@@ -52,7 +52,7 @@ impl Sweep {
     pub fn standard() -> Self {
         Self {
             axis: "cube",
-            points: [16usize, 24, 32, 48, 64, 96, 128, 192, 256]
+            points: [32usize, 48, 64, 96, 128, 192, 256, 320, 384]
                 .iter()
                 .map(|&s| Point { m: s, k: s, n: s })
                 .collect(),
@@ -115,6 +115,23 @@ pub struct Fit {
     pub rms_residual: f64,
     /// How many observations the fit used.
     pub samples: usize,
+}
+
+/// Above this RMS residual in log space, the power law does not describe the
+/// data and the exponent should not be believed.
+///
+/// `0.15` in log10 is about a factor of 1.4 of typical deviation. An
+/// implementation with a heavy prologue --- a thread pool to spin up, a
+/// blocking decision to make --- is not a power law over a range that includes
+/// shapes too small to amortise it, and quoting an exponent for it anyway would
+/// be the dishonest part. `CG-07` is the claim that covers that region.
+pub const RESIDUAL_LIMIT: f64 = 0.15;
+
+impl Fit {
+    /// Does a power law describe this data well enough to read the exponent?
+    pub fn is_credible(&self) -> bool {
+        self.rms_residual <= RESIDUAL_LIMIT
+    }
 }
 
 /// Least squares in log-log space.
@@ -189,6 +206,56 @@ pub fn run_case(m: usize, k: usize, n: usize, a: &[i8], w: &[i8], out: &mut [i32
     started.elapsed().as_secs_f64()
 }
 
+/// Fit a power law to anything that can be timed over a sweep.
+///
+/// The comparison C3 asks for is only meaningful if both sides are measured the
+/// same way: same shapes, same data, same clock, same process. So both this
+/// library and every oracle go through this one function, and the only thing
+/// that differs between them is the call inside `run`.
+pub fn fit_timed(sweep: &Sweep, mut run: impl FnMut(&Point) -> f64) -> Option<Fit> {
+    let observations: Vec<Observation> = sweep
+        .points
+        .iter()
+        .map(|p| Observation {
+            x: p.macs(),
+            y: run(p),
+        })
+        .collect();
+    fit(&observations)
+}
+
+/// One implementation's fit, labelled.
+#[derive(Clone, Debug)]
+pub struct Labelled {
+    /// The conformance ID, or `uor-matmul` for us.
+    pub id: &'static str,
+    /// What was measured.
+    pub name: &'static str,
+    /// The fit, if the sweep produced enough usable points.
+    pub fit: Option<Fit>,
+}
+
+impl Labelled {
+    /// How many times slower this is than `reference` at a fixed size, from the
+    /// fitted constants.
+    ///
+    /// Only meaningful when the two exponents agree: if they do not, there is
+    /// no fixed ratio, and the exponents are the comparison. That is why this
+    /// returns `None` rather than a number when they differ by more than their
+    /// intervals allow.
+    pub fn constant_ratio_against(&self, reference: &Labelled) -> Option<f64> {
+        let (a, b) = (self.fit.as_ref()?, reference.fit.as_ref()?);
+        if !a.is_credible() || !b.is_credible() {
+            return None;
+        }
+        let gap = (a.exponent - b.exponent).abs();
+        if gap > a.confidence_half_width + b.confidence_half_width {
+            return None;
+        }
+        Some(10f64.powf(a.log_constant - b.log_constant))
+    }
+}
+
 /// Time this library over a sweep, against MAC count.
 pub fn fit_ours(sweep: &Sweep) -> Option<Fit> {
     let observations: Vec<Observation> = sweep
@@ -211,6 +278,54 @@ pub fn fit_ours(sweep: &Sweep) -> Option<Fit> {
     fit(&observations)
 }
 
+/// Time this library's `i32 x i32` path, which is what the integer oracles
+/// speak.
+///
+/// The `i8` path is faster and is what the library is for; this exists so the
+/// comparison against `ndarray` and `nalgebra` is of the same arithmetic on
+/// both sides rather than of two different problems.
+pub fn ours_i32_timed(p: &Point) -> f64 {
+    let a = vec![1i32; p.m * p.k];
+    let b = vec![1i32; p.k * p.n];
+    let mut out = vec![0i32; p.m * p.n];
+    let started = Instant::now();
+    {
+        let av = MatView::row_major(as_alphabet_full(&a), p.m, p.k).expect("A fits");
+        let bv = MatView::row_major(as_alphabet_full(&b), p.k, p.n).expect("B fits");
+        let cv = MatViewMut::row_major(&mut out, p.m, p.n).expect("C fits");
+        let mut t = Triple::new(av, bv, cv).expect("the product exists");
+        gemm(
+            &mut t,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                encode: EncodeMode::Wrapping,
+                ..Default::default()
+            },
+            &mut Scratch::none(),
+        );
+    }
+    // The timed call must be correct, or the number describes nothing.
+    assert!(out.iter().all(|&v| v == p.k as i32));
+    started.elapsed().as_secs_f64()
+}
+
+/// Time this library's `f32` path.
+pub fn ours_f32_timed(p: &Point) -> f64 {
+    let a = vec![1.0f32; p.m * p.k];
+    let b = vec![1.0f32; p.k * p.n];
+    let mut out = vec![0.0f32; p.m * p.n];
+    let started = Instant::now();
+    {
+        let av = MatView::row_major(&a, p.m, p.k).expect("A fits");
+        let bv = MatView::row_major(&b, p.k, p.n).expect("B fits");
+        let cv = MatViewMut::row_major(&mut out, p.m, p.n).expect("C fits");
+        let mut t = Triple::new(av, bv, cv).expect("the product exists");
+        crate::gemm_float_for_scaling(&mut t);
+    }
+    assert!(out.iter().all(|&v| v == p.k as f32));
+    started.elapsed().as_secs_f64()
+}
+
 /// Bytes of weight storage a coded tier touches, per decoded element.
 ///
 /// The residency claim of `CG-03`, as a ratio rather than an adjective: an
@@ -220,49 +335,98 @@ pub fn residency_ratio(bits_per_weight: f64) -> f64 {
     bits_per_weight / 8.0
 }
 
-/// The report `just scaling` emits.
+/// The report `just scaling` emits: this library beside every oracle.
+///
+/// C3 is a hard constraint --- scaling is compared against the *oracle's*
+/// scaling --- so a report with only our own numbers would not discharge it.
+/// What matters is whether the exponents agree, because two implementations
+/// with the same exponent and different constants differ by a factor that does
+/// not grow, and two with different exponents eventually differ by any factor
+/// you like.
 #[derive(Clone, Debug)]
 pub struct Report {
-    /// The sweep the fits were taken over.
+    /// The sweep every fit was taken over.
     pub sweep: Sweep,
-    /// This library's fit, if the sweep produced enough usable points.
-    pub ours: Option<Fit>,
+    /// This library, first.
+    pub ours: Labelled,
+    /// Every oracle measured over the same sweep.
+    pub oracles: Vec<Labelled>,
 }
 
 impl Report {
     /// Assemble a report.
-    pub fn new(sweep: Sweep, ours: Option<Fit>) -> Self {
-        Self { sweep, ours }
+    pub fn new(sweep: Sweep, ours: Labelled, oracles: Vec<Labelled>) -> Self {
+        Self {
+            sweep,
+            ours,
+            oracles,
+        }
     }
 
-    /// Print the report, with every number labelled `open`.
+    /// Print it, with every number labelled `open`.
     ///
     /// The labelling is not decoration. `CG-*` claims are measurements, and a
     /// report that presented them as results would be exactly the blurring of
     /// registers the honesty gate exists to catch (R4, §2).
     pub fn emit(&self) {
-        println!("# Scaling report (every figure below is `open`: measured, never asserted)");
-        println!("axis: {}", self.sweep.axis);
-        println!("points: {}", self.sweep.points.len());
-        match &self.ours {
-            Some(f) => {
-                println!(
-                    "CG-01 uor-matmul: exponent {:.4} +/- {:.4} (95%), log10 c {:.4}, \
-                     rms residual {:.4}, n = {}",
-                    f.exponent, f.confidence_half_width, f.log_constant, f.rms_residual, f.samples
-                );
-                println!(
-                    "  interpretation: against MAC count an O(m k n) implementation fits \
-                     near 1.0; the constant is where a residency advantage would show."
-                );
-            }
-            None => println!("CG-01 uor-matmul: not enough usable points to fit"),
-        }
+        println!("# Scaling report --- every figure is `open`: measured, never asserted");
         println!(
-            "CG-03 residency: i4 stores {:.2} bytes per weight against a dense i8 tier's 1.00",
-            residency_ratio(4.0)
+            "# sweep: {}, {} points",
+            self.sweep.axis,
+            self.sweep.points.len()
         );
-        println!("CG-05 allocations: 0 by construction; see CA-01, which is a `build` claim");
+        println!();
+        println!(
+            "{:<24} {:>10} {:>10} {:>12} {:>10} {:>6} {:>9}",
+            "implementation", "exponent", "+/- 95%", "log10 c", "residual", "n", "credible"
+        );
+        for row in core::iter::once(&self.ours).chain(self.oracles.iter()) {
+            match &row.fit {
+                Some(f) => println!(
+                    "{:<24} {:>10.4} {:>10.4} {:>12.4} {:>10.4} {:>6} {:>9}",
+                    row.name,
+                    f.exponent,
+                    f.confidence_half_width,
+                    f.log_constant,
+                    f.rms_residual,
+                    f.samples,
+                    if f.is_credible() { "yes" } else { "NO" }
+                ),
+                None => println!("{:<24} {:>10}", row.name, "no fit"),
+            }
+        }
+        println!();
+        for row in &self.oracles {
+            let credible = row.fit.as_ref().is_some_and(Fit::is_credible);
+            if !credible {
+                println!(
+                    "{} ({}): residual above {RESIDUAL_LIMIT}, so a power law does not \
+                     describe it over this sweep and its exponent should not be read. \
+                     CG-07 covers the small-shape region where a prologue dominates.",
+                    row.name, row.id
+                );
+                continue;
+            }
+            match row.constant_ratio_against(&self.ours) {
+                Some(r) if r < 1.0 => println!(
+                    "{} ({}): same exponent within the intervals; {:.2}x faster than \
+                     uor-matmul at a fixed size",
+                    row.name,
+                    row.id,
+                    1.0 / r
+                ),
+                Some(r) => println!(
+                    "{} ({}): same exponent within the intervals; {:.2}x slower than \
+                     uor-matmul at a fixed size",
+                    row.name, row.id, r
+                ),
+                None => println!(
+                    "{} ({}): exponents differ by more than their intervals, so there is \
+                     no fixed ratio --- the exponents are the comparison",
+                    row.name, row.id
+                ),
+            }
+        }
     }
 }
 

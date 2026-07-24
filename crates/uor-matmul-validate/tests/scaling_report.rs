@@ -9,26 +9,133 @@
 //! that timed the wrong answer. A measurement apparatus that cannot be wrong is
 //! not measuring.
 
-use uor_matmul_validate::scaling::{self, Observation, Sweep};
+use uor_matmul_validate::scaling::{self, Labelled, Observation, Point, Sweep};
 
-/// `CG-01`: the arithmetic scaling exponent, ours and every oracle's.
+/// `CG-01`: the arithmetic scaling exponent, ours **and every oracle's**, over
+/// the same sweep.
+///
+/// C3 is a hard constraint: scaling is compared against the oracle's scaling,
+/// not reported alone. A throughput table with no asymptotic content would say
+/// nothing about whether the two implementations have the same shape, which is
+/// the only comparison that survives a change of machine.
 #[test]
 fn arithmetic_scaling_exponent_cg_01() {
     let sweep = Sweep::standard();
-    let ours = scaling::fit_ours(&sweep);
-    let report = scaling::Report::new(sweep, ours.clone());
+
+    let ours = Labelled {
+        id: "uor-matmul",
+        name: "uor-matmul i32",
+        fit: scaling::fit_timed(&sweep, scaling::ours_i32_timed),
+    };
+
+    let mut oracles: Vec<Labelled> = Vec::new();
+
+    #[cfg(feature = "ref-ndarray")]
+    {
+        use uor_matmul_validate::oracle::{NdArray, Oracle};
+        oracles.push(Labelled {
+            id: "CX-01",
+            name: "ndarray i32",
+            fit: scaling::fit_timed(&sweep, |p: &Point| {
+                let a = vec![1i32; p.m * p.k];
+                let b = vec![1i32; p.k * p.n];
+                let started = std::time::Instant::now();
+                let out = NdArray::product_i32(p.m, p.k, p.n, &a, &b);
+                let elapsed = started.elapsed().as_secs_f64();
+                // The timed call must be correct on the oracle's side too.
+                assert!(out.iter().all(|&v| v == p.k as i32));
+                elapsed
+            }),
+        });
+    }
+
+    #[cfg(feature = "ref-nalgebra")]
+    {
+        use uor_matmul_validate::oracle::{Nalgebra, Oracle};
+        oracles.push(Labelled {
+            id: "CX-02",
+            name: "nalgebra i32",
+            fit: scaling::fit_timed(&sweep, |p: &Point| {
+                let a = vec![1i32; p.m * p.k];
+                let b = vec![1i32; p.k * p.n];
+                let started = std::time::Instant::now();
+                let out = Nalgebra::product_i32(p.m, p.k, p.n, &a, &b);
+                let elapsed = started.elapsed().as_secs_f64();
+                assert!(out.iter().all(|&v| v == p.k as i32));
+                elapsed
+            }),
+        });
+    }
+
+    let report = scaling::Report::new(sweep, ours.clone(), oracles);
     report.emit();
 
-    let f = ours.expect("the standard sweep has enough points to fit");
+    let f = ours
+        .fit
+        .expect("the standard sweep has enough points to fit");
     // An O(m k n) implementation fits near 1.0 against MAC count. The interval
-    // is reported rather than asserted narrow, because a shared CI runner is a
+    // is reported rather than asserted narrow, because a shared runner is a
     // noisy machine and pretending otherwise would be the dishonest part.
-    eprintln!(
-        "CG-01 (open): exponent {:.4} +/- {:.4}, rms residual {:.4}",
-        f.exponent, f.confidence_half_width, f.rms_residual
-    );
     assert!(f.samples >= 3, "the fit must have used the sweep");
     assert!(f.exponent.is_finite(), "the fit must produce a number");
+}
+
+/// `CG-01`, float half: our exact `f32` path against the classical ones.
+///
+/// The exponents are what to compare. The constant is expected to favour the
+/// oracles --- exact accumulation into a 619-bit register costs more per
+/// element than one FMA, which is non-goal N4 stated as a number rather than as
+/// an excuse.
+#[test]
+fn float_scaling_exponent_cg_01() {
+    let sweep = Sweep::standard();
+
+    let ours = Labelled {
+        id: "uor-matmul",
+        name: "uor-matmul f32 exact",
+        fit: scaling::fit_timed(&sweep, scaling::ours_f32_timed),
+    };
+
+    let mut oracles: Vec<Labelled> = Vec::new();
+
+    #[cfg(feature = "ref-matrixmultiply")]
+    {
+        use uor_matmul_validate::oracle::{FloatOracle, MatrixMultiply};
+        oracles.push(Labelled {
+            id: "CX-05",
+            name: "matrixmultiply f32",
+            fit: scaling::fit_timed(&sweep, |p: &Point| {
+                let a = vec![1.0f32; p.m * p.k];
+                let b = vec![1.0f32; p.k * p.n];
+                let started = std::time::Instant::now();
+                let out = MatrixMultiply::product_f32(p.m, p.k, p.n, &a, &b);
+                let elapsed = started.elapsed().as_secs_f64();
+                assert!(out.iter().all(|&v| v == p.k as f32));
+                elapsed
+            }),
+        });
+    }
+
+    #[cfg(feature = "ref-faer")]
+    {
+        use uor_matmul_validate::oracle::{Faer, FloatOracle};
+        oracles.push(Labelled {
+            id: "CX-06",
+            name: "faer f32",
+            fit: scaling::fit_timed(&sweep, |p: &Point| {
+                let a = vec![1.0f32; p.m * p.k];
+                let b = vec![1.0f32; p.k * p.n];
+                let started = std::time::Instant::now();
+                let out = Faer::product_f32(p.m, p.k, p.n, &a, &b);
+                let elapsed = started.elapsed().as_secs_f64();
+                assert!(out.iter().all(|&v| v == p.k as f32));
+                elapsed
+            }),
+        });
+    }
+
+    scaling::Report::new(sweep, ours.clone(), oracles).emit();
+    assert!(ours.fit.expect("fits").exponent.is_finite());
 }
 
 /// `CG-02`: per-axis exponents for `m`, `n`, and `k` separately.

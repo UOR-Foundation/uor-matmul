@@ -130,6 +130,21 @@ pub fn reference_wrapping_i32(m: usize, k: usize, n: usize, a: &[i32], b: &[i32]
     c
 }
 
+/// Run the float driver with the overwriting epilogue.
+///
+/// A shim so the scaling module can time the float path without repeating the
+/// epilogue and options at every call site.
+pub fn gemm_float_for_scaling<E, O>(triple: &mut Triple<'_, '_, '_, E, O>)
+where
+    E: uor_matmul_core::FloatElement,
+    O: uor_matmul_core::EncodeFrom<uor_matmul_core::AccOf<E>>,
+    uor_matmul_core::AccOf<E>:
+        uor_matmul_gemm::epilogue::ScaleExact + uor_matmul_gemm::epilogue::AbsorbPrior<O>,
+    O: Copy,
+{
+    uor_matmul::gemm_float(triple, &Linear::OVERWRITE, GemmOptions::default());
+}
+
 /// Byte equality on the output buffer --- not `==` on floats, and not an
 /// epsilon (§3.3-oracles).
 ///

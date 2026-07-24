@@ -18,17 +18,22 @@
 #![allow(missing_docs)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use uor_matmul_validate::scaling::{self, Sweep};
+use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 
 /// Emit the fitted exponents, then time a few shapes so `cargo bench` has
 /// something to report alongside them.
 fn scaling_report(c: &mut Criterion) {
     let sweep = Sweep::standard();
 
-    // `CG-01`: the arithmetic scaling exponent, ours and every oracle's.
-    let ours = scaling::fit_ours(&sweep);
-    let report = scaling::Report::new(sweep.clone(), ours);
-    report.emit();
+    // `CG-01`: the arithmetic scaling exponent. The oracle columns live in the
+    // test harness, which has the `ref-*` features; this emits our side so that
+    // `cargo bench` and `cargo test` report the same fit for the same sweep.
+    let ours = Labelled {
+        id: "uor-matmul",
+        name: "uor-matmul i8",
+        fit: scaling::fit_ours(&sweep),
+    };
+    scaling::Report::new(sweep.clone(), ours, Vec::new()).emit();
 
     // A single criterion benchmark so `cargo bench` has something to time; the
     // asymptotic content is in the report above, which is what R12 asks for.

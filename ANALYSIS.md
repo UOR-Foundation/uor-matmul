@@ -152,7 +152,70 @@ What remains, and why it is not a defect:
   `n`. Fixing that needs an accumulator row, which is again memory the library
   cannot own. The kernel-driven path is the one that packs, and it is 2.2x
   faster for exactly this reason.
-- `f32` is ~25x slower than `i8`. That is the cost of a complete accumulator and
-  it is the trade N4 already names: exact accumulation into a 619-bit register
-  costs more per element than one FMA. What it buys is a result that does not
-  depend on the order of the additions.
+- `f32` is far slower than the integer paths. The size of that gap is measured
+  against the *oracles* below, not against our own integer path, because
+  comparing a library to itself says nothing about whether the cost is
+  reasonable.
+
+## Against the oracles
+
+C3 is a hard constraint: scaling is compared against the oracle's scaling. Both
+sides are measured in one process, over one sweep, with the answer asserted
+inside the timed harness --- a speed measured on the wrong bytes is not a
+measurement.
+
+Fitted exponents against MAC count, on a two-core shared runner with AVX2:
+
+| implementation | exponent | +/- 95% | credible |
+| --- | --- | --- | --- |
+| uor-matmul i32 | 1.09 | 0.07 | yes |
+| ndarray i32 | 1.07 | 0.08 | yes |
+| nalgebra i32 | 0.96 | 0.03 | yes |
+| uor-matmul f32 exact | 1.03 | 0.07 | yes |
+| matrixmultiply f32 | 0.76 | 0.19 | **no** |
+| faer f32 | 0.42 | 0.43 | **no** |
+
+The two float oracles do not fit a power law over this sweep --- residuals of
+0.28 and 0.62 in log space --- so their exponents are not reported as numbers to
+read. Both have a prologue heavy enough to dominate the small end of the range,
+which is what `CG-07` measures separately. Reporting an exponent for them anyway
+would be the dishonest move, so the harness flags it instead.
+
+Throughput, best of five runs, in Gmac/s. The runner is noisy enough that the
+spread across whole runs is worth reporting rather than a single figure:
+
+| shape | uor-matmul | oracle | ratio |
+| --- | --- | --- | --- |
+| `i32` 256^3 | 0.60 -- 0.71 | ndarray 0.63 -- 0.67 | 0.95 -- 1.06x |
+| `i32` 256^3 | 0.60 -- 0.71 | nalgebra 2.75 -- 2.93 | 3.9 -- 4.8x slower |
+| W8A8 256^3 | 1.13 -- 2.25 | --- | no external `i8` oracle exists |
+| `f32` 256^3 | 0.06 -- 0.11 | matrixmultiply 35 -- 42 | 390 -- 570x slower |
+| `f32` 256^3 | 0.06 -- 0.11 | faer 21 -- 27 | 245 -- 350x slower |
+
+Three things this says, and one it does not.
+
+**The exponents match where they can be read.** `uor-matmul` and `ndarray` fit
+1.09 and 1.07 against MAC count, which are the same number within their
+intervals, and the constants are within 6% of each other. That is the shape C3
+asks about: two implementations that scale the same way and differ by a factor
+that does not grow.
+
+**`nalgebra` is about four times faster on `i32`, and that is an unexploited
+opportunity rather than a mystery.** The kernel-driven path exists only for
+W8A8, because that is the instantiation the SIMD instructions name --- `i32`
+goes through the generic driver, which reads `B` with stride `n` and packs
+nothing. `nalgebra`'s `i32` product auto-vectorises. Adding an `i32` kernel
+would close it; nothing in the design prevents it, and `KernelSpec` is where it
+would go.
+
+**The float gap is large, and it is the trade N4 names.** A classical `sgemm`
+issues one FMA per element. This library decodes two IEEE patterns, multiplies
+their significands as integers, and places the exact product into a 619-bit
+fixed-point register --- per element, with no rounding until the end. Two to
+three orders of magnitude is what that costs on this machine. What it buys is
+the property in §3.3: the result does not depend on the order of the additions,
+which no figure in the `matrixmultiply` column has.
+
+What the table does **not** say is that the exact result is worth the factor for
+any particular use. That is a judgement for a caller with a workload, and this
+repository's job is to make the number available rather than to argue about it.
