@@ -1,0 +1,33 @@
+[package]
+name = "uor-matmul-validate"
+description = "External validation: oracle adapters, corpus tooling, and the differential harness. Dev and CI only; never a dependency of a shipped crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+uor-matmul = { path = "../uor-matmul" }
+uor-matmul-core = { workspace = true }
+uor-matmul-codec = { workspace = true }
+uor-matmul-gemm = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
+
+# R11: every oracle is a dependency of this dev-and-CI-only crate and of
+# nothing else. The shipped crates depend on none of them, and `Cargo.lock`
+# pins the resolved versions because the version is part of the claim.
+#
+# They are optional normal dependencies rather than dev-dependencies because
+# Cargo does not allow an optional dev-dependency, and a validation run must be
+# able to declare which outside witnesses it called.
+ndarray = { version = "0.16", optional = true }
+nalgebra = { version = "0.34", optional = true }
+
+[features]
+default = ["ref-ndarray", "ref-nalgebra"]
+ref-ndarray = ["dep:ndarray"]
+ref-nalgebra = ["dep:nalgebra"]
+
+[lints]
+workspace = true
