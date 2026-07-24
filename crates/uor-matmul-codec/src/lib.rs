@@ -22,11 +22,13 @@
 #![deny(clippy::disallowed_types)]
 
 pub mod codecs;
+pub mod e8;
 pub mod kappa;
 pub mod matrix;
 pub mod tier;
 
 pub use codecs::{Book, Grid, Identity, Offset, Packed, Runs, Transcode};
+pub use e8::{e8_codec, e8_table, E8_I8};
 pub use matrix::CodedMatrix;
 pub use tier::{Codec, TierId};
 

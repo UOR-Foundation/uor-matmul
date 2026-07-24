@@ -59,11 +59,11 @@ pub trait Accumulator: Copy + Eq + core::fmt::Debug + Send + Sync + 'static {
     /// Forwards to [`Element::mac`], which is the library's one arithmetic
     /// primitive.
     fn mac<E: IntegerElement<Acc = Self>, Bd: Bound>(
-        self,
+        &mut self,
         a: Alphabet<E, Bd>,
         w: Alphabet<E, Bd>,
-    ) -> Self {
-        E::mac(self, a.get(), w.get())
+    ) {
+        E::mac(self, a.get(), w.get());
     }
 
     /// The single encode step.
@@ -144,6 +144,59 @@ const fn encode_i128_into(acc: i128, min: i128, max: i128, mode: EncodeMode) -> 
     }
 }
 
+/// Add `parts` into `limbs` starting at limb `at`, propagating the carry only
+/// as far as it reaches.
+///
+/// The whole reason the float path is not hopeless: an exact fixed-point add is
+/// three limb additions and a carry, not a full-width traversal.
+fn add_at<const L: usize>(limbs: &mut [u64; L], at: usize, parts: [u64; 3]) {
+    let mut carry = 0u64;
+    let mut i = at;
+    for part in parts {
+        if i >= L {
+            return;
+        }
+        let (sum, c1) = limbs[i].overflowing_add(part);
+        let (sum, c2) = sum.overflowing_add(carry);
+        limbs[i] = sum;
+        carry = u64::from(c1) + u64::from(c2);
+        i += 1;
+    }
+    // The tail: a carry out of the third limb, which stops as soon as a limb
+    // absorbs it. For a register whose top limbs are zero --- the usual case,
+    // since the leading one sits wherever the exponent put it --- that is one
+    // iteration.
+    while carry != 0 && i < L {
+        let (sum, c) = limbs[i].overflowing_add(carry);
+        limbs[i] = sum;
+        carry = u64::from(c);
+        i += 1;
+    }
+}
+
+/// Subtract `parts` from `limbs` starting at limb `at`, propagating the borrow
+/// only as far as it reaches.
+fn sub_at<const L: usize>(limbs: &mut [u64; L], at: usize, parts: [u64; 3]) {
+    let mut borrow = 0u64;
+    let mut i = at;
+    for part in parts {
+        if i >= L {
+            return;
+        }
+        let (diff, b1) = limbs[i].overflowing_sub(part);
+        let (diff, b2) = diff.overflowing_sub(borrow);
+        limbs[i] = diff;
+        borrow = u64::from(b1) + u64::from(b2);
+        i += 1;
+    }
+    while borrow != 0 && i < L {
+        let (diff, b) = limbs[i].overflowing_sub(borrow);
+        limbs[i] = diff;
+        borrow = u64::from(b);
+        i += 1;
+    }
+}
+
 /// Fixed-width multi-limb accumulator: `L` limbs of 64 bits, two's complement,
 /// little-endian, no allocation, no growth.
 ///
@@ -164,6 +217,34 @@ impl<const L: usize> Limbs<L> {
     /// Is this value negative? Equivalently, is the top bit of the top limb set?
     pub const fn is_negative(&self) -> bool {
         L > 0 && (self.0[L - 1] >> 63) == 1
+    }
+
+    /// Add a sign-extended `i128` in place, propagating the carry only as far
+    /// as it reaches.
+    ///
+    /// The hot path for `i64` elements: a full-width traversal per product
+    /// would make a 192-bit accumulator cost three times an `i128` one for no
+    /// reason, since the carry almost never leaves the low two limbs.
+    pub fn add_i128_in_place(&mut self, v: i128) {
+        let ext: u64 = if v < 0 { u64::MAX } else { 0 };
+        let uv = v as u128;
+        let mut carry = 0u64;
+        for i in 0..L {
+            let addend = match i {
+                0 => uv as u64,
+                1 => (uv >> 64) as u64,
+                _ => ext,
+            };
+            let (sum, c1) = self.0[i].overflowing_add(addend);
+            let (sum, c2) = sum.overflowing_add(carry);
+            self.0[i] = sum;
+            carry = u64::from(c1) + u64::from(c2);
+            // A non-negative addend past limb 1 contributes nothing but the
+            // carry, and once that is gone the remaining limbs are unchanged.
+            if ext == 0 && carry == 0 && i >= 1 {
+                break;
+            }
+        }
     }
 
     /// Add a sign-extended `i128`.
@@ -354,75 +435,142 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
     /// `Complete` directly --- the contribution is clamped into the register
     /// rather than wrapping, because a wrap would silently change the answer
     /// while a clamp cannot arise on any real input.
-    pub fn add_scaled(self, mag: u128, exp: i32, negative: bool) -> Self {
+    pub fn add_scaled(&mut self, mag: u128, exp: i32, negative: bool) {
         if mag == 0 {
-            return self;
+            return;
         }
         let shift = exp.saturating_sub(MIN_EXP); // R3-ok: an exponent placement, checked below
         if shift < 0 {
-            return self;
+            return;
         }
         let shift = shift as u32;
-        let limb_index = (shift / 64) as usize;
-        let bit_offset = shift % 64;
+        let at = (shift / 64) as usize;
+        let bit = shift % 64;
 
         // Spread `mag` across at most three limbs: 128 bits of magnitude can
         // straddle two limb boundaries once shifted.
-        let spread: [u64; 3] = if bit_offset == 0 {
+        let spread: [u64; 3] = if bit == 0 {
             [mag as u64, (mag >> 64) as u64, 0]
         } else {
-            let lo = (mag << bit_offset) as u64;
-            let mid = ((mag << bit_offset) >> 64) as u64;
-            let hi = (mag >> (128 - bit_offset)) as u64;
-            [lo, mid, hi]
+            [
+                (mag << bit) as u64,
+                ((mag << bit) >> 64) as u64,
+                (mag >> (128 - bit)) as u64,
+            ]
         };
 
-        let mut acc = self.limbs;
-        for (j, part) in spread.iter().copied().enumerate() {
-            if part == 0 {
-                continue;
-            }
-            let Some(i) = limb_index.checked_add(j) else {
-                continue;
-            };
-            if i >= L {
-                continue;
-            }
-            acc = if negative {
-                acc.combine(Self::limb_at(i, part).neg())
-            } else {
-                acc.combine(Self::limb_at(i, part))
-            };
+        // Add or subtract in place, at the offset, propagating only as far as
+        // the carry actually reaches. The obvious implementation --- build a
+        // full-width value and combine --- costs O(L) per product, which for
+        // `f64`'s 67 limbs is most of the work in a float GEMM. This costs
+        // three limbs plus a carry that almost always stops immediately.
+        if negative {
+            sub_at(&mut self.limbs.0, at, spread);
+        } else {
+            add_at(&mut self.limbs.0, at, spread);
         }
-        Self { limbs: acc, ..self }
     }
 
-    fn limb_at(i: usize, part: u64) -> Limbs<L> {
-        let mut limbs = [0u64; L];
-        limbs[i] = part;
-        Limbs(limbs)
+    /// The accumulator holding exactly the value `x` names.
+    ///
+    /// The bridge the epilogue needs: `beta * C` requires the value already in
+    /// `C` to enter the accumulation, and it enters it *exactly*, by the same
+    /// decode every operand goes through.
+    pub fn of<E>(x: E) -> Self
+    where
+        E: crate::alphabet::FloatElement,
+    {
+        use crate::alphabet::Decoded;
+        let mut out = Self::ZERO;
+        match x.decode() {
+            Decoded::NotANumber => out.set_nan(),
+            Decoded::Infinite { sign } => out.set_infinity(sign),
+            Decoded::Finite {
+                sign,
+                mantissa,
+                exp,
+            } => out.add_scaled(mantissa as u128, exp, sign),
+        }
+        out
+    }
+
+    /// Multiply by an exact integer scalar.
+    ///
+    /// Double-and-add over the register's own `combine`, so there is no second
+    /// multiplication routine and no rounding: an integer scaling of an exact
+    /// fixed-point value is exact.
+    pub fn scale(self, factor: i64) -> Self {
+        if self.is_nan() {
+            return self;
+        }
+        if factor == 0 {
+            // Zero times an infinity is a NaN, by IEEE 754 clause 7.2.
+            let mut out = Self::ZERO;
+            if self.pos_inf || self.neg_inf {
+                out.set_nan();
+            }
+            return out;
+        }
+        let flip = factor < 0;
+        let mut magnitude = factor.unsigned_abs();
+        let mut acc = Self {
+            limbs: Limbs::ZERO,
+            nan: false,
+            pos_inf: false,
+            neg_inf: false,
+        };
+        let mut addend = if flip {
+            Self {
+                limbs: self.limbs.neg(),
+                ..Self::ZERO
+            }
+        } else {
+            Self {
+                limbs: self.limbs,
+                ..Self::ZERO
+            }
+        };
+        while magnitude > 0 {
+            if magnitude & 1 == 1 {
+                acc = Self {
+                    limbs: acc.limbs.combine(addend.limbs),
+                    ..acc
+                };
+            }
+            addend = Self {
+                limbs: addend.limbs.combine(addend.limbs),
+                ..addend
+            };
+            magnitude >>= 1;
+        }
+        // A scaled infinity is an infinity, with the sign of the product.
+        let (pos, neg) = match (self.pos_inf, self.neg_inf, flip) {
+            (false, false, _) => (false, false),
+            (p, n, false) => (p, n),
+            (p, n, true) => (n, p),
+        };
+        Self {
+            limbs: acc.limbs,
+            nan: false,
+            pos_inf: pos,
+            neg_inf: neg,
+        }
     }
 
     /// Record that a NaN reached this accumulation. Sticky and absorbing.
-    pub const fn with_nan(self) -> Self {
-        Self { nan: true, ..self }
+    pub fn set_nan(&mut self) {
+        self.nan = true;
     }
 
     /// Record that an infinity of the given sign reached this accumulation.
     ///
     /// Two infinities of opposite sign make a NaN, by IEEE 754 clause 7.2, and
     /// they do so here whatever order they arrived in.
-    pub const fn with_infinity(self, negative: bool) -> Self {
+    pub fn set_infinity(&mut self, negative: bool) {
         if negative {
-            Self {
-                neg_inf: true,
-                ..self
-            }
+            self.neg_inf = true;
         } else {
-            Self {
-                pos_inf: true,
-                ..self
-            }
+            self.pos_inf = true;
         }
     }
 
@@ -554,7 +702,7 @@ mod tests {
     fn i128_accumulation_is_exact_past_the_narrow_threshold_cd_03() {
         let mut acc = 0i128;
         for _ in 0..1_000_000 {
-            acc = <i8 as Element>::mac(acc, i8::MIN, i8::MIN);
+            <i8 as Element>::mac(&mut acc, i8::MIN, i8::MIN);
         }
         assert_eq!(acc, 1_000_000i128 * 128 * 128);
     }
@@ -580,7 +728,7 @@ mod tests {
     fn i64_accumulation_needs_and_gets_192_bits_ct_02() {
         let mut acc = <i64 as Element>::Acc::ZERO;
         for _ in 0..4 {
-            acc = <i64 as Element>::mac(acc, i64::MIN, i64::MIN);
+            <i64 as Element>::mac(&mut acc, i64::MIN, i64::MIN);
         }
         // 4 * 2^126 = 2^128, one bit past what an i128 could hold.
         let (_, exceeded) = acc.magnitude_low_u128();
@@ -626,9 +774,12 @@ mod tests {
     #[test]
     fn complete_accumulation_is_order_independent_cd_02() {
         type C = Complete<10, -298>;
-        let big = C::ZERO.add_scaled(1, 200, false);
-        let both_a = big.add_scaled(1, -290, false);
-        let both_b = C::ZERO.add_scaled(1, -290, false).add_scaled(1, 200, false);
+        let mut both_a = C::ZERO;
+        both_a.add_scaled(1, 200, false);
+        both_a.add_scaled(1, -290, false);
+        let mut both_b = C::ZERO;
+        both_b.add_scaled(1, -290, false);
+        both_b.add_scaled(1, 200, false);
         assert_eq!(both_a, both_b);
         assert!(both_a.magnitude_bit((200i32 - -298i32) as u32));
         assert!(both_a.magnitude_bit((-290i32 - -298i32) as u32));
@@ -641,10 +792,154 @@ mod tests {
     #[test]
     fn complete_cancellation_is_exact_cd_02() {
         type C = Complete<10, -298>;
-        let acc = C::ZERO
-            .add_scaled(12345, 100, false)
-            .add_scaled(12345, 100, true);
+        let mut acc = C::ZERO;
+        acc.add_scaled(12345, 100, false);
+        acc.add_scaled(12345, 100, true);
         assert!(acc.is_zero());
         assert_eq!(acc.magnitude_high_bit(), None);
     }
 }
+
+/// The correctly-rounded encode out of a complete accumulator (§3.3).
+///
+/// This is the single encode step for the float family, and it is the only
+/// place in the float path where information is discarded. Everything upstream
+/// of it --- the decode, the significand product, the fixed-point add --- is
+/// exact, so what this rounds is the *exact sum*, once.
+///
+/// That is what makes the result schedule-independent: a classical GEMM rounds
+/// after every add, so its answer depends on the order; this one rounds after
+/// the last add, so it cannot.
+macro_rules! impl_encode_into_float {
+    ($t:ty, $bits:ty, $mant:expr, $expo:expr) => {
+        impl<const L: usize, const MIN_EXP: i32> EncodeFrom<Complete<L, MIN_EXP>> for $t {
+            fn encode_from(acc: Complete<L, MIN_EXP>, mode: EncodeMode) -> Self {
+                const MANT: u32 = $mant;
+                const EXPO: u32 = $expo;
+                /// Significand bits including the implicit one.
+                const P: u32 = MANT + 1;
+                const BIAS: i32 = (1 << (EXPO - 1)) - 1;
+                /// The exponent of the least significant bit of a subnormal.
+                const SUB_LSB_EXP: i32 = 1 - BIAS - MANT as i32;
+                const SIGN_SHIFT: u32 = MANT + EXPO;
+
+                // The non-finite cases first, so that a NaN never reaches the
+                // rounding logic and an infinity never competes with it.
+                if acc.is_nan() {
+                    return <$t>::NAN;
+                }
+                if let Some(negative) = acc.infinity_sign() {
+                    let bits: $bits = ((negative as $bits) << SIGN_SHIFT)
+                        | ((((1 as $bits) << EXPO) - 1) << MANT);
+                    return <$t>::from_bits(bits);
+                }
+
+                let negative = acc.is_negative();
+                let Some(high) = acc.magnitude_high_bit() else {
+                    // An exactly zero sum. IEEE 754 gives `+0` for a sum that
+                    // cancels under round-to-nearest, and the sign of a zero
+                    // that arose from cancellation carries no information, so
+                    // the positive zero is returned rather than invented.
+                    return <$t>::from_bits(0);
+                };
+
+                // The value is `magnitude * 2^MIN_EXP`, with its leading one at
+                // register bit `high`, so its binary exponent is this.
+                let exp = MIN_EXP + high as i32;
+
+                // Where the output's least significant bit falls, in register
+                // bits. Clamped at the subnormal floor, which is what makes the
+                // gradual-underflow region come out right rather than being a
+                // separate branch.
+                let lsb_exp = if exp - (P as i32 - 1) < SUB_LSB_EXP {
+                    SUB_LSB_EXP
+                } else {
+                    exp - (P as i32 - 1)
+                };
+                let lsb = lsb_exp - MIN_EXP;
+                if lsb < 0 {
+                    // Unreachable for an accumulator sized by the model: the
+                    // register's floor is the minimum *product* exponent, which
+                    // is below the minimum subnormal. Returning zero rather
+                    // than indexing negatively keeps the function total for a
+                    // hand-built `Complete` of the wrong size.
+                    return <$t>::from_bits(0);
+                }
+                let lsb = lsb as u32;
+
+                // The P significand bits, read out of the register.
+                let mut sig: u64 = 0;
+                for j in (0..P).rev() {
+                    sig = (sig << 1) | u64::from(acc.magnitude_bit(lsb + j));
+                }
+
+                // Round, once, under the caller's mode. `Nearest` is
+                // round-half-to-even, which is IEEE 754's default and what
+                // makes this *the* correctly-rounded value rather than *a*
+                // rounding of it.
+                let (round_bit, sticky) = if lsb == 0 {
+                    (false, false)
+                } else {
+                    (acc.magnitude_bit(lsb - 1), acc.magnitude_any_below(lsb - 1))
+                };
+                let increment = match mode {
+                    EncodeMode::Nearest => round_bit && (sticky || (sig & 1) == 1),
+                    // Truncation toward zero: the magnitude is already
+                    // truncated, so there is nothing to add.
+                    EncodeMode::TowardZero | EncodeMode::Saturating | EncodeMode::Wrapping => false,
+                };
+                let mut sig = sig + u64::from(increment);
+                let mut lsb_exp = lsb_exp;
+                if sig >> P == 1 {
+                    // The increment carried out of the significand: halve it
+                    // and step the exponent, which is exact.
+                    sig >>= 1;
+                    lsb_exp += 1;
+                }
+
+                if sig == 0 {
+                    return <$t>::from_bits((negative as $bits) << SIGN_SHIFT);
+                }
+
+                // Assemble. A significand with its top bit set is normal; one
+                // without is subnormal, and its biased exponent is zero.
+                let top = 64 - 1 - sig.leading_zeros();
+                let value_exp = lsb_exp + top as i32;
+                let bits: $bits = if sig >> (P - 1) == 1 {
+                    let biased = value_exp + BIAS;
+                    if biased >= (1 << EXPO) - 1 {
+                        // Overflow. Round-to-nearest carries an overflowing
+                        // magnitude to infinity; the directed modes clamp to
+                        // the largest finite value, which is what `Saturating`
+                        // means for this family.
+                        return match mode {
+                            EncodeMode::Nearest => {
+                                if negative {
+                                    <$t>::NEG_INFINITY
+                                } else {
+                                    <$t>::INFINITY
+                                }
+                            }
+                            _ => {
+                                if negative {
+                                    <$t>::MIN
+                                } else {
+                                    <$t>::MAX
+                                }
+                            }
+                        };
+                    }
+                    ((negative as $bits) << SIGN_SHIFT)
+                        | ((biased as $bits) << MANT)
+                        | ((sig as $bits) & (((1 as $bits) << MANT) - 1))
+                } else {
+                    ((negative as $bits) << SIGN_SHIFT) | (sig as $bits)
+                };
+                <$t>::from_bits(bits)
+            }
+        }
+    };
+}
+
+impl_encode_into_float!(f32, u32, 23, 8);
+impl_encode_into_float!(f64, u64, 52, 11);

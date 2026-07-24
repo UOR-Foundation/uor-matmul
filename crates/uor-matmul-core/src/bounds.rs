@@ -83,20 +83,26 @@ pub const fn fits_narrow(b: u128, cap: u128, k: usize) -> bool {
 #[doc(hidden)]
 pub const NARROW_CAPS: [u128; 2] = [i64::MAX as u128, i32::MAX as u128];
 
-/// The widest narrow register that can hold a run of `k` products bounded by
+/// The **narrowest** register that can hold a run of `k` products bounded by
 /// `b`, or `None` when the tile must use the wide accumulator.
 ///
-/// The whole of the narrow/wide decision, in one place, so that the reference
-/// and every backend factor the accumulation the same way and `CB-*` compares
-/// like with like.
+/// [`NARROW_CAPS`] is declared widest-first, and this scans it from the narrow
+/// end, because a wider cap is *easier* to satisfy: scanning from the wide end
+/// would always return the widest and the list would carry no information.
+/// What a kernel wants is the narrowest lane that suffices, since every lane
+/// computes the same integer and the narrow ones are faster --- which is what
+/// "ordered by speed" means (§5.1).
+///
+/// A `None` is not a failure. It selects `AccOf<E>`, which the width derivation
+/// already guaranteed cannot overflow for any expressible `k`.
 #[doc(hidden)]
 pub const fn narrow_cap_for(b: u128, k: usize) -> Option<u128> {
-    let mut i = 0;
-    while i < NARROW_CAPS.len() {
+    let mut i = NARROW_CAPS.len();
+    while i > 0 {
+        i -= 1;
         if fits_narrow(b, NARROW_CAPS[i], k) {
             return Some(NARROW_CAPS[i]);
         }
-        i += 1;
     }
     None
 }
@@ -115,15 +121,38 @@ mod tests {
         assert_eq!(acc_bits::<i64>(), generated::acc_width::I64_BITS);
     }
 
-    /// §5.1: the predicate is a question about register width, not a limit.
-    /// The W8A8 threshold is where the plain i32 tile stops being usable, and
-    /// one past it the answer is still computed --- in a wider register.
+    /// `CS-07`: the generated `133144` pin equals `k_max(127, i32::MAX)`
+    /// recomputed at test time.
+    ///
+    /// The numeral is a check on the derivation, not a definition. And it is a
+    /// threshold on a *register*, not on an answer: one past it the value is
+    /// still computed, in a wider one.
     #[test]
-    fn fits_narrow_is_a_register_question_not_a_limit() {
+    fn the_w8a8_threshold_is_recomputed_cs_07() {
         let cap = generated::narrow::CAP_I32;
-        assert!(fits_narrow(127, cap, 133_144));
-        assert!(!fits_narrow(127, cap, 133_145));
+        let recomputed = cap / (127 * 127);
+        assert_eq!(recomputed, generated::narrow::I32_TILE_W8A8_K_MAX);
+        assert!(fits_narrow(127, cap, recomputed as usize));
+        assert!(!fits_narrow(127, cap, recomputed as usize + 1));
+        // One past it, a wider narrow register still holds the tile.
+        assert_eq!(
+            narrow_cap_for(127, recomputed as usize + 1),
+            Some(i64::MAX as u128)
+        );
         // A bound of zero is an alphabet containing only zero. Every depth fits.
         assert!(fits_narrow(0, cap, usize::MAX));
+    }
+
+    /// `CU-02`: the narrow candidates are ordered by speed, not by quality.
+    ///
+    /// Every entry computes the same integer, and `None` is not an error: it
+    /// selects `AccOf<E>`, which the width derivation already guaranteed cannot
+    /// overflow. That is the difference between a factorization and a fallback.
+    #[test]
+    fn narrow_candidates_are_ordered_by_speed_cu_02() {
+        assert_eq!(narrow_cap_for(127, 1_000), Some(i32::MAX as u128));
+        assert_eq!(narrow_cap_for(127, 200_000), Some(i64::MAX as u128));
+        assert_eq!(narrow_cap_for(127, usize::MAX), None);
+        assert_eq!(NARROW_CAPS, [i64::MAX as u128, i32::MAX as u128]);
     }
 }

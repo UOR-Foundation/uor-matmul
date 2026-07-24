@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         "check-constants" => audit::check_constants(&root),
         "audit-limits" => audit::audit_limits(&root),
         "audit-purity" => audit::audit_purity(&root),
+        "audit-disassembly" => audit::audit_disassembly(&root),
         "audit-deferral" => audit::audit_deferral(&root),
         "verify-oracles" => verify_oracles(&root),
         "validate" => validate(&root),
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
                  check-constants   R1:  every constant derives; no magic numeral\n\
                  audit-limits      R8:  no bound that cannot be traced to a parameter\n\
                  audit-purity      R13: one method; no float addition, no fallback\n\
+                 audit-disassembly CU-01: no float arithmetic opcode in any shipped kernel\n\
                  audit-deferral    R15: no TODO, no stub, no 'later version'\n\
                  verify-oracles    R11: every external claim is bound to a committed artifact\n\
                  validate          run every gate above\n\
@@ -156,6 +158,7 @@ fn validate(root: &Path) -> Result<(), Fail> {
     audit::check_constants(root)?;
     audit::audit_limits(root)?;
     audit::audit_purity(root)?;
+    audit::audit_disassembly(root)?;
     audit::audit_deferral(root)?;
     verify_oracles(root)?;
     println!("validate: every gate passed");

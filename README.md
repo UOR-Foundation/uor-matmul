@@ -168,16 +168,32 @@ the documentation.
 | Path | What it is |
 | --- | --- |
 | `model/` | the single source of every constant, tier, oracle, and claim |
-| `crates/uor-matmul-core` | alphabet, accumulator, reference accumulation, views. `no_std`, no `alloc`, `forbid(unsafe_code)`, no float token |
-| `crates/uor-matmul-codec` | the `Codec` trait and every tier |
-| `crates/uor-matmul-gemm` | the driver: traversal, scratch, epilogue |
-| `crates/uor-matmul` | the facade |
-| `crates/uor-matmul-model` | build-time: parses `model/*.toml`, generates the Rust consts |
-| `crates/uor-matmul-validate` | dev/CI only: oracle adapters and the differential harness |
+| `features/suites/` | one Gherkin scenario per conformance ID |
+| `oracles/` | committed external artifacts, with provenance and checksums |
+| `crates/uor-matmul-core` | alphabet, accumulator, reference accumulation, views. `no_std`, no `alloc`, `forbid(unsafe_code)`, no float arithmetic |
+| `crates/uor-matmul-codec` | the `Codec` trait, every tier, and the E8 codebook |
+| `crates/uor-matmul-kernels` | one module per ISA. The only crate with `unsafe` |
+| `crates/uor-matmul-gemm` | the driver: traversal, scratch, epilogue, tile partition |
+| `crates/uor-matmul` | the facade, and the raw-pointer face |
+| `crates/uor-matmul-model` | build-time: parses `model/*.toml`, generates the Rust consts and `CONFORMANCE.md` |
+| `crates/uor-matmul-validate` | dev/CI only: oracle adapters, the differential harness, the scaling fits |
+| `crates/uor-matmul-conformance` | dev/CI only: the BDD runner and the honesty meta-gate |
 | `xtask/` | the gates |
+| `fuzz/` | totality targets |
 
-`just vv` is the normative acceptance gate. `STATUS.md` records which parts of
-the build specification are implemented and which are not.
+`just vv` is the normative acceptance gate. `VERIFICATION.md` maps each of its
+axes to the claims it discharges, and lists the defect that was planted to prove
+each gate can fail. `VALIDATION.md` is how a third party reproduces all of it
+without trusting this repository.
+
+## Performance
+
+`ANALYSIS.md` §"Where the time goes" has the measured figures and what dominates
+them. In short: the kernel-driven `i8` path reaches about 2.1 Gmac/s on a
+two-core runner with AVX2, and `f32` is roughly 25 times slower --- which is the
+cost of a complete accumulator, and the trade N4 already names. The library
+makes exactly one copy of each operand, into the packed panels, and packs the
+reused operand once per column block rather than once per output block.
 
 ## Licence
 

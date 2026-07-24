@@ -16,13 +16,14 @@ readme = "../../README.md"
 uor-matmul-core = { workspace = true }
 uor-matmul-codec = { workspace = true }
 uor-matmul-gemm = { workspace = true }
+uor-matmul-kernels = { workspace = true }
 
 [features]
 default = []
 # `std` buys exactly two things: runtime CPU feature detection and
 # `core::error::Error` impls. Nothing in the numerical path changes when it is
 # off, which is what CA-02 asserts by comparing bytes across targets.
-std = []
+std = ["uor-matmul-kernels/std"]
 # Content addressing for weight artifacts.
 kappa = ["uor-matmul-codec/kappa"]
 

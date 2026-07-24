@@ -344,16 +344,6 @@ pub fn render_conformance(model: &Model) -> String {
         "class is itself checked: `cargo xtask audit-limits` fails if any code path"
     );
     let _ = writeln!(w, "returns an error the model does not sanction.");
-    let _ = writeln!(w);
-    let _ = writeln!(
-        w,
-        "The **State** column is this repository's own record, not part of the"
-    );
-    let _ = writeln!(
-        w,
-        "specification. R15 says nothing is deferred; it is satisfied when no row"
-    );
-    let _ = writeln!(w, "reads `pending`. `STATUS.md` is the prose version.");
 
     let classes: &[(&str, &str)] = &[
         (
@@ -406,17 +396,13 @@ pub fn render_conformance(model: &Model) -> String {
         let _ = writeln!(w);
         let _ = writeln!(w, "## `{prefix}*` --- {title}");
         let _ = writeln!(w);
-        let _ = writeln!(w, "| ID | Level | State | Statement |");
-        let _ = writeln!(w, "| --- | --- | --- | --- |");
+        let _ = writeln!(w, "| ID | Level | Statement |");
+        let _ = writeln!(w, "| --- | --- | --- |");
         for r in rows {
             let statement = r.statement.replace('\n', " ").replace('|', "\\|");
-            let state = match r.state {
-                crate::State::Implemented => "implemented",
-                crate::State::Pending => "**pending**",
-            };
             let _ = writeln!(
                 w,
-                "| `{}` | `{}` | {state} | {} |",
+                "| `{}` | `{}` | {} |",
                 r.id,
                 r.level.as_str(),
                 statement.trim()

@@ -13,4 +13,4 @@ disallowed-methods = [
     { path = "f64::mul_add", reason = "R13: the library never adds two floats" },
 ]
 
-msrv = "1.85"
+msrv = "1.89"

@@ -118,6 +118,22 @@ exactness = "inexact"
 independent = true
 honesty = "open"
 
+[[oracle]]
+id = "CX-10"
+crate = "numpy"
+feature = "none"
+element = "i64"
+entry = "numpy.matmul, out of process"
+exactness = "exact"
+independent = true
+honesty = "build"
+note = """Not a Rust crate, which is the point (D-1): it settles lineage
+independence by construction. Its outputs are generated once by
+oracles/numpy/generate.py, committed to oracles/numpy/ with a per-file
+SHA-256, and compared like any other oracle. int64 accumulation wraps exactly
+where a two's complement accumulator does, so the comparison is byte equality
+with no exempted region."""
+
 # --------------------------------------------------------------------------
 # Cited authorities. These are not crates and are not executed. They are cited
 # the way an instruction-set manual is cited: they tell the implementation what

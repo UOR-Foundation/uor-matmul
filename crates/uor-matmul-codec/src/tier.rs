@@ -47,6 +47,17 @@ pub trait Codec<E: IntegerElement, Bd: Bound>: Send + Sync {
     /// constructed, and `i >= BLOCK` is answered by the block's own padding.
     fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd>;
 
+    /// Is `decode_len` always `MAX_BLOCK`?
+    ///
+    /// True for every fixed-width tier, which is all of them except a run
+    /// codec. It is what lets [`crate::CodedMatrix`] find the codes of row `r`
+    /// by arithmetic rather than by walking, and the difference is not a
+    /// constant factor: a walk makes random access O(row length), and a driver
+    /// that reads one element at a time then runs in O(k^2 n) instead of
+    /// O(m k n). A variable-length tier pays that cost only if the caller uses
+    /// random access on it; the row and range decodes walk each row once.
+    const IS_FIXED_WIDTH: bool = true;
+
     /// How many elements `code` actually produces.
     ///
     /// `MAX_BLOCK` for a fixed-width tier, and possibly fewer for a

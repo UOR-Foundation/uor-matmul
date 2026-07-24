@@ -8,7 +8,9 @@
 //! coarser alphabet. It is exact integer throughout, and it never consults a
 //! platform rounding mode.
 
-use uor_matmul_core::{AccOf, Accumulator, Element, EncodeFrom, EncodeMode};
+use uor_matmul_core::{
+    AccOf, Accumulator, Complete, Element, EncodeFrom, EncodeMode, FloatElement, Limbs,
+};
 
 /// What to do with a finished accumulator and the value already in `C`.
 ///
@@ -62,8 +64,8 @@ impl Linear {
 impl<E, O> Epilogue<E, O> for Linear
 where
     E: Element,
-    O: Element + EncodeFrom<AccOf<E>> + Into<i128>,
-    AccOf<E>: ScaleExact,
+    O: EncodeFrom<AccOf<E>>,
+    AccOf<E>: ScaleExact + AbsorbPrior<O>,
 {
     fn reads_c(&self) -> bool {
         // `beta == 0` overwrites `C` without reading it, which is what makes an
@@ -80,7 +82,7 @@ where
                 if self.beta == 0 {
                     scaled
                 } else {
-                    scaled.combine(AccOf::<E>::from_i128(c.into()).scale_exact(self.beta))
+                    scaled.combine(AccOf::<E>::of_prior(c).scale_exact(self.beta))
                 }
             }
         };
@@ -98,10 +100,10 @@ pub struct Bias<'a> {
     pub values: &'a [i64],
 }
 
-impl<'a, E, O> Epilogue<E, O> for (Bias<'a>, usize)
+impl<E, O> Epilogue<E, O> for (Bias<'_>, usize)
 where
     E: Element,
-    O: Element + EncodeFrom<AccOf<E>>,
+    O: EncodeFrom<AccOf<E>>,
     AccOf<E>: ScaleExact,
 {
     fn reads_c(&self) -> bool {
@@ -112,6 +114,38 @@ where
         let (bias, column) = *self;
         let b = bias.values.get(column).copied().unwrap_or(0);
         O::encode_from(acc.combine(AccOf::<E>::from_i128(b as i128)), mode)
+    }
+}
+
+/// How the value already in `C` enters the accumulation.
+///
+/// `beta * C` requires the prior output element to become an accumulator value,
+/// and it must do so *exactly* --- otherwise the epilogue would round twice.
+/// One trait rather than a bound on `O`, so that the integer families and the
+/// float families reach [`Linear`] through the same impl and there is no second
+/// epilogue (R13).
+pub trait AbsorbPrior<O>: Accumulator {
+    /// The accumulator holding exactly the value `prior` names.
+    fn of_prior(prior: O) -> Self;
+}
+
+impl<O: Into<i128>> AbsorbPrior<O> for i128 {
+    fn of_prior(prior: O) -> Self {
+        prior.into()
+    }
+}
+
+impl<O: Into<i128>, const L: usize> AbsorbPrior<O> for Limbs<L> {
+    fn of_prior(prior: O) -> Self {
+        Self::ZERO.add_i128(prior.into())
+    }
+}
+
+impl<O: FloatElement, const L: usize, const MIN_EXP: i32> AbsorbPrior<O> for Complete<L, MIN_EXP> {
+    fn of_prior(prior: O) -> Self {
+        // The same decode every operand goes through. A float already in `C`
+        // is a code like any other.
+        Self::of(prior)
     }
 }
 
@@ -140,6 +174,24 @@ impl ScaleExact for i128 {
 
     fn from_i128(v: i128) -> Self {
         v
+    }
+}
+
+impl<const L: usize, const MIN_EXP: i32> ScaleExact for uor_matmul_core::Complete<L, MIN_EXP> {
+    fn scale_exact(self, factor: i64) -> Self {
+        // Exact: an integer scaling of an exact fixed-point value is exact, and
+        // the register is wide enough that `alpha` cannot push a representable
+        // sum out of it.
+        self.scale(factor)
+    }
+
+    fn from_i128(v: i128) -> Self {
+        // An integer is a dyadic rational with exponent zero. `v` is at most
+        // 128 bits, so it lands in the register without rounding.
+        let negative = v < 0;
+        let mut out = Self::ZERO;
+        out.add_scaled(v.unsigned_abs(), 0, negative);
+        out
     }
 }
 

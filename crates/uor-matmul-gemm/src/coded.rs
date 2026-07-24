@@ -121,7 +121,7 @@ pub fn coded_gemm<E, Bd, C, O, Ep>(
                 // Decode, then accumulate exactly. The codec is not an argument
                 // of the arithmetic below it.
                 let w = triple.b.at(p, j);
-                acc = E::mac(acc, triple.a.at(i, p).get(), w.get());
+                E::mac(&mut acc, triple.a.at(i, p).get(), w.get());
             }
             let prior = if reads_c {
                 Some(*triple.c.at(i, j))

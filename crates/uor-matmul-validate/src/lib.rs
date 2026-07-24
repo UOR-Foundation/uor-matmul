@@ -46,9 +46,12 @@ use uor_matmul::prelude::*;
 use uor_matmul_core::EncodeMode;
 
 pub mod corpus;
+pub mod counting;
 pub mod oracle;
+pub mod scaling;
 
 pub use corpus::{Case, Corpus};
+pub use counting::Counting;
 pub use oracle::{Agreement, Oracle};
 
 /// Compute a product with this library, row-major, `beta = 0`, under `mode`.

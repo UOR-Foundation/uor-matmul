@@ -32,9 +32,15 @@ extern crate std;
 pub mod coded;
 pub mod driver;
 pub mod epilogue;
+pub mod float;
+pub mod kernel;
+pub mod partition;
 pub mod scratch;
 
 pub use coded::{coded_gemm, CodedTriple};
 pub use driver::{gemm, GemmOptions};
 pub use epilogue::{Bias, Epilogue, Linear};
+pub use float::gemm_float;
+pub use kernel::gemm_w8a8;
+pub use partition::{Partition, Tile};
 pub use scratch::{suggested_scratch, Scratch};

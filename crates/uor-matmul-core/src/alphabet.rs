@@ -42,7 +42,12 @@ pub trait Element: Copy + PartialEq + Send + Sync + core::fmt::Debug + 'static {
     ///
     /// Exact, total, and free of any rounding or saturating step. Everything
     /// else in the library is a traversal over this (R3, R13).
-    fn mac(acc: Self::Acc, a: Self, w: Self) -> Self::Acc;
+    ///
+    /// In place, by `&mut`, rather than by value. For an `i128` that is a wash;
+    /// for a complete accumulator it is the difference between a float GEMM
+    /// that works and one that spends most of its time copying an 88- or
+    /// 536-byte register in and out of this call, twice per product.
+    fn mac(acc: &mut Self::Acc, a: Self, w: Self);
 
     /// Does this element type have a narrow register at all?
     ///
@@ -315,12 +320,12 @@ macro_rules! impl_element_for_signed {
             const BITS: u32 = <$t>::BITS;
             const ZERO: Self = 0;
 
-            fn mac(acc: i128, a: Self, w: Self) -> i128 {
+            fn mac(acc: &mut i128, a: Self, w: Self) {
                 // Exact by construction: the product of two values of this type
                 // needs at most `2 * BITS` bits, and `acc_bits::<Self>()` leaves
                 // room for every `k` the machine can address (§3.2). No
                 // wrapping, no saturation, no rounding (R3).
-                acc + (a as i128) * (w as i128)
+                *acc += (a as i128) * (w as i128);
             }
 
             // The product of two values of this type needs at most 64 bits, so
@@ -358,10 +363,10 @@ impl Element for i64 {
     const BITS: u32 = i64::BITS;
     const ZERO: Self = 0;
 
-    fn mac(acc: Self::Acc, a: Self, w: Self) -> Self::Acc {
+    fn mac(acc: &mut Self::Acc, a: Self, w: Self) {
         // The product of two i64 needs at most 128 bits and is therefore exact
         // in an i128; the 192-bit accumulator absorbs every `k` on top of it.
-        acc.add_i128((a as i128) * (w as i128))
+        acc.add_i128_in_place((a as i128) * (w as i128));
     }
 
     // A single i64 x i64 product does not fit in an i64, so there is no narrow
@@ -442,15 +447,11 @@ macro_rules! impl_element_for_complex {
             const PRODUCT_TERMS: u32 = 2;
             const ZERO: Self = Complex { re: 0, im: 0 };
 
-            fn mac(acc: Self::Acc, a: Self, w: Self) -> Self::Acc {
-                ComplexAcc {
-                    re: <$t as Element>::mac(
-                            <$t as Element>::mac(acc.re, a.re, w.re),
-                            a.im, -w.im),
-                    im: <$t as Element>::mac(
-                            <$t as Element>::mac(acc.im, a.re, w.im),
-                            a.im, w.re),
-                }
+            fn mac(acc: &mut Self::Acc, a: Self, w: Self) {
+                <$t as Element>::mac(&mut acc.re, a.re, w.re);
+                <$t as Element>::mac(&mut acc.re, a.im, -w.im);
+                <$t as Element>::mac(&mut acc.im, a.re, w.im);
+                <$t as Element>::mac(&mut acc.im, a.im, w.re);
             }
 
             // Two independent accumulators; a single i64 register would have to
@@ -554,7 +555,8 @@ mod tests {
     fn complex_mac_is_componentwise_ck_01() {
         let a = Complex::new(3i32, 4);
         let w = Complex::new(5i32, -2);
-        let acc = <Complex<i32> as Element>::mac(ComplexAcc::ZERO, a, w);
+        let mut acc = ComplexAcc::ZERO;
+        <Complex<i32> as Element>::mac(&mut acc, a, w);
         // (3 + 4i)(5 - 2i) = 15 - 6i + 20i + 8 = 23 + 14i
         assert_eq!(acc.re, 23);
         assert_eq!(acc.im, 14);
@@ -579,19 +581,19 @@ macro_rules! impl_float_element {
             const BITS: u32 = <$t>::MANTISSA_DIGITS + $expo;
             const ZERO: Self = 0.0;
 
-            fn mac(acc: Self::Acc, a: Self, w: Self) -> Self::Acc {
+            fn mac(acc: &mut Self::Acc, a: Self, w: Self) {
                 // Decode, multiply the significands as integers, place the
                 // exact product in the complete accumulator. Every step is
                 // exact and none of them is a float operation.
                 match (a.decode(), w.decode()) {
-                    (Decoded::NotANumber, _) | (_, Decoded::NotANumber) => acc.with_nan(),
+                    (Decoded::NotANumber, _) | (_, Decoded::NotANumber) => acc.set_nan(),
                     (Decoded::Infinite { sign: sa }, other)
                     | (other, Decoded::Infinite { sign: sa }) => match other {
                         // Infinity times zero is NaN, by IEEE 754 clause 7.2.
-                        Decoded::Finite { mantissa: 0, .. } => acc.with_nan(),
-                        Decoded::Finite { sign: sb, .. } => acc.with_infinity(sa ^ sb),
-                        Decoded::Infinite { sign: sb } => acc.with_infinity(sa ^ sb),
-                        Decoded::NotANumber => acc.with_nan(),
+                        Decoded::Finite { mantissa: 0, .. } => acc.set_nan(),
+                        Decoded::Finite { sign: sb, .. } => acc.set_infinity(sa ^ sb),
+                        Decoded::Infinite { sign: sb } => acc.set_infinity(sa ^ sb),
+                        Decoded::NotANumber => acc.set_nan(),
                     },
                     (
                         Decoded::Finite {
@@ -607,8 +609,7 @@ macro_rules! impl_float_element {
                     ) => {
                         // Both significands fit in 53 bits, so their product
                         // fits in 106 and the u128 multiply is exact.
-                        let product = (ma as u128) * (mb as u128);
-                        acc.add_scaled(product, ea + eb, sa != sb)
+                        acc.add_scaled((ma as u128) * (mb as u128), ea + eb, sa != sb);
                     }
                 }
             }

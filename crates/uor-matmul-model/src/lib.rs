@@ -16,8 +16,8 @@ pub mod registry;
 
 pub use registry::{
     Authorities, Authority, AuthorityRow, Blocking, Claim, Codebook, Complete, Constants, Element,
-    IdRow, Ids, Instantiation, Ledger, Level, Narrow, Oracle, Oracles, State, Threshold, Tier,
-    Tiers, Width, Widths,
+    IdRow, Ids, Instantiation, Ledger, Level, Narrow, Oracle, Oracles, Threshold, Tier, Tiers,
+    Width, Widths,
 };
 
 use std::path::{Path, PathBuf};

@@ -128,6 +128,7 @@ where
     type Code = u8;
     const MAX_BLOCK: usize = P * C::MAX_BLOCK;
     const TIER: TierId = TierId::Packed;
+    const IS_FIXED_WIDTH: bool = C::IS_FIXED_WIDTH;
 
     fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd> {
         let bits = Self::SUB_BITS;
@@ -245,6 +246,7 @@ where
     type Code = C::Code;
     const MAX_BLOCK: usize = C::MAX_BLOCK;
     const TIER: TierId = TierId::Offset;
+    const IS_FIXED_WIDTH: bool = C::IS_FIXED_WIDTH;
 
     fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, BdOut> {
         let inner = self.inner.decode_element(code, i).get();
@@ -322,6 +324,8 @@ impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>, const MAX_RUN: usize> Codec<
     type Code = u32;
     const MAX_BLOCK: usize = MAX_RUN;
     const TIER: TierId = TierId::Runs;
+    // The one variable-length tier: a run is as long as it is.
+    const IS_FIXED_WIDTH: bool = false;
 
     fn decode_len(&self, run: Self::Code) -> usize {
         self.runs
@@ -401,6 +405,7 @@ where
     type Code = In;
     const MAX_BLOCK: usize = C::MAX_BLOCK;
     const TIER: TierId = TierId::Transcode;
+    const IS_FIXED_WIDTH: bool = C::IS_FIXED_WIDTH;
 
     fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd> {
         self.inner.decode_element(self.map.map(code), i)

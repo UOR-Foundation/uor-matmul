@@ -37,6 +37,23 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
         if C::MAX_BLOCK == 0 {
             return None;
         }
+        // A fixed-width tier's shape is arithmetic, so checking it is too.
+        if C::IS_FIXED_WIDTH {
+            if !cols.is_multiple_of(C::MAX_BLOCK) {
+                return None;
+            }
+            let per_row = cols / C::MAX_BLOCK;
+            if rows.checked_mul(per_row)? != codes.len() {
+                return None;
+            }
+            return Some(Self {
+                codec,
+                rows,
+                cols,
+                codes,
+                _marker: core::marker::PhantomData,
+            });
+        }
         let mut at = 0usize;
         for _ in 0..rows {
             let mut width = 0usize;
@@ -94,24 +111,33 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
 
     /// The half-open range of codes belonging to row `r`.
     ///
-    /// Walks [`Codec::decode_len`], so it is correct for a fixed-width tier and
-    /// for a variable-length one without branching on which it has.
-    pub fn row_code_range(&self, r: usize) -> core::ops::Range<usize> {
-        let mut at = 0usize;
+    /// Arithmetic for a fixed-width tier, which is every tier but a run codec.
+    /// That matters more than it looks: a walk would make random access
+    /// O(row length), and a driver reading one element at a time would then run
+    /// in O(k^2 n) instead of O(m k n).
+    pub fn row_code_range(&self, r: usize) -> Range<usize> {
+        if C::IS_FIXED_WIDTH {
+            let per_row = self.codes_per_row();
+            return r * per_row..(r + 1) * per_row;
+        }
+        // Walk the rows before `r` to find where it starts, then walk `r`
+        // itself to find where it ends. `new` already established that the
+        // lengths sum to `cols` on every row, so neither walk can run off.
+        let mut start = 0usize;
         for _ in 0..r {
             let mut width = 0usize;
             while width < self.cols {
-                width += self.codec.decode_len(self.codes[at]);
-                at += 1;
+                width += self.codec.decode_len(self.codes[start]);
+                start += 1;
             }
         }
-        let start = at;
+        let mut end = start;
         let mut width = 0usize;
         while width < self.cols {
-            width += self.codec.decode_len(self.codes[at]);
-            at += 1;
+            width += self.codec.decode_len(self.codes[end]);
+            end += 1;
         }
-        start..at
+        start..end
     }
 
     /// The raw code slice.
@@ -141,10 +167,16 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
 
     /// The element at `(r, c)` of the decoded matrix.
     ///
-    /// Walks the codec's own lengths from the start of the row, so it is
-    /// correct for a variable-length tier. A caller decoding a whole row should
-    /// use [`CodedMatrix::decode_row_into`], which walks it once.
+    /// O(1) for a fixed-width tier. For a variable-length one it walks the row,
+    /// because the run boundaries are the data; a caller reading a whole row
+    /// from such a tier should use [`CodedMatrix::decode_row_into`], which walks
+    /// it once instead of once per element.
     pub fn at(&self, r: usize, c: usize) -> Alphabet<E, Bd> {
+        if C::IS_FIXED_WIDTH {
+            let block = C::MAX_BLOCK;
+            let code = self.codes[r * self.codes_per_row() + c / block];
+            return self.codec.decode_element(code, c % block);
+        }
         let range = self.row_code_range(r);
         let mut width = 0usize;
         for &code in &self.codes[range] {

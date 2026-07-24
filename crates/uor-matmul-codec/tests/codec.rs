@@ -311,3 +311,57 @@ fn streaming_decode_equals_row_decode_cd_04() {
         assert_eq!(whole, streamed);
     }
 }
+
+/// `CK-03`: the packed panels themselves are byte-equal across codecs that
+/// decode equally --- not merely the products.
+///
+/// This is stronger than `CK-05` and it is the one that would catch a codec
+/// whose decode is right but whose *ordering* is not. Two tiers that agree
+/// element for element must fill a packed panel with the same bytes, because
+/// the packing reads the decoded stream and nothing else.
+#[test]
+fn packed_panels_are_byte_equal_across_tiers_ck_03() {
+    use uor_matmul_codec::{e8_codec, e8_table, E8_I8};
+
+    // The E8 codebook, and a dense tier holding the same decoded stream.
+    let table = e8_table::<Full<i8>>().expect("i8 admits every codeword");
+    let book = e8_codec(&table);
+    let codes: Vec<u16> = (0..64u16).map(|c| c * 3 % 256).collect();
+    let coded = CodedMatrix::new(book, 8, 64, &codes).unwrap();
+
+    let dense: Vec<i8> = codes
+        .iter()
+        .flat_map(|&c| E8_I8[c as usize % 256].iter().copied())
+        .collect();
+    let plain = CodedMatrix::new(Identity, 8, 64, as_alphabet_full(&dense)).unwrap();
+
+    // Pack both, k-major, exactly as the driver's kernel path does.
+    fn pack<C: Codec<i8, Full<i8>>>(
+        m: &CodedMatrix<'_, i8, Full<i8>, C>,
+        mr: usize,
+        kc: usize,
+    ) -> Vec<i8> {
+        let mut out = vec![0i8; mr * kc];
+        for p in 0..kc {
+            for i in 0..mr {
+                out[p * mr + i] = m.at(i, p).get();
+            }
+        }
+        out
+    }
+
+    for (mr, kc) in [(1usize, 1usize), (4, 8), (6, 16), (8, 64)] {
+        assert_eq!(
+            pack(&coded, mr, kc),
+            pack(&plain, mr, kc),
+            "the E8 tier and the dense tier must pack the same bytes at {mr}x{kc}"
+        );
+    }
+
+    // And the panels really are non-trivial, or the comparison is vacuous.
+    let panel = pack(&coded, 8, 64);
+    assert!(
+        panel.iter().any(|&b| b != 0),
+        "the packed panel must not be all zeros"
+    );
+}

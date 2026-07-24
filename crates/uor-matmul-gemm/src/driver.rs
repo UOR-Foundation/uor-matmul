@@ -91,7 +91,7 @@ pub fn gemm<E, Bd, O, Ep>(
 
             if panel == 0 {
                 for p in 0..shape.k {
-                    acc = E::mac(acc, a.at(i, p).get(), b.at(p, j).get());
+                    E::mac(&mut acc, a.at(i, p).get(), b.at(p, j).get());
                 }
             } else {
                 // The same accumulation, in panels. `combine` is associative on
@@ -102,7 +102,7 @@ pub fn gemm<E, Bd, O, Ep>(
                     let end = shape.k.min(p + panel);
                     let mut part = <AccOf<E> as Accumulator>::ZERO;
                     for q in p..end {
-                        part = E::mac(part, a.at(i, q).get(), b.at(q, j).get());
+                        E::mac(&mut part, a.at(i, q).get(), b.at(q, j).get());
                     }
                     acc = acc.combine(part);
                     p = end;
@@ -167,6 +167,30 @@ mod tests {
             );
         }
         assert_eq!(product(5, 97, 7, Traversal::OutputMajor, 1000), reference);
+    }
+
+    /// `CD-10`: `Scratch::none`, one element, `suggested_scratch - 1`,
+    /// `suggested_scratch`, and ten times it all give the same bytes.
+    ///
+    /// Scratch is an offer. The library's whole response to the amount is a
+    /// panel length, and a panel length is invisible in an exact sum.
+    #[test]
+    fn every_scratch_amount_gives_the_same_bytes_cd_10() {
+        let (m, k, n) = (5usize, 97usize, 7usize);
+        let suggested = crate::suggested_scratch(uor_matmul_core::Shape { m, k, n });
+        let reference = product(m, k, n, Traversal::Blocked, 0);
+        for amount in [0, 1, suggested.saturating_sub(1), suggested, suggested * 10] {
+            assert_eq!(
+                product(m, k, n, Traversal::Blocked, amount),
+                reference,
+                "scratch = {amount} (suggested = {suggested})"
+            );
+        }
+        // And the query is a query: offering less is not an error.
+        assert!(
+            suggested > 0,
+            "a non-degenerate shape suggests some scratch"
+        );
     }
 
     /// CS-04: `beta = 0` overwrites `C` without reading it, so an output buffer

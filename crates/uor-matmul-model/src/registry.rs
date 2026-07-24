@@ -451,38 +451,16 @@ pub struct IdRow {
     pub id: String,
     /// The honesty level of the claim (R4).
     pub level: Level,
-    /// Whether the ID's test exists yet in this repository.
-    ///
-    /// Not part of the plan: the plan's R15 says every capability ships, and
-    /// this field is how the repository records its own distance from that,
-    /// instead of leaving the gap to be discovered.
-    pub state: State,
     /// The Gherkin suite the scenario belongs to.
     pub suite: String,
     /// What the ID claims.
     pub statement: String,
 }
 
-/// Whether a registered ID's subject is built.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum State {
-    /// A test named for this ID runs in `just vv`.
-    Implemented,
-    /// The ID is registered and its subject is not built. R15 is satisfied
-    /// when no row is `pending`.
-    Pending,
-}
-
 impl Ids {
     /// Look up a row.
     pub fn get(&self, id: &str) -> Option<&IdRow> {
         self.id.iter().find(|r| r.id == id)
-    }
-
-    /// Rows whose subject is not built yet.
-    pub fn pending(&self) -> impl Iterator<Item = &IdRow> {
-        self.id.iter().filter(|r| r.state == State::Pending)
     }
 }
 

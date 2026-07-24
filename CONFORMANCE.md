@@ -21,125 +21,121 @@ object, which `CS-03` covers at view construction. The absence of that
 class is itself checked: `cargo xtask audit-limits` fails if any code path
 returns an error the model does not sanction.
 
-The **State** column is this repository's own record, not part of the
-specification. R15 says nothing is deferred; it is satisfied when no row
-reads `pending`. `STATUS.md` is the prose version.
-
 ## `CS-*` --- Structural: public API shape, stride semantics, view construction
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CS-01` | `build` | implemented | `C <- alpha*A*B + beta*C` with A `m x k`, B `k x n`, C `m x n` |
-| `CS-02` | `build` | implemented | A and B strides are arbitrary: negative, zero, and non-contiguous all give the defined result |
-| `CS-03` | `build` | implemented | Output strides that alias are rejected at `Triple::new` and nowhere else |
-| `CS-04` | `build` | implemented | `beta == 0` overwrites C without reading it, so uninitialized or NaN-filled C is admissible |
-| `CS-05` | `build` | **pending** | The raw-pointer entry points are signature-identical to `matrixmultiply` and produce the same bytes as the safe API on the same inputs |
-| `CS-06` | `build` | implemented | `m`, `n`, `k` that are not multiples of `MR`, `NR`, or `K_GROUP` take the same path and give the same result |
-| `CS-07` | `build` | implemented | The generated `133144` pin equals `k_max(127, i32::MAX)` recomputed at test time |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CS-01` | `build` | `C <- alpha*A*B + beta*C` with A `m x k`, B `k x n`, C `m x n` |
+| `CS-02` | `build` | A and B strides are arbitrary: negative, zero, and non-contiguous all give the defined result |
+| `CS-03` | `build` | Output strides that alias are rejected at `Triple::new` and nowhere else |
+| `CS-04` | `build` | `beta == 0` overwrites C without reading it, so uninitialized or NaN-filled C is admissible |
+| `CS-05` | `build` | The raw-pointer entry points are signature-identical to `matrixmultiply` and produce the same bytes as the safe API on the same inputs |
+| `CS-06` | `build` | `m`, `n`, `k` that are not multiples of `MR`, `NR`, or `K_GROUP` take the same path and give the same result |
+| `CS-07` | `build` | The generated `133144` pin equals `k_max(127, i32::MAX)` recomputed at test time |
 
 ## `CT-*` --- Totality: the operation is infallible on everything it can represent
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CT-01` | `build` | implemented | No representable input errors or panics: fuzzed shapes, strides, magnitudes, and depths, under a checked-arithmetic build |
-| `CT-02` | `build` | implemented | No accumulation overflows: the whole corpus under checked arithmetic, zero overflow events |
-| `CT-03` | `build` | implemented | Non-finite float codes propagate by the IEEE rules and never error |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CT-01` | `build` | No representable input errors or panics: fuzzed shapes, strides, magnitudes, and depths, under a checked-arithmetic build |
+| `CT-02` | `build` | No accumulation overflows: the whole corpus under checked arithmetic, zero overflow events |
+| `CT-03` | `build` | Non-finite float codes propagate by the IEEE rules and never error |
 
 ## `CD-*` --- Determinism: same inputs, same bytes
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CD-01` | `build` | **pending** | Backend choice does not change output bytes |
-| `CD-02` | `build` | implemented | Tile count and completion order do not change output bytes, over `{1,2,3,5,8,64,m*n}` and shuffled orders |
-| `CD-03` | `build` | implemented | Every partial sum stays inside the accumulator, measured by `dot_instrumented`, never inferred |
-| `CD-04` | `build` | implemented | Traversal and blocking preset do not change output bytes, including deliberately bad presets |
-| `CD-05` | `build` | implemented | Encode mode is the only thing that changes the output bytes for a fixed accumulation |
-| `CD-06` | `build` | **pending** | Big-endian and little-endian targets agree on the serialized output |
-| `CD-07` | `build` | implemented | Splitting the operand stream at any index sums the parts |
-| `CD-08` | `build` | implemented | Two tiles reduce in either order |
-| `CD-09` | `build` | implemented | The narrow-register tile path agrees with `dot_wide` |
-| `CD-10` | `build` | implemented | `Scratch::None`, one byte, `suggested_scratch - 1`, `suggested_scratch`, and ten times it all give the same bytes |
-| `CD-11` | `build` | implemented | Forcing a wider accumulator than necessary changes nothing but the room |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CD-01` | `build` | Backend choice does not change output bytes |
+| `CD-02` | `build` | Tile count and completion order do not change output bytes, over `{1,2,3,5,8,64,m*n}` and shuffled orders |
+| `CD-03` | `build` | Every partial sum stays inside the accumulator, measured by `dot_instrumented`, never inferred |
+| `CD-04` | `build` | Traversal and blocking preset do not change output bytes, including deliberately bad presets |
+| `CD-05` | `build` | Encode mode is the only thing that changes the output bytes for a fixed accumulation |
+| `CD-06` | `build` | Big-endian and little-endian targets agree on the serialized output |
+| `CD-07` | `build` | Splitting the operand stream at any index sums the parts |
+| `CD-08` | `build` | Two tiles reduce in either order |
+| `CD-09` | `build` | The narrow-register tile path agrees with `dot_wide` |
+| `CD-10` | `build` | `Scratch::None`, one byte, `suggested_scratch - 1`, `suggested_scratch`, and ten times it all give the same bytes |
+| `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CB-01` | `build` | implemented | Portable equals `dot_ref` on the whole corpus |
-| `CB-02` | `build` | **pending** | AVX2 equals portable |
-| `CB-03` | `build` | **pending** | AVX-512 VNNI equals portable, on all three of its sequences |
-| `CB-04` | `build` | **pending** | NEON and NEON dotprod equal portable |
-| `CB-05` | `build` | **pending** | wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CB-01` | `build` | Portable equals `dot_ref` on the whole corpus |
+| `CB-02` | `build` | AVX2 equals portable |
+| `CB-03` | `build` | AVX-512 VNNI equals portable, on all three of its sequences |
+| `CB-04` | `build` | NEON and NEON dotprod equal portable |
+| `CB-05` | `build` | wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on |
 
 ## `CU-*` --- Purity: one method, no classical path, no fallback
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CU-01` | `build` | **pending** | No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target |
-| `CU-02` | `build` | implemented | The instrumented count of narrow-path tiles matches `fits_narrow` exactly, so no tile takes an unintended path |
-| `CU-03` | `build` | **pending** | Every instruction sequence agrees at depths straddling its own threshold |
-| `CU-04` | `build` | implemented | Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases |
-| `CU-05` | `build` | implemented | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CU-01` | `build` | No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target |
+| `CU-02` | `build` | The instrumented count of narrow-path tiles matches `fits_narrow` exactly, so no tile takes an unintended path |
+| `CU-03` | `build` | Every instruction sequence agrees at depths straddling its own threshold |
+| `CU-04` | `build` | Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases |
+| `CU-05` | `build` | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph |
 
 ## `CK-*` --- Codec: tier equivalence, transcode, kappa addressing
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CK-01` | `build` | implemented | Two codecs with equal decodes give equal output bytes |
-| `CK-02` | `build` | implemented | Codec-invariance holds when both operands are coded |
-| `CK-03` | `build` | **pending** | The packed panels themselves are byte-equal across codecs that decode equally |
-| `CK-04` | `build` | implemented | A transcoded stream equals the composite codec |
-| `CK-05` | `build` | implemented | Two `CodedMatrix` values with different kappa labels and equal decodes give equal output bytes |
-| `CK-06` | `build` | implemented | A run codec's returned counts sum to the declared row width on every row |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CK-01` | `build` | Two codecs with equal decodes give equal output bytes |
+| `CK-02` | `build` | Codec-invariance holds when both operands are coded |
+| `CK-03` | `build` | The packed panels themselves are byte-equal across codecs that decode equally |
+| `CK-04` | `build` | A transcoded stream equals the composite codec |
+| `CK-05` | `build` | Two `CodedMatrix` values with different kappa labels and equal decodes give equal output bytes |
+| `CK-06` | `build` | A run codec's returned counts sum to the declared row width on every row |
 
 ## `CX-*` --- Cross-library agreement against an external library
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CX-01` | `build` | implemented | `ndarray` `i32`, byte-identical over the whole corpus under `EncodeMode::Wrapping` |
-| `CX-02` | `build` | implemented | `nalgebra` `i32`, likewise |
-| `CX-03` | `build` | implemented | `ndarray` `i32` against our `i8` kernels on widened inputs |
-| `CX-04` | `build` | implemented | `nalgebra` `i32` against our coded kernels on decoded weights |
-| `CX-05` | `open` | **pending** | `matrixmultiply` `sgemm`: deviation from our exact value, in ulps |
-| `CX-06` | `open` | **pending** | `faer` `f32`: likewise |
-| `CX-07` | `open` | **pending** | `ndarray` `f32`: likewise, recorded as not independent of `CX-05` |
-| `CX-08` | `open` | **pending** | `gemm` crate `f32`: likewise |
-| `CX-09` | `open` | **pending** | `matrixmultiply` `dgemm`: likewise at f64 |
-| `CX-10` | `build` | **pending** | NumPy `int64` out of process, byte-identical |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CX-01` | `build` | `ndarray` `i32`, byte-identical over the whole corpus under `EncodeMode::Wrapping` |
+| `CX-02` | `build` | `nalgebra` `i32`, likewise |
+| `CX-03` | `build` | `ndarray` `i32` against our `i8` kernels on widened inputs |
+| `CX-04` | `build` | `nalgebra` `i32` against our coded kernels on decoded weights |
+| `CX-05` | `open` | `matrixmultiply` `sgemm`: deviation from our exact value, in ulps |
+| `CX-06` | `open` | `faer` `f32`: likewise |
+| `CX-07` | `open` | `ndarray` `f32`: likewise, recorded as not independent of `CX-05` |
+| `CX-08` | `open` | `gemm` crate `f32`: likewise |
+| `CX-09` | `open` | `matrixmultiply` `dgemm`: likewise at f64 |
+| `CX-10` | `build` | NumPy `int64` out of process, byte-identical |
 
 ## `CA-*` --- Allocation and environment: zero heap, no_std, embedded and wasm
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CA-01` | `build` | **pending** | Zero allocations during any call, on every hosted target |
-| `CA-02` | `build` | **pending** | Identical bytes on `thumbv7em-none-eabihf` and both wasm targets as on x86-64 |
-| `CA-03` | `build` | implemented | No shipped crate links an allocator symbol on a `no_std` target |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CA-01` | `build` | Zero allocations during any call, on every hosted target |
+| `CA-02` | `build` | Identical bytes on `thumbv7em-none-eabihf` and both wasm targets as on x86-64 |
+| `CA-03` | `build` | No shipped crate links an allocator symbol on a `no_std` target |
 
 ## `CP-*` --- Statistical / property-based, with sample size and seed recorded
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CP-01` | `build` | **pending** | The randomized differential suite at the sample size derived in `ANALYSIS.md`, seeds recorded |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CP-01` | `build` | The randomized differential suite at the sample size derived in `ANALYSIS.md`, seeds recorded |
 
 ## `CG-*` --- Scaling: fitted exponent, compared against the same fit for each oracle
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CG-01` | `open` | **pending** | Arithmetic scaling exponent, this library and every oracle |
-| `CG-02` | `open` | **pending** | Per-axis scaling exponents for `m`, `n`, `k` separately |
-| `CG-03` | `open` | **pending** | Residency scaling: bytes of weight storage touched, per codec, against every oracle |
-| `CG-04` | `open` | **pending** | Working-set scaling, `suggested_scratch` against each oracle's measured internal allocation |
-| `CG-05` | `open` | **pending** | Allocation count and peak bytes: zero here, whatever the oracle does there |
-| `CG-06` | `open` | **pending** | Parallel speedup against tile count, with byte-equality asserted inside the timed harness |
-| `CG-07` | `open` | **pending** | Small-shape latency, where a heavyweight prologue costs more than an asymptote |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CG-01` | `open` | Arithmetic scaling exponent, this library and every oracle |
+| `CG-02` | `open` | Per-axis scaling exponents for `m`, `n`, `k` separately |
+| `CG-03` | `open` | Residency scaling: bytes of weight storage touched, per codec, against every oracle |
+| `CG-04` | `open` | Working-set scaling, `suggested_scratch` against each oracle's measured internal allocation |
+| `CG-05` | `open` | Allocation count and peak bytes: zero here, whatever the oracle does there |
+| `CG-06` | `open` | Parallel speedup against tile count, with byte-equality asserted inside the timed harness |
+| `CG-07` | `open` | Small-shape latency, where a heavyweight prologue costs more than an asymptote |
 
 ## `CM-*` --- Model integrity: the model is the single source of every constant
 
-| ID | Level | State | Statement |
-| --- | --- | --- | --- |
-| `CM-01` | `build` | implemented | The generated Rust consts equal `model/constants.toml` |
-| `CM-02` | `build` | implemented | Every ID in `model/ids.toml` has a scenario and a test, and every test's ID is in the register |
-| `CM-03` | `build` | implemented | Every `some-true` claim has a row in `model/authorities.toml` with a citation |
+| ID | Level | Statement |
+| --- | --- | --- |
+| `CM-01` | `build` | The generated Rust consts equal `model/constants.toml` |
+| `CM-02` | `build` | Every ID in `model/ids.toml` has a scenario and a test, and every test's ID is in the register |
+| `CM-03` | `build` | Every `some-true` claim has a row in `model/authorities.toml` with a citation |
 
 ## Cited authorities
 

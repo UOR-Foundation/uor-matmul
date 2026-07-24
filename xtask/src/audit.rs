@@ -405,7 +405,13 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
             .to_string();
         for (i, line) in text.lines().enumerate() {
             for marker in markers {
-                if line.contains(marker) {
+                if !line.contains(marker) {
+                    continue;
+                }
+                // A backticked marker is a *mention*, not a use: the
+                // documentation has to be able to name what the gate catches
+                // without tripping it. Anything outside code spans is real.
+                if outside_code_spans(line, marker) {
                     violations.push(format!("{rel}:{}: {}", i + 1, line.trim()));
                 }
             }
@@ -425,6 +431,23 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
     Ok(())
 }
 
+/// Does `marker` occur in `line` outside every backtick-delimited span?
+fn outside_code_spans(line: &str, marker: &str) -> bool {
+    let mut rest = line;
+    let mut at = 0usize;
+    while let Some(pos) = rest.find(marker) {
+        let absolute = at + pos;
+        // An odd number of backticks before this occurrence means it is inside
+        // a span.
+        if line[..absolute].matches('`').count().is_multiple_of(2) {
+            return true;
+        }
+        at = absolute + marker.len();
+        rest = &line[at..];
+    }
+    false
+}
+
 fn gather_all(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Fail> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
@@ -441,4 +464,129 @@ fn gather_all(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Fail> {
         }
     }
     Ok(())
+}
+
+/// `CU-01`, R2: no float add, subtract, multiply, or FMA opcode appears in any
+/// shipped kernel's disassembly.
+///
+/// The definitive form of R2. The source grep in [`audit_purity`] cannot see
+/// what the optimizer emitted; this reads the assembly the compiler actually
+/// produced and looks for the instructions themselves.
+///
+/// A kernel that computed a float sum would fail here even if it did so through
+/// a helper the grep never saw, and that is the point: the rule is about the
+/// machine code, so the check should be too.
+///
+/// What it deliberately does *not* catch is a float add the optimizer removed,
+/// because such an add is not in the shipped kernel. That is the gate reporting
+/// the binary rather than the source, which is the only thing worth reporting.
+pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
+    let out_dir = root.join("target").join("cu01-asm");
+    std::fs::create_dir_all(&out_dir)?;
+
+    let mut checked = 0usize;
+    let mut violations = Vec::new();
+
+    for krate in ["uor-matmul-kernels", "uor-matmul-core", "uor-matmul-gemm"] {
+        let status = std::process::Command::new(env!("CARGO"))
+            .current_dir(root)
+            .args(["rustc", "--release", "-p", krate, "--lib", "--target-dir"])
+            .arg(&out_dir)
+            .args(["--", "--emit", "asm", "-C", "debuginfo=0"])
+            .status()?;
+        if !status.success() {
+            return Err(format!("could not build {krate} for disassembly").into());
+        }
+
+        for path in asm_files(&out_dir)? {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if !name.starts_with(&krate.replace('-', "_")) {
+                continue;
+            }
+            checked += 1;
+            for (i, line) in text.lines().enumerate() {
+                if let Some(op) = float_opcode(line.trim()) {
+                    violations.push(format!("{name}:{}: `{op}`\n    {}", i + 1, line.trim()));
+                }
+            }
+        }
+    }
+
+    if checked == 0 {
+        return Err("CU-01 disassembled nothing; the gate would pass vacuously".into());
+    }
+    if !violations.is_empty() {
+        return Err(format!(
+            "R2, CU-01: the library never adds two floats. A float arithmetic opcode in a \
+             shipped kernel means an accumulation is not exact, which breaks every claim in \
+             §3.\n\n{}",
+            violations.join("\n")
+        )
+        .into());
+    }
+    println!(
+        "audit-disassembly: no float arithmetic opcode in {checked} shipped object(s) (CU-01)"
+    );
+    Ok(())
+}
+
+/// Float arithmetic opcodes, across the ISAs this workspace targets.
+///
+/// Conversions (`cvtsi2ss`, `scvtf`) and moves (`movss`, `fmov`) are *not*
+/// here: decoding a float and encoding one back are exactly what the library
+/// does, and forbidding them would forbid the operation rather than the defect.
+/// What is forbidden is arithmetic *between* two floats.
+const FLOAT_OPCODES: &[&str] = &[
+    // x86
+    "addss", "addsd", "addps", "addpd", "subss", "subsd", "subps", "subpd", "mulss", "mulsd",
+    "mulps", "mulpd", "divss", "divsd", "divps", "divpd", "vaddss", "vaddsd", "vaddps", "vaddpd",
+    "vsubss", "vsubsd", "vsubps", "vsubpd", "vmulss", "vmulsd", "vmulps", "vmulpd", "vfmadd",
+    "vfmsub", "vfnmadd", "haddps", "haddpd", // aarch64
+    "fadd", "fsub", "fmul", "fdiv", "fmadd", "fmsub", "fnmadd", "fmla", "fmls",
+    // wasm
+    "f32.add", "f32.sub", "f32.mul", "f64.add", "f64.sub", "f64.mul",
+];
+
+/// The float opcode on this assembly line, if any.
+fn float_opcode(line: &str) -> Option<&'static str> {
+    // Labels, directives, and comments are not instructions.
+    if line.is_empty()
+        || line.starts_with('.')
+        || line.starts_with('#')
+        || line.starts_with("//")
+        || line.ends_with(':')
+    {
+        return None;
+    }
+    let mnemonic = line.split_whitespace().next()?;
+    FLOAT_OPCODES
+        .iter()
+        .copied()
+        .find(|op| mnemonic == *op || mnemonic.starts_with(op))
+}
+
+fn asm_files(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
+    let mut out = Vec::new();
+    let mut stack = std::vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "s") {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
 }

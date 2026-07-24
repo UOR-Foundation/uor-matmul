@@ -43,7 +43,7 @@ pub fn dot_ref<E: IntegerElement, Bd: Bound>(
 
     let Some(run) = narrow_run::<E, Bd>() else {
         for i in 0..k {
-            acc = E::mac(acc, a[i].get(), w[i].get());
+            E::mac(&mut acc, a[i].get(), w[i].get());
         }
         return acc;
     };
@@ -74,7 +74,7 @@ pub fn dot_wide<E: IntegerElement, Bd: Bound>(
     let k = a.len().min(w.len());
     let mut acc = <E::Acc as crate::acc::Accumulator>::ZERO;
     for i in 0..k {
-        acc = E::mac(acc, a[i].get(), w[i].get());
+        E::mac(&mut acc, a[i].get(), w[i].get());
     }
     acc
 }
@@ -113,7 +113,7 @@ pub fn dot_instrumented<E: IntegerElement, Bd: Bound>(
                     peak = m;
                 }
             } else {
-                acc = E::mac(acc, a[j].get(), w[j].get());
+                E::mac(&mut acc, a[j].get(), w[j].get());
             }
         }
         if run.is_some() {
@@ -152,9 +152,17 @@ fn narrow_run<E: IntegerElement, Bd: Bound>() -> Option<usize> {
 }
 
 #[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
+// R7 governs the library, not its tests: these build operands on the heap so
+// that depths past every threshold can be generated. `CA-01` witnesses the
+// library's own zero-allocation claim with a counting allocator.
+#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::alphabet::{as_alphabet_full, Bnd, Full};
+    use std::vec::Vec;
 
     /// CD-03: the narrow factorization is invisible. Whatever the bound, the
     /// two functions agree, so `fits_narrow` never reaches the answer.
@@ -174,6 +182,35 @@ mod tests {
         assert_eq!(dot_ref(a7, w7), dot_wide(a7, w7));
         assert_eq!(dot_ref(a7, w7), dot_ref(af, wf));
         assert!(narrow_run::<i8, Bnd<127>>() > narrow_run::<i8, Full<i8>>());
+    }
+
+    /// `CD-09`: the narrow-register tile path agrees with `dot_wide`, over
+    /// depths on both sides of every threshold.
+    ///
+    /// This is the claim that makes the narrow path an optimization rather than
+    /// a fallback: if it ever disagreed, the library would have two answers.
+    #[test]
+    fn the_narrow_tile_path_agrees_with_dot_wide_cd_09() {
+        for k in [0usize, 1, 2, 3, 127, 128, 129, 1_000, 4_096, 10_007] {
+            let a: Vec<i8> = (0..k)
+                .map(|i| ((i * 31 % 255) as i32 - 127) as i8)
+                .collect();
+            let w: Vec<i8> = (0..k)
+                .map(|i| ((i * 71 % 255) as i32 - 127) as i8)
+                .collect();
+            assert_eq!(
+                dot_ref(as_alphabet_full(&a), as_alphabet_full(&w)),
+                dot_wide(as_alphabet_full(&a), as_alphabet_full(&w)),
+                "k={k}"
+            );
+            // And with the extremes, where the lane fills fastest.
+            let ext = std::vec![i8::MIN; k];
+            assert_eq!(
+                dot_ref(as_alphabet_full(&ext), as_alphabet_full(&ext)),
+                dot_wide(as_alphabet_full(&ext), as_alphabet_full(&ext)),
+                "k={k} at the extremes"
+            );
+        }
     }
 
     /// CU-02: the narrow path is exercised, and the test reads the count rather

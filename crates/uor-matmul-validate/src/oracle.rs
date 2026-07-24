@@ -127,3 +127,179 @@ pub fn measure_deviation(ours: &[i32], theirs: &[i32]) -> Agreement {
         at_index,
     }
 }
+
+/// A classical `f32` GEMM, adapted to a common shape.
+///
+/// Every implementor computes an order-dependent approximation of the value
+/// this library computes exactly. The harness measures the difference in ulps
+/// and reports it; it never fails a gate on it (N1, `CX-05` .. `CX-09`).
+pub trait FloatOracle {
+    /// The conformance ID this oracle discharges.
+    const ID: &'static str;
+    /// The crate name, for the report.
+    const CRATE: &'static str;
+    /// The oracle's own `f32` product, row-major.
+    fn product_f32(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Vec<f32>;
+}
+
+/// `CX-05`: `matrixmultiply::sgemm`.
+#[cfg(feature = "ref-matrixmultiply")]
+pub struct MatrixMultiply;
+
+#[cfg(feature = "ref-matrixmultiply")]
+impl FloatOracle for MatrixMultiply {
+    const ID: &'static str = "CX-05";
+    const CRATE: &'static str = "matrixmultiply";
+
+    fn product_f32(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Vec<f32> {
+        let mut c = vec![0.0f32; m * n];
+        if m == 0 || k == 0 || n == 0 {
+            return c;
+        }
+        // SAFETY: all three buffers are row-major and exactly `rows * cols`
+        // long, which is what these strides describe.
+        unsafe {
+            matrixmultiply::sgemm(
+                m,
+                k,
+                n,
+                1.0,
+                a.as_ptr(),
+                k as isize,
+                1,
+                b.as_ptr(),
+                n as isize,
+                1,
+                0.0,
+                c.as_mut_ptr(),
+                n as isize,
+                1,
+            );
+        }
+        c
+    }
+}
+
+/// `CX-09`: `matrixmultiply::dgemm`, at `f64`.
+#[cfg(feature = "ref-matrixmultiply")]
+pub struct MatrixMultiplyF64;
+
+#[cfg(feature = "ref-matrixmultiply")]
+impl MatrixMultiplyF64 {
+    /// The conformance ID this oracle discharges.
+    pub const ID: &'static str = "CX-09";
+
+    /// The oracle's own `f64` product, row-major.
+    pub fn product_f64(m: usize, k: usize, n: usize, a: &[f64], b: &[f64]) -> Vec<f64> {
+        let mut c = vec![0.0f64; m * n];
+        if m == 0 || k == 0 || n == 0 {
+            return c;
+        }
+        // SAFETY: as `MatrixMultiply::product_f32`.
+        unsafe {
+            matrixmultiply::dgemm(
+                m,
+                k,
+                n,
+                1.0,
+                a.as_ptr(),
+                k as isize,
+                1,
+                b.as_ptr(),
+                n as isize,
+                1,
+                0.0,
+                c.as_mut_ptr(),
+                n as isize,
+                1,
+            );
+        }
+        c
+    }
+}
+
+/// `CX-06`: `faer::matmul`. An independent lineage from matrixmultiply.
+#[cfg(feature = "ref-faer")]
+pub struct Faer;
+
+#[cfg(feature = "ref-faer")]
+impl FloatOracle for Faer {
+    const ID: &'static str = "CX-06";
+    const CRATE: &'static str = "faer";
+
+    fn product_f32(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Vec<f32> {
+        use faer::{Mat, Par};
+        if m == 0 || k == 0 || n == 0 {
+            return vec![0.0f32; m * n];
+        }
+        let am = Mat::from_fn(m, k, |i, j| a[i * k + j]);
+        let bm = Mat::from_fn(k, n, |i, j| b[i * n + j]);
+        let mut cm = Mat::<f32>::zeros(m, n);
+        faer::linalg::matmul::matmul(
+            cm.as_mut(),
+            faer::Accum::Replace,
+            am.as_ref(),
+            bm.as_ref(),
+            1.0f32,
+            Par::Seq,
+        );
+        (0..m)
+            .flat_map(|i| (0..n).map(move |j| (i, j)))
+            .map(|(i, j)| cm[(i, j)])
+            .collect()
+    }
+}
+
+/// `CX-07`: `ndarray`'s `f32` path, which routes to matrixmultiply.
+///
+/// Registered and reported as **not independent** of `CX-05`. Two measurements
+/// of the same implementation are one measurement, and saying so is the
+/// difference between a validation and a tally.
+#[cfg(feature = "ref-ndarray")]
+pub struct NdArrayF32;
+
+#[cfg(feature = "ref-ndarray")]
+impl FloatOracle for NdArrayF32 {
+    const ID: &'static str = "CX-07";
+    const CRATE: &'static str = "ndarray";
+
+    fn product_f32(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Vec<f32> {
+        use ndarray::Array2;
+        let a = Array2::from_shape_vec((m, k), a.to_vec()).expect("A conforms");
+        let b = Array2::from_shape_vec((k, n), b.to_vec()).expect("B conforms");
+        a.dot(&b).into_raw_vec_and_offset().0
+    }
+}
+
+/// `CX-08`: the `gemm` crate. Behind its own feature.
+#[cfg(feature = "ref-gemm")]
+pub struct GemmCrate;
+
+/// How far apart two `f32` are, in units in the last place.
+///
+/// The unit the float claims are reported in. Counting representable values
+/// between two floats is the only comparison that means the same thing across
+/// magnitudes, which an absolute or relative epsilon does not.
+pub fn ulps_between(ours: f32, theirs: f32) -> Option<u64> {
+    if ours.is_nan() || theirs.is_nan() {
+        return None;
+    }
+    if ours.is_infinite() || theirs.is_infinite() {
+        return if ours == theirs { Some(0) } else { None };
+    }
+    // Map the sign-magnitude bit pattern onto a monotone integer line, so that
+    // "how many representable values apart" is a subtraction.
+    let order = |x: f32| -> i64 {
+        // The sign lives in the top bit of the *pattern*, not in the sign of
+        // the widened integer --- `to_bits` is unsigned, so a negative float
+        // widens to a large positive number. Mirroring the magnitude around
+        // zero is what makes the two halves of the line meet at +/-0.
+        let b = x.to_bits();
+        if b & 0x8000_0000 != 0 {
+            -i64::from(b & 0x7FFF_FFFF)
+        } else {
+            i64::from(b)
+        }
+    };
+    Some((order(ours) - order(theirs)).unsigned_abs())
+}

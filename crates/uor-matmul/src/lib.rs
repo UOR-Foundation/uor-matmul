@@ -58,8 +58,15 @@
 //! throughput, and has no second method for any case however hard.
 
 #![no_std]
-#![forbid(unsafe_code)]
+// The facade carries the raw-pointer face (`CS-05`), whose contract is a
+// caller obligation rather than a checkable property, so this crate cannot
+// `forbid(unsafe_code)` the way the numerical crates do. Every `unsafe fn`
+// below names its obligations, and the safe API is the one everything else
+// uses.
+#![deny(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
+
+pub mod raw;
 
 pub use uor_matmul_codec as codec;
 pub use uor_matmul_core as core_types;
@@ -75,8 +82,10 @@ pub use uor_matmul_core::{
     Traversal, Triple,
 };
 pub use uor_matmul_gemm::{
-    coded_gemm, gemm, suggested_scratch, Bias, CodedTriple, Epilogue, GemmOptions, Linear, Scratch,
+    coded_gemm, gemm, gemm_float, gemm_w8a8, suggested_scratch, Bias, CodedTriple, Epilogue,
+    GemmOptions, Linear, Partition, Scratch, Tile,
 };
+pub use uor_matmul_kernels as kernels;
 
 /// Everything a caller ordinarily needs, in one `use`.
 pub mod prelude {

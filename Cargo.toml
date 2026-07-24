@@ -5,7 +5,10 @@ members = ["crates/*", "xtask"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# The AVX-512 VNNI intrinsics stabilized in 1.89, and the kernels crate uses
+# them directly. Declaring anything lower would be a version the workspace
+# cannot actually build on.
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/UOR-Foundation/matmul"
 homepage = "https://github.com/UOR-Foundation/matmul"
