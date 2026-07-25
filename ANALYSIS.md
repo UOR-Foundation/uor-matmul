@@ -559,6 +559,52 @@ every ISA, each at a four-row and a one-row panel, because a panel wider than th
 output is zero-padded and for a reduce kernel that padding is copied at `k`
 elements a row.
 
+### The narrow panel
+
+`i8` at `n = 8` ran *slower* than the same kernel at `n = 16` --- 0.51 Gmac/s
+against 4.05. That is not a property of the shape. The AVX2 `i8` tile is
+`6 x 16`, so an output eight columns wide paid for sixteen: twice the arithmetic,
+twice the packing, and a padded panel that fills half its lanes with zeros.
+
+The table already had the answer on the other axis. `AVX2_I8_I32_M1` exists
+because a panel *taller* than the output does the padding's arithmetic at `m = 1`;
+`AVX2_I8_I32_N8` is the same argument on the columns. Measured, `8 x 8 x 8` went
+from 1001 ns to 490 ns, a factor of two, and nothing above `n = 16` moved.
+
+Three things had to be got right, and two of them were got wrong first.
+
+**A width parameter costs the full-width panel its registers.** Folding both
+widths into one kernel behind a `const V` --- an accumulator array indexed by the
+parameter --- took `n = 2048` from 31.3 Gmac/s to 24.9. The array stops being
+register-allocated and starts being memory. Two panel widths are two sequences,
+which is what a table of sequences is for, and `CB-01` .. `CB-06` hold both to the
+same integer. They are written out separately and the differential net sees both
+--- `every_i8_tile()` chains the two lists, because a sequence outside the net is
+a sequence nothing checks.
+
+**The narrow panels are a second list, not more entries in the first.** Putting
+them in `available_i8` lengthened *every* selection, including the calls that
+could never use one: measured, a hundred nanoseconds on a shape whose whole cost
+is a hundred and twenty. The driver only asks when `shape.n < tile.nr`, which is
+the same condition under which it already asks for a reduce sequence, so a
+product wider than its panel pays nothing for the question. What it does cost, on
+a shape narrower than the tile that then does not want one, is one table walk:
+20 ns, against the 511 ns it buys at `n = 8`. `n <= 4` and `n = 12` are 40 ns
+worse and every size from 6 up is better, which is the trade and it is reported
+rather than averaged away.
+
+**The cost model priced a traversal the offer could not run.** `packed_cost`
+counted the blocked traversal's packing --- each operand packed once per block ---
+whatever the caller offered. But `run` takes the blocked traversal only when a
+block of both panels fits the offer; below that it repacks *both* panels for every
+output tile, which is a different count entirely. Narrowing the panel shrank
+`mr + nr` enough for `4 x 4 x 4` to slip past the scratch guard into that
+per-tile path, and the model --- still pricing the blocked one --- called it
+cheaper than the streaming reference while it ran three and a half times slower.
+Costing the traversal the offer actually buys fixed it, and it is the count that
+was wrong rather than a constant that needed tuning: `calls * (mr + nr) * kpad`
+against `(rows + cols) * kpad`.
+
 ### The declared alphabet
 
 `_mm256_madd_epi16` sums two products into an `i32`, and two full-magnitude

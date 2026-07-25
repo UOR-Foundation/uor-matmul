@@ -141,6 +141,62 @@ unsafe fn avx2_i8_inner<const MR: usize>(kc: usize, pa: *const i8, pb: *const i8
     }
 }
 
+/// The same sequence over an eight-column panel: one accumulator vector per row
+/// rather than two.
+///
+/// Written out beside [`avx2_i8_inner`] rather than folded into it behind a
+/// width parameter. That was tried: an accumulator array indexed by a width
+/// parameter costs the sixteen-column panel its register allocation, and
+/// measured it took `n = 2048` from 31.3 Gmac/s to 24.9. Two panel widths are
+/// two sequences, which is what the table is a table of --- and `CB-01` .. `CB-06`
+/// hold both to the same integer.
+///
+/// # Safety
+///
+/// As [`avx2_i8`], with an eight-column panel: `pb` must have `8 * kc` readable
+/// elements and `acc` `MR * 8` writable lanes.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_i8_half_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    const NR: usize = 8;
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    let mut lo = [_mm256_setzero_si256(); MR];
+
+    for q in 0..kc / 2 {
+        // SAFETY: `pb[q * NR * 2 ..][..16]` is in bounds.
+        let bv = unsafe {
+            let base = pb.as_ptr().add(q * NR * 2);
+            _mm256_cvtepi8_epi16(_mm_loadu_si128(base.cast::<__m128i>()))
+        };
+        for (i, lo) in lo.iter_mut().enumerate() {
+            // SAFETY: `q * MR * 2 + i * 2 + 1 < MR * kc`.
+            let av = unsafe {
+                let pair = pa.as_ptr().add(q * MR * 2 + i * 2).cast::<i16>();
+                _mm256_cvtepi8_epi16(_mm_set1_epi16(pair.read_unaligned()))
+            };
+            *lo = _mm256_add_epi32(*lo, _mm256_madd_epi16(av, bv));
+        }
+    }
+
+    for (i, lo) in lo.iter().enumerate() {
+        // SAFETY: `i < MR`, so the store lands inside `MR * NR`.
+        unsafe {
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast::<__m256i>(), *lo);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // i16 x i16 -> i64
 // ---------------------------------------------------------------------------
@@ -1312,6 +1368,57 @@ pub const AVX2_I8_I32_M1: KernelSpec<i8, i32> = KernelSpec {
     max_bound: 32767,
     mac_tile: avx2_i8_one,
 };
+
+/// The same sequence at a half-width panel.
+///
+/// The mirror of [`AVX2_I8_I32_M1`], on the other axis and for the same reason:
+/// a tile panel wider than the output is zero-padded, and the kernel does that
+/// padding's arithmetic. At `n = 8` a sixteen-column panel is twice the work the
+/// product needs --- measured, that made `i8` at `n = 8` slower than the same
+/// kernel at `n = 16`, which is a padding artefact and not a property of the
+/// shape. Same instructions, same answer (`CB-06`).
+pub const AVX2_I8_I32_N8: KernelSpec<i8, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: A2_I8_MR,
+    nr: 8,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 2,
+    products_per_step: 16,
+    lane_cap: i32::MAX as u128,
+    max_bound: 32767,
+    mac_tile: avx2_i8_half,
+};
+
+/// # Safety
+///
+/// As [`avx2_i8`], with an eight-column panel.
+unsafe fn avx2_i8_half(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i8_half_inner::<A2_I8_MR>(kc, pa, pb, acc) }
+}
+
+/// [`AVX2_I8_I32_N8`] at a one-row panel: the corner both narrowings meet in.
+pub const AVX2_I8_I32_M1_N8: KernelSpec<i8, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: 8,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 2,
+    products_per_step: 16,
+    lane_cap: i32::MAX as u128,
+    max_bound: 32767,
+    mac_tile: avx2_i8_one_half,
+};
+
+/// # Safety
+///
+/// As [`avx2_i8`], with a one-row eight-column panel.
+unsafe fn avx2_i8_one_half(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i8_half_inner::<1>(kc, pa, pb, acc) }
+}
 
 /// # Safety
 ///

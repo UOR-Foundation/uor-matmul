@@ -9,8 +9,8 @@
 use uor_matmul_core::{as_alphabet_full, dot_ref, Backend};
 use uor_matmul_kernels::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
-    available_i64_modular, available_i8, choose_for_rows, packed_slot, portable_i8, Factorization,
-    KernelSpec,
+    available_i64_modular, available_i8, available_i8_narrow, choose_for_rows, packed_slot,
+    portable_i8, Factorization, KernelSpec,
 };
 
 /// Element `p` of lane `l`, read the way the kernel reads it.
@@ -77,12 +77,21 @@ fn portable_equals_dot_ref_cb_01() {
     }
 }
 
+/// Every `i8` tile sequence this build can run, at every panel width.
+///
+/// The narrow panels live in their own list because the driver only asks for
+/// one when the shape is narrower than the tile --- but a differential test has
+/// no such condition. A sequence outside the net is a sequence nothing checks.
+fn every_i8_tile() -> impl Iterator<Item = uor_matmul_kernels::KernelSpec<i8, i32>> {
+    available_i8().chain(available_i8_narrow())
+}
+
 /// `CB-02`: every `i8` backend this host can run equals the portable
 /// reference, byte for byte.
 #[test]
 fn every_i8_backend_equals_portable_cb_02() {
     let mut names = Vec::new();
-    for spec in available_i8() {
+    for spec in every_i8_tile() {
         for kc in depths(&spec) {
             let pa = fill(spec.mr * kc, kc as u64 ^ 0xC0, |v| v as i8);
             let pb = fill(spec.nr * kc, kc as u64 ^ 0x0D, |v| v as i8);
@@ -169,7 +178,7 @@ fn wasm_simd128_equals_portable_cb_05() {
 /// the extremes where a lane fills fastest.
 #[test]
 fn sequences_agree_across_their_thresholds_cu_03() {
-    for spec in available_i8() {
+    for spec in every_i8_tile() {
         for kc in [1usize, 2, 3, 4, 8, 15, 16, 17, 128, 129, 130]
             .map(|kc| kc.div_ceil(spec.k_group) * spec.k_group)
         {
@@ -686,7 +695,7 @@ fn every_declaration_is_consistent_with_the_shape_cb_07() {
             );
         }
     }
-    for s in available_i8() {
+    for s in every_i8_tile() {
         check(&s, "i8");
     }
     for s in uor_matmul_kernels::available_reduce_i8() {

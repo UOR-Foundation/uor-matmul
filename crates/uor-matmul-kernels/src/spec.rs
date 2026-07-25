@@ -367,6 +367,37 @@ pub fn available_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
 /// agrees with the reference byte for byte, and the driver chooses between the
 /// two by comparing the shape against the tile, which is a declaration.
 #[inline]
+/// The `i8` tile sequences over a *narrow* panel: half the columns.
+///
+/// A tile panel wider than the output is zero-padded and the kernel does that
+/// padding's arithmetic, so at `n = 8` a sixteen-column panel is twice the work
+/// the product needs --- measured, that made `i8` at `n = 8` slower than the same
+/// kernel at `n = 16`.
+///
+/// Its own list rather than more entries in [`available_i8`], because the driver
+/// only asks when the shape is narrower than the tile it already has. Adding
+/// them to the ordinary list lengthened every selection, including the calls
+/// that could never use one: measured, a hundred nanoseconds on a shape whose
+/// whole cost is a hundred and twenty.
+pub fn available_i8_narrow() -> impl Iterator<Item = KernelSpec<i8, i32>> {
+    collect![
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1_N8,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_N8,
+    ]
+}
+
+/// Every `i8` *reduce* sequence this build can run.
+///
+/// The reduce factorization puts the vector lanes on `k` rather than on the
+/// columns of `C`. It is the one to use when the output is narrower than a tile:
+/// a tile kernel produces `nr` columns per call whether they exist or not, so a
+/// single dot product fills one lane in ninety-six, while there is always more
+/// `k` to fill a lane with.
+///
+/// Not a special case and not a fallback --- the same identity, with the
+/// reduction factored across lanes instead of the output. `CB-06` asserts it
+/// agrees with the reference byte for byte, and the driver chooses between the
+/// two by comparing the shape against the tile, which is a declaration.
 pub fn available_reduce_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
     collect![
         true => crate::isa::portable::R1_I8_I32,

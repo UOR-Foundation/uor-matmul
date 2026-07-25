@@ -22,10 +22,10 @@ use uor_matmul_core::{
 };
 use uor_matmul_kernels::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
-    available_i64_exact, available_i64_modular, available_i8, available_reduce_i16,
-    available_reduce_i16_modular, available_reduce_i32_exact, available_reduce_i32_modular,
-    available_reduce_i64_exact, available_reduce_i64_modular, available_reduce_i8, choose_for_rows,
-    Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
+    available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
+    available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
+    available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
+    available_reduce_i8, choose_for_rows, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
 };
 
 use crate::driver::GemmOptions;
@@ -48,6 +48,31 @@ pub trait Kernelized: IntegerElement {
     /// Always present: the reference sequence is exact on every alphabet, so
     /// narrowing the choice can never empty it.
     fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, Self::Exact>;
+
+    /// The same sequence over a panel narrower than the tile, when the table
+    /// offers one.
+    ///
+    /// Asked for only when the shape is narrower than the tile already chosen,
+    /// so a product wider than its panel pays nothing for the question. `None`
+    /// means the table has no narrower panel for this family, which is the
+    /// ordinary case and not a degraded one.
+    fn exact_narrow(
+        _backend: Backend,
+        _bound: u128,
+        _rows: usize,
+    ) -> Option<KernelSpec<Self, Self::Exact>> {
+        None
+    }
+
+    /// [`Kernelized::exact_narrow`] read in the quotient the caller named.
+    fn modular_narrow(
+        _backend: Backend,
+        _out_bits: u32,
+        _bound: u128,
+        _rows: usize,
+    ) -> Option<KernelSpec<Self, Self::Modular>> {
+        None
+    }
 
     /// The exact *reduce* kernel: lanes on `k` rather than on the output.
     ///
@@ -107,6 +132,27 @@ impl Kernelized for i8 {
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i32> {
         choose_for_rows(available_reduce_i8(), backend, bound, rows)
             .expect("the portable kernel is always present")
+    }
+
+    fn exact_narrow(backend: Backend, bound: u128, rows: usize) -> Option<KernelSpec<Self, i32>> {
+        choose_for_rows(available_i8_narrow(), backend, bound, rows)
+    }
+
+    fn modular_narrow(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i32>> {
+        if out_bits > 32 {
+            return None;
+        }
+        // The same homomorphism the full-width tile cashes in.
+        let spec = choose_for_rows(available_i8_narrow(), backend, bound, rows)?;
+        Some(KernelSpec {
+            factorization: Factorization::Modular,
+            ..spec
+        })
     }
 
     fn modular_reduce(
@@ -378,9 +424,14 @@ pub fn gemm_packed<E, Bd, O, Ep>(
 
     match modular {
         Some(tile) => {
-            match pick(shape, triple, &tile, || {
-                E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m)
-            }) {
+            match pick(
+                shape,
+                triple,
+                &tile,
+                || E::modular_narrow(options.backend, O::BITS, Bd::VALUE, shape.m),
+                || E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m),
+                scratch.len(),
+            ) {
                 Some(spec) => {
                     // In the quotient the caller asked for, a running partial sum
                     // kept in the accumulator and a lane are the same value, so
@@ -404,9 +455,14 @@ pub fn gemm_packed<E, Bd, O, Ep>(
         }
         None => {
             let tile = E::exact_spec(options.backend, Bd::VALUE, shape.m);
-            match pick(shape, triple, &tile, || {
-                Some(E::exact_reduce(options.backend, Bd::VALUE, shape.m))
-            }) {
+            match pick(
+                shape,
+                triple,
+                &tile,
+                || E::exact_narrow(options.backend, Bd::VALUE, shape.m),
+                || Some(E::exact_reduce(options.backend, Bd::VALUE, shape.m)),
+                scratch.len(),
+            ) {
                 Some(spec) => {
                     let depth = spec.lane_depth(Bd::VALUE);
                     let accumulate = E::fold_exact;
@@ -453,6 +509,7 @@ fn packed_cost<E, L>(
     shape: uor_matmul_core::Shape,
     spec: &KernelSpec<E, L>,
     borrowed: bool,
+    blocked: bool,
 ) -> (u64, u64) {
     let g = spec.k_group.max(1);
     let kpad = (shape.k.div_ceil(g) * g) as u64;
@@ -462,8 +519,23 @@ fn packed_cost<E, L>(
     let issues = rows.saturating_mul(cols).saturating_mul(kpad);
     let accesses = if borrowed {
         0
-    } else {
+    } else if blocked {
+        // Each operand packed once per block, and at the suggested offer that is
+        // once.
         (rows + cols)
+            .saturating_mul(kpad)
+            .saturating_mul(2)
+            .saturating_mul(pps)
+    } else {
+        // An offer too small to hold a block does not buy the blocked traversal;
+        // it buys the one that packs both panels afresh for every output tile.
+        // Costing the blocked traversal anyway is how a narrower panel came to
+        // look cheaper than the streaming reference at `4 x 4 x 4` while running
+        // three and a half times slower than it --- the model was pricing a
+        // traversal the offer could not run.
+        let calls = (rows / spec.mr as u64).saturating_mul(cols / spec.nr as u64);
+        calls
+            .saturating_mul(spec.mr as u64 + spec.nr as u64)
             .saturating_mul(kpad)
             .saturating_mul(2)
             .saturating_mul(pps)
@@ -481,12 +553,22 @@ fn pick<E, Bd, O, L>(
     shape: uor_matmul_core::Shape,
     triple: &Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
     tile: &KernelSpec<E, L>,
+    narrow: impl FnOnce() -> Option<KernelSpec<E, L>>,
     reduce: impl FnOnce() -> Option<KernelSpec<E, L>>,
+    offer: usize,
 ) -> Option<KernelSpec<E, L>>
 where
     E: IntegerElement,
     Bd: Bound,
 {
+    // Which traversal the offer actually buys. `run` takes the blocked one only
+    // when a block of both panels fits; below that it repacks per output tile,
+    // and the two do not cost the same.
+    let blocks = |spec: &KernelSpec<E, L>| -> bool {
+        let g = spec.k_group.max(1);
+        let kpad = shape.k.div_ceil(g) * g;
+        kpad != 0 && offer / kpad >= spec.mr + spec.nr
+    };
     // A panel the operands already hold costs nothing to make, which is most of
     // what a reduce sequence costs on a narrow shape.
     let borrows = |spec: &KernelSpec<E, L>| -> bool {
@@ -507,21 +589,31 @@ where
     };
 
     let mut best = *tile;
-    let (mut cost, mut pps) = packed_cost(shape, tile, borrows(tile));
+    let (mut cost, mut pps) = packed_cost(shape, tile, borrows(tile), blocks(tile));
 
-    // A reduce sequence produces one column per call, so past a tile's width the
-    // tile is cheaper by construction and there is nothing to weigh. Asking
-    // anyway would cost a walk of the reduce table on every wide call.
+    // Both remaining candidates exist for a shape narrower than the tile, so past
+    // a tile's width there is nothing to weigh and nothing to ask. Asking anyway
+    // would cost two table walks on every wide call --- measured, a hundred
+    // nanoseconds on a shape whose whole cost is a hundred and twenty.
     if shape.n < tile.nr {
-        if let Some(r) = reduce() {
-            let (rc, rp) = packed_cost(shape, &r, borrows(&r));
-            // `a/p < b/q` without dividing.
-            if rc.saturating_mul(pps) < cost.saturating_mul(rp) {
-                best = r;
-                cost = rc;
-                pps = rp;
+        // A narrower panel of the same sequence: the padding a tile does for
+        // columns that are not there is arithmetic, and halving the panel halves
+        // it. The reduce sequence puts the lanes on `k` instead. They are weighed
+        // the same way and against the same reference, because all three compute
+        // the same integer (`CB-06`).
+        let mut weigh = |c: Option<KernelSpec<E, L>>| {
+            if let Some(c) = c {
+                let (cc, cp) = packed_cost(shape, &c, borrows(&c), blocks(&c));
+                // `a/p < b/q` without dividing.
+                if cc.saturating_mul(pps) < cost.saturating_mul(cp) {
+                    best = c;
+                    cost = cc;
+                    pps = cp;
+                }
             }
-        }
+        };
+        weigh(narrow());
+        weigh(reduce());
     }
 
     // Two operand reads and one issue per product, and nothing packed.

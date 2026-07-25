@@ -59,6 +59,12 @@ pub const AVX2_R_I32_MOD_1: KernelSpec<i32, i32> = portable::R1_I32_MOD;
 
 /// Absent here; the reference sequence carries this family.
 pub const AVX2_I8_I32_M1: KernelSpec<i8, i32> = portable::I8_I32;
+
+/// Absent here; the reference stands in its place.
+pub const AVX2_I8_I32_N8: KernelSpec<i8, i32> = portable::I8_I32;
+
+/// Absent here; the reference stands in its place.
+pub const AVX2_I8_I32_M1_N8: KernelSpec<i8, i32> = portable::I8_I32;
 /// Absent here; the reference sequence carries this family.
 pub const AVX2_I16_I64_M1: KernelSpec<i16, i64> = portable::I16_I64;
 /// Absent here; the reference sequence carries this family.
