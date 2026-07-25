@@ -215,6 +215,12 @@ impl PackedCode {
 /// pattern to the exact dyadic rational it names. It is total, it never rounds,
 /// and it is the same shape as any other codec in `uor-matmul-codec` (§3.3).
 pub trait FloatElement: Element {
+    /// Bits in a significand, implicit bit included: 24 for `f32`, 53 for `f64`.
+    ///
+    /// What it decides is whether a product of two of them can leave an `i64`,
+    /// which is a question about the *type* and never about the data.
+    const SIGNIFICAND_BITS: u32;
+
     /// Twice the minimum subnormal exponent: the lowest exponent a product of
     /// two values of this type can reach.
     const MIN_PRODUCT_EXP: i32;
@@ -709,6 +715,8 @@ macro_rules! impl_float_element {
         impl FloatElement for $t {
             const MIN_PRODUCT_EXP: i32 = $min_prod;
             const MAX_PRODUCT_EXP: i32 = $max_prod;
+            // The stored fraction plus the implicit leading bit.
+            const SIGNIFICAND_BITS: u32 = $mant + 1;
 
             fn decode(self) -> Decoded {
                 // Total on all bit patterns. No branch here can fail, and none

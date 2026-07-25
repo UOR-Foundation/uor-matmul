@@ -88,13 +88,21 @@ pub fn gemm_float_packed<E, O, Ep>(
     // whole depth once and then serves every row of `A`.
     let block = (pb.len() / shape.k).min(shape.n).max(1);
 
+    // The element type's significand width decides whether a product of two of
+    // them can leave an `i64`. It is a constant of the type, not of the data.
+    let product_fits = 2 * E::SIGNIFICAND_BITS <= 63;
+
     let mut j0 = 0;
     while j0 < shape.n {
         let cols = block.min(shape.n - j0);
+        // Whether this block of `B` is finite is settled here, while its codes
+        // are being walked anyway, rather than once per product afterwards.
+        let mut b_finite = true;
         for (jj, j) in (j0..j0 + cols).enumerate() {
             let dst = &mut pb[jj * shape.k..jj * shape.k + shape.k];
             for (slot, v) in dst.iter_mut().zip(b.column_walk(0, j, shape.k)) {
                 *slot = v.pack();
+                b_finite &= slot.is_finite();
             }
         }
 
@@ -103,12 +111,22 @@ pub fn gemm_float_packed<E, O, Ep>(
             // from it. Walking rather than indexing, for the reason the integer
             // packer walks: two multiplies per element is most of the cost of a
             // decode that is otherwise a handful of bit operations.
+            let mut a_finite = true;
             for (slot, v) in pa[..shape.k].iter_mut().zip(a.row_walk(i, 0, shape.k)) {
                 *slot = v.pack();
+                a_finite &= slot.is_finite();
             }
+            let panels = PanelFacts {
+                finite: a_finite && b_finite,
+                product_fits,
+            };
             for (jj, j) in (j0..j0 + cols).enumerate() {
                 let mut acc = <AccOf<E> as Accumulator>::ZERO;
-                acc.accumulate_panels(&pa[..shape.k], &pb[jj * shape.k..jj * shape.k + shape.k]);
+                acc.accumulate_panels(
+                    &pa[..shape.k],
+                    &pb[jj * shape.k..jj * shape.k + shape.k],
+                    panels,
+                );
                 let prior = if reads_c { Some(*c.at(i, j)) } else { None };
                 *c.at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
             }
@@ -178,22 +196,17 @@ impl<const L: usize, const MIN_EXP: i32> Window<'_, L, MIN_EXP> {
         if self.at == usize::MAX || self.bits == 0 {
             return;
         }
-        // The window holds an exact integer at scale `64 * at`; placing it is
-        // the same `add_signed` a single product would have used, at the two
-        // halves of the register the window spans.
-        let negative = self.bits < 0;
-        let mag = self.bits.unsigned_abs();
-        let scale = MIN_EXP + (self.at as i32) * 64;
-        let lo = mag as u64;
-        let hi = (mag >> 64) as u64;
-        let sgn = |v: u64| if negative { -(v as i64) } else { v as i64 };
-        // Split at 63 bits rather than 64, so each half fits a *signed* 64-bit
-        // mantissa without wrapping into the sign bit.
-        self.acc.add_signed(sgn(lo & ((1u64 << 63) - 1)), scale);
-        self.acc.add_signed(sgn(lo >> 63), scale + 63);
-        self.acc
-            .add_signed(sgn(hi & ((1u64 << 63) - 1)), scale + 64);
-        self.acc.add_signed(sgn(hi >> 63), scale + 127);
+        // The window holds an exact integer at scale `64 * at`, and placing a
+        // magnitude at a scale is exactly what `add_scaled` does: one three-limb
+        // spread and one carry, against the four separate `add_signed` calls
+        // this used to make by cutting the window into 63-bit pieces. Realistic
+        // data flushes whenever the product exponent crosses a limb boundary, so
+        // this is not a rare path.
+        self.acc.add_scaled(
+            self.bits.unsigned_abs(),
+            MIN_EXP + (self.at as i32) * 64,
+            self.bits < 0,
+        );
         self.bits = 0;
     }
 }
@@ -207,12 +220,28 @@ fn accumulate_run<const L: usize, const MIN_EXP: i32>(
     acc: &mut Complete<L, MIN_EXP>,
     pa: &[PackedCode],
     pb: &[PackedCode],
+    panels: PanelFacts,
 ) {
     let mut window = Window {
         acc,
         at: usize::MAX,
         bits: 0,
     };
+
+    // Both panels finite, and the element type's significands narrow enough that
+    // no product can leave an `i64`: then the loop is the three lines it should
+    // be, with no per-product test of anything. Both are facts about the *panel*
+    // and the *type*, established once, so this is the same arithmetic asked
+    // fewer questions --- not a second method (R13). `CU-04` compares it against
+    // the per-product traversal on the same operands.
+    if panels.finite && panels.product_fits {
+        for (a, b) in pa.iter().zip(pb) {
+            window.place(a.mantissa * b.mantissa, a.exp + b.exp);
+        }
+        window.flush();
+        return;
+    }
+
     for (a, b) in pa.iter().zip(pb) {
         if a.is_finite() && b.is_finite() {
             // Does the product fit a signed 64-bit mantissa? For `f32` it
@@ -263,26 +292,48 @@ fn accumulate_run<const L: usize, const MIN_EXP: i32>(
     window.flush();
 }
 
+/// What a caller has already established about a pair of decoded panels.
+///
+/// Neither field can change a value. `finite` says the IEEE clause 6 rules have
+/// nothing to do here, and `product_fits` is a property of the element type's
+/// significand width --- `2 * 24 <= 63` for `f32`. Both are asked once instead
+/// of once per product.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PanelFacts {
+    /// Every code in both panels is finite.
+    pub finite: bool,
+    /// Every product of two significands of this element type fits an `i64`.
+    pub product_fits: bool,
+}
+
+impl PanelFacts {
+    /// Establish nothing. Always admissible, and always the same answer.
+    pub const UNKNOWN: Self = Self {
+        finite: false,
+        product_fits: false,
+    };
+}
+
 /// What the packed float loop needs from an accumulator.
 ///
 /// A trait rather than an inherent method so that `gemm_float_packed` stays
 /// generic over the element type while the hot path stays monomorphic.
 pub trait SignedPlace {
     /// Accumulate a whole dot product of two decoded panels, exactly.
-    fn accumulate_panels(&mut self, pa: &[PackedCode], pb: &[PackedCode]);
+    fn accumulate_panels(&mut self, pa: &[PackedCode], pb: &[PackedCode], panels: PanelFacts);
     /// Accumulate one product of two decoded codes.
     fn accumulate_one(&mut self, a: PackedCode, b: PackedCode);
 }
 
 impl<const L: usize, const MIN_EXP: i32> SignedPlace for Complete<L, MIN_EXP> {
     #[inline]
-    fn accumulate_panels(&mut self, pa: &[PackedCode], pb: &[PackedCode]) {
-        accumulate_run(self, pa, pb);
+    fn accumulate_panels(&mut self, pa: &[PackedCode], pb: &[PackedCode], panels: PanelFacts) {
+        accumulate_run(self, pa, pb, panels);
     }
 
     #[inline]
     fn accumulate_one(&mut self, a: PackedCode, b: PackedCode) {
-        accumulate_run(self, &[a], &[b]);
+        accumulate_run(self, &[a], &[b], PanelFacts::UNKNOWN);
     }
 }
 
@@ -541,6 +592,102 @@ mod window_tests {
                 "k={k}: the window disagreed with per-product placement"
             );
         }
+    }
+
+    /// `CU-04`: what a panel establishes cannot change what it computes.
+    ///
+    /// The packed traversal settles two facts once per panel --- that every code
+    /// is finite, and that this element type's products fit an `i64` --- and then
+    /// runs a loop with no per-product test. The streaming traversal establishes
+    /// neither and tests everything. They must agree on every input, including
+    /// the ones where the facts are false: a non-finite code anywhere, and `f64`
+    /// significands wide enough that a product leaves an `i64`.
+    #[test]
+    fn what_a_panel_establishes_cannot_change_it_cu_04() {
+        fn both_ways_agree_f32(k: usize, a: &[f32], b: &[f32]) {
+            let mut packed = vec![0.0f32; 1];
+            let mut streamed = vec![0.0f32; 1];
+            let mut pa = vec![uor_matmul_core::PackedCode::default(); k];
+            let mut pb = vec![uor_matmul_core::PackedCode::default(); k];
+            for (out, offer) in [(&mut packed, true), (&mut streamed, false)] {
+                let av = MatView::row_major(a, 1, k).unwrap();
+                let bv = MatView::row_major(b, k, 1).unwrap();
+                let cv = MatViewMut::row_major(out.as_mut_slice(), 1, 1).unwrap();
+                let mut t = Triple::new(av, bv, cv).unwrap();
+                let (x, y): (&mut [_], &mut [_]) = if offer {
+                    (&mut pa, &mut pb)
+                } else {
+                    (&mut [], &mut [])
+                };
+                gemm_float_packed(
+                    &mut t,
+                    &crate::epilogue::Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    x,
+                    y,
+                );
+            }
+            assert_eq!(
+                packed[0].to_bits(),
+                streamed[0].to_bits(),
+                "the panel facts changed the answer"
+            );
+        }
+
+        let k = 64usize;
+        // Finite, full significand width, exponents spread across limbs.
+        let a: Vec<f32> = (0..k)
+            .map(|i| f32::from_bits(0x4B7F_FFFF - (i as u32 % 7) - ((i as u32 % 11) << 23)))
+            .collect();
+        let b: Vec<f32> = (0..k)
+            .map(|i| f32::from_bits(0x3F7F_FFFF - (i as u32 % 5) - ((i as u32 % 13) << 23)))
+            .collect();
+        both_ways_agree_f32(k, &a, &b);
+
+        // A non-finite code makes `finite` false, so the general loop runs; it
+        // must still agree with the streaming one it is compared against.
+        for at in [0usize, 1, 31, 63] {
+            for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 0.0] {
+                let mut a2 = a.clone();
+                a2[at] = bad;
+                both_ways_agree_f32(k, &a2, &b);
+                let mut b2 = b.clone();
+                b2[at] = bad;
+                both_ways_agree_f32(k, &a, &b2);
+            }
+        }
+
+        // `f64`, where two significands make 106 bits and no product fits an
+        // `i64`, so `product_fits` is false for the whole type.
+        let a: Vec<f64> = (0..k)
+            .map(|i| f64::from_bits(0x433F_FFFF_FFFF_FFFF - (i as u64 % 7)))
+            .collect();
+        let b: Vec<f64> = (0..k)
+            .map(|i| f64::from_bits(0x3FEF_FFFF_FFFF_FFFF - (i as u64 % 5)))
+            .collect();
+        let mut packed = [0.0f64];
+        let mut streamed = [0.0f64];
+        let mut pa = vec![uor_matmul_core::PackedCode::default(); k];
+        let mut pb = vec![uor_matmul_core::PackedCode::default(); k];
+        for (out, offer) in [(&mut packed, true), (&mut streamed, false)] {
+            let av = MatView::row_major(&a, 1, k).unwrap();
+            let bv = MatView::row_major(&b, k, 1).unwrap();
+            let cv = MatViewMut::row_major(out.as_mut_slice(), 1, 1).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            let (x, y): (&mut [_], &mut [_]) = if offer {
+                (&mut pa, &mut pb)
+            } else {
+                (&mut [], &mut [])
+            };
+            gemm_float_packed(
+                &mut t,
+                &crate::epilogue::Linear::OVERWRITE,
+                GemmOptions::default(),
+                x,
+                y,
+            );
+        }
+        assert_eq!(packed[0].to_bits(), streamed[0].to_bits());
     }
 
     /// The window carries exactly across a limb boundary, where a term in one
