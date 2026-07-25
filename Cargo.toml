@@ -19,7 +19,6 @@ categories = ["mathematics", "no-std", "science"]
 [workspace.dependencies]
 uor-matmul-core = { version = "0.1.0", path = "crates/uor-matmul-core", default-features = false }
 uor-matmul-codec = { version = "0.1.0", path = "crates/uor-matmul-codec", default-features = false }
-uor-matmul-float = { version = "0.1.0", path = "crates/uor-matmul-float", default-features = false }
 uor-matmul-kernels = { version = "0.1.0", path = "crates/uor-matmul-kernels", default-features = false }
 uor-matmul-gemm = { version = "0.1.0", path = "crates/uor-matmul-gemm", default-features = false }
 uor-matmul-model = { version = "0.1.0", path = "crates/uor-matmul-model" }

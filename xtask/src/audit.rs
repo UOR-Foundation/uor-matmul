@@ -565,7 +565,12 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
 }
 
 /// The symbol fragment that names the tabulated column loop's accumulation.
-const TABULATED_COLUMN_LOOP: &str = "add_entry_wide";
+///
+/// The loop itself is a [`uor_matmul_kernels::TableSpec`] sequence and generic,
+/// so it emits no code until something instantiates it;
+/// `uor_matmul_gemm::tabulated::gather_reference_*` names the reference
+/// instantiation precisely so this gate has instructions to read.
+const TABULATED_COLUMN_LOOP: &str = "gather_reference";
 
 /// Every emitted function whose symbol contains `fragment`, as `(label, body)`,
 /// where the body is the `(line number, instruction)` pairs between the label and

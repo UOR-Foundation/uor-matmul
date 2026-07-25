@@ -738,3 +738,127 @@ fn every_declaration_is_consistent_with_the_shape_cb_07() {
         check(&s, "i64 mod reduce");
     }
 }
+
+// ---------------------------------------------------------------------------
+// CB-08: the table sequences
+// ---------------------------------------------------------------------------
+
+/// Every table sequence equals the reference, lane for lane.
+///
+/// Both halves: the build, which is the only place the tabulated traversal
+/// multiplies, and the gather, which is the only place it adds. A sequence that
+/// disagreed with the reference on either would produce a different sum, and
+/// this is the test that says so before `CD-13` sees it end to end.
+///
+/// The code spaces include one that is not a power of two, because the slab is
+/// rounded up and the padding must not reach any answer.
+#[test]
+fn every_table_sequence_equals_the_reference_cb_08() {
+    use uor_matmul_kernels::{available_table_i8, packed_slot, TableSpec};
+
+    /// One codebook and one activation tile, deterministic and full-range.
+    fn fill(len: usize, salt: u64) -> Vec<i8> {
+        let mut s = 0x243F_6A88_85A3_08D3u64 ^ salt;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (((s >> 33) % 255) as i64 - 127) as i8
+            })
+            .collect()
+    }
+
+    /// The activation tile in the layout `spec` declared.
+    fn pack(flat: &[i8], rows: usize, block: usize, spec: &TableSpec<i8, i32>) -> Vec<i8> {
+        let mut out = vec![0i8; rows * block];
+        for t in 0..block {
+            for i in 0..rows {
+                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
+            }
+        }
+        out
+    }
+
+    let mut compared = 0usize;
+    for &space in &[16usize, 64, 200, 256] {
+        for &block in &[2usize, 4, 8] {
+            let book = fill(space * block, 0xb00c ^ space as u64);
+            for &rows in &[1usize, 2, 4, 8, 16] {
+                let flat = fill(rows * block, 0xac75 ^ rows as u64);
+                for &group in &[1usize, 2, 4, 8, 16] {
+                    let specs: Vec<_> = available_table_i8(rows, group).collect();
+                    let reference = specs[0];
+                    assert_eq!(
+                        reference.backend,
+                        uor_matmul_core::Backend::Portable,
+                        "the reference is listed first"
+                    );
+
+                    // The build.
+                    let mut want = vec![0i32; space * rows];
+                    reference.build(
+                        space,
+                        block,
+                        &book,
+                        &pack(&flat, rows, block, &reference),
+                        &mut want,
+                    );
+                    for spec in &specs[1..] {
+                        let mut got = vec![0i32; space * rows];
+                        spec.build(
+                            space,
+                            block,
+                            &book,
+                            &pack(&flat, rows, block, spec),
+                            &mut got,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "{:?} build disagrees at space {space}, block {block}, rows {rows}",
+                            spec.backend
+                        );
+                        compared += 1;
+                    }
+
+                    // The gather, over a stack whose slab is the rounded space.
+                    let codes = space.next_power_of_two();
+                    let slab = codes * rows;
+                    let depth = 5usize;
+                    let mut stack = vec![0i32; depth * slab];
+                    for slot in 0..depth {
+                        // The live entries; the padding stays zero, exactly as
+                        // `Table::new` leaves it.
+                        let at = slot * slab;
+                        stack[at..at + space * rows].copy_from_slice(
+                            &fill(space * rows, slot as u64)
+                                .iter()
+                                .map(|&x| x as i32)
+                                .collect::<Vec<_>>(),
+                        );
+                    }
+                    let off: Vec<u32> = (0..depth * group)
+                        .map(|i| ((i * 37 % space) * rows) as u32)
+                        .collect();
+                    let mut want = vec![7i32; group * rows];
+                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
+                    for spec in &specs[1..] {
+                        let mut got = vec![7i32; group * rows];
+                        spec.gather(depth, slab as u32, &stack, &off, &mut got);
+                        assert_eq!(
+                            got, want,
+                            "{:?} gather disagrees at space {space}, rows {rows}, group {group}",
+                            spec.backend
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "CB-08 compared nothing; on a host with no table sequence beyond the \
+         reference this gate would pass vacuously"
+    );
+}

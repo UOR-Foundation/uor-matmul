@@ -74,6 +74,7 @@ returns an error the model does not sanction.
 | `CB-05` | `build` | wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on |
 | `CB-06` | `build` | Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes |
 | `CB-07` | `build` | Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet |
+| `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two |
 
 ## `CU-*` --- Purity: one method, no classical path, no fallback
 

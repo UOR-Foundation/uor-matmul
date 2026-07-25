@@ -48,8 +48,9 @@ pub use kernel::{gemm_packed, Kernelized};
 pub use partition::{Partition, Tile};
 pub use scratch::{suggested_accumulators, suggested_scratch, PanelSplit, Scratch};
 pub use tabulated::{
-    add_entry_narrow, add_entry_wide, gemm_tabulated, gemm_tabulated_counted, suggested_tabulation,
-    suggested_tabulation_index, suggested_tabulation_lanes, suggested_tabulation_panel,
-    tabulation_depth, tabulation_fits, tabulation_pays, tabulation_rows, Census, Lane, LaneWord,
-    Ledger, Table, TabulatedTriple, Tabulation, Wide,
+    gather_reference_i32, gather_reference_wide, gemm_tabulated, gemm_tabulated_counted,
+    suggested_tabulation, suggested_tabulation_index, suggested_tabulation_lanes,
+    suggested_tabulation_panel, tabulation_depth, tabulation_fits, tabulation_pays,
+    tabulation_rows, Census, Lane, LaneWord, Ledger, Table, TableSpec, Tabulated, TabulatedTriple,
+    Tabulation, Wide,
 };

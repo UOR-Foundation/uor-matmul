@@ -37,6 +37,13 @@ extern crate std;
 
 pub mod isa;
 pub mod spec;
+pub mod table;
+
+pub use table::{
+    available_table_i16, available_table_i8, choose_table, gather_reference_i32,
+    gather_reference_wide, portable_table, Lane, LaneWord, TableBuild, TableGather, TableSpec,
+    Wide,
+};
 
 pub use spec::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,

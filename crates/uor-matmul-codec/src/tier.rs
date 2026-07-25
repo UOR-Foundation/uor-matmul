@@ -139,9 +139,15 @@ pub trait Enumerable<E: IntegerElement, Bd: Bound>: Codec<E, Bd> {
 
     /// Where `code` sits in the enumeration.
     ///
-    /// Total for every value of [`Codec::Code`], including values no encoder
-    /// would produce. That totality is not politeness; it is what lets the
-    /// tabulated traversal read the table with no bounds check and no branch.
+    /// Total, and total *into the enumeration*: for every value of
+    /// [`Codec::Code`], including values no encoder would produce, the answer is
+    /// below [`Self::CODE_SPACE`]. Both halves are law, and `CK-09` asserts
+    /// them.
+    ///
+    /// That is not politeness. The tabulated traversal reads its table with no
+    /// bounds check and no branch, and this is what makes the read correct: the
+    /// mask that makes it *safe* holds unconditionally, and this is what makes
+    /// the entry it lands on the right one.
     fn index_of(code: Self::Code) -> usize;
 }
 

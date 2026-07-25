@@ -7,6 +7,7 @@
 
 use crate::isa::portable;
 use crate::spec::KernelSpec;
+use crate::table::TableSpec;
 
 /// Is AVX2 available? Never, on a target that is not x86-64.
 pub fn avx2_available() -> bool {
@@ -75,3 +76,29 @@ pub const AVX2_I32_I64_M1: KernelSpec<i32, i64> = portable::I32_I64;
 pub const AVX2_I32_MOD_M1: KernelSpec<i32, i32> = portable::I32_MOD;
 /// Absent here; the reference sequence carries this family.
 pub const AVX2_I16_MOD_M1: KernelSpec<i16, i32> = portable::I16_MOD;
+
+// ---------------------------------------------------------------------------
+// The table sequences (§7.3)
+// ---------------------------------------------------------------------------
+
+/// The `i8` table sequence. Absent here; the reference carries this family.
+///
+/// A table's column loop is integer adds and a masked index, so every SIMD
+/// target has a sequence for it and this absence is unfinished work rather
+/// than a property of the hardware. It is written as `None` rather than as a
+/// slower body so that the reference is the one that runs and `CB-*` compares
+/// against one sequence and not two.
+pub fn avx2_table_i8_i32(_rows: usize, _group: usize) -> Option<TableSpec<i8, i32>> {
+    None
+}
+
+/// The `i16` table sequence. Absent here; the reference carries this family.
+///
+/// A table's column loop is integer adds and a masked index, so every SIMD
+/// target has a sequence for it and this absence is unfinished work rather
+/// than a property of the hardware. It is written as `None` rather than as a
+/// slower body so that the reference is the one that runs and `CB-*` compares
+/// against one sequence and not two.
+pub fn avx2_table_i16_i64(_rows: usize, _group: usize) -> Option<TableSpec<i16, i64>> {
+    None
+}

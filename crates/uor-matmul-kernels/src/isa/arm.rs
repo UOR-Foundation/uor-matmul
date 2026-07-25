@@ -5,6 +5,7 @@ use core::arch::aarch64::*;
 use uor_matmul_core::Backend;
 
 use crate::spec::{Factorization, KernelSpec, LaneLayout};
+use crate::table::TableSpec;
 
 crate::tile_fits!(4, 8);
 crate::tile_fits!(8, 12);
@@ -393,4 +394,19 @@ pub const NEON_DOTPROD_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
 unsafe fn neon_dotprod_r_i8_one(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
     // SAFETY: the caller established the lengths and the target features.
     unsafe { neon_dotprod_r_i8_inner::<1>(kc, pa, pb, acc) }
+}
+
+// ---------------------------------------------------------------------------
+// The table sequences (§7.3)
+// ---------------------------------------------------------------------------
+
+/// The `i8` table sequence. Absent here; the reference carries this family.
+///
+/// A table's column loop is integer adds and a masked index, so every SIMD
+/// target has a sequence for it and this absence is unfinished work rather
+/// than a property of the hardware. It is written as `None` rather than as a
+/// slower body so that the reference is the one that runs and `CB-*` compares
+/// against one sequence and not two.
+pub fn neon_table_i8_i32(_rows: usize, _group: usize) -> Option<TableSpec<i8, i32>> {
+    None
 }

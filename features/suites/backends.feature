@@ -47,3 +47,9 @@ Feature: Backend parity
     Given the standing corpus
     When the suite exercises CB-07
     Then the claim holds byte for byte
+
+  @CB-08 @build
+  Scenario: Every table sequence equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two
+    Given the standing corpus
+    When the suite exercises CB-08
+    Then the claim holds byte for byte

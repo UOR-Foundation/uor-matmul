@@ -5,6 +5,7 @@ use core::arch::x86_64::*;
 use uor_matmul_core::Backend;
 
 use crate::spec::{Factorization, KernelSpec, LaneLayout};
+use crate::table::{TableBuild, TableGather, TableSpec};
 
 crate::tile_fits!(6, 16);
 crate::tile_fits!(1, 16);
@@ -1569,4 +1570,249 @@ pub const AVX2_I16_MOD_M1: KernelSpec<i16, i32> = KernelSpec {
 unsafe fn avx2_i16_mod_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i32) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
     unsafe { avx2_i16_mod_inner::<1>(kc, pa, pb, acc) }
+}
+
+// ---------------------------------------------------------------------------
+// The table sequences (§7.3)
+// ---------------------------------------------------------------------------
+
+/// Lane words one 256-bit add covers, at a 32-bit lane.
+const A2_TABLE_LANES: usize = 8;
+
+/// The `i8` table sequence at `rows` rows and `group` columns, if AVX2 has one.
+///
+/// `rows` must be a whole number of 256-bit registers of `i32`; the tile shapes
+/// the driver walks are `16, 8, 4, 2, 1`, so the top two take this and the rest
+/// take the reference at a tile too narrow for a register to help.
+pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
+    let (build, gather): (TableBuild<i8, i32>, TableGather<i32>) = match (rows, group) {
+        (16, 1) => (avx2_table_build_i8_v2, avx2_table_gather_i32_v2_u1),
+        (16, 2) => (avx2_table_build_i8_v2, avx2_table_gather_i32_v2_u2),
+        (8, 1) => (avx2_table_build_i8_v1, avx2_table_gather_i32_v1_u1),
+        (8, 2) => (avx2_table_build_i8_v1, avx2_table_gather_i32_v1_u2),
+        _ => return None,
+    };
+    Some(TableSpec {
+        backend: Backend::Avx2,
+        rows,
+        group,
+        // `madd` folds two block steps into each lane, so the activation tile
+        // arrives with the pair adjacent and the sequence needs no shuffle to
+        // build it and no tail (S8).
+        k_group: 2,
+        lanes_per_add: A2_TABLE_LANES,
+        // One `madd` and one add per eight lanes and two block steps.
+        build_products_per_step: A2_TABLE_LANES,
+        lane_cap: i32::MAX as u128,
+        // `madd`'s pair sum is `2 * bound^2`; an `i8` alphabet cannot reach the
+        // bound where that leaves an `i32`, so this is stated rather than
+        // binding.
+        max_bound: 32767,
+        build,
+        gather,
+    })
+}
+
+/// The `i16` table sequence. Absent: see [`crate::available_table_i16`].
+pub fn avx2_table_i16_i64(_rows: usize, _group: usize) -> Option<TableSpec<i16, i64>> {
+    None
+}
+
+/// One column group over a run of slots, at `V` registers of `i32` per column.
+///
+/// The whole traversal, in four instructions per code: one masked index, one
+/// scaled address, and `V` fused load-adds. No multiply, no bounds check, no
+/// loop framing --- which is what `CU-06` reads off the disassembly.
+///
+/// # Safety
+///
+/// [`TableGather`]'s contract, with `rows == V * 8` and `group == U`.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_table_gather<const V: usize, const U: usize>(
+    rows: usize,
+    _group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const i32,
+    off: *const u32,
+    lane: *mut i32,
+) {
+    debug_assert_eq!(rows, V * A2_TABLE_LANES);
+    debug_assert_eq!(_group, U);
+    let mask = (slab - 1) as u32;
+    // SAFETY: the caller established every extent.
+    unsafe {
+        let mut acc = [[_mm256_setzero_si256(); V]; U];
+        for (u, cols) in acc.iter_mut().enumerate() {
+            for (v, cell) in cols.iter_mut().enumerate() {
+                *cell =
+                    _mm256_loadu_si256(lane.add(u * rows + v * A2_TABLE_LANES) as *const __m256i);
+            }
+        }
+        // Walked, not indexed: the slot's base advances by an add, and the
+        // offsets arrive pre-scaled, so the step below has no multiply in it.
+        let mut words = stack;
+        for slot in 0..depth {
+            for (u, cols) in acc.iter_mut().enumerate() {
+                // The mask, not a comparison: every offset reads in-slab
+                // whatever it holds, so this is one `and` and never a branch.
+                let entry = words.add((*off.add(slot * U + u) & mask) as usize);
+                for (v, cell) in cols.iter_mut().enumerate() {
+                    *cell = _mm256_add_epi32(
+                        *cell,
+                        _mm256_loadu_si256(entry.add(v * A2_TABLE_LANES) as *const __m256i),
+                    );
+                }
+            }
+            words = words.add(slab);
+        }
+        for (u, cols) in acc.iter().enumerate() {
+            for (v, cell) in cols.iter().enumerate() {
+                _mm256_storeu_si256(
+                    lane.add(u * rows + v * A2_TABLE_LANES) as *mut __m256i,
+                    *cell,
+                );
+            }
+        }
+    }
+}
+
+/// One slot of the table, at `V` registers of `i32`.
+///
+/// `T[c][i] = sum_t acts[t][i] * book[c][t]`, with the block's steps taken in
+/// pairs: `madd` on the widened activations is this family's whole arithmetic
+/// in one instruction, exactly as it is for the dense tile.
+///
+/// # Safety
+///
+/// [`TableBuild`]'s contract, with `rows == V * 8` and `block` even.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_table_build<const V: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    debug_assert_eq!(rows, V * A2_TABLE_LANES);
+    debug_assert!(block.is_multiple_of(2));
+    // SAFETY: the caller established every extent.
+    unsafe {
+        for c in 0..space {
+            let d = book.add(c * block);
+            let mut entry = [_mm256_setzero_si256(); V];
+            for pair in 0..block / 2 {
+                // The pair of block steps, as one 32-bit pattern in every lane.
+                let w =
+                    (*d.add(pair * 2) as u16 as u32) | ((*d.add(pair * 2 + 1) as u16 as u32) << 16);
+                let wv = _mm256_set1_epi32(w as i32);
+                let a = acts.add(pair * rows * 2);
+                for (v, cell) in entry.iter_mut().enumerate() {
+                    let x = _mm256_cvtepi8_epi16(_mm_loadu_si128(
+                        a.add(v * A2_TABLE_LANES * 2) as *const __m128i
+                    ));
+                    *cell = _mm256_add_epi32(*cell, _mm256_madd_epi16(x, wv));
+                }
+            }
+            let o = out.add(c * rows);
+            for (v, cell) in entry.iter().enumerate() {
+                _mm256_storeu_si256(o.add(v * A2_TABLE_LANES) as *mut __m256i, *cell);
+            }
+        }
+    }
+}
+
+/// # Safety
+///
+/// [`TableGather`]'s contract at `rows == 16`, `group == 1`.
+unsafe fn avx2_table_gather_i32_v2_u1(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const i32,
+    off: *const u32,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_gather::<2, 1>(rows, group, depth, slab, stack, off, lane) }
+}
+
+/// # Safety
+///
+/// [`TableGather`]'s contract at `rows == 16`, `group == 2`.
+unsafe fn avx2_table_gather_i32_v2_u2(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const i32,
+    off: *const u32,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_gather::<2, 2>(rows, group, depth, slab, stack, off, lane) }
+}
+
+/// # Safety
+///
+/// [`TableGather`]'s contract at `rows == 8`, `group == 1`.
+unsafe fn avx2_table_gather_i32_v1_u1(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const i32,
+    off: *const u32,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_gather::<1, 1>(rows, group, depth, slab, stack, off, lane) }
+}
+
+/// # Safety
+///
+/// [`TableGather`]'s contract at `rows == 8`, `group == 2`.
+unsafe fn avx2_table_gather_i32_v1_u2(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const i32,
+    off: *const u32,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_gather::<1, 2>(rows, group, depth, slab, stack, off, lane) }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`.
+unsafe fn avx2_table_build_i8_v2(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_build::<2>(rows, space, block, book, acts, out) }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 8`.
+unsafe fn avx2_table_build_i8_v1(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_build::<1>(rows, space, block, book, acts, out) }
 }

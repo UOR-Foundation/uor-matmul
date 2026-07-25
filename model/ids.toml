@@ -222,6 +222,12 @@ suite = "backends"
 statement = """Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet"""
 
 [[id]]
+id = "CB-08"
+level = "build"
+suite = "backends"
+statement = """Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two"""
+
+[[id]]
 id = "CU-01"
 level = "build"
 suite = "purity"

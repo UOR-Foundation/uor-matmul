@@ -48,7 +48,6 @@
 //! and it is the orientation in which a code names `Bk` consecutive *outputs*.
 //! Tabulation simply has nothing to sum there.
 
-use bytemuck::TransparentWrapper;
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
@@ -56,7 +55,10 @@ use uor_matmul_core::{
     NotAProduct, Shape, Traversal,
 };
 
-use uor_matmul_core::{Strides, Triple};
+use uor_matmul_core::{Backend, Strides, Triple};
+use uor_matmul_kernels::{
+    available_table_i16, available_table_i8, choose_table, packed_slot, portable_table,
+};
 
 use crate::coded::self_aliases;
 use crate::driver::GemmOptions;
@@ -162,161 +164,27 @@ impl Ledger for Census {
 
 /// A word the table and the column accumulation are held in.
 ///
-/// The exact accumulator is 128 bits wide or more, and the column loop touches
-/// one per output cell per block of the reduction. At `m*n*k/Bk` touches that is
-/// not arithmetic, it is *traffic*: a 64x1024x4096 product moves a gigabyte of
-/// accumulator through the cache to compute a quarter of a billion products.
+/// The exact accumulator is 128 bits wide or more, and a column loop that
+/// touched one per output cell per block of the reduction would move a gigabyte
+/// of accumulator through the cache to compute a quarter of a billion products.
 ///
-/// A lane is where that stops. One table entry is a sum of `MAX_BLOCK` products
-/// of two alphabet elements, and a chunk of the reduction is a sum of those, so a
-/// narrow register holds it exactly for a depth this trait states. The exact
-/// accumulator is then touched once per *chunk* instead of once per block, and
-/// the words the inner loop moves halve or better.
+/// A lane is where that stops, and it stops completely: one table entry is a sum
+/// of `MAX_BLOCK` products of two alphabet elements, a whole reduction is a sum
+/// of those, and [`Lane::capacity`] says how many of them one narrow word holds
+/// exactly. At `(i8, 128)` that is 133144 products --- past every depth a weight
+/// row reaches --- so the exact accumulator is touched **once per output
+/// element**, which is what "encode once" already said and what the traversal
+/// did not do. Measured, taking it out of the reduction was worth 1.94x.
 ///
-/// This is the same narrow/wide factorization the tile kernels already run under
-/// [`uor_matmul_core::fits_narrow`], at a different place in the traversal. Both
-/// lanes compute the same integer, and `CD-13` asserts the bytes.
-pub trait LaneWord: Copy + Send + Sync + 'static {
-    /// The additive identity.
-    const ZERO: Self;
-    /// Exact within the lane's declared capacity, which is the only place it is
-    /// reached.
-    fn add(self, other: Self) -> Self;
-}
-
-/// A lane for a particular element type: how to fill it, and how to place it.
-pub trait Lane<E: Element>: LaneWord {
-    /// The most products this lane holds exactly, for an alphabet bounded by `b`.
-    ///
-    /// `None` is unbounded --- the exact accumulator, which the width derivation
-    /// already sized against every depth any machine can address.
-    fn capacity(b: u128) -> Option<usize>;
-
-    /// Accumulate one exact product. The only multiply the traversal issues.
-    fn mac(self, a: E, w: E) -> Self;
-
-    /// Place a completed chunk into the exact accumulator.
-    fn place(self, acc: E::Acc) -> E::Acc;
-}
-
-impl LaneWord for i64 {
-    const ZERO: Self = 0;
-
-    fn add(self, other: Self) -> Self {
-        // Exact: both operands are partial sums of a chunk whose length
-        // `capacity` bounded, so this cannot overflow where it is reached. A
-        // derivation error would panic under the checked profile, which is what
-        // that profile is for (`CT-02`).
-        self + other
-    }
-}
-
-impl<E: Element> Lane<E> for i64 {
-    fn capacity(b: u128) -> Option<usize> {
-        // The worst-case magnitude of one product is `b * b`; a bound of zero is
-        // an alphabet containing only zero, for which every depth fits.
-        let per_step = b.saturating_mul(b);
-        if per_step == 0 {
-            return None;
-        }
-        let room = (i64::MAX as u128) / per_step;
-        Some(if room > usize::MAX as u128 {
-            usize::MAX
-        } else {
-            room as usize
-        })
-    }
-
-    fn mac(self, a: E, w: E) -> Self {
-        E::mac_narrow(self, a, w)
-    }
-
-    fn place(self, acc: E::Acc) -> E::Acc {
-        E::combine_narrow(acc, self)
-    }
-}
-
-impl LaneWord for i32 {
-    const ZERO: Self = 0;
-
-    fn add(self, other: Self) -> Self {
-        // Exact within the capacity below, which is the only place it is reached.
-        self + other
-    }
-}
-
-impl<E: Element> Lane<E> for i32 {
-    fn capacity(b: u128) -> Option<usize> {
-        let per_step = b.saturating_mul(b);
-        if per_step == 0 {
-            return None;
-        }
-        let room = (i32::MAX as u128) / per_step;
-        Some(if room > usize::MAX as u128 {
-            usize::MAX
-        } else {
-            room as usize
-        })
-    }
-
-    fn mac(self, a: E, w: E) -> Self {
-        E::mac_narrow32(self, a, w)
-    }
-
-    fn place(self, acc: E::Acc) -> E::Acc {
-        E::combine_narrow(acc, self as i64)
-    }
-}
-
-/// The exact accumulator, as a lane.
-///
-/// The wrapper exists so that "the accumulator used as a lane" and "the narrow
-/// register used as a lane" are two types rather than two code paths. It is
-/// `repr(transparent)`, so a caller's accumulator offer *is* a buffer of these
-/// and no copy stands between them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, TransparentWrapper)]
-#[repr(transparent)]
-pub struct Wide<A>(pub A);
-
-impl<A: Accumulator> LaneWord for Wide<A> {
-    const ZERO: Self = Wide(A::ZERO);
-
-    fn add(self, other: Self) -> Self {
-        Wide(self.0.combine(other.0))
-    }
-}
-
-impl<E: Element> Lane<E> for Wide<E::Acc> {
-    fn capacity(_: u128) -> Option<usize> {
-        // The width derivation already covers every depth any addressable machine
-        // can present, so there is nothing left to bound (§3.2).
-        None
-    }
-
-    fn mac(mut self, a: E, w: E) -> Self {
-        E::mac(&mut self.0, a, w);
-        self
-    }
-
-    fn place(self, acc: E::Acc) -> E::Acc {
-        acc.combine(self.0)
-    }
-}
-
-/// One code's contribution to a tile of `R` rows: one table read and one add
-/// each, and no multiply.
-///
-/// Two arrays of a *compile-time* length, so the whole thing is `R` registers and
-/// there is no index arithmetic, no bounds check and no loop framing in it at all.
-/// That is not tidiness: it is what makes `CU-06`'s disassembly half a statement
-/// about the accumulation rather than about addressing, and measured it was worth
-/// more than everything else in this module put together.
-#[inline(always)]
-fn add_entry<const R: usize, L: LaneWord>(entry: &[L; R], acc: &mut [L; R]) {
-    for i in 0..R {
-        acc[i] = acc[i].add(entry[i]);
-    }
-}
+/// The definitions live in [`uor_matmul_kernels`], with the sequences that read
+/// them. That is not tidiness: a lane's whole purpose is to be added to in one
+/// instruction, and the only crate in this workspace permitted `#[target_feature]`
+/// is that one. Written here, the column loop compiled at the target's baseline
+/// and issued no vector instruction at all --- 17.6 Gmac/s where the same
+/// traversal in vectors measures 86.7.
+pub use uor_matmul_kernels::{
+    gather_reference_i32, gather_reference_wide, Lane, LaneWord, TableSpec, Wide,
+};
 
 /// One dot product, in the narrowest lane its depth admits.
 ///
@@ -348,25 +216,6 @@ where
     acc
 }
 
-/// The accumulation of [`add_entry`] in the narrowest lane at the widest tile,
-/// named so that `CU-06`'s disassembly gate has a symbol to read.
-///
-/// Not a second path and not a test hook: it is the same function, named once at
-/// an instantiation the shipped traversal reaches, because a generic function
-/// emits no code until something instantiates it and a gate cannot read
-/// instructions that were never emitted.
-#[inline(never)]
-pub fn add_entry_narrow(entry: &[i32; 8], acc: &mut [i32; 8]) {
-    add_entry(entry, acc);
-}
-
-/// The same, in the exact lane, for the element families that have no narrow
-/// register at all.
-#[inline(never)]
-pub fn add_entry_wide(entry: &[Wide<i128>; 8], acc: &mut [Wide<i128>; 8]) {
-    add_entry(entry, acc);
-}
-
 // ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
@@ -374,58 +223,94 @@ pub fn add_entry_wide(entry: &[Wide<i128>; 8], acc: &mut [Wide<i128>; 8]) {
 /// The tabulation buffer for one row tile and a chunk of the reduction.
 ///
 /// Borrowed, never owned: it lives in the caller's offer like every other working
-/// buffer in this library (R7, S13). `depth * code_space * rows` lane words,
-/// indexed block-major then code-major, so one code's entry is a contiguous run
-/// of `rows` words and [`add_entry`] walks it against the column accumulation
-/// without a stride.
+/// buffer in this library (R7, S13). `depth * codes * rows` lane words, indexed
+/// block-major then code-major, so one code's entry is a contiguous run of `rows`
+/// words that one vector load reaches without a stride.
 ///
-/// The *depth* is why the exact accumulator stops being traffic. A stack of
-/// `depth` tables lets the column loop reduce `depth` blocks into a lane held in
-/// registers and place the result once, so the accumulator is touched
-/// `m*n*(k/Bk)/depth` times instead of `m*n*(k/Bk)`.
+/// # The slab is a power of two
+///
+/// `codes` is [`Enumerable::CODE_SPACE`] rounded **up** to a power of two, and
+/// the column loop reads `stack[slot * slab + (index & (codes - 1)) * rows]`.
+///
+/// The mask is what discharges the read's bound. `index_of` is total below
+/// `CODE_SPACE` --- that is the trait's law and `CK-09` asserts it --- so masking
+/// changes no value the traversal can reach; but it makes every read in-slab
+/// *whatever* the index holds, so there is no comparison and no branch in the
+/// step. The entries between `CODE_SPACE` and `codes` are zeroed once and never
+/// written, so an enumeration whose space is not a power of two costs padding and
+/// never a special case.
+///
+/// # The depth is not what keeps the accumulator out of the loop
+///
+/// It was, and that was the error. A narrow lane holds the *whole* reduction ---
+/// 133144 products at `(i8, 128)` against a `k` of 1024 --- so the column
+/// accumulation is carried across every chunk and the exact accumulator is
+/// touched once per output element. The depth is now only what keeps the stack
+/// cache-resident, which is the question it should always have been answering.
 #[derive(Debug)]
 pub struct Table<'s, L> {
     words: &'s mut [L],
     code_space: usize,
+    codes: usize,
     rows: usize,
     depth: usize,
 }
 
 impl<'s, L: LaneWord> Table<'s, L> {
+    /// Codes one slab addresses: [`Enumerable::CODE_SPACE`] rounded up to a
+    /// power of two, so the index needs a mask and never a comparison.
+    pub const fn codes(code_space: usize) -> usize {
+        code_space.next_power_of_two()
+    }
+
     /// How many lane words a stack of `depth` tables over `rows` rows of a
     /// `code_space`-wide enumeration occupies.
     ///
     /// A query, so an embedded caller can size a static and know the answer
     /// before it calls anything.
     pub const fn words(code_space: usize, rows: usize, depth: usize) -> usize {
-        code_space.saturating_mul(rows).saturating_mul(depth)
+        Self::codes(code_space)
+            .saturating_mul(rows)
+            .saturating_mul(depth)
     }
 
-    /// Borrow `words` as a stack of `depth` tables.
+    /// Borrow `words` as a stack of `depth` tables, with the padding zeroed.
     ///
     /// `None` when the borrow is shorter than the table it is asked to be, which
     /// means no such table exists in that offer. Decided here, before any
     /// arithmetic, and answered by the caller taking the streaming traversal
     /// instead --- not by an error reaching anyone (C6).
     pub fn new(words: &'s mut [L], code_space: usize, rows: usize, depth: usize) -> Option<Self> {
-        if code_space == 0
-            || rows == 0
-            || depth == 0
-            || words.len() < Self::words(code_space, rows, depth)
-        {
+        let want = Self::words(code_space, rows, depth);
+        if code_space == 0 || rows == 0 || depth == 0 || words.len() < want {
             return None;
         }
-        Some(Self {
-            words,
+        let codes = Self::codes(code_space);
+        let table = Self {
+            words: &mut words[..want],
             code_space,
+            codes,
             rows,
             depth,
-        })
+        };
+        // The padding, once. The build writes `code_space * rows` of every slab
+        // and never the rest, so zeroing here is zeroing for the whole call.
+        let slab = codes * rows;
+        let live = code_space * rows;
+        for slot in 0..depth {
+            table.words[slot * slab + live..slot * slab + slab].fill(L::ZERO);
+        }
+        Some(table)
     }
 
-    /// Distinct codes each table in the stack is indexed by.
+    /// Distinct codes the enumeration has.
     pub const fn code_space(&self) -> usize {
         self.code_space
+    }
+
+    /// Codes one slab addresses, which is [`Self::code_space`] rounded up.
+    pub const fn slab_codes(&self) -> usize {
+        self.codes
     }
 
     /// Rows of `A` the stack covers.
@@ -438,87 +323,63 @@ impl<'s, L: LaneWord> Table<'s, L> {
         self.depth
     }
 
+    /// Words per block held: one entry per addressable code, one word per row.
+    pub const fn slab(&self) -> usize {
+        self.codes * self.rows
+    }
+
     /// Every entry of one block of the reduction, into stack slot `slot`.
     ///
-    /// `code_space * block * rows` products, and the only multiplies the tabulated
-    /// traversal issues at all.
+    /// `code_space * block * rows` products, and the only multiplies the
+    /// tabulated traversal issues at all.
     ///
-    /// The reduction's step outer, the code space inner. That order is not free to
-    /// choose, and it is the whole cost of the build:
-    ///
-    /// - The `R` activations of one step are read **once** and stay in registers
-    ///   across the entire code space. Codes-outer would re-read them
-    ///   `code_space` times, and measured that re-read was half the traversal.
-    /// - Each codeword's `block` elements are still decoded once per tile rather
-    ///   than once per row, which is `code_space * block` decode calls and not
-    ///   `code_space * block * R`.
-    ///
-    /// `R` is the tile's height and a compile-time one, because the last tile of a
-    /// shape that does not divide is shorter and the caller walks down
-    /// [`ROW_TILES`] rather than passing a runtime length. The stride stays the
-    /// table's, so a ragged tile changes what is written and never where.
-    pub fn build<const R: usize, E, Bd, C, Lg>(
+    /// The sequence is the spec's. The reduction's step is the inner loop and
+    /// the code space the outer, so one entry's `rows` words stay in registers
+    /// for its whole codeword and are written once; the other order reads and
+    /// writes every entry once per element of the block, which is `MAX_BLOCK`
+    /// times the traffic and measured half the traversal.
+    pub fn build<E, Lg>(
         &mut self,
-        book: &[Alphabet<E, Bd>],
-        acts: &[Alphabet<E, Bd>],
+        spec: &TableSpec<E, L>,
+        block: usize,
+        book: &[E],
+        acts: &[E],
         slot: usize,
         ledger: &mut Lg,
     ) where
-        E: IntegerElement,
-        Bd: Bound,
-        C: Enumerable<E, Bd>,
+        E: Element,
         L: Lane<E>,
         Lg: Ledger,
     {
-        let block = C::MAX_BLOCK;
-        let space = self.code_space;
-        let slab = space * R;
+        let slab = self.slab();
+        let live = self.code_space * self.rows;
         let start = slot * slab;
-        let words = &mut self.words[start..start + slab];
-        // The code space outer, the block inner. That order is the whole cost of
-        // the build: one entry's `R` words stay in registers for its whole
-        // codeword and are written **once**. Block-outer reads and writes every
-        // entry once per element of the block, which is `MAX_BLOCK` times the
-        // traffic --- measured, that was half the traversal.
-        for (entry, word) in words.chunks_exact_mut(R).zip(book.chunks_exact(block)) {
-            let mut acc = [L::ZERO; R];
-            for (&w, col) in word.iter().zip(acts.chunks_exact(R)) {
-                let w = w.get();
-                for i in 0..R {
-                    acc[i] = acc[i].mac(col[i].get(), w);
-                }
-            }
-            if let Some(entry) = entry.first_chunk_mut::<R>() {
-                *entry = acc;
-            }
-        }
-        ledger.multiplied((space * block * R) as u64);
+        spec.build(
+            self.code_space,
+            block,
+            book,
+            acts,
+            &mut self.words[start..start + live],
+        );
+        ledger.multiplied((self.code_space * block * self.rows) as u64);
     }
 
-    /// The stack itself, one slab of `code_space * rows` words per block held.
-    ///
-    /// The column loop walks it with [`slice::chunks_exact`], so the slot's base
-    /// advances by an add rather than a multiply and the slab's bounds are checked
-    /// once for the whole walk instead of once per code.
+    /// The stack itself, one slab per block held.
     pub fn stack(&self) -> &[L] {
         self.words
     }
 
-    /// Words per block held: one entry per code, one word per row.
-    pub const fn slab(&self) -> usize {
-        self.code_space * self.rows
-    }
-
-    /// One code's entry in one slot of the stack: the partial sum for each of the
-    /// tile's `R` rows, as an array so the column loop keeps it in registers.
+    /// One code's entry in one slot of the stack: the partial sum for each of
+    /// the tile's rows.
     ///
-    /// No bounds check is needed in principle: [`Enumerable::index_of`] is total
-    /// below `CODE_SPACE` and the buffer is `CODE_SPACE` entries wide per slot by
-    /// construction, which is what `CT-07` asserts.
-    #[inline(always)]
-    pub fn entry<const R: usize>(&self, slot: usize, code_index: usize) -> Option<&[L; R]> {
-        let at = (slot * self.code_space + code_index) * self.rows;
-        self.words.get(at..at + R)?.first_chunk::<R>()
+    /// The masked read the column loop performs, exposed so that `CT-07` can
+    /// assert that every code of the enumeration reaches a live entry.
+    pub fn entry(&self, slot: usize, code_index: usize) -> Option<&[L]> {
+        if slot >= self.depth {
+            return None;
+        }
+        let at = slot * self.slab() + (code_index & (self.codes - 1)) * self.rows;
+        self.words.get(at..at + self.rows)
     }
 }
 
@@ -668,21 +529,27 @@ pub fn suggested_tabulation_index(shape: Shape) -> usize {
 ///
 /// It does not grow with `n`, and it grows with `k` only until the stack reaches
 /// the depth the cache holds.
-pub fn suggested_tabulation_lanes<E: IntegerElement, Bd: Bound>(
+pub fn suggested_tabulation_lanes<E: Tabulated, Bd: Bound>(
     shape: Shape,
     code_space: usize,
     block: usize,
 ) -> usize {
-    let lane = LaneChoice::resolve::<E, Bd>(block);
-    if matches!(lane.kind, LaneKind::Exact) {
+    if E::LANE_IS_EXACT {
         return 0;
     }
-    let Some(plan) = Plan::choose(code_space, shape, lane, usize::MAX, usize::MAX, block) else {
+    let Some(plan) = Plan::choose(
+        code_space,
+        shape,
+        E::LANE_BYTES,
+        usize::MAX,
+        usize::MAX,
+        block,
+    ) else {
         return 0;
     };
     // Reported in `i64` words, which is what the offer is made of.
     plan.lane_words(code_space)
-        .saturating_mul(lane.bytes)
+        .saturating_mul(E::LANE_BYTES)
         .div_ceil(core::mem::size_of::<i64>())
 }
 
@@ -693,20 +560,26 @@ pub fn suggested_tabulation_lanes<E: IntegerElement, Bd: Bound>(
 /// block; offering none gives the same bytes from the streaming traversal
 /// (`CD-13`). It does not grow with `k`.
 ///
-/// When the element type has no narrow register this covers the table stack too,
-/// because there is then nowhere else for it to live.
-pub fn suggested_tabulation<E: IntegerElement, Bd: Bound>(
+/// When the element type has no narrow register this covers the table stack and
+/// the column accumulation too, because there is then nowhere else for them to
+/// live.
+pub fn suggested_tabulation<E: Tabulated, Bd: Bound>(
     shape: Shape,
     code_space: usize,
     block: usize,
 ) -> usize {
-    let lane = LaneChoice::resolve::<E, Bd>(block);
-    let exact = matches!(lane.kind, LaneKind::Exact);
-    let Some(plan) = Plan::choose(code_space, shape, lane, usize::MAX, usize::MAX, block) else {
+    let Some(plan) = Plan::choose(
+        code_space,
+        shape,
+        E::LANE_BYTES,
+        usize::MAX,
+        usize::MAX,
+        block,
+    ) else {
         return 0;
     };
     let tile = plan.rows.saturating_mul(plan.cols);
-    if exact {
+    if E::LANE_IS_EXACT {
         tile.saturating_add(plan.lane_words(code_space))
     } else {
         tile
@@ -856,77 +729,149 @@ pub const fn tabulation_depth(
     }
 }
 
-/// Which register a run of products is accumulated in.
+/// The lane a family tabulates in, and the sequence that reads it.
 ///
-/// Not a quality ordering. Every kind computes the same integer; a narrower one
-/// holds fewer products before it must be placed and moves fewer bytes while it
-/// does. `CD-13` asserts the bytes across all three.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum LaneKind {
-    /// The 32-bit entry of `NARROW_CAPS`. Eight lanes to a 256-bit register.
-    Narrow32,
-    /// The 64-bit entry. Four lanes, and no vector multiply on x86.
-    Narrow64,
-    /// The exact accumulator, which every depth fits by derivation.
-    Exact,
+/// One associated type, not a scan. Which register holds a run of products is a
+/// property of the *element type* --- the same kind of fact as `AccOf<E>` --- and
+/// writing it as a per-shape search was a mechanism with one answer.
+///
+/// Not a quality ordering, and not a fallback chain. Every lane computes the same
+/// integer; a narrower one moves fewer bytes per product, and `CD-13` asserts the
+/// bytes across all of them. An element family with no narrow register at all
+/// tabulates in the exact accumulator, which is not a placeholder there but the
+/// whole of what the hardware offers --- the same status
+/// [`uor_matmul_kernels::available_i64_exact`] has for the dense tile.
+pub trait Tabulated: Kernelized {
+    /// The lane one table entry's row is held in.
+    type Lane: Lane<Self>;
+
+    /// Bytes one lane word occupies. The column loop's traffic is this divided
+    /// by the codec's block, per product, which is the whole of why it is here.
+    const LANE_BYTES: usize = core::mem::size_of::<Self::Lane>();
+
+    /// Does this family's lane come out of the accumulator offer rather than
+    /// the narrow one?
+    ///
+    /// True exactly when the lane *is* the exact accumulator, which is where a
+    /// word that wide already lives.
+    const LANE_IS_EXACT: bool;
+
+    /// The sequence for this backend, at this tile height and column group.
+    ///
+    /// Always present: the reference is exact on every alphabet and every tile,
+    /// so narrowing the choice can never empty it.
+    fn table_spec(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+    ) -> TableSpec<Self, Self::Lane>;
+
+    /// Borrow `want` lane words out of whichever offer this family's lane lives
+    /// in.
+    ///
+    /// The two offers have concrete types --- `i64` for the narrow one, the
+    /// exact accumulator for the other --- and the lane is an associated type,
+    /// so the relabelling has to happen where both are known. Here, in three
+    /// lines per family, and nowhere in the traversal.
+    ///
+    /// `None` when the offer is shorter than `want`, which is the caller getting
+    /// a different traversal at the same bytes (S13, `CD-13`).
+    fn lanes<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<Self>],
+        want: usize,
+    ) -> Option<&'s mut [Self::Lane]>;
 }
 
-/// A lane's three facts, as the planner needs them: which register it is, how
-/// wide one word is, and how many products one word holds exactly.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct LaneChoice {
-    kind: LaneKind,
-    bytes: usize,
-    capacity: Option<usize>,
-}
+/// `i8`: an `i32` lane holds 133144 products of the full alphabet, which is past
+/// every depth a weight row reaches, so the whole reduction is one run.
+impl Tabulated for i8 {
+    type Lane = i32;
+    const LANE_IS_EXACT: bool = false;
 
-impl LaneChoice {
-    /// The lane this instantiation resolves to: the **narrowest** that can hold a
-    /// block of the reduction.
-    ///
-    /// The same scan, and the same reason, as
-    /// [`uor_matmul_core::narrow_cap_for`]: every lane computes the same integer,
-    /// and a narrower word halves the table, doubles the rows that sit in L1 and
-    /// doubles the depth that sits in L2. Traffic is what the column loop is bound
-    /// by, so the narrowest lane is the fastest one.
-    ///
-    /// `None` for [`Element::HAS_NARROW`] false means the exact accumulator, which
-    /// the width derivation already sized against every depth (§3.2).
-    fn resolve<E: IntegerElement, Bd: Bound>(block: usize) -> Self {
-        let holds = |c: Option<usize>| c.is_some_and(|c| c >= block);
-        if E::HAS_NARROW32 {
-            let narrow32 = <i32 as Lane<E>>::capacity(Bd::VALUE);
-            if holds(narrow32) {
-                return Self {
-                    kind: LaneKind::Narrow32,
-                    bytes: core::mem::size_of::<i32>(),
-                    capacity: narrow32,
-                };
-            }
-        }
-        if E::HAS_NARROW {
-            let narrow64 = <i64 as Lane<E>>::capacity(Bd::VALUE);
-            if holds(narrow64) {
-                return Self {
-                    kind: LaneKind::Narrow64,
-                    bytes: core::mem::size_of::<i64>(),
-                    capacity: narrow64,
-                };
-            }
-        }
-        Self {
-            kind: LaneKind::Exact,
-            bytes: core::mem::size_of::<AccOf<E>>(),
-            capacity: None,
-        }
+    fn table_spec(backend: Backend, bound: u128, rows: usize, group: usize) -> TableSpec<i8, i32> {
+        choose_table(available_table_i8(rows, group), backend, bound)
+            .expect("the reference sequence is always present")
     }
 
-    /// Products one word holds before it must be placed. Never zero.
-    const fn run(&self) -> usize {
-        match self.capacity {
-            Some(0) | None => usize::MAX,
-            Some(c) => c,
-        }
+    fn lanes<'s>(
+        narrow: &'s mut [i64],
+        _: &'s mut [AccOf<i8>],
+        want: usize,
+    ) -> Option<&'s mut [i32]> {
+        bytemuck::cast_slice_mut::<i64, i32>(narrow).get_mut(..want)
+    }
+}
+
+/// `i16`: two full `i16` products already need 31 bits, so no 32-bit lane holds
+/// an entry of any block longer than one.
+impl Tabulated for i16 {
+    type Lane = i64;
+    const LANE_IS_EXACT: bool = false;
+
+    fn table_spec(backend: Backend, bound: u128, rows: usize, group: usize) -> TableSpec<i16, i64> {
+        choose_table(available_table_i16(rows, group), backend, bound)
+            .expect("the reference sequence is always present")
+    }
+
+    fn lanes<'s>(
+        narrow: &'s mut [i64],
+        _: &'s mut [AccOf<i16>],
+        want: usize,
+    ) -> Option<&'s mut [i64]> {
+        narrow.get_mut(..want)
+    }
+}
+
+/// `i32`: the product of two `i32` needs 62 bits and a run of them needs more, so
+/// the lane is the exact accumulator. Nothing narrower is a lane here --- an
+/// `i64` would hold two products --- and that is a fact about the width, not a
+/// gap in the sequence table.
+impl Tabulated for i32 {
+    type Lane = Wide<AccOf<i32>>;
+    const LANE_IS_EXACT: bool = true;
+
+    fn table_spec(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+    ) -> TableSpec<i32, Wide<AccOf<i32>>> {
+        let _ = (backend, bound);
+        portable_table::<i32, Wide<AccOf<i32>>>(rows, group)
+    }
+
+    fn lanes<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<i32>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<i32>>]> {
+        Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+}
+
+/// `i64`: as `i32`, one width up.
+impl Tabulated for i64 {
+    type Lane = Wide<AccOf<i64>>;
+    const LANE_IS_EXACT: bool = true;
+
+    fn table_spec(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+    ) -> TableSpec<i64, Wide<AccOf<i64>>> {
+        let _ = (backend, bound);
+        portable_table::<i64, Wide<AccOf<i64>>>(rows, group)
+    }
+
+    fn lanes<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<i64>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<i64>>]> {
+        Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
     }
 }
 
@@ -939,28 +884,32 @@ struct Plan {
 }
 
 impl Plan {
-    /// Lane words the plan needs: the stack, and nothing else.
+    /// Lane words the plan needs: the column accumulation, then the stack.
     ///
-    /// The column accumulation itself is `R` registers and never a buffer, which
-    /// is what [`row_tile`]'s compile-time row count buys.
+    /// The column accumulation is a buffer now, and that is what bought the
+    /// biggest single step in this module. It used to be `R` registers held
+    /// across one chunk and folded into the exact accumulator at the end of it,
+    /// which meant the exact accumulator was read and written `m*n*(k/Bk)/depth`
+    /// times. Held in the lane instead, it is `rows * cols` narrow words --- a
+    /// quarter of the bytes at `(i8, i32)` --- and the exact accumulator is
+    /// touched once per output element.
     const fn lane_words(&self, code_space: usize) -> usize {
-        code_space
-            .saturating_mul(self.rows)
-            .saturating_mul(self.depth)
+        self.rows
+            .saturating_mul(self.cols)
+            .saturating_add(Table::<i32>::words(code_space, self.rows, self.depth))
     }
 
     /// The largest plan the two offers support.
     ///
     /// Rows first, from the cache budget: a wider row tile shares each decode
     /// across more outputs and puts more lane words under one vector instruction.
-    /// Then the column block, as wide as the exact offer allows, because the build
-    /// repeats once per column block. Then the depth, as deep as the lane offer
-    /// and the lane's own capacity allow, because depth is what keeps the exact
-    /// accumulator out of the inner loop.
+    /// Then the column block, as wide as the exact offer allows, because the
+    /// build repeats once per column block. Then the depth, as deep as the lane
+    /// offer and the cache allow.
     fn choose(
         code_space: usize,
         shape: Shape,
-        lane: LaneChoice,
+        lane_bytes: usize,
         exact_offer: usize,
         lane_offer: usize,
         block: usize,
@@ -968,28 +917,38 @@ impl Plan {
         if code_space == 0 || block == 0 || shape.m == 0 || shape.n == 0 {
             return None;
         }
-        let LaneChoice {
-            bytes: lane_bytes,
-            capacity: cap,
-            ..
-        } = lane;
         let row_cap = tabulation_rows(code_space, blocking::L1_BYTES, lane_bytes)
             .min(shape.m)
             .min(exact_offer);
-        // The row tile is one of the counts the column loop is compiled for, so
-        // that its accumulation is registers and not a buffer. Widest first.
+        let slab = Table::<i32>::codes(code_space);
         let rows = ROW_TILES
             .into_iter()
-            .find(|&r| r <= row_cap && code_space.saturating_mul(r) <= lane_offer)?;
+            .find(|&r| r <= row_cap && slab.saturating_mul(r) < lane_offer)?;
         let cols = shape.n.min(exact_offer / rows);
         if cols == 0 {
             return None;
         }
         let blocks = shape.k / block;
-        let by_cache =
-            tabulation_depth(code_space, rows, block, cap, blocking::L2_BYTES, lane_bytes);
-        let by_offer = lane_offer / (code_space * rows);
-        let depth = by_cache.min(by_offer).min(blocks.max(1)).max(1);
+        // The stack shares the lane offer with the column accumulation, which is
+        // `rows * cols` words and is claimed first because the reduction cannot
+        // proceed without it.
+        let for_stack = lane_offer.saturating_sub(rows * cols);
+        let by_cache = tabulation_depth(
+            code_space,
+            rows,
+            block,
+            None,
+            blocking::L2_BYTES,
+            lane_bytes,
+        );
+        let by_offer = for_stack / (slab * rows);
+        let depth = by_cache.min(by_offer).min(blocks.max(1)).min(GATHER_SLOTS);
+        // A stack of no slots is not a stack. Every term above is a cache or an
+        // offer, so this is the floor of a derivation and not a chosen minimum.
+        let depth = if depth == 0 { 1 } else { depth };
+        if for_stack < slab * rows {
+            return None;
+        }
         Some(Self { rows, cols, depth })
     }
 }
@@ -1008,7 +967,7 @@ pub fn gemm_tabulated<E, Bd, C, O, Ep>(
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
 ) where
-    E: Kernelized,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1030,7 +989,7 @@ pub fn gemm_tabulated_counted<E, Bd, C, O, Ep>(
     lanes: &mut Tabulation<'_>,
     census: &mut Census,
 ) where
-    E: Kernelized,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1047,7 +1006,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
     lanes: &mut Tabulation<'_>,
     ledger: &mut Lg,
 ) where
-    E: Kernelized,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1087,86 +1046,45 @@ fn run<E, Bd, C, O, Ep, Lg>(
     // traversal shaped around an answer of "none".
     let index = distinct.filter(|&d| d < shape.n).map(|_| &index[..shape.n]);
 
-    // The narrowest lane that holds a block of the reduction, the same scan the
-    // tile kernels run. Every lane computes the same integer; this is a question
-    // about register width and traffic, and `CD-13` asserts the bytes across it.
-    let lane = LaneChoice::resolve::<E, Bd>(block);
+    let lane_bytes = E::LANE_BYTES;
     let exact_offer = scratch.accumulators();
-
-    if matches!(lane.kind, LaneKind::Exact) {
-        // The exact accumulator as the lane, out of the same offer the tile comes
-        // from. Wider words and a shallower stack; the same identity, and for
-        // `i64` and complex elements the only lane there is.
-        let Some(plan) = Plan::choose(space, shape, lane, exact_offer, exact_offer, block) else {
-            decline(triple, epilogue, options, scratch, ledger);
-            return;
-        };
-        let tile = plan.rows * plan.cols;
-        let want = tile + plan.lane_words(space);
-        if want > exact_offer || !admits(options.traversal, space, block, plan, lane.bytes) {
-            decline(triple, epilogue, options, scratch, ledger);
-            return;
-        }
-        let (panel, accumulators) = scratch.split(suggested_tabulation_panel(space, block), want);
-        if !decode_book(triple.w.codec(), panel, ledger) {
-            decline(triple, epilogue, options, scratch, ledger);
-            return;
-        }
-        let (exact, stack) = accumulators.split_at_mut(tile);
-        let words: &mut [Wide<AccOf<E>>] = Wide::wrap_slice_mut(stack);
-        tabulate::<E, Bd, C, O, Ep, Wide<AccOf<E>>, Lg>(
-            triple, epilogue, options, exact, words, panel, index, plan, ledger,
-        );
-        return;
-    }
-
-    // A narrow lane, out of the caller's lane offer. The offer is `i64`-shaped
-    // because that is the widest narrow word; a 32-bit lane reads twice as many
-    // of them out of the same bytes.
-    let offered = core::mem::size_of_val(&*words) / lane.bytes;
-    let Some(plan) = Plan::choose(space, shape, lane, exact_offer, offered, block) else {
+    // The lane offer is `i64`-shaped, read as however many lane words fit in the
+    // same bytes; a family whose lane *is* the exact accumulator reads that
+    // offer instead, because that is where a word so wide already lives.
+    let offered = if E::LANE_IS_EXACT {
+        exact_offer
+    } else {
+        core::mem::size_of_val(&*words) / lane_bytes
+    };
+    let Some(plan) = Plan::choose(space, shape, lane_bytes, exact_offer, offered, block) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
-    if !admits(options.traversal, space, block, plan, lane.bytes) {
+    if !admits(options.traversal, space, block, plan, lane_bytes) {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     }
-    let (panel, exact) = scratch.split(
-        suggested_tabulation_panel(space, block),
-        plan.rows * plan.cols,
-    );
+
+    let want = plan.lane_words(space);
+    let tile = plan.rows * plan.cols;
+    let take = if E::LANE_IS_EXACT { tile + want } else { tile };
+    if take > exact_offer {
+        decline(triple, epilogue, options, scratch, ledger);
+        return;
+    }
+    let (panel, accumulators) = scratch.split(suggested_tabulation_panel(space, block), take);
     if !decode_book(triple.w.codec(), panel, ledger) {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     }
-    let want = plan.lane_words(space);
-    if matches!(lane.kind, LaneKind::Narrow32) {
-        let narrow: &mut [i32] = bytemuck::cast_slice_mut(words);
-        tabulate::<E, Bd, C, O, Ep, i32, Lg>(
-            triple,
-            epilogue,
-            options,
-            exact,
-            &mut narrow[..want],
-            panel,
-            index,
-            plan,
-            ledger,
-        );
-    } else {
-        tabulate::<E, Bd, C, O, Ep, i64, Lg>(
-            triple,
-            epilogue,
-            options,
-            exact,
-            &mut words[..want],
-            panel,
-            index,
-            plan,
-            ledger,
-        );
-    }
+    let (exact, rest) = accumulators.split_at_mut(tile);
+    let Some(lanes) = E::lanes(words, rest, want) else {
+        decline(triple, epilogue, options, scratch, ledger);
+        return;
+    };
+    tabulate::<E, Bd, C, O, Ep, Lg>(
+        triple, epilogue, options, exact, lanes, panel, index, plan, ledger,
+    );
 }
 
 /// Does the caller's named traversal admit the table this plan describes?
@@ -1216,6 +1134,15 @@ fn admits(
 /// every `m`.
 const ROW_TILES: [usize; 5] = [16, 8, 4, 2, 1];
 
+/// The narrowest tile the traversal runs unpadded.
+///
+/// Below this the entry is smaller than the offset that addresses it, and the
+/// adds are one instruction each rather than one for the whole tile. Padding to
+/// here computes rows that are not there --- which is exact, because the
+/// alphabet's zero contributes nothing --- and measured it is the faster of the
+/// two at every `m` under it.
+const PADDED_TILE: usize = 8;
+
 /// Decode the whole codebook once, transposed, into the caller's panel offer.
 ///
 /// `book[index * block + t]` is element `t` of the `index`-th codeword, so one
@@ -1263,105 +1190,45 @@ pub const fn suggested_tabulation_panel(code_space: usize, block: usize) -> usiz
 }
 
 /// Output columns reduced together in one pass over the stack.
+/// Slots one [`TableSpec::gather`] call reduces at once.
 ///
-/// The table does not fit L1 once the stack is deep enough to keep the exact
-/// accumulator out of the loop, so every entry read is an L2 hit and the only
-/// question is whether it is *overlapped*. One column at a time gives the machine
-/// one load to work on; `U` columns give it `U`, and they are independent because
-/// their codes are independent. The lane state is `U * R` words --- four 256-bit
-/// registers at the shipped tile --- so nothing spills to make room for it.
-const COLUMN_GROUP: usize = 2;
+/// The call's index run is a fixed window on the stack, so the traversal's own
+/// depth --- which [`tabulation_depth`] derives from L2 --- is capped by this.
+/// That is a blocking parameter and not a ceiling on anything a caller supplies:
+/// a deeper reduction takes more windows, and `R8` is about limits on the input.
+///
+/// Measured, the depth that pays is between four and thirty-two, so this is
+/// above every value the derivation asks for and costs nothing.
+const GATHER_SLOTS: usize = 32;
 
-/// `U` output columns, one chunk of the reduction, at a compile-time row count.
+/// Lane words one gather call keeps in flight.
 ///
-/// Everything is walked rather than indexed: the stack is one slab per block, the
-/// codes of each column are a contiguous run, and the entry's offset is a shift.
-/// That leaves the step with one load, one mask, one add, and `R` adds --- no
-/// multiply, no bounds check, and no loop framing.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn columns<const R: usize, const U: usize, E, Bd, C, L>(
-    stack: &[L],
-    slab: usize,
-    codes: &[C::Code],
-    codes_per_row: usize,
-    col: usize,
-    p0: usize,
-    depth: usize,
-    acc: &mut [AccOf<E>],
-) where
-    E: IntegerElement,
-    Bd: Bound,
-    C: Enumerable<E, Bd>,
-    L: Lane<E>,
-{
-    let mut base = [0usize; U];
-    for (u, at) in base.iter_mut().enumerate() {
-        *at = (col + u) * codes_per_row + p0;
-    }
-    let mut lane = [[L::ZERO; R]; U];
-    for (slot, words) in stack.chunks_exact(slab).take(depth).enumerate() {
-        for u in 0..U {
-            let at = C::index_of(codes[base[u] + slot]) * R;
-            if let Some(entry) = words.get(at..).and_then(<[L]>::first_chunk::<R>) {
-                add_entry(entry, &mut lane[u]);
-            }
-        }
-    }
-    // The placement, once for the whole chunk and all `U` columns.
-    for (cell, word) in acc.iter_mut().zip(lane.iter().flatten()) {
-        *cell = word.place(*cell);
-    }
-}
+/// Every entry read is a random access into a table that does not fit L1 once
+/// the stack is deep, so what the column loop is bound by is how many of those
+/// reads are *overlapped*. A tile of `rows` gives one call `rows` of them; below
+/// the widest tile it takes more than one column to reach the same number, and
+/// measured that is exactly the shape of the loss: at a one-row tile, a group of
+/// one runs at 3.1 Gmac/s where the same traversal in groups runs at three times
+/// that.
+///
+/// So the group is derived, not chosen: `COLUMN_LANES / rows`, which is one at
+/// the widest tile and widens as the tile narrows. The lane state stays the same
+/// size whatever the shape, which is what keeps it in registers.
+const COLUMN_LANES: usize = 16;
 
-/// The same, for `U` columns that are *not* consecutive.
+/// The widest column group any tile asks for, and therefore the offset run one
+/// call materializes.
 ///
-/// A specialization of [`columns`] in the direction that costs something, which
-/// is why it is a second function and not a parameter. The consecutive form lets
-/// the compiler carry the code base and the accumulator base as induction
-/// variables; naming the columns instead turns both into indexed loads, and
-/// measured that halved the throughput of every shape --- including the ones with
-/// nothing to collapse. An operand that repeats no column must never pay for the
-/// machinery that would have found repeats, so it walks [`columns`] and this one
-/// is reached only when the collapse has something to do.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn columns_at<const R: usize, const U: usize, E, Bd, C, L>(
-    stack: &[L],
-    slab: usize,
-    codes: &[C::Code],
-    codes_per_row: usize,
-    of: &[usize],
-    col0: usize,
-    p0: usize,
-    depth: usize,
-    acc: &mut [AccOf<E>],
-) where
-    E: IntegerElement,
-    Bd: Bound,
-    C: Enumerable<E, Bd>,
-    L: Lane<E>,
-{
-    let mut base = [0usize; U];
-    for (u, at) in base.iter_mut().enumerate() {
-        *at = of[u] * codes_per_row + p0;
-    }
-    let mut lane = [[L::ZERO; R]; U];
-    for (slot, words) in stack.chunks_exact(slab).take(depth).enumerate() {
-        for u in 0..U {
-            let at = C::index_of(codes[base[u] + slot]) * R;
-            if let Some(entry) = words.get(at..).and_then(<[L]>::first_chunk::<R>) {
-                add_entry(entry, &mut lane[u]);
-            }
-        }
-    }
-    // The codes are named by the *output* column; the accumulator is the block's,
-    // so it is named by the column's place within it.
-    for (u, word) in lane.iter().enumerate() {
-        let out = (of[u] - col0) * R;
-        for (cell, w) in acc[out..out + R].iter_mut().zip(word) {
-            *cell = w.place(*cell);
-        }
+/// A frame size, not a limit on anything a caller supplies: `COLUMN_LANES` over
+/// the narrowest tile, which is one.
+const MAX_GROUP: usize = COLUMN_LANES;
+
+/// Output columns one gather call reduces at once, at a tile of `rows`.
+const fn column_group(rows: usize) -> usize {
+    if rows >= COLUMN_LANES {
+        1
+    } else {
+        COLUMN_LANES / rows
     }
 }
 
@@ -1510,27 +1377,42 @@ where
     (x ^ (x >> 31)) as usize
 }
 
-/// One row tile, at a compile-time row count.
+/// One row tile: build the stack, reduce every distinct column into a lane, and
+/// encode once.
 ///
-/// `R` is what makes the column loop a *register* loop. A `rows`-long slice of
-/// unknown length compiles to a bounds check, a scalar prologue and a vector
-/// epilogue around eight adds; measured, that framing cost more than the adds by
-/// an order of magnitude. With `R` known, the whole chunk's accumulation is `R`
-/// registers and the table read is one contiguous `R`-word load.
+/// `rows` is a runtime value now, and that is a simplification rather than a
+/// concession. It was a const generic so the column accumulation would sit in
+/// registers instead of behind a bounds check --- which mattered while the loop
+/// was written here, in a crate compiled at the target's baseline. The loop is a
+/// [`TableSpec`] sequence now, so the register count is the sequence's own
+/// compile-time constant and the tile height is just a number.
+///
+/// # Where the exact accumulator is
+///
+/// Once, at the end. `lane` carries the whole reduction for every column of the
+/// block, and it is placed into `exact` only when the run reaches the lane's
+/// capacity --- 133144 products at `(i8, 128)`, so for every `k` under that,
+/// exactly once per output element. That is "encode once" applied inside the
+/// traversal, and measured it was worth 1.94x.
 #[allow(clippy::too_many_arguments)]
-fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
+fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     exact: &mut [AccOf<E>],
-    lanes: &mut [L],
-    panel: &mut [Alphabet<E, Bd>],
+    lane: &mut [L],
+    table: &mut Table<'_, L>,
+    spec: &TableSpec<E, L>,
+    book: &[E],
+    acts: &mut [E],
     index: Option<&[usize]>,
     plan: Plan,
+    rows: usize,
+    group: usize,
     row0: usize,
     ledger: &mut Lg,
 ) where
-    E: IntegerElement,
+    E: Tabulated<Lane = L>,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1544,29 +1426,33 @@ fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
     let reads_c = epilogue.reads_c();
     let codes_per_row = triple.w.codes_per_row();
     let codes = triple.w.codes();
-
-    // The stack is shaped to *this* tile, so its stride is `R` and its slab is
-    // `CODE_SPACE * R` --- both compile-time. That is what turns the step's
-    // address arithmetic into a shift and lets the bounds of the entry be proved
-    // rather than checked: `index < CODE_SPACE`, so `index * R + R <= slab`.
-    let space = C::CODE_SPACE;
-    let slab = space * R;
-    let Some(mut table) = Table::new(lanes, space, R, plan.depth) else {
-        // `Plan::choose` sized the lane offer for the widest tile it admits and
-        // `R` is never wider, so this cannot be reached. It is written as the
-        // streaming traversal rather than as an assertion because an unreachable
-        // branch that could produce no output at all is worse than one that
-        // produces the right output slowly (C6, R14).
-        stream(triple, epilogue, options, panel, ledger);
-        return;
+    let slab = table.slab();
+    // Blocks one lane word holds before it must be placed. A question about a
+    // register, never a limit on `k`: a deeper reduction takes more runs, and the
+    // runs combine exactly (§5.1).
+    let run_blocks = <L as Lane<E>>::capacity(Bd::VALUE)
+        .map(|c| (c / block).max(1))
+        .unwrap_or(usize::MAX);
+    // The two widths this tile reduces at, resolved once. `wide` is the group
+    // the tile height asks for; `single` is the one column an operand's repeats
+    // or a shape that does not divide leaves over.
+    let arg = Sweep {
+        wide: *spec,
+        single: E::table_spec(options.backend, Bd::VALUE, rows, 1),
+        codes,
+        codes_per_row,
+        index,
+        rows,
+        slab,
     };
-    let (book, acts) = panel.split_at_mut(space * block);
 
     let mut col0 = 0usize;
     while col0 < shape.n {
         let cols = plan.cols.min(shape.n - col0);
-        let acc = &mut exact[..R * cols];
+        let acc = &mut exact[..rows * cols];
         acc.fill(<AccOf<E> as Accumulator>::ZERO);
+        let carried = &mut lane[..rows * cols];
+        carried.fill(L::ZERO);
 
         // The collapse applies when this block is the whole output width, because
         // a repeat's first occurrence has to be inside the block to be copied
@@ -1579,118 +1465,57 @@ fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
         };
 
         let mut p0 = 0usize;
+        let mut in_run = 0usize;
         while p0 < blocks {
             let depth = plan.depth.min(blocks - p0);
             for slot in 0..depth {
-                // The activation tile for this block, packed once: `R` rows by
-                // `MAX_BLOCK` steps, read from `A`'s own strides here and walked
-                // contiguously inside the build.
+                // The activation tile for this block, packed once into the layout
+                // the sequence declared: `k`-major in groups of `k_group`,
+                // lane-major within a group. That is [`packed_slot`], the same
+                // function the dense packer uses, so a sequence that folds a pair
+                // of block steps into one instruction finds the pair adjacent and
+                // needs no shuffle and no tail.
                 let base = (p0 + slot) * block;
+                let live = rows.min(shape.m - row0);
                 for t in 0..block {
-                    for i in 0..R {
-                        acts[t * R + i] = *triple.a.at(row0 + i, base + t);
+                    for i in 0..live {
+                        acts[packed_slot(t, i, rows, spec.k_group)] =
+                            triple.a.at(row0 + i, base + t).get();
+                    }
+                    // The rows that are not there. Zero, which contributes
+                    // nothing to any entry and therefore nothing to any sum.
+                    for i in live..rows {
+                        acts[packed_slot(t, i, rows, spec.k_group)] = E::ZERO;
                     }
                 }
-                table.build::<R, E, Bd, C, Lg>(book, &acts[..block * R], slot, ledger);
+                table.build(spec, block, book, &acts[..block * rows], slot, ledger);
             }
 
-            // No multiply below this line, and no exact accumulator either:
-            // `depth` blocks reduce into `R` lane words held in registers, and
-            // the placement happens once for all of them.
-            //
-            // Everything the step needs is walked rather than indexed: the codes
-            // of one column are a contiguous run, the stack is one slab per
-            // block, and the output tile is one chunk per column. That leaves the
-            // step with one load, one mask, one add of the entry's base, and `R`
-            // adds --- no multiply, no bounds check, and no loop framing.
-            let stack = table.stack();
-            // Only the columns that carry a distinct meaning. A repeat is not
-            // computed at all; it is copied once, after the whole reduction, from
-            // the column it repeats --- `R` contiguous words.
-            //
-            // Two loops, not one loop with a test in it. The test is loop
-            // invariant and leaving it inside cost the consecutive case its
-            // grouping: measured, 28 Gmac/s became 11. An operand with nothing to
-            // collapse must walk exactly the loop it walked before the collapse
-            // existed, and this is that loop.
-            let computed;
-            if let Some(of) = collapsed {
-                // Only the columns that carry a distinct meaning. A repeat is not
-                // computed at all; it is copied once, after the whole reduction,
-                // from the column it repeats --- `R` contiguous words.
-                let mut ids = [0usize; COLUMN_GROUP];
-                let mut filled = 0usize;
-                let mut done = 0usize;
-                for j in 0..cols {
-                    if of[col0 + j] != col0 + j {
-                        continue;
-                    }
-                    ids[filled] = col0 + j;
-                    filled += 1;
-                    done += 1;
-                    if filled == COLUMN_GROUP {
-                        columns_at::<R, COLUMN_GROUP, E, Bd, C, L>(
-                            stack,
-                            slab,
-                            codes,
-                            codes_per_row,
-                            &ids,
-                            col0,
-                            p0,
-                            depth,
-                            acc,
-                        );
-                        filled = 0;
-                    }
-                }
-                for u in 0..filled {
-                    columns_at::<R, 1, E, Bd, C, L>(
-                        stack,
-                        slab,
-                        codes,
-                        codes_per_row,
-                        &ids[u..],
-                        col0,
-                        p0,
-                        depth,
-                        acc,
-                    );
-                }
-                computed = done;
-            } else {
-                let mut j = 0usize;
-                while j + COLUMN_GROUP <= cols {
-                    columns::<R, COLUMN_GROUP, E, Bd, C, L>(
-                        stack,
-                        slab,
-                        codes,
-                        codes_per_row,
-                        col0 + j,
-                        p0,
-                        depth,
-                        &mut acc[j * R..],
-                    );
-                    j += COLUMN_GROUP;
-                }
-                while j < cols {
-                    columns::<R, 1, E, Bd, C, L>(
-                        stack,
-                        slab,
-                        codes,
-                        codes_per_row,
-                        col0 + j,
-                        p0,
-                        depth,
-                        &mut acc[j * R..],
-                    );
-                    j += 1;
-                }
-                computed = cols;
-            }
-            ledger.read((computed * depth * R) as u64);
-            ledger.added((computed * depth * R) as u64);
+            // No multiply below this line, and no exact accumulator either: the
+            // whole chunk reduces into the lane words the previous chunk left,
+            // and the placement happens once for the whole run.
+            let stack = &table.stack()[..depth * slab];
+            let computed = match group {
+                16 => sweep::<16, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
+                8 => sweep::<8, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
+                4 => sweep::<4, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
+                2 => sweep::<2, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
+                _ => sweep::<1, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
+            };
+            ledger.read((computed * depth * rows) as u64);
+            ledger.added((computed * depth * rows) as u64);
+
             p0 += depth;
+            in_run += depth;
+            // The run is full: place it and start the next one. Unreachable for
+            // every `k` a narrow lane covers whole, which is every `k` under
+            // 133144 at `(i8, 128)`.
+            if in_run + plan.depth > run_blocks {
+                place(carried, acc);
+                in_run = 0;
+            }
         }
+        place(carried, acc);
 
         // The expansion: every repeated column takes the accumulation of the one
         // it repeats. Ascending, and a repeat always names an earlier column, so
@@ -1698,13 +1523,14 @@ fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
         if let Some(of) = collapsed {
             for (j, &src) in of[..cols].iter().enumerate() {
                 if src != j {
-                    acc.copy_within(src * R..src * R + R, j * R);
+                    acc.copy_within(src * rows..src * rows + rows, j * rows);
                 }
             }
         }
 
-        // The single encode step, exactly once per output element.
-        for i in 0..R {
+        // The single encode step, exactly once per output element. The padded
+        // rows are not output elements and are never written.
+        for i in 0..rows.min(shape.m - row0) {
             for j in 0..cols {
                 let (r, c) = (row0 + i, col0 + j);
                 let prior = if reads_c {
@@ -1712,61 +1538,177 @@ fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
                 } else {
                     None
                 };
-                *triple.c.at_mut(r, c) = epilogue.finish(acc[j * R + i], prior, options.encode);
+                *triple.c.at_mut(r, c) = epilogue.finish(acc[j * rows + i], prior, options.encode);
             }
         }
         col0 += cols;
     }
 }
 
+/// What one column sweep needs and does not change while it runs.
+struct Sweep<'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, L> {
+    wide: TableSpec<E, L>,
+    single: TableSpec<E, L>,
+    codes: &'c [C::Code],
+    codes_per_row: usize,
+    index: Option<&'c [usize]>,
+    rows: usize,
+    slab: usize,
+}
+
+/// One chunk of the reduction, over every distinct column of the block.
+///
+/// `G` is the column group and it is a *compile-time* constant, which is the
+/// whole reason this is a function. With `G` runtime, the offset run's stride and
+/// the code stream's column step are indexed loads rather than folded constants,
+/// and measured that cost 2.4x at the widest tile --- on shapes where `G` is one
+/// and the grouping does nothing at all. A knob has to disappear when it is not
+/// being used.
 #[allow(clippy::too_many_arguments)]
-fn tabulate<E, Bd, C, O, Ep, L, Lg>(
+#[inline(always)]
+fn sweep<const G: usize, E, Bd, C, L>(
+    arg: &Sweep<'_, E, Bd, C, L>,
+    stack: &[L],
+    carried: &mut [L],
+    col0: usize,
+    cols: usize,
+    p0: usize,
+    depth: usize,
+) -> usize
+where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    L: Lane<E>,
+{
+    let (rows, cpr) = (arg.rows, arg.codes_per_row);
+    let mut off = [0u32; GATHER_SLOTS * MAX_GROUP];
+    let mut computed = 0usize;
+    let mut j = 0usize;
+    while j < cols {
+        // A repeat is not computed at all; it is copied once, after the whole
+        // reduction, from the column it repeats. A group's lanes have to be
+        // adjacent in `carried`, so a group is a run of consecutive columns and
+        // a skipped one ends the run.
+        let present = |u: usize| match arg.index {
+            Some(of) => of[col0 + j + u] == col0 + j + u,
+            None => true,
+        };
+        if !present(0) {
+            j += 1;
+            continue;
+        }
+        let whole = G > 1 && j + G <= cols && (1..G).all(present);
+        let base = (col0 + j) * cpr + p0;
+        if whole {
+            for slot in 0..depth {
+                for u in 0..G {
+                    off[slot * G + u] =
+                        (C::index_of(arg.codes[base + u * cpr + slot]) * rows) as u32;
+                }
+            }
+            arg.wide.gather(
+                depth,
+                arg.slab as u32,
+                stack,
+                &off[..depth * G],
+                &mut carried[j * rows..(j + G) * rows],
+            );
+            computed += G;
+            j += G;
+        } else {
+            for (slot, cell) in off[..depth].iter_mut().enumerate() {
+                *cell = (C::index_of(arg.codes[base + slot]) * rows) as u32;
+            }
+            arg.single.gather(
+                depth,
+                arg.slab as u32,
+                stack,
+                &off[..depth],
+                &mut carried[j * rows..(j + 1) * rows],
+            );
+            computed += 1;
+            j += 1;
+        }
+    }
+    computed
+}
+
+/// Place a completed run of lane words into the exact accumulator and clear it.
+///
+/// The only place the exact accumulator appears in the reduction, and for a
+/// narrow lane that holds the whole depth it runs once per output element.
+fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc]) {
+    for (cell, word) in acc.iter_mut().zip(lane.iter_mut()) {
+        *cell = word.place(*cell);
+        *word = L::ZERO;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tabulate<E, Bd, C, O, Ep, Lg>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     exact: &mut [AccOf<E>],
-    lanes: &mut [L],
+    lanes: &mut [E::Lane],
     panel: &mut [Alphabet<E, Bd>],
     index: Option<&[usize]>,
     plan: Plan,
     ledger: &mut Lg,
 ) where
-    E: IntegerElement,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
-    L: Lane<E>,
     Lg: Ledger,
 {
     let shape = triple.shape();
+    let space = C::CODE_SPACE;
+    let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
+    let (columns, stack) = lanes.split_at_mut(plan.rows * plan.cols);
 
     let mut row0 = 0usize;
     while row0 < shape.m {
-        // The widest compiled tile the plan and the remaining rows admit. A shape
-        // that does not divide walks down the list; it does not take a different
-        // path, and `CD-13` asserts the bytes at every `m`.
+        // The widest tile the plan and the remaining rows admit. A shape that
+        // does not divide walks down the list; it does not take a different path,
+        // and `CD-13` asserts the bytes at every `m`.
+        // Zero padding is exact (S8), so a remainder narrower than the
+        // narrowest vector sequence is *padded up* to one rather than run
+        // without instructions. At a one-row tile the offset the gather reads
+        // is as wide as the entry it addresses; at eight it is an eighth of it,
+        // and the adds are one instruction instead of eight. The padded rows
+        // contribute zero and are never written.
+        let want = (shape.m - row0).next_power_of_two().max(PADDED_TILE);
         let rows = ROW_TILES
             .into_iter()
-            .find(|&r| r <= plan.rows && r <= shape.m - row0)
+            .find(|&r| r <= plan.rows && r <= want)
             .unwrap_or(1);
-        match rows {
-            16 => row_tile::<16, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
-            ),
-            8 => row_tile::<8, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
-            ),
-            4 => row_tile::<4, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
-            ),
-            2 => row_tile::<2, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
-            ),
-            _ => row_tile::<1, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
-            ),
-        }
+        // The sequence for *this* tile height. A narrower tile is a narrower
+        // register file, not a different function, and the reference carries
+        // every height no vector sequence has (R13).
+        let group = column_group(rows);
+        let spec = E::table_spec(options.backend, Bd::VALUE, rows, group);
+        let Some(mut table) = Table::new(stack, space, rows, plan.depth) else {
+            // `Plan::choose` sized the offer for the widest tile it admits and
+            // `rows` is never wider, so this cannot be reached. It is written as
+            // the streaming traversal rather than as an assertion because an
+            // unreachable branch that could produce no output at all is worse
+            // than one that produces the right output slowly (C6, R14).
+            stream(triple, epilogue, options, panel, ledger);
+            return;
+        };
+        // The panel is `Alphabet<E, Bd>`, a transparent wrapper, so the
+        // sequences read the caller's elements themselves and no copy stands
+        // between them.
+        let (book, acts) = panel.split_at_mut(space * block);
+        let book: &[E] = bytemuck::TransparentWrapper::peel_slice(book);
+        let acts: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(acts);
+        row_tile::<E, Bd, C, O, Ep, E::Lane, Lg>(
+            triple, epilogue, options, exact, columns, &mut table, &spec, book, acts, index, plan,
+            rows, group, row0, ledger,
+        );
         row0 += rows;
     }
 }
@@ -1784,7 +1726,7 @@ fn decline<E, Bd, C, O, Ep, Lg>(
     scratch: &mut Scratch<'_, E, Bd>,
     ledger: &mut Lg,
 ) where
-    E: Kernelized,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1823,7 +1765,7 @@ fn packed_route<E, Bd, C, O, Ep, Lg>(
     ledger: &mut Lg,
 ) -> bool
 where
-    E: Kernelized,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1887,7 +1829,7 @@ fn stream<E, Bd, C, O, Ep, Lg>(
     panel: &mut [Alphabet<E, Bd>],
     ledger: &mut Lg,
 ) where
-    E: IntegerElement,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1901,10 +1843,9 @@ fn stream<E, Bd, C, O, Ep, Lg>(
     // it --- which decodes each weight once instead of once per row of `A`, and
     // leaves two contiguous runs for the lane dot product below.
     let borrowed = panel.len() >= shape.k;
-    // The same narrowest-lane scan the table runs, at a block of one: a plain dot
-    // product is a table of one entry that nobody shares.
-    let lane = LaneChoice::resolve::<E, Bd>(1);
-    let run = lane.run();
+    // The same lane the table uses, at a block of one: a plain dot product is a
+    // table of one entry that nobody shares.
+    let run = <E::Lane as Lane<E>>::capacity(Bd::VALUE).unwrap_or(usize::MAX);
     for j in 0..shape.n {
         if borrowed {
             triple.w.decode_row_into(j, panel);
@@ -1916,18 +1857,14 @@ fn stream<E, Bd, C, O, Ep, Lg>(
             } else {
                 None
             };
-            let acc = match (row, lane.kind) {
-                // Both operands are runs and the alphabet admits a narrow lane:
-                // the whole reduction is a vector loop over two contiguous slices.
-                (Some(a), LaneKind::Narrow32) => dot_lane::<E, Bd, i64>(a, &panel[..shape.k], run),
-                (Some(a), LaneKind::Narrow64) => dot_lane::<E, Bd, i64>(a, &panel[..shape.k], run),
-                (Some(a), LaneKind::Exact) => {
-                    dot_lane::<E, Bd, Wide<AccOf<E>>>(a, &panel[..shape.k], run)
-                }
+            let acc = match row {
+                // Both operands are runs: the whole reduction is a loop over two
+                // contiguous slices in the family's own lane.
+                Some(a) => dot_lane::<E, Bd, E::Lane>(a, &panel[..shape.k], run),
                 // `A`'s row is not a run, or nothing was offered to decode into.
                 // The same accumulation, walked: this is what makes the traversal
                 // runnable on a target whose RAM cannot hold one row (S13).
-                (None, _) => {
+                None => {
                     let mut acc = <AccOf<E> as Accumulator>::ZERO;
                     if borrowed {
                         for (p, w) in panel[..shape.k].iter().enumerate() {
