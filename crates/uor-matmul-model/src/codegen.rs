@@ -273,6 +273,24 @@ pub fn render(model: &Model) -> String {
         "    pub const L2_BYTES: usize = {};",
         model.constants.blocking.l2_bytes
     );
+    let _ = writeln!(
+        w,
+        "    /// Products one instruction of a dense tile kernel issues."
+    );
+    let _ = writeln!(
+        w,
+        "    pub const KERNEL_PRODUCTS_PER_STEP: usize = {};",
+        model.constants.blocking.kernel_products_per_step
+    );
+    let _ = writeln!(
+        w,
+        "    /// Rows of the output a dense tile kernel produces per call."
+    );
+    let _ = writeln!(
+        w,
+        "    pub const KERNEL_ROWS: usize = {};",
+        model.constants.blocking.kernel_rows
+    );
     let _ = writeln!(w, "}}");
 
     // R1's pin. The plan permits `133144` to appear inside a `const _` assert

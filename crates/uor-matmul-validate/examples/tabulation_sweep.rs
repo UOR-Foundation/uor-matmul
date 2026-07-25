@@ -5,6 +5,12 @@
 //! the tabulated traversal compare against this library's *fast* dense path ---
 //! the packed AVX2 tile kernels --- on the same product.
 //!
+//! It runs `Traversal::Blocked`, which is the default and therefore what a caller
+//! actually gets: the library's own choice between the table and the streaming
+//! traversal at each shape, not the table forced. The `picked` column says which
+//! way the predicate went, and the point of the sweep is to check that judgement
+//! against the clock.
+//!
 //! Every figure is `open`. The answer is checked to be the same bytes the dense
 //! driver produces, inside the timed region, at every shape.
 
@@ -16,8 +22,9 @@ use uor_matmul_core::{
     Traversal, Triple,
 };
 use uor_matmul_gemm::{
-    gemm_packed, gemm_tabulated, suggested_scratch, suggested_tabulation,
-    suggested_tabulation_lanes, GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
+    gemm_packed, gemm_tabulated, gemm_tabulated_counted, suggested_scratch, suggested_tabulation,
+    suggested_tabulation_lanes, suggested_tabulation_panel, Census, GemmOptions, Linear, Scratch,
+    TabulatedTriple, Tabulation,
 };
 
 type Book<'a> = uor_matmul_codec::Book<'a, i8, Full<i8>, 256, 8>;
@@ -60,8 +67,8 @@ fn main() {
     println!("tile path over the *decoded* weights; `tabulated` never decodes more");
     println!("than `{space} * {block}` codewords per row tile.");
     println!();
-    println!("| `m x k x n` | tabulated | packed | streamed | vs packed |");
-    println!("| --- | --- | --- | --- | --- |");
+    println!("| `m x k x n` | default | packed | forced stream | vs packed | picked |");
+    println!("| --- | --- | --- | --- | --- | --- |");
 
     for &(m, k, n) in &[
         (1usize, 1024usize, 4096usize),
@@ -70,6 +77,13 @@ fn main() {
         (64, 4096, 4096),
         (256, 1024, 4096),
         (64, 1024, 16384),
+        // Shapes that divide nothing: a ragged row tile, a prime column count,
+        // and a depth that is one block past a round number. A traversal that had
+        // a cliff at an awkward size would show it here.
+        (3, 1024, 4093),
+        (17, 1032, 1021),
+        (1, 8192, 1),
+        (1000, 512, 512),
     ] {
         let macs = (m * k * n) as f64;
         let shape = Shape { m, k, n };
@@ -102,7 +116,8 @@ fn main() {
         let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
         let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
-        let mut lanes: Vec<Alphabet<i8, Full<i8>>> = Vec::new();
+        let mut lanes =
+            vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_tabulation_panel(space, block)];
         let mut c = vec![0i32; m * n];
 
         let t_tab = {
@@ -117,7 +132,7 @@ fn main() {
                     gemm_tabulated(
                         &mut tr,
                         &Linear::OVERWRITE,
-                        options(Traversal::Tabulated),
+                        options(Traversal::Blocked),
                         &mut Scratch::with_accumulators(lanes, accumulators),
                         &mut Tabulation::new(words),
                     );
@@ -150,6 +165,25 @@ fn main() {
         );
 
         let mut scratch = vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_scratch(shape)];
+        // Which way the library went, read from the census rather than recomputed
+        // from the predicate: a table that was never read is a table that was not
+        // chosen, and that is a fact rather than a restatement.
+        let picked = {
+            let mut census = Census::default();
+            let mut out = vec![0i32; m * n];
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let cv = MatViewMut::row_major(&mut out, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            gemm_tabulated_counted(
+                &mut tr,
+                &Linear::OVERWRITE,
+                options(Traversal::Blocked),
+                &mut Scratch::with_accumulators(&mut lanes, &mut accumulators),
+                &mut Tabulation::new(&mut words),
+                &mut census,
+            );
+            census.table_reads > 0
+        };
         let t_packed = {
             let (a, b, c, scratch) = (&a, &b, &mut c, &mut scratch);
             best(|| {
@@ -173,11 +207,12 @@ fn main() {
 
         let g = |t: f64| macs / t / 1e9;
         println!(
-            "| `{m}x{k}x{n}` | {:.2} | {:.2} | {:.3} | {:.2}x |",
+            "| `{m}x{k}x{n}` | {:.2} | {:.2} | {:.3} | {:.2}x | {} |",
             g(t_tab),
             g(t_packed),
             g(t_stream),
             t_packed / t_tab,
+            if picked { "table" } else { "stream" },
         );
     }
 }

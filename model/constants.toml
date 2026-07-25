@@ -177,7 +177,22 @@ l1_bytes = 32768
 # The second level of data cache. It sizes the *depth* of a tabulation stack:
 # `depth` tables are built once and then reduced into a lane held in registers, so
 # the exact accumulator is touched once per chunk instead of once per block.
-# Deeper is better until the stack leaves this budget --- and measured, a stack at
-# half of L2 already thrashes against the code stream and the accumulator tile, so
-# `tabulation_depth` takes a quarter of it.
+# Deeper is better until the stack leaves this budget: the column loop reduces
+# `depth` blocks per placement, so the exact accumulator's traffic falls as `1/depth`.
+# `tabulation_depth` takes half, which is what the sweep in ANALYSIS.md settles on.
 l2_bytes = 524288
+# Products one instruction of a dense tile kernel issues. It is what makes the
+# tabulation predicate a comparison of *instructions* rather than of operations:
+# a lane operation covers `MAX_BLOCK * rows` products and a dense one covers this
+# many, so counting both as one apiece over-sells the table and selects it on
+# shapes where the kernels are four times faster per product. Like the five above
+# it can change which traversal produces an output byte and never which byte.
+kernel_products_per_step = 32
+# Rows of the output a dense tile kernel produces per call. A tile issues its
+# `kernel_products_per_step` products only when it has this many rows to fill;
+# with fewer it pays for the lanes that are not there, which is why a matrix-vector
+# product is where a tile kernel is weakest and a table is strongest. The
+# tabulation predicate scales the dense side by the rows actually present, and
+# without that it declined the table at `m = 1` where the table was three times
+# faster.
+kernel_rows = 6

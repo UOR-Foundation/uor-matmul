@@ -448,7 +448,8 @@ fn tabulation_census_and_throughput_cg_10() {
     };
     use uor_matmul_gemm::{
         gemm_tabulated, gemm_tabulated_counted, suggested_tabulation, suggested_tabulation_lanes,
-        Census, GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
+        suggested_tabulation_panel, Census, GemmOptions, Linear, Scratch, TabulatedTriple,
+        Tabulation,
     };
 
     let table = e8_table::<Full<i8>>().expect("i8 holds E8");
@@ -514,7 +515,8 @@ fn tabulation_census_and_throughput_cg_10() {
         let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
         let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
-        let mut panel: Vec<Alphabet<i8, Full<i8>>> = Vec::new();
+        let mut panel =
+            vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_tabulation_panel(space, block)];
         let mut c = vec![0i32; m * n];
 
         let run = |traversal: Traversal,

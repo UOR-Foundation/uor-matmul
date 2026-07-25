@@ -478,60 +478,103 @@ asserts the closed forms behind it --- `adds == table_reads == m*n*(k/Bk)` and
 ### Against the kernels, which is the harder question
 
 Beating the streaming traversal is not the bar. The bar is this library's own
-packed AVX2 tile path over the *decoded* weights. Over `Book<256,8>`:
+packed AVX2 tile path over the *decoded* weights --- which is given its operand
+already dense, so the comparison is generous to it. Over `Book<256,8>`, running
+`Traversal::Blocked`, which is the default and therefore what a caller gets:
 
-| `m x k x n` | tabulated | packed | vs packed |
-| --- | --- | --- | --- |
-| `1x1024x4096` | **7.41** | 1.13 | **6.56x** |
-| `8x1024x4096` | **14.26** | 6.86 | **2.08x** |
-| `64x1024x4096` | 13.90 | 24.66 | 0.56x |
-| `64x4096x4096` | 12.38 | 15.87 | 0.78x |
-| `256x1024x4096` | 12.72 | 33.90 | 0.38x |
-| `64x1024x16384` | 18.36 | 24.22 | 0.76x |
+| `m x k x n` | default | packed | vs packed | picked |
+| --- | --- | --- | --- | --- |
+| `1x1024x4096` | **10.17** | 1.15 | **8.81x** | table |
+| `8x1024x4096` | **24.95** | 6.99 | **3.57x** | table |
+| `64x1024x4096` | **27.91** | 25.10 | **1.11x** | table |
+| `64x4096x4096` | **27.57** | 16.68 | **1.65x** | table |
+| `256x1024x4096` | 28.02 | 34.01 | 0.82x | table |
+| `64x1024x16384` | **34.65** | 24.63 | **1.41x** | table |
+| `3x1024x4093` | **13.09** | 3.53 | **3.71x** | table |
+| `17x1032x1021` | **13.81** | 13.71 | **1.01x** | table |
+| `1x8192x1` | 0.82 | 21.01 | 0.04x | stream |
+| `1000x512x512` | 4.24 | 39.83 | 0.11x | stream |
 
-The first version of this traversal reached `2.95` on the fourth row. Everything
-between that and `13.90` was overhead, and none of it was arithmetic:
+The last four rows divide nothing --- a ragged row tile, a prime column count, a
+degenerate dot product, a shape below the break-even --- and they are in the sweep
+because a traversal with a cliff at an awkward size would show it there.
+
+### Everything between 2.95 and 28 was overhead
+
+The first working version of this traversal reached `2.95` on the fourth row.
+None of what followed was arithmetic:
 
 | what was removed | `64x1024x4096` |
 | --- | --- |
 | the first working version | 2.95 |
 | the exact accumulator out of the block loop, into a narrow lane | 5.51 |
 | the row count made a compile-time one | 9.03 |
-| the stack depth sized against a quarter of L2 rather than half | 10.55 |
 | the step's addressing walked instead of indexed | 13.09 |
 | the table's stride made the compile-time row count | 13.90 |
+| the column loop given more than one load in flight | 20.19 |
+| the codebook decoded once per call rather than once per tile | 25.33 |
+| the build's entry kept in registers across its codeword | 26.44 |
+| the row tile widened, once the above made it pay | **27.91** |
 
-Four of those five are the same bug in different places: **a runtime length where
-a compile-time one belongs.** An `R`-word slice of unknown length compiles to a
-bounds check, a scalar prologue and a vector epilogue wrapped around eight adds,
-and measured that framing cost an order of magnitude more than the adds. With `R`
-a constant the accumulation is registers, the entry is one cache line, and the
-entry's address is a shift.
+Three lessons, and they generalise past this module:
 
-The fifth is the placement. The exact accumulator is sixteen bytes and the naive
-loop touches one per output cell per block: `m*n*k/Bk` touches, a gigabyte of
-accumulator moved to compute a quarter of a billion products. A lane fixes it for
-the same reason the float path's did --- a chunk of the reduction is a sum of
-`Bk`-product entries, so a 32-bit register holds it exactly for a depth
-`fits_narrow` states, and the placement happens once per chunk. The lane is
-chosen narrowest-first by the same scan `narrow_cap_for` runs.
+**A runtime length where a compile-time one belongs is an order of magnitude.**
+An `R`-word slice of unknown length compiles to a bounds check, a scalar prologue
+and a vector epilogue wrapped around eight adds. With `R` a constant the
+accumulation is registers, the entry is one cache line, and its address is a
+shift. Four of the nine rows above are that one bug in four places.
+
+**Traffic is not arithmetic and does not look like it.** The exact accumulator is
+sixteen bytes and the naive loop touched one per output cell per block ---
+`m*n*k/Bk` touches, a gigabyte moved to compute a quarter of a billion products.
+A narrow lane fixes it the way the float path's did: a chunk of the reduction is a
+sum of `Bk`-product entries, so a 32-bit register holds it exactly for a depth
+`fits_narrow` states. The build had the same disease in a different place --- it
+read and wrote every entry once per element of its codeword, `Bk` times the
+traffic --- and the fix is the same shape: keep the entry in registers and write
+it once.
+
+**Every tuning constant here was measured, and two of them changed sign.** A
+stack at a quarter of L2 beat one at a half while the column loop had one load in
+flight, and lost to it once the loop had two. A sixteen-row tile lost to an
+eight-row tile while the build re-read every entry, and won once it did not.
+Neither is a fact about caches; both are facts about what else the loop was doing,
+and neither would have been found without re-running the sweep after each change.
+
+### The predicate is a comparison of instructions, not of operations
+
+The op-count model in the previous section --- `S + n/Bk` against `n` --- prices a
+build multiply and a kernel multiply the same, and they are not the same. A
+tabulated lane operation covers `Bk * rows` products; one instruction of a dense
+tile covers `KERNEL_PRODUCTS_PER_STEP` of them. Counting both as one apiece
+selected the table at `1000x512x512`, where the kernels are four times faster per
+product. The corrected predicate is
+
+```text
+cols * (block*rows - kernel_step) > code_space * kernel_step * block
+```
+
+and there is a second term without which it is wrong in the other direction: a
+dense tile issues its products per instruction only when it has `KERNEL_ROWS` rows
+to fill. At `m = 1` it has one useful row in six, and scaling the dense side by
+the rows actually present is what keeps the table selected there --- where it is
+`8.8x` faster and the first version of the predicate said no. Both terms are in
+`model/constants.toml`, both change which traversal produces a byte and never
+which byte, and `CM-04` recomputes every recorded break-even from them.
 
 ### What is left
 
-At `m = 1` and `m = 8` tabulation is `6.6x` and `2.1x` the packed path, which is
-the decode-time and small-batch regime a coded weight matrix exists for: a tile
-kernel at `n = 1` has one useful lane in ninety-six, and tabulation has no lanes
-to waste. Past `m = 64` the packed path wins, and the reason is measured rather
-than supposed. The remaining time splits roughly `13.5 ms` in the column loop
-against `5.8 ms` in the build at `64x1024x4096`; the column loop is `4.19M`
-code-steps at about eleven cycles each, which is an L2 hit that is not being
-hidden. The stack is `128 KiB` and every step's address depends on a just-loaded
-code, so there is a two-deep dependent load per step and `depth` of them in
-flight. Closing it means either prefetching the entry a step ahead or shrinking
-the slab so the whole stack sits in L1, and neither is built. It is work, not a
-property of the construction.
+Two rows decline the table and are slower than a dense kernel handed already-dense
+weights. `1x8192x1` is a single dot product: `n*k` decodes for `n*k` products, so
+no method beats one that is given the decode for free, and the row is there to say
+so. `1000x512x512` is below the break-even and is real: a coded operand at large
+`m` and small `n` wants to be decoded once into a panel and handed to the tile
+kernels, which is a third factorization of the same identity and is not built. It
+needs `Kernelized` at the traversal's boundary and a reborrow of the output view
+that `MatViewMut` does not currently expose. It is work, and it is named here
+rather than described as a property of the construction.
 
-## Against the oracles
+## Against the oracles## Against the oracles
 
 C3 is a hard constraint: scaling is compared against the oracle's scaling. Both
 sides are measured in one process, over one sweep spanning ten orders of

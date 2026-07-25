@@ -49,6 +49,7 @@ pub use partition::{Partition, Tile};
 pub use scratch::{suggested_accumulators, suggested_scratch, Scratch};
 pub use tabulated::{
     add_entry_narrow, add_entry_wide, gemm_tabulated, gemm_tabulated_counted, suggested_tabulation,
-    suggested_tabulation_lanes, tabulation_depth, tabulation_fits, tabulation_pays,
-    tabulation_rows, Census, Lane, LaneWord, Ledger, Table, TabulatedTriple, Tabulation, Wide,
+    suggested_tabulation_lanes, suggested_tabulation_panel, tabulation_depth, tabulation_fits,
+    tabulation_pays, tabulation_rows, Census, Lane, LaneWord, Ledger, Table, TabulatedTriple,
+    Tabulation, Wide,
 };

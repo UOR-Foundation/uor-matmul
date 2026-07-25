@@ -55,25 +55,51 @@ pub const fn threshold(cap: u128, per_step: u128) -> u128 {
 }
 
 /// The first `n` at which tabulating a `code_space`-wide enumeration of `block`
-/// elements issues fewer operations than the blocked traversal.
+/// elements issues fewer *instructions* than the blocked traversal.
 ///
-/// `m * (k / block)` tables, each costing `code_space * block` products to build
-/// and read `n` times at one read and one add per code, against `m * k * n`
-/// products. So tabulation is cheaper when
-/// `code_space + n / block < n`, that is `n * (block - 1) > code_space * block`.
+/// Instructions, not operations. A tabulated lane operation covers `block * rows`
+/// products --- `rows` outputs at once, each covering a whole codeword --- and one
+/// instruction of a dense tile kernel covers `kernel_step` of them. Counting both
+/// as one apiece over-sells the table: measured, it selected tabulation at
+/// `1000x512x512` where the kernels were four times faster.
 ///
-/// `None` when `block == 1`: one code names one element, so the table removes
-/// every multiply and no add, and no `n` makes the *op count* cross. That case is
-/// not worthless --- a read is cheaper than a widening multiply --- but the
-/// justification is residency rather than arithmetic, so this derivation declines
-/// to claim it.
-pub const fn tabulation_break_even(code_space: usize, block: usize) -> Option<usize> {
-    if block <= 1 {
+/// ```text
+/// tabulated instructions = m*k*S/rows + m*n*(k/block)/rows
+/// dense instructions     = m*k*n/kernel_step
+/// ```
+///
+/// so the table is cheaper when `n > S * kernel_step * block / (block*rows - kernel_step)`.
+///
+/// `None` when no `n` satisfies it: `block == 1` names one element per code, and
+/// `block * rows <= kernel_step` means one lane operation does not even cover what
+/// one dense instruction does, so the build is never repaid.
+pub const fn tabulation_break_even(
+    code_space: usize,
+    block: usize,
+    rows: usize,
+    kernel_step: usize,
+    kernel_rows: usize,
+) -> Option<usize> {
+    if block <= 1 || rows == 0 || kernel_step == 0 || kernel_rows == 0 {
+        return None;
+    }
+    // A dense tile issues `kernel_step` products per instruction only when it has
+    // `kernel_rows` rows to fill; with fewer it pays for the lanes that are not
+    // there. Without this term the predicate declined the table at `m = 1`, where
+    // the table was three times faster and the tile had one useful row in six.
+    let present = if rows < kernel_rows {
+        rows
+    } else {
+        kernel_rows
+    };
+    let effective = kernel_step * present / kernel_rows;
+    let per_lane = block * rows;
+    if effective == 0 || per_lane <= effective {
         return None;
     }
     // The predicate is strict, so the first satisfying `n` is one past the
     // quotient whether or not the division is exact.
-    Some(code_space * block / (block - 1) + 1)
+    Some(code_space * effective * block / (per_lane - effective) + 1)
 }
 
 #[cfg(test)]

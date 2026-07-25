@@ -177,6 +177,14 @@ pub struct Blocking {
     /// depth of a tabulation stack, which is what keeps the exact accumulator out
     /// of the inner loop.
     pub l2_bytes: usize,
+    /// Products one instruction of a dense tile kernel issues. Makes the
+    /// tabulation predicate a comparison of instructions rather than of
+    /// operations.
+    pub kernel_products_per_step: usize,
+    /// Rows of the output a dense tile kernel produces per call. Below this many
+    /// rows the tile pays for lanes that are not there, and the predicate scales
+    /// the dense side accordingly.
+    pub kernel_rows: usize,
 }
 
 /// `model/widths.toml`.
@@ -274,6 +282,9 @@ pub struct Tabulation {
     pub code_space: usize,
     /// Alphabet elements one code names: `Codec::MAX_BLOCK`.
     pub block: usize,
+    /// Rows of `A` one table entry covers at the canonical lane: the row tile
+    /// `tabulation_rows` resolves to for this code space.
+    pub rows: usize,
     /// The first `n` at which tabulation issues fewer operations than blocking.
     ///
     /// Absent when `block == 1`, where no such `n` exists: one code names one

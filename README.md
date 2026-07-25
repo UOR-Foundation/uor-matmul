@@ -239,10 +239,15 @@ multiply in it at all. Over the E8 codebook that is **16x fewer multiplies and
 5.3x fewer operations** than the dense traversal at `n = 4096`, counted by an
 operation census rather than timed, and the census and the clock cross the
 derived break-even at the same `n`. Against this library's own packed AVX2 path
-over the decoded weights it is **6.6x ahead at `m = 1`** and **2.1x at `m = 8`**
---- the decode-time and small-batch regime a coded weight matrix exists for ---
-and behind past `m = 64`, by an amount `ANALYSIS.md` §"The other constraint that
-is nobody's" measures and attributes rather than excuses.
+over the *already decoded* weights it is **8.8x ahead at `m = 1`**, **3.6x at
+`m = 8`**, and **1.1x to 1.7x** through `m = 64` and `k = 4096` --- and the first
+working version of it was four times *slower* than the kernels. Everything between
+was overhead: a runtime length where a compile-time one belonged, an exact
+accumulator moved a gigabyte per quarter-billion products, and a codebook decoded
+once per tile instead of once per call. `ANALYSIS.md` §"The other constraint that
+is nobody's" has the nine-row table of what each one was worth, the two tuning
+constants that changed sign when the loop around them changed, and the one shape
+that still declines the table and why.
 
 ## Licence
 
