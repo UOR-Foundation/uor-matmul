@@ -247,7 +247,11 @@ accumulator moved a gigabyte per quarter-billion products, and a codebook decode
 once per tile instead of once per call. Where the table does not pay --- a shape below its break-even --- a caller
 who offers room for the decoded operand gets the tile kernels instead, at
 **parity with a dense operand handed over free**. Three factorizations of one
-identity, chosen by the offer and the shape, byte-identical under `CD-13`.
+identity, chosen by the offer and the shape, byte-identical under `CD-13`. And
+the operand's *columns* collapse too: two columns whose code streams agree
+accumulate identically, so an operand with repeated columns is charged for the
+ones it has --- **2.06x** at high degeneracy, 4% for the question when there are
+none.
 `ANALYSIS.md` §"The other constraint that is nobody's" has the nine-row table of
 what each removal was worth and the two tuning constants that changed sign when
 the loop around them changed.

@@ -516,9 +516,45 @@ A coded operand has three of them, all computing the same bytes:
   decoded row.
 
 `1x8192x1` is the shape that cannot be won: `n*k` decodes for `n*k` products, so
-no method beats one that is given the decode for free. It reaches `0.37x` of a
+no method beats one that is given the decode for free. It reaches `0.36x` of a
 dense kernel and the row exists to say what the decode costs, not to claim
 otherwise.
+
+### The third degeneracy: distinct columns
+
+Collapse charges per distinct *row* of `A`. Tabulation charges per distinct
+*code*. Neither charges per distinct **column of the coded operand** --- and two
+columns whose index streams agree read the same table entries in the same order,
+so their accumulations are equal. Not nearly: identically, and for the same reason
+the rows are.
+
+At `16x1024x4096` over `Book<256,8>`, with column `j` repeating column `j % d`:
+
+| `d` | degeneracy | collapsed | uncollapsed | |
+| --- | --- | --- | --- | --- |
+| 1 | 4096x | **56.30** | 27.34 | **2.06x** |
+| 8 | 512x | **59.23** | 28.81 | **2.06x** |
+| 64 | 64x | **42.43** | 22.14 | **1.92x** |
+| 512 | 8x | **39.65** | 25.88 | **1.53x** |
+| 4096 | 1x | 25.78 | 26.81 | 0.96x |
+
+The last row is the price of looking, and it is 4%. It was 34% at `m = 1` before
+the hash read a bounded prefix of a column instead of all of it --- the hash is a
+filter and `columns_equal` verifies every hit in full, so a short read costs a
+false positive and never an answer.
+
+The ceiling at `d = 1` is the table *build*, which does not collapse: it is
+`m*k*S` products whatever the columns do. That is why 4096-fold degeneracy buys
+2x and not 4096x, and it is the honest shape of the construction rather than a
+disappointment.
+
+One thing this cost to get right. Naming the columns instead of counting from a
+first one turns the code base and the accumulator base from induction variables
+into indexed loads, and measured that **halved every shape, including the ones
+with nothing to collapse**. So there are two column loops: the consecutive one,
+unchanged, and an indexed one reached only when the collapse has something to do.
+A specialization in the direction that costs something is a second function, not a
+parameter.
 
 ### Everything between 2.95 and 28 was overhead
 

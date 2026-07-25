@@ -23,11 +23,21 @@ use uor_matmul_core::{
 };
 use uor_matmul_gemm::{
     gemm_packed, gemm_tabulated, gemm_tabulated_counted, suggested_scratch, suggested_tabulation,
-    suggested_tabulation_lanes, suggested_tabulation_panel, Census, GemmOptions, Linear, Scratch,
-    TabulatedTriple, Tabulation,
+    suggested_tabulation_index, suggested_tabulation_lanes, suggested_tabulation_panel, Census,
+    GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
 };
 
 type Book<'a> = uor_matmul_codec::Book<'a, i8, Full<i8>, 256, 8>;
+
+/// One timed product, with every buffer the traversal may take.
+type Run<'a> = dyn FnMut(
+        bool,
+        &mut Vec<i32>,
+        &mut Vec<Alphabet<i8, Full<i8>>>,
+        &mut Vec<AccOf<i8>>,
+        &mut Vec<i64>,
+        &mut Vec<usize>,
+    ) + 'a;
 
 fn best(mut run: impl FnMut() -> f64) -> f64 {
     const BUDGET: f64 = 0.40;
@@ -69,6 +79,8 @@ fn main() {
     println!();
     println!("| `m x k x n` | default | packed | forced stream | vs packed | picked |");
     println!("| --- | --- | --- | --- | --- | --- |");
+
+    degeneracy(&book, space, block);
 
     for &(m, k, n) in &[
         (1usize, 1024usize, 4096usize),
@@ -116,6 +128,7 @@ fn main() {
         let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
         let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
+        let mut ids = vec![0usize; suggested_tabulation_index(shape)];
         // Enough for the decoded operand, so the tile-kernel route is available
         // where the table declines. A caller who cannot afford this gets the
         // streaming traversal instead, and the `forced stream` column is what that
@@ -128,8 +141,15 @@ fn main() {
         let mut c = vec![0i32; m * n];
 
         let t_tab = {
-            let (a, w, c, lanes, accumulators, words) =
-                (&a, &w, &mut c, &mut lanes, &mut accumulators, &mut words);
+            let (a, w, c, lanes, accumulators, words, ids) = (
+                &a,
+                &w,
+                &mut c,
+                &mut lanes,
+                &mut accumulators,
+                &mut words,
+                &mut ids,
+            );
             best(|| {
                 let s = Instant::now();
                 {
@@ -141,7 +161,7 @@ fn main() {
                         &Linear::OVERWRITE,
                         options(Traversal::Blocked),
                         &mut Scratch::with_accumulators(lanes, accumulators),
-                        &mut Tabulation::new(words),
+                        &mut Tabulation::with_index(words, ids),
                     );
                 }
                 s.elapsed().as_secs_f64()
@@ -186,7 +206,7 @@ fn main() {
                 &Linear::OVERWRITE,
                 options(Traversal::Blocked),
                 &mut Scratch::with_accumulators(&mut lanes, &mut accumulators),
-                &mut Tabulation::new(&mut words),
+                &mut Tabulation::with_index(&mut words, &mut ids),
                 &mut census,
             );
             if census.table_reads > 0 {
@@ -227,5 +247,131 @@ fn main() {
             t_packed / t_tab,
             picked,
         );
+    }
+}
+
+/// Throughput against the number of *distinct* columns the coded operand has.
+///
+/// The table charges per distinct code; this charges per distinct column. Column
+/// `j` repeats column `j % d`, which is the shape a weight matrix has when its
+/// outputs share a codeword run. `d = n` is the case the collapse exists for and
+/// does not get, and it says what the question cost.
+///
+/// Every figure is `open`, and the answer is checked to be the same bytes the
+/// uncollapsed traversal gives at every degeneracy.
+fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
+    let (m, k, n) = (16usize, 1024usize, 4096usize);
+    let macs = (m * k * n) as f64;
+    let shape = Shape { m, k, n };
+    let blocks = k / block;
+    let a: Vec<i8> = fill(m * k, 0xa11)
+        .into_iter()
+        .map(|x| ((x % 255) as i64 - 127) as i8)
+        .collect();
+
+    println!();
+    println!("## Distinct columns");
+    println!();
+    println!("| `d` | degeneracy | collapsed | uncollapsed | speedup |");
+    println!("| --- | --- | --- | --- | --- |");
+
+    let mut d = 1usize;
+    loop {
+        let base: Vec<u16> = fill(d * blocks, 0xc01)
+            .into_iter()
+            .map(|x| (x % 256) as u16)
+            .collect();
+        let stream: Vec<u16> = (0..n * blocks)
+            .map(|x| base[(x / blocks % d) * blocks + x % blocks])
+            .collect();
+        let w = CodedMatrix::new(*book, n, k, &stream).expect("the codes describe n x k");
+
+        let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
+        let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
+        let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
+        let mut ids = vec![0usize; suggested_tabulation_index(shape)];
+        let mut lanes =
+            vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_tabulation_panel(space, block)];
+        let mut c = vec![0i32; m * n];
+
+        let mut run = |collapse: bool,
+                       c: &mut Vec<i32>,
+                       lanes: &mut Vec<Alphabet<i8, Full<i8>>>,
+                       accumulators: &mut Vec<AccOf<i8>>,
+                       words: &mut Vec<i64>,
+                       ids: &mut Vec<usize>| {
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let cv = MatViewMut::row_major(c, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            let mut none: Vec<usize> = Vec::new();
+            gemm_tabulated(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    encode: EncodeMode::Wrapping,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(lanes, accumulators),
+                &mut if collapse {
+                    Tabulation::with_index(words, ids)
+                } else {
+                    Tabulation::with_index(words, &mut none)
+                },
+            );
+        };
+
+        let time = |collapse: bool,
+                    c: &mut Vec<i32>,
+                    lanes: &mut Vec<Alphabet<i8, Full<i8>>>,
+                    accumulators: &mut Vec<AccOf<i8>>,
+                    words: &mut Vec<i64>,
+                    ids: &mut Vec<usize>,
+                    run: &mut Run<'_>|
+         -> f64 {
+            run(collapse, c, lanes, accumulators, words, ids);
+            let s = Instant::now();
+            for _ in 0..3 {
+                run(collapse, c, lanes, accumulators, words, ids);
+            }
+            s.elapsed().as_secs_f64() / 3.0
+        };
+
+        let t_on = time(
+            true,
+            &mut c,
+            &mut lanes,
+            &mut accumulators,
+            &mut words,
+            &mut ids,
+            &mut run,
+        );
+        let collapsed = c.clone();
+        let t_off = time(
+            false,
+            &mut c,
+            &mut lanes,
+            &mut accumulators,
+            &mut words,
+            &mut ids,
+            &mut run,
+        );
+        assert_eq!(
+            collapsed, c,
+            "the collapse must not change a byte at d = {d}"
+        );
+
+        let g = |t: f64| macs / t / 1e9;
+        println!(
+            "| {d} | {:.0}x | {:.2} | {:.2} | {:.2}x |",
+            n as f64 / d as f64,
+            g(t_on),
+            g(t_off),
+            t_off / t_on,
+        );
+        if d >= n {
+            break;
+        }
+        d = (d * 8).min(n);
     }
 }

@@ -593,12 +593,30 @@ impl<'a, 'w, 'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, O>
 #[derive(Debug)]
 pub struct Tabulation<'s> {
     lanes: &'s mut [i64],
+    index: &'s mut [usize],
 }
 
 impl<'s> Tabulation<'s> {
     /// Offer a narrow lane buffer.
     pub fn new(lanes: &'s mut [i64]) -> Self {
-        Self { lanes }
+        Self {
+            lanes,
+            index: &mut [],
+        }
+    }
+
+    /// Offer a lane buffer and room to record which output columns repeat.
+    ///
+    /// With it the traversal charges per *distinct* column of the coded operand
+    /// instead of per column --- the same move [`crate::collapse`] makes on the
+    /// rows of `A` and the same move tabulation itself makes on the codes. A cost
+    /// that tracks meanings rather than expressions.
+    ///
+    /// See [`suggested_tabulation_index`] for the size. An operand that repeats no
+    /// column pays one pass over its code stream for the question, and `CG-10`
+    /// reports what that costs alongside what it buys.
+    pub fn with_index(lanes: &'s mut [i64], index: &'s mut [usize]) -> Self {
+        Self { lanes, index }
     }
 
     /// Offer none.
@@ -606,7 +624,10 @@ impl<'s> Tabulation<'s> {
     /// Not a degraded mode and not a fallback: the same identity, accumulated in
     /// a wider register (R13).
     pub fn none() -> Tabulation<'static> {
-        Tabulation { lanes: &mut [] }
+        Tabulation {
+            lanes: &mut [],
+            index: &mut [],
+        }
     }
 
     /// How much was offered.
@@ -618,6 +639,24 @@ impl<'s> Tabulation<'s> {
     pub fn is_empty(&self) -> bool {
         self.lanes.is_empty()
     }
+}
+
+/// How much index room the column collapse wants for this shape.
+///
+/// One entry per output column, plus an open-addressed dictionary at least twice
+/// as wide so a probe stays short --- the same sizing
+/// [`crate::suggested_collapse_index`] uses on the row side.
+///
+/// A *query*. Offering none gives the same bytes from the uncollapsed traversal,
+/// which is the rule every other offer in this library follows (`CD-13`).
+pub fn suggested_tabulation_index(shape: Shape) -> usize {
+    shape.n.saturating_add(
+        shape
+            .n
+            .saturating_mul(2)
+            .next_power_of_two()
+            .saturating_mul(2),
+    )
 }
 
 /// How many narrow lane words would let the tabulated traversal run at its
@@ -1035,6 +1074,19 @@ fn run<E, Bd, C, O, Ep, Lg>(
         return;
     }
 
+    // Which output columns carry a distinct meaning. One pass over the code
+    // stream, before any arithmetic, and the answer is used by every row tile ---
+    // so a weight matrix with repeated columns is charged for the ones it has
+    // rather than the ones it is written with. `CG-10` reports both the
+    // degeneracy and what the question cost when there was none.
+    let (words, index) = (&mut *lanes.lanes, &mut *lanes.index);
+    let distinct =
+        distinct_columns::<E, Bd, C>(triple.w.codes(), triple.w.codes_per_row(), shape.n, index);
+    // Only when it saves work. An operand with no repeated column has paid one
+    // pass over its code stream for the question and must not also pay for a
+    // traversal shaped around an answer of "none".
+    let index = distinct.filter(|&d| d < shape.n).map(|_| &index[..shape.n]);
+
     // The narrowest lane that holds a block of the reduction, the same scan the
     // tile kernels run. Every lane computes the same integer; this is a question
     // about register width and traffic, and `CD-13` asserts the bytes across it.
@@ -1063,7 +1115,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
         let (exact, stack) = accumulators.split_at_mut(tile);
         let words: &mut [Wide<AccOf<E>>] = Wide::wrap_slice_mut(stack);
         tabulate::<E, Bd, C, O, Ep, Wide<AccOf<E>>, Lg>(
-            triple, epilogue, options, exact, words, panel, plan, ledger,
+            triple, epilogue, options, exact, words, panel, index, plan, ledger,
         );
         return;
     }
@@ -1071,7 +1123,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
     // A narrow lane, out of the caller's lane offer. The offer is `i64`-shaped
     // because that is the widest narrow word; a 32-bit lane reads twice as many
     // of them out of the same bytes.
-    let offered = core::mem::size_of_val(lanes.lanes) / lane.bytes;
+    let offered = core::mem::size_of_val(&*words) / lane.bytes;
     let Some(plan) = Plan::choose(space, shape, lane, exact_offer, offered, block) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
@@ -1090,14 +1142,15 @@ fn run<E, Bd, C, O, Ep, Lg>(
     }
     let want = plan.lane_words(space);
     if matches!(lane.kind, LaneKind::Narrow32) {
-        let words: &mut [i32] = bytemuck::cast_slice_mut(lanes.lanes);
+        let narrow: &mut [i32] = bytemuck::cast_slice_mut(words);
         tabulate::<E, Bd, C, O, Ep, i32, Lg>(
             triple,
             epilogue,
             options,
             exact,
-            &mut words[..want],
+            &mut narrow[..want],
             panel,
+            index,
             plan,
             ledger,
         );
@@ -1107,8 +1160,9 @@ fn run<E, Bd, C, O, Ep, Lg>(
             epilogue,
             options,
             exact,
-            &mut lanes.lanes[..want],
+            &mut words[..want],
             panel,
+            index,
             plan,
             ledger,
         );
@@ -1260,6 +1314,202 @@ fn columns<const R: usize, const U: usize, E, Bd, C, L>(
     }
 }
 
+/// The same, for `U` columns that are *not* consecutive.
+///
+/// A specialization of [`columns`] in the direction that costs something, which
+/// is why it is a second function and not a parameter. The consecutive form lets
+/// the compiler carry the code base and the accumulator base as induction
+/// variables; naming the columns instead turns both into indexed loads, and
+/// measured that halved the throughput of every shape --- including the ones with
+/// nothing to collapse. An operand that repeats no column must never pay for the
+/// machinery that would have found repeats, so it walks [`columns`] and this one
+/// is reached only when the collapse has something to do.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn columns_at<const R: usize, const U: usize, E, Bd, C, L>(
+    stack: &[L],
+    slab: usize,
+    codes: &[C::Code],
+    codes_per_row: usize,
+    of: &[usize],
+    col0: usize,
+    p0: usize,
+    depth: usize,
+    acc: &mut [AccOf<E>],
+) where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    L: Lane<E>,
+{
+    let mut base = [0usize; U];
+    for (u, at) in base.iter_mut().enumerate() {
+        *at = of[u] * codes_per_row + p0;
+    }
+    let mut lane = [[L::ZERO; R]; U];
+    for (slot, words) in stack.chunks_exact(slab).take(depth).enumerate() {
+        for u in 0..U {
+            let at = C::index_of(codes[base[u] + slot]) * R;
+            if let Some(entry) = words.get(at..).and_then(<[L]>::first_chunk::<R>) {
+                add_entry(entry, &mut lane[u]);
+            }
+        }
+    }
+    // The codes are named by the *output* column; the accumulator is the block's,
+    // so it is named by the column's place within it.
+    for (u, word) in lane.iter().enumerate() {
+        let out = (of[u] - col0) * R;
+        for (cell, w) in acc[out..out + R].iter_mut().zip(word) {
+            *cell = w.place(*cell);
+        }
+    }
+}
+
+/// Which output columns repeat, and where each one's first occurrence is.
+///
+/// Two columns whose *index* streams agree read the same table entries in the
+/// same order, so their accumulations are equal --- not nearly, identically, and
+/// for the same reason [`crate::collapse`]'s rows are: an exact sum is a function
+/// of the multiset of its products, so equal operands give equal sums by
+/// definition. A classical `sgemm` sharing a column would additionally have to
+/// argue that its *order* of additions was the same. This one has nothing to
+/// argue.
+///
+/// Indices, not raw codes. That is the coarser relation and therefore the better
+/// one --- two codes at the same index decode alike, so a codec whose enumeration
+/// carries duplicates has them collapsed here too --- and it asks nothing of the
+/// code type, which [`uor_matmul_codec::Codec`] does not constrain and should not.
+///
+/// `None` when the offer is too short to answer, which is the caller getting the
+/// uncollapsed traversal at the same bytes.
+fn distinct_columns<E, Bd, C>(
+    codes: &[C::Code],
+    codes_per_row: usize,
+    n: usize,
+    index: &mut [usize],
+) -> Option<usize>
+where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+{
+    if n == 0 || codes_per_row == 0 || codes.len() < n.checked_mul(codes_per_row)? {
+        return None;
+    }
+    // Half full at worst, so an empty slot always exists and a probe terminates.
+    let table = n.checked_mul(2)?.next_power_of_two();
+    if index.len() < n.checked_add(table.checked_mul(2)?)? {
+        return None;
+    }
+    let (position, rest) = index.split_at_mut(n);
+    let (slot, key) = rest.split_at_mut(table);
+    // Zero is "empty"; a slot holds one more than the column it names.
+    slot[..table].fill(0);
+    let mask = table - 1;
+
+    let mut distinct = 0usize;
+    for (j, position) in position.iter_mut().enumerate() {
+        let run = &codes[j * codes_per_row..(j + 1) * codes_per_row];
+        let hash = column_hash::<E, Bd, C>(run);
+        let mut probe = hash & mask;
+        loop {
+            match slot[probe] {
+                0 => {
+                    slot[probe] = j + 1;
+                    key[probe] = hash;
+                    *position = j;
+                    distinct += 1;
+                    break;
+                }
+                seen => {
+                    let seen = seen - 1;
+                    let other = &codes[seen * codes_per_row..(seen + 1) * codes_per_row];
+                    if key[probe] == hash && columns_equal::<E, Bd, C>(run, other) {
+                        *position = seen;
+                        break;
+                    }
+                    probe = (probe + 1) & mask;
+                }
+            }
+        }
+    }
+    Some(distinct)
+}
+
+/// Do two columns read the same table entries in the same order?
+fn columns_equal<E, Bd, C>(a: &[C::Code], b: &[C::Code]) -> bool
+where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+{
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(&x, &y)| C::index_of(x) == C::index_of(y))
+}
+
+/// How much of a column the hash reads.
+///
+/// The hash is a *filter*: [`columns_equal`] verifies in full on every hit, so a
+/// short read costs only a false positive and never a wrong answer. Reading the
+/// whole column made the pass half the cost of a traversal pass, which at `m = 1`
+/// --- where there is only one such pass --- was a third of the throughput. Two
+/// hundred and fifty-six bits of a column separate any two of them that differ in
+/// their first sixteen codes, and the ones that do not are separated by the
+/// comparison.
+const HASH_PREFIX: usize = 16;
+
+/// FNV over the head of one column's index stream, mixed in eight lanes.
+///
+/// Eight because the mix is a five-cycle multiply and the multiplier retires one
+/// a cycle, so eight chains is where the latency stops being what bounds it ---
+/// the same reason and the same shape as [`crate::collapse`]'s row hash.
+fn column_hash<E, Bd, C>(run: &[C::Code]) -> usize
+where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+{
+    const SEED: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = [
+        SEED,
+        SEED ^ 1,
+        SEED ^ 2,
+        SEED ^ 3,
+        SEED ^ 4,
+        SEED ^ 5,
+        SEED ^ 6,
+        SEED ^ 7,
+    ];
+    // The length goes in first: two columns of different lengths cannot be equal,
+    // and this is the only place the tail beyond the prefix is represented.
+    let mut seeded = SEED ^ run.len() as u64;
+    seeded = seeded.wrapping_mul(PRIME);
+    h[0] ^= seeded;
+    let run = &run[..run.len().min(HASH_PREFIX)];
+    let mut chunks = run.chunks_exact(8);
+    for c in &mut chunks {
+        for (lane, &code) in h.iter_mut().zip(c) {
+            *lane = (*lane ^ C::index_of(code) as u64).wrapping_mul(PRIME);
+        }
+    }
+    for (i, &code) in chunks.remainder().iter().enumerate() {
+        h[i] = (h[i] ^ C::index_of(code) as u64).wrapping_mul(PRIME);
+    }
+    let mut x = 0u64;
+    for (i, lane) in h.into_iter().enumerate() {
+        x ^= lane.rotate_left((i * 8) as u32);
+    }
+    // splitmix's finisher: the FNV lanes carry their entropy high and an
+    // open-addressed probe reads the low bits.
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    (x ^ (x >> 31)) as usize
+}
+
 /// One row tile, at a compile-time row count.
 ///
 /// `R` is what makes the column loop a *register* loop. A `rows`-long slice of
@@ -1275,6 +1525,7 @@ fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
     exact: &mut [AccOf<E>],
     lanes: &mut [L],
     panel: &mut [Alphabet<E, Bd>],
+    index: Option<&[usize]>,
     plan: Plan,
     row0: usize,
     ledger: &mut Lg,
@@ -1317,6 +1568,16 @@ fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
         let acc = &mut exact[..R * cols];
         acc.fill(<AccOf<E> as Accumulator>::ZERO);
 
+        // The collapse applies when this block is the whole output width, because
+        // a repeat's first occurrence has to be inside the block to be copied
+        // from. A caller whose offer forces narrower blocks gets the uncollapsed
+        // traversal, at the same bytes.
+        let collapsed = if col0 == 0 && cols == shape.n {
+            index
+        } else {
+            None
+        };
+
         let mut p0 = 0usize;
         while p0 < blocks {
             let depth = plan.depth.min(blocks - p0);
@@ -1343,36 +1604,103 @@ fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
             // step with one load, one mask, one add of the entry's base, and `R`
             // adds --- no multiply, no bounds check, and no loop framing.
             let stack = table.stack();
-            let mut j = 0usize;
-            while j + COLUMN_GROUP <= cols {
-                columns::<R, COLUMN_GROUP, E, Bd, C, L>(
-                    stack,
-                    slab,
-                    codes,
-                    codes_per_row,
-                    col0 + j,
-                    p0,
-                    depth,
-                    &mut acc[j * R..],
-                );
-                j += COLUMN_GROUP;
+            // Only the columns that carry a distinct meaning. A repeat is not
+            // computed at all; it is copied once, after the whole reduction, from
+            // the column it repeats --- `R` contiguous words.
+            //
+            // Two loops, not one loop with a test in it. The test is loop
+            // invariant and leaving it inside cost the consecutive case its
+            // grouping: measured, 28 Gmac/s became 11. An operand with nothing to
+            // collapse must walk exactly the loop it walked before the collapse
+            // existed, and this is that loop.
+            let computed;
+            if let Some(of) = collapsed {
+                // Only the columns that carry a distinct meaning. A repeat is not
+                // computed at all; it is copied once, after the whole reduction,
+                // from the column it repeats --- `R` contiguous words.
+                let mut ids = [0usize; COLUMN_GROUP];
+                let mut filled = 0usize;
+                let mut done = 0usize;
+                for j in 0..cols {
+                    if of[col0 + j] != col0 + j {
+                        continue;
+                    }
+                    ids[filled] = col0 + j;
+                    filled += 1;
+                    done += 1;
+                    if filled == COLUMN_GROUP {
+                        columns_at::<R, COLUMN_GROUP, E, Bd, C, L>(
+                            stack,
+                            slab,
+                            codes,
+                            codes_per_row,
+                            &ids,
+                            col0,
+                            p0,
+                            depth,
+                            acc,
+                        );
+                        filled = 0;
+                    }
+                }
+                for u in 0..filled {
+                    columns_at::<R, 1, E, Bd, C, L>(
+                        stack,
+                        slab,
+                        codes,
+                        codes_per_row,
+                        &ids[u..],
+                        col0,
+                        p0,
+                        depth,
+                        acc,
+                    );
+                }
+                computed = done;
+            } else {
+                let mut j = 0usize;
+                while j + COLUMN_GROUP <= cols {
+                    columns::<R, COLUMN_GROUP, E, Bd, C, L>(
+                        stack,
+                        slab,
+                        codes,
+                        codes_per_row,
+                        col0 + j,
+                        p0,
+                        depth,
+                        &mut acc[j * R..],
+                    );
+                    j += COLUMN_GROUP;
+                }
+                while j < cols {
+                    columns::<R, 1, E, Bd, C, L>(
+                        stack,
+                        slab,
+                        codes,
+                        codes_per_row,
+                        col0 + j,
+                        p0,
+                        depth,
+                        &mut acc[j * R..],
+                    );
+                    j += 1;
+                }
+                computed = cols;
             }
-            while j < cols {
-                columns::<R, 1, E, Bd, C, L>(
-                    stack,
-                    slab,
-                    codes,
-                    codes_per_row,
-                    col0 + j,
-                    p0,
-                    depth,
-                    &mut acc[j * R..],
-                );
-                j += 1;
-            }
-            ledger.read((cols * depth * R) as u64);
-            ledger.added((cols * depth * R) as u64);
+            ledger.read((computed * depth * R) as u64);
+            ledger.added((computed * depth * R) as u64);
             p0 += depth;
+        }
+
+        // The expansion: every repeated column takes the accumulation of the one
+        // it repeats. Ascending, and a repeat always names an earlier column, so
+        // the source is final by the time it is read.
+        if let Some(of) = collapsed {
+            for (j, &src) in of[..cols].iter().enumerate() {
+                if src != j {
+                    acc.copy_within(src * R..src * R + R, j * R);
+                }
+            }
         }
 
         // The single encode step, exactly once per output element.
@@ -1399,6 +1727,7 @@ fn tabulate<E, Bd, C, O, Ep, L, Lg>(
     exact: &mut [AccOf<E>],
     lanes: &mut [L],
     panel: &mut [Alphabet<E, Bd>],
+    index: Option<&[usize]>,
     plan: Plan,
     ledger: &mut Lg,
 ) where
@@ -1423,19 +1752,19 @@ fn tabulate<E, Bd, C, O, Ep, L, Lg>(
             .unwrap_or(1);
         match rows {
             16 => row_tile::<16, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, plan, row0, ledger,
+                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
             ),
             8 => row_tile::<8, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, plan, row0, ledger,
+                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
             ),
             4 => row_tile::<4, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, plan, row0, ledger,
+                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
             ),
             2 => row_tile::<2, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, plan, row0, ledger,
+                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
             ),
             _ => row_tile::<1, E, Bd, C, O, Ep, L, Lg>(
-                triple, epilogue, options, exact, lanes, panel, plan, row0, ledger,
+                triple, epilogue, options, exact, lanes, panel, index, plan, row0, ledger,
             ),
         }
         row0 += rows;
@@ -1723,6 +2052,7 @@ mod tests {
         };
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; scale(want_acc)];
         let mut lane_words = vec![0i64; scale(want_lanes)];
+        let mut ids = vec![0usize; scale(suggested_tabulation_index(shape))];
         // At the top of the sweep the panel holds the whole decoded operand, so
         // the tile-kernel route is exercised too; below it, only the table and the
         // stream can be reached. All three are asserted against the same bytes.
@@ -1740,7 +2070,7 @@ mod tests {
                 &Linear::OVERWRITE,
                 options(traversal),
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
-                &mut Tabulation::new(&mut lane_words),
+                &mut Tabulation::with_index(&mut lane_words, &mut ids),
                 &mut census,
             );
         }
@@ -1780,6 +2110,13 @@ mod tests {
                      must give the dense driver's bytes ({census:?})"
                 );
             }
+        }
+
+        // The collapse is reached and is not vacuous: an operand whose columns
+        // repeat is charged for the ones it has.
+        if C::CODE_SPACE > 0 {
+            let (_, full) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS);
+            assert!(full.table_reads > 0 || full.kernel_calls > 0);
         }
 
         // And the comparison is not vacuous: each of the three factorizations is
@@ -1825,6 +2162,18 @@ mod tests {
         ] {
             let stream: Vec<u16> = fill(n * (k / 8), 0xb00c, |x| (x % 400) as u16);
             every_traversal_agrees("Book<256,8>", book, &stream, m, k, n);
+
+            // The same shape with `d` distinct columns, so the collapse has
+            // something to find. Column `j` repeats column `j % d`, which is the
+            // shape a weight matrix has when its outputs share a codeword run.
+            for d in [1usize, 3, n] {
+                let d = d.min(n);
+                let base: Vec<u16> = fill(d * (k / 8), 0xd0b, |x| (x % 400) as u16);
+                let repeated: Vec<u16> = (0..n * (k / 8))
+                    .map(|x| base[(x / (k / 8) % d) * (k / 8) + x % (k / 8)])
+                    .collect();
+                every_traversal_agrees("Book<256,8> repeated", book, &repeated, m, k, n);
+            }
         }
 
         let i4: [A8; 16] = core::array::from_fn(|i| Alphabet::of((i as i8) - 8));
