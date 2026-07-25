@@ -458,3 +458,185 @@ fn selection_respects_the_declared_alphabet_cu_02() {
         assert!(picked.max_bound >= bound, "bound {bound}");
     }
 }
+
+/// `CB-06`: every reduce sequence equals its own reference.
+///
+/// The reduce factorization puts the vector lanes on `k`, so its panel layout is
+/// the contiguous one and its reference reads rows rather than strides. What this
+/// asserts is that moving the lanes does not move the answer.
+#[test]
+fn every_reduce_sequence_equals_its_reference_cb_06() {
+    use uor_matmul_kernels::{
+        available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
+        available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
+        available_reduce_i8, LaneLayout,
+    };
+
+    let mut seen = 0usize;
+    for spec in available_reduce_i8() {
+        assert_eq!(spec.nr, 1, "a reduce kernel produces one column");
+        assert_eq!(spec.lane_layout, LaneLayout::Contiguous);
+        for kc in depths(&spec) {
+            let pa = fill(spec.mr * kc, 21, |v| v as i8);
+            let pb: Vec<i8> = fill(kc, 22, |v| v as i8);
+            let mut acc = vec![0i32; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            for i in 0..spec.mr {
+                let row = &pa[i * kc..][..kc];
+                let want = dot_ref(as_alphabet_full(row), as_alphabet_full(&pb[..kc])) as i32;
+                assert_eq!(acc[i], want, "{} i8 reduce kc={kc}", spec.backend.as_str());
+            }
+        }
+        seen += 1;
+    }
+    assert!(seen > 0);
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        assert!(
+            seen > 1,
+            "x86-64 and aarch64 both have a vector i8 reduce sequence past the reference"
+        );
+    }
+
+    // The extremes too: the reduce sequences accumulate a whole row into one
+    // lane, so their intermediate widths are a different question from the tile
+    // sequences' and deserve the same input.
+    for spec in available_reduce_i8() {
+        for kc in [16usize, 64, 1024].map(|k| k.div_ceil(spec.k_group) * spec.k_group) {
+            let pa = vec![i8::MIN; spec.mr * kc];
+            let pb = vec![i8::MIN; kc];
+            let mut acc = vec![0i32; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            let want = (kc as i32) * 128 * 128;
+            assert!(
+                acc.iter().all(|&x| x == want),
+                "{} i8 reduce at the extreme, kc={kc}: {acc:?} want {want}",
+                spec.backend.as_str()
+            );
+        }
+    }
+
+    for spec in available_reduce_i16() {
+        for kc in depths(&spec) {
+            let pa = fill(spec.mr * kc, 23, |v| v as i16);
+            let pb: Vec<i16> = fill(kc, 24, |v| v as i16);
+            let mut acc = vec![0i64; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            for i in 0..spec.mr {
+                let want: i64 = (0..kc)
+                    .map(|p| i64::from(pa[i * kc + p]) * i64::from(pb[p]))
+                    .sum();
+                assert_eq!(acc[i], want, "{} i16 reduce kc={kc}", spec.backend.as_str());
+            }
+        }
+        // At the full alphabet, where a paired-product sequence would be wrong.
+        let kc = 16usize.div_ceil(spec.k_group) * spec.k_group;
+        for (av, bv) in [(i16::MIN, i16::MIN), (i16::MIN, i16::MAX)] {
+            let pa = vec![av; spec.mr * kc];
+            let pb = vec![bv; kc];
+            let mut acc = vec![0i64; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            let want = (kc as i64) * i64::from(av) * i64::from(bv);
+            assert!(
+                acc.iter().all(|&x| x == want),
+                "{} i16 reduce at ({av}, {bv}): {acc:?} want {want}",
+                spec.backend.as_str()
+            );
+        }
+    }
+
+    for spec in available_reduce_i32_exact() {
+        for kc in depths(&spec) {
+            // Bounded so the reference sum fits an `i64` at every depth here.
+            let pa = fill(spec.mr * kc, 25, |v| ((v & 0xFFFF) - 0x8000) as i32);
+            let pb: Vec<i32> = fill(kc, 26, |v| ((v & 0xFFFF) - 0x8000) as i32);
+            let mut acc = vec![0i64; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            for i in 0..spec.mr {
+                let want: i64 = (0..kc)
+                    .map(|p| i64::from(pa[i * kc + p]) * i64::from(pb[p]))
+                    .sum();
+                assert_eq!(acc[i], want, "{} i32 reduce kc={kc}", spec.backend.as_str());
+            }
+        }
+    }
+
+    for spec in available_reduce_i32_modular() {
+        for kc in depths(&spec) {
+            let pa = fill(spec.mr * kc, 27, |v| v.wrapping_mul(99_991) as i32);
+            let pb: Vec<i32> = fill(kc, 28, |v| v.wrapping_mul(65_537) as i32);
+            let mut acc = vec![0i32; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            for i in 0..spec.mr {
+                let want = (0..kc).fold(0i32, |s, p| {
+                    s.wrapping_add(pa[i * kc + p].wrapping_mul(pb[p]))
+                });
+                assert_eq!(
+                    acc[i],
+                    want,
+                    "{} i32 modular reduce kc={kc}",
+                    spec.backend.as_str()
+                );
+            }
+        }
+    }
+
+    for spec in available_reduce_i16_modular() {
+        for kc in depths(&spec) {
+            let pa = fill(spec.mr * kc, 29, |v| v as i16);
+            let pb: Vec<i16> = fill(kc, 30, |v| v as i16);
+            let mut acc = vec![0i32; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            for i in 0..spec.mr {
+                let want = (0..kc).fold(0i32, |s, p| {
+                    s.wrapping_add(i32::from(pa[i * kc + p]).wrapping_mul(i32::from(pb[p])))
+                });
+                assert_eq!(
+                    acc[i],
+                    want,
+                    "{} i16 modular reduce kc={kc}",
+                    spec.backend.as_str()
+                );
+            }
+        }
+    }
+
+    for spec in available_reduce_i64_exact() {
+        // Bounded by `2^31`, so the *reference* sum fits an `i128` at every depth
+        // below. The kernel's lane is bounded the same way: at the full `i64`
+        // bound one product needs 126 bits and `lane_depth` is 1, so the driver
+        // never offers this lane a deeper chunk, and testing past that would be
+        // testing something no caller can reach.
+        for kc in depths(&spec) {
+            let pa = fill(spec.mr * kc, 31, |v| (v & 0xFFFF_FFFF) - 0x8000_0000);
+            let pb: Vec<i64> = fill(kc, 32, |v| (v & 0xFFFF_FFFF) - 0x8000_0000);
+            let mut acc = vec![0i128; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            for i in 0..spec.mr {
+                let want: i128 = (0..kc)
+                    .map(|p| i128::from(pa[i * kc + p]) * i128::from(pb[p]))
+                    .sum();
+                assert_eq!(acc[i], want, "{} i64 reduce kc={kc}", spec.backend.as_str());
+            }
+        }
+    }
+
+    for spec in available_reduce_i64_modular() {
+        for kc in depths(&spec) {
+            let pa = fill(spec.mr * kc, 33, |v| v.wrapping_mul(0x1000_0000_01B3));
+            let pb: Vec<i64> = fill(kc, 34, |v| v.wrapping_mul(0x9E37_79B9));
+            let mut acc = vec![0i64; spec.mr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            for i in 0..spec.mr {
+                let want = (0..kc).fold(0i64, |s, p| {
+                    s.wrapping_add(pa[i * kc + p].wrapping_mul(pb[p]))
+                });
+                assert_eq!(
+                    acc[i],
+                    want,
+                    "{} i64 modular reduce kc={kc}",
+                    spec.backend.as_str()
+                );
+            }
+        }
+    }
+}

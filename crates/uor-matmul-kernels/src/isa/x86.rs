@@ -4,7 +4,7 @@ use core::arch::x86_64::*;
 
 use uor_matmul_core::Backend;
 
-use crate::spec::{Factorization, KernelSpec};
+use crate::spec::{Factorization, KernelSpec, LaneLayout};
 
 crate::tile_fits!(6, 16);
 crate::tile_fits!(4, 8);
@@ -56,6 +56,7 @@ pub const AVX2_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     factorization: Factorization::Exact,
     mr: A2_I8_MR,
     nr: A2_I8_NR,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 2,
     lane_cap: i32::MAX as u128,
     // `madd`'s pair sum is `2 * bound^2`; an `i8` alphabet cannot reach the
@@ -161,6 +162,7 @@ pub const AVX2_I16_I64: KernelSpec<i16, i64> = KernelSpec {
     factorization: Factorization::Exact,
     mr: A2_I16_MR,
     nr: A2_I16_NR,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 2,
     lane_cap: i64::MAX as u128,
     max_bound: 32767,
@@ -249,6 +251,7 @@ pub const AVX2_I16_I64_FULL: KernelSpec<i16, i64> = KernelSpec {
     factorization: Factorization::Exact,
     mr: A2_I16_MR,
     nr: A2_I16_NR,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 1,
     lane_cap: i64::MAX as u128,
     max_bound: u128::MAX,
@@ -326,6 +329,7 @@ pub const AVX2_I32_I64: KernelSpec<i32, i64> = KernelSpec {
     factorization: Factorization::Exact,
     mr: A2_I32_MR,
     nr: A2_I32_NR,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 1,
     lane_cap: i64::MAX as u128,
     // Each product is computed at its own full width, so every alphabet.
@@ -407,6 +411,7 @@ pub const AVX2_I32_MOD: KernelSpec<i32, i32> = KernelSpec {
     factorization: Factorization::Modular,
     mr: 6,
     nr: 16,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 1,
     lane_cap: 0,
     max_bound: u128::MAX,
@@ -480,6 +485,7 @@ pub const AVX2_I16_MOD: KernelSpec<i16, i32> = KernelSpec {
     factorization: Factorization::Modular,
     mr: 6,
     nr: 16,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 2,
     lane_cap: 0,
     // `madd` wraps, and in `Z/2^32` the wrap *is* the answer --- so the pair
@@ -563,6 +569,7 @@ pub const AVX512_DPWSSD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     factorization: Factorization::Exact,
     mr: V_MR,
     nr: V_NR,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 2,
     lane_cap: i32::MAX as u128,
     // `dpwssd` accumulates pair sums into the `i32` lane itself, so the depth
@@ -591,6 +598,7 @@ pub const AVX512_DPBUSD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     factorization: Factorization::Exact,
     mr: V_MR,
     nr: V_NR,
+    lane_layout: LaneLayout::Interleaved,
     k_group: 4,
     lane_cap: (i32::MAX as u128) / 255 * 128,
     max_bound: u128::MAX,
@@ -724,4 +732,520 @@ unsafe fn vnni_store(acc: &mut [i32], tile: &[__m512i; V_MR]) {
         // SAFETY: `i < V_MR`, so this 512-bit store lands inside `MR * NR`.
         unsafe { _mm512_storeu_si512(acc.as_mut_ptr().add(i * V_NR).cast(), *lane) };
     }
+}
+
+// ---------------------------------------------------------------------------
+// The reduce factorization: vector lanes on `k` rather than on the output
+// ---------------------------------------------------------------------------
+
+/// Four rows at a time, against one column.
+///
+/// Four is what fits: eight accumulator vectors for the widening families, plus
+/// the column's two, plus the row being loaded, is within the sixteen `ymm`
+/// registers. A wider `mr` would spill, and spilling costs more than the extra
+/// reuse buys.
+const R_MR: usize = 4;
+
+crate::tile_fits!(R_MR, 1);
+crate::tile_fits!(1, 1);
+
+/// Sum the eight `i32` lanes of `v`.
+///
+/// Every partial sum is bounded by the sum of the lane magnitudes, which
+/// `lane_cap` already keeps inside an `i32`, so the tree cannot overflow where
+/// the total does not.
+///
+/// # Safety
+///
+/// The host must have `avx2`.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum_epi32(v: __m256i) -> i32 {
+    let s = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b0100_1110));
+    let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b0001_0001));
+    _mm_cvtsi128_si32(s)
+}
+
+/// Sum the four `i64` lanes of `v`.
+///
+/// # Safety
+///
+/// The host must have `avx2`.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn hsum_epi64(v: __m256i) -> i64 {
+    let mut out = [0i64; 4];
+    // SAFETY: `out` holds exactly four `i64`.
+    unsafe { _mm256_storeu_si256(out.as_mut_ptr().cast::<__m256i>(), v) };
+    // The lane sums are exact integers and the total is what `lane_cap` bounds,
+    // so this is an ordinary `i64` addition, not a widening question.
+    out[0]
+        .wrapping_add(out[1])
+        .wrapping_add(out[2])
+        .wrapping_add(out[3])
+}
+
+/// AVX2 `i8`, reducing four rows against one column with the lanes on `k`.
+///
+/// Thirty-two `k`-steps per iteration: `B`'s run widens into two `i16` vectors
+/// once and serves all four rows, and each row's run widens the same way. The
+/// pair sum is `madd`'s, so the declared alphabet is the same `32767` as the tile
+/// sequence's --- and an `i8` alphabet cannot reach it.
+pub const AVX2_R_I8_I32: KernelSpec<i8, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: R_MR,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 32,
+    lane_cap: i32::MAX as u128,
+    max_bound: 32767,
+    mac_tile: avx2_r_i8,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements with row `i` at `pa[i * kc ..][..kc]`,
+/// `pb` must have `kc`, `acc` 4 writable lanes, `kc` a multiple of 32, and the
+/// host must have `avx2`.
+unsafe fn avx2_r_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i8_inner::<R_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_r_i8`].
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_r_i8_inner<const MR: usize>(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    let mut sums = [_mm256_setzero_si256(); MR];
+
+    for q in 0..kc / 32 {
+        // SAFETY: `pb[q * 32 ..][..32]` is in bounds: two 128-bit loads widened
+        // to sixteen `i16` each.
+        let (bl, bh) = unsafe {
+            let base = pb.as_ptr().add(q * 32);
+            (
+                _mm256_cvtepi8_epi16(_mm_loadu_si128(base.cast::<__m128i>())),
+                _mm256_cvtepi8_epi16(_mm_loadu_si128(base.add(16).cast::<__m128i>())),
+            )
+        };
+        for (i, sum) in sums.iter_mut().enumerate() {
+            // SAFETY: `i * kc + q * 32 + 32 <= MR * kc`.
+            let (al, ah) = unsafe {
+                let base = pa.as_ptr().add(i * kc + q * 32);
+                (
+                    _mm256_cvtepi8_epi16(_mm_loadu_si128(base.cast::<__m128i>())),
+                    _mm256_cvtepi8_epi16(_mm_loadu_si128(base.add(16).cast::<__m128i>())),
+                )
+            };
+            *sum = _mm256_add_epi32(*sum, _mm256_madd_epi16(al, bl));
+            *sum = _mm256_add_epi32(*sum, _mm256_madd_epi16(ah, bh));
+        }
+    }
+
+    for (i, sum) in sums.iter().enumerate() {
+        // SAFETY: `avx2` is enabled on this function.
+        acc[i] = unsafe { hsum_epi32(*sum) };
+    }
+}
+
+/// AVX2 `i32` in `Z/2^32`, reducing four rows against one column.
+///
+/// `mullo` gives eight products per instruction and the adds wrap; both are the
+/// ring operations of `Z/2^32`, so the lane holds the value the caller asked to
+/// encode into, at every depth.
+pub const AVX2_R_I32_MOD: KernelSpec<i32, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Modular,
+    mr: R_MR,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 8,
+    lane_cap: 0,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i32_mod,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i8`], with `kc` a multiple of 8.
+unsafe fn avx2_r_i32_mod(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i32_mod_inner::<R_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_r_i32_mod`].
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_r_i32_mod_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i32,
+    pb: *const i32,
+    acc: *mut i32,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    let mut sums = [_mm256_setzero_si256(); MR];
+
+    for q in 0..kc / 8 {
+        // SAFETY: `pb[q * 8 ..][..8]` is in bounds: one 256-bit load.
+        let bv = unsafe { _mm256_loadu_si256(pb.as_ptr().add(q * 8).cast::<__m256i>()) };
+        for (i, sum) in sums.iter_mut().enumerate() {
+            // SAFETY: `i * kc + q * 8 + 8 <= MR * kc`.
+            let av =
+                unsafe { _mm256_loadu_si256(pa.as_ptr().add(i * kc + q * 8).cast::<__m256i>()) };
+            *sum = _mm256_add_epi32(*sum, _mm256_mullo_epi32(av, bv));
+        }
+    }
+
+    for (i, sum) in sums.iter().enumerate() {
+        // SAFETY: `avx2` is enabled on this function. The horizontal sum wraps,
+        // which in `Z/2^32` is the addition.
+        acc[i] = unsafe { hsum_epi32(*sum) };
+    }
+}
+
+/// AVX2 `i16` in `Z/2^32`, reducing four rows against one column.
+pub const AVX2_R_I16_MOD: KernelSpec<i16, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Modular,
+    mr: R_MR,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 16,
+    lane_cap: 0,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i16_mod,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i8`], with `kc` a multiple of 16.
+unsafe fn avx2_r_i16_mod(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i16_mod_inner::<R_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_r_i16_mod`].
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_r_i16_mod_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i32,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    let mut sums = [_mm256_setzero_si256(); MR];
+
+    for q in 0..kc / 16 {
+        // SAFETY: `pb[q * 16 ..][..16]` is in bounds: one 256-bit load.
+        let bv = unsafe { _mm256_loadu_si256(pb.as_ptr().add(q * 16).cast::<__m256i>()) };
+        for (i, sum) in sums.iter_mut().enumerate() {
+            // SAFETY: `i * kc + q * 16 + 16 <= MR * kc`.
+            let av =
+                unsafe { _mm256_loadu_si256(pa.as_ptr().add(i * kc + q * 16).cast::<__m256i>()) };
+            // `madd` wraps and so does the add; in `Z/2^32` both are the ring's.
+            *sum = _mm256_add_epi32(*sum, _mm256_madd_epi16(av, bv));
+        }
+    }
+
+    for (i, sum) in sums.iter().enumerate() {
+        // SAFETY: `avx2` is enabled on this function.
+        acc[i] = unsafe { hsum_epi32(*sum) };
+    }
+}
+
+/// AVX2 `i16 -> i64`, exact at every `i16`, reducing four rows against one
+/// column.
+///
+/// `madd`'s pair sum is not admissible here for the same reason it is not in the
+/// tile kernel, so the products are widened first: `cvtepi16_epi32` then
+/// `mullo_epi32`, each product exact in 31 bits, then widened to `i64`.
+pub const AVX2_R_I16_I64: KernelSpec<i16, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: R_MR,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 8,
+    lane_cap: i64::MAX as u128,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i16,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i8`], with `kc` a multiple of 8.
+unsafe fn avx2_r_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i16_inner::<R_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_r_i16`].
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_r_i16_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i64,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    let mut sums = [[_mm256_setzero_si256(); 2]; MR];
+
+    for q in 0..kc / 8 {
+        // SAFETY: `pb[q * 8 ..][..8]` is in bounds: one 128-bit load widened.
+        let bv = unsafe {
+            _mm256_cvtepi16_epi32(_mm_loadu_si128(pb.as_ptr().add(q * 8).cast::<__m128i>()))
+        };
+        for (i, sum) in sums.iter_mut().enumerate() {
+            // SAFETY: `i * kc + q * 8 + 8 <= MR * kc`.
+            let av = unsafe {
+                _mm256_cvtepi16_epi32(_mm_loadu_si128(
+                    pa.as_ptr().add(i * kc + q * 8).cast::<__m128i>(),
+                ))
+            };
+            let m = _mm256_mullo_epi32(av, bv);
+            sum[0] = _mm256_add_epi64(sum[0], _mm256_cvtepi32_epi64(_mm256_castsi256_si128(m)));
+            sum[1] = _mm256_add_epi64(
+                sum[1],
+                _mm256_cvtepi32_epi64(_mm256_extracti128_si256(m, 1)),
+            );
+        }
+    }
+
+    for (i, sum) in sums.iter().enumerate() {
+        // SAFETY: `avx2` is enabled on this function.
+        acc[i] = unsafe { hsum_epi64(sum[0]).wrapping_add(hsum_epi64(sum[1])) };
+    }
+}
+
+/// AVX2 `i32 -> i64`, exact, reducing four rows against one column.
+///
+/// `mul_epi32` multiplies the even 32-bit lanes into `i64`, so the odd ones are
+/// reached by shifting both operands down 32 bits --- two multiplies for eight
+/// products, which is the arrangement AVX2 offers.
+pub const AVX2_R_I32_I64: KernelSpec<i32, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: R_MR,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 8,
+    lane_cap: i64::MAX as u128,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i32,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i8`], with `kc` a multiple of 8.
+unsafe fn avx2_r_i32(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i32_inner::<R_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_r_i32`].
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_r_i32_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i32,
+    pb: *const i32,
+    acc: *mut i64,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    let mut sums = [[_mm256_setzero_si256(); 2]; MR];
+
+    for q in 0..kc / 8 {
+        // SAFETY: `pb[q * 8 ..][..8]` is in bounds: one 256-bit load.
+        let bv = unsafe { _mm256_loadu_si256(pb.as_ptr().add(q * 8).cast::<__m256i>()) };
+        let bv_odd = _mm256_srli_epi64(bv, 32);
+        for (i, sum) in sums.iter_mut().enumerate() {
+            // SAFETY: `i * kc + q * 8 + 8 <= MR * kc`.
+            let av =
+                unsafe { _mm256_loadu_si256(pa.as_ptr().add(i * kc + q * 8).cast::<__m256i>()) };
+            let av_odd = _mm256_srli_epi64(av, 32);
+            // Exact: each product needs at most 62 bits and lands in an `i64`.
+            sum[0] = _mm256_add_epi64(sum[0], _mm256_mul_epi32(av, bv));
+            sum[1] = _mm256_add_epi64(sum[1], _mm256_mul_epi32(av_odd, bv_odd));
+        }
+    }
+
+    for (i, sum) in sums.iter().enumerate() {
+        // SAFETY: `avx2` is enabled on this function.
+        acc[i] = unsafe { hsum_epi64(sum[0]).wrapping_add(hsum_epi64(sum[1])) };
+    }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A panel wider than the output is zero-padded, and for a reduce kernel that
+/// padding is copied at `k` elements a row --- which for a single dot product is
+/// the whole cost. So the table offers the widths the shapes need, and the driver
+/// takes the widest panel the rows fill. Same instructions, same answer.
+pub const AVX2_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 32,
+    lane_cap: i32::MAX as u128,
+    max_bound: 32767,
+    mac_tile: avx2_r_i8_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i8`], with a one-row panel.
+unsafe fn avx2_r_i8_one(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i8_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A panel wider than the output is zero-padded, and for a reduce kernel that
+/// padding is copied at `k` elements a row --- which for a single dot product is
+/// the whole cost. So the table offers the widths the shapes need, and the driver
+/// takes the widest panel the rows fill. Same instructions, same answer.
+pub const AVX2_R_I32_MOD_1: KernelSpec<i32, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Modular,
+    mr: 1,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 8,
+    lane_cap: 0,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i32_mod_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i32_mod`], with a one-row panel.
+unsafe fn avx2_r_i32_mod_one(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i32_mod_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A panel wider than the output is zero-padded, and for a reduce kernel that
+/// padding is copied at `k` elements a row --- which for a single dot product is
+/// the whole cost. So the table offers the widths the shapes need, and the driver
+/// takes the widest panel the rows fill. Same instructions, same answer.
+pub const AVX2_R_I16_MOD_1: KernelSpec<i16, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Modular,
+    mr: 1,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 16,
+    lane_cap: 0,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i16_mod_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i16_mod`], with a one-row panel.
+unsafe fn avx2_r_i16_mod_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i16_mod_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A panel wider than the output is zero-padded, and for a reduce kernel that
+/// padding is copied at `k` elements a row --- which for a single dot product is
+/// the whole cost. So the table offers the widths the shapes need, and the driver
+/// takes the widest panel the rows fill. Same instructions, same answer.
+pub const AVX2_R_I16_I64_1: KernelSpec<i16, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 8,
+    lane_cap: i64::MAX as u128,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i16_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i16`], with a one-row panel.
+unsafe fn avx2_r_i16_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i16_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A panel wider than the output is zero-padded, and for a reduce kernel that
+/// padding is copied at `k` elements a row --- which for a single dot product is
+/// the whole cost. So the table offers the widths the shapes need, and the driver
+/// takes the widest panel the rows fill. Same instructions, same answer.
+pub const AVX2_R_I32_I64_1: KernelSpec<i32, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: 1,
+    lane_layout: LaneLayout::Contiguous,
+    k_group: 8,
+    lane_cap: i64::MAX as u128,
+    max_bound: u128::MAX,
+    mac_tile: avx2_r_i32_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_r_i32`], with a one-row panel.
+unsafe fn avx2_r_i32_one(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_r_i32_inner::<1>(kc, pa, pb, acc) }
 }

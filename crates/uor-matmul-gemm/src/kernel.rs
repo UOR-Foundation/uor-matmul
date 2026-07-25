@@ -22,8 +22,10 @@ use uor_matmul_core::{
 };
 use uor_matmul_kernels::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
-    available_i64_exact, available_i64_modular, available_i8, choose, Factorization, KernelSpec,
-    MAX_TILE_LANES,
+    available_i64_exact, available_i64_modular, available_i8, available_reduce_i16,
+    available_reduce_i16_modular, available_reduce_i32_exact, available_reduce_i32_modular,
+    available_reduce_i64_exact, available_reduce_i64_modular, available_reduce_i8, choose,
+    choose_reduce, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
 };
 
 use crate::driver::GemmOptions;
@@ -46,6 +48,21 @@ pub trait Kernelized: IntegerElement {
     /// Always present: the reference sequence is exact on every alphabet, so
     /// narrowing the choice can never empty it.
     fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, Self::Exact>;
+
+    /// The exact *reduce* kernel: lanes on `k` rather than on the output.
+    ///
+    /// Also always present, and also exact. Which of the two runs is a question
+    /// about the shape against the tile, and about nothing else --- see
+    /// [`uor_matmul_kernels::available_reduce_i8`].
+    fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, Self::Exact>;
+
+    /// The modular reduce kernel, if the output width admits one.
+    fn modular_reduce(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, Self::Modular>>;
 
     /// The modular kernel for this backend, if the output width admits it.
     ///
@@ -76,6 +93,29 @@ impl Kernelized for i8 {
 
     fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i32> {
         choose(available_i8(), backend, bound).expect("the portable kernel is always present")
+    }
+
+    fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i32> {
+        choose_reduce(available_reduce_i8(), backend, bound, rows)
+            .expect("the portable kernel is always present")
+    }
+
+    fn modular_reduce(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i32>> {
+        if out_bits > 32 {
+            return None;
+        }
+        // The same homomorphism the tile kernel cashes in: an `i8` reduce lane is
+        // already 32 bits, and read as `Z/2^32` its wrap *is* the encode.
+        let spec = choose_reduce(available_reduce_i8(), backend, bound, rows)?;
+        Some(KernelSpec {
+            factorization: Factorization::Modular,
+            ..spec
+        })
     }
 
     fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
@@ -116,6 +156,23 @@ impl Kernelized for i16 {
         choose(available_i16(), backend, bound).expect("the portable kernel is always present")
     }
 
+    fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
+        choose_reduce(available_reduce_i16(), backend, bound, rows)
+            .expect("the portable kernel is always present")
+    }
+
+    fn modular_reduce(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i32>> {
+        if out_bits > 32 {
+            return None;
+        }
+        choose_reduce(available_reduce_i16_modular(), backend, bound, rows)
+    }
+
     fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
         if out_bits > 32 {
             return None;
@@ -146,6 +203,23 @@ impl Kernelized for i32 {
     fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i64> {
         choose(available_i32_exact(), backend, bound)
             .expect("the portable kernel is always present")
+    }
+
+    fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
+        choose_reduce(available_reduce_i32_exact(), backend, bound, rows)
+            .expect("the portable kernel is always present")
+    }
+
+    fn modular_reduce(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i32>> {
+        if out_bits > 32 {
+            return None;
+        }
+        choose_reduce(available_reduce_i32_modular(), backend, bound, rows)
     }
 
     fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
@@ -180,6 +254,23 @@ impl Kernelized for i64 {
         // gets.
         choose(available_i64_exact(), backend, bound)
             .expect("the portable kernel is always present")
+    }
+
+    fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i128> {
+        choose_reduce(available_reduce_i64_exact(), backend, bound, rows)
+            .expect("the portable kernel is always present")
+    }
+
+    fn modular_reduce(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i64>> {
+        if out_bits > 64 {
+            return None;
+        }
+        choose_reduce(available_reduce_i64_modular(), backend, bound, rows)
     }
 
     fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i64>> {
@@ -233,23 +324,43 @@ pub fn gemm_packed<E, Bd, O, Ep>(
     // The modular lane is admissible exactly when the caller asked to wrap into
     // a type no wider than it. That is a question about two declarations --- the
     // encode mode and the output type --- and about nothing else.
-    let modular = matches!(options.encode, EncodeMode::Wrapping)
+    let wrapping = matches!(options.encode, EncodeMode::Wrapping);
+    let modular = wrapping
         .then(|| E::modular_spec(options.backend, O::BITS, Bd::VALUE))
         .flatten();
 
     match modular {
-        Some(spec) => run::<E, Bd, O, Ep, E::Modular>(
-            triple,
-            epilogue,
-            options,
-            scratch,
-            spec,
-            E::add_modular,
-            |acc, lane| *acc = E::modular_as_acc(lane),
-            usize::MAX,
-        ),
+        Some(tile) => {
+            // Where the lanes go is a question about the shape against the tile.
+            // A tile kernel produces `nr` columns per call whether the output has
+            // them or not, so an output narrower than `nr` pays for the ones that
+            // are not there --- at `n = 1` that is one useful lane in `mr * nr`.
+            // The reduce sequence puts the lanes on `k`, where there is always
+            // more. Both compute the same integer (`CB-06`), so this is which
+            // factorization fits the declared shape and not which is better.
+            let spec = if shape.n < tile.nr {
+                E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m).unwrap_or(tile)
+            } else {
+                tile
+            };
+            run::<E, Bd, O, Ep, E::Modular>(
+                triple,
+                epilogue,
+                options,
+                scratch,
+                spec,
+                E::add_modular,
+                |acc, lane| *acc = E::modular_as_acc(lane),
+                usize::MAX,
+            )
+        }
         None => {
-            let spec = E::exact_spec(options.backend, Bd::VALUE);
+            let tile = E::exact_spec(options.backend, Bd::VALUE);
+            let spec = if shape.n < tile.nr {
+                E::exact_reduce(options.backend, Bd::VALUE, shape.m)
+            } else {
+                tile
+            };
             let depth = spec.lane_depth(Bd::VALUE);
             run::<E, Bd, O, Ep, E::Exact>(
                 triple,
@@ -300,19 +411,19 @@ fn run<E, Bd, O, Ep, L>(
     // padding is the alphabet's zero, which contributes nothing to the sum and
     // nothing to the lane --- so it is exact, it cannot push a lane past its
     // cap, and there is no `k`-tail in any kernel to get wrong (S8).
-    let group = spec.k_group.max(1);
+    let pad_to = spec.k_group.max(1);
 
     // With less than one packed group of room there is no panel to pack, so the
     // streaming traversal runs instead --- the same identity, walked
     // differently (S13).
-    if scratch.len() < per_step * group {
+    if scratch.len() < per_step * pad_to {
         crate::gemm(triple, epilogue, options, scratch);
         return;
     }
 
     // A whole number of groups, so a chunk's padded depth never outgrows what
     // was reserved for it.
-    let kc = (scratch.len() / per_step).min(lane_depth) / group * group;
+    let kc = (scratch.len() / per_step).min(lane_depth) / pad_to * pad_to;
     let reads_c = epilogue.reads_c();
 
     // The panels are the only copies this driver makes, and which loop they sit
@@ -337,10 +448,44 @@ fn run<E, Bd, O, Ep, L>(
     // assert the bytes are the same either way.
     let mut tile = [L::default(); MAX_TILE];
     let (a, b, c) = triple.parts();
-    let kpad = shape.k.div_ceil(group) * group;
-    let budget = scratch.len().checked_div(kpad).unwrap_or(0);
+    let kpad = shape.k.div_ceil(pad_to) * pad_to;
+    // A [`LaneLayout::Contiguous`] kernel reads one lane's whole depth as a run,
+    // which is the same layout function at `group = kpad`: `packed_slot` then
+    // reduces to `lane * kpad + p`. So there is one packer, and the difference
+    // between a kernel whose lanes are columns and one whose lanes are steps of
+    // the reduction is a single `usize`.
+    let group = match spec.lane_layout {
+        LaneLayout::Interleaved => pad_to,
+        LaneLayout::Contiguous => kpad,
+    };
+    // A packed panel is a copy, and a copy of something already in the panel's
+    // shape is pure cost. For a [`LaneLayout::Contiguous`] kernel the panel *is*
+    // a run of rows or a run of columns, so a row-major `A` and a column-major
+    // `B` already hold it --- and that is not an exotic case, it is a
+    // matrix-vector product with the ordinary layout, where the panel would
+    // otherwise be one element written per multiply-accumulate and double the
+    // whole product's memory traffic.
+    //
+    // When *both* are borrowable the traversal needs no working memory at all,
+    // so it does not have to ask whether the offer covers a panel: a single deep
+    // dot product runs blocked on an empty `Scratch`. Nothing else changes ---
+    // the kernel reads the same bytes at the same offsets, which is why `CD-01`
+    // still holds and the borrowed and copied traversals are asserted equal on
+    // every narrow shape.
+    let borrowable = matches!(spec.lane_layout, LaneLayout::Contiguous) && kpad == shape.k;
+    let borrow_all = borrowable
+        && a.row_block(0, 0, shape.m.min(mr), kpad).is_some()
+        && b.column_block(0, 0, shape.n.min(nr), kpad).is_some()
+        && shape.m.is_multiple_of(mr)
+        && shape.n.is_multiple_of(nr);
 
-    if shape.k <= kc && budget >= per_step {
+    let budget = if borrow_all {
+        shape.m.max(mr) + shape.n.max(nr)
+    } else {
+        scratch.len().checked_div(kpad).unwrap_or(0)
+    };
+
+    if shape.k <= lane_depth && (borrow_all || (shape.k <= kc && budget >= per_step)) {
         use uor_matmul_core::generated::blocking;
 
         // The declared blocking is a working *set*, not a column count: `KC * NC`
@@ -357,44 +502,78 @@ fn run<E, Bd, O, Ep, L>(
         // capped by the working set, by the matrix itself, and by what the offer
         // pays for --- in that order, with `A` yielding to `B` when the offer is
         // tight, because it is `A` that gets repacked.
-        let mc_want = shape
-            .m
-            .min(blocking::MC)
-            .min((blocking::MC * blocking::KC / kpad).max(mr))
-            .div_ceil(mr)
-            * mr;
-        let nc_want = shape
-            .n
-            .min(blocking::NC)
-            .min((blocking::KC * blocking::NC / kpad).max(nr))
-            .div_ceil(nr)
-            * nr;
-        let mc = mc_want.min((budget - nr) / mr * mr).max(mr);
-        let nc = ((budget - mc) / nr * nr).min(nc_want).max(nr);
+        // A shape inside one block has one block, and asking how to divide it
+        // costs a dozen integer divisions that the answer does not depend on ---
+        // which, at a shape this small, is a measurable share of the whole call.
+        let (mc, nc) = if shape.m <= mr && shape.n <= nr {
+            (mr, nr)
+        } else {
+            let mc_want = shape
+                .m
+                .min(blocking::MC)
+                .min((blocking::MC * blocking::KC / kpad).max(mr))
+                .div_ceil(mr)
+                * mr;
+            let nc_want = shape
+                .n
+                .min(blocking::NC)
+                .min((blocking::KC * blocking::NC / kpad).max(nr))
+                .div_ceil(nr)
+                * nr;
+            let mc = mc_want.min((budget - nr) / mr * mr).max(mr);
+            let nc = ((budget - mc) / nr * nr).min(nc_want).max(nr);
 
-        // Spread the extents evenly over the number of blocks they already imply.
-        // The count is what decides how often `A` is repacked, and it does not
-        // change here --- what changes is that the last block is a full one
-        // instead of a sliver, so every panel is the same size and the tail costs
-        // a repack of the same block rather than of a 16-column stub.
-        let mc = shape.m.div_ceil(shape.m.div_ceil(mc)).div_ceil(mr) * mr;
-        let nc = shape.n.div_ceil(shape.n.div_ceil(nc)).div_ceil(nr) * nr;
+            // Spread the extents evenly over the number of blocks they already
+            // imply. The count is what decides how often `A` is repacked, and it
+            // does not change here --- what changes is that the last block is a
+            // full one instead of a sliver, so every panel is the same size and
+            // the tail costs a repack of the same block rather than of a
+            // sixteen-column stub.
+            (
+                shape.m.div_ceil(shape.m.div_ceil(mc)).div_ceil(mr) * mr,
+                shape.n.div_ceil(shape.n.div_ceil(nc)).div_ceil(nr) * nr,
+            )
+        };
 
-        let buf = scratch.take(kpad * (mc + nc));
-        let (pa_buf, pb_buf) = buf.split_at_mut(mc * kpad);
+        // Nothing to reserve when nothing is copied.
+        let (pa_buf, pb_buf) = if borrow_all {
+            (&mut [][..], &mut [][..])
+        } else {
+            scratch.take(kpad * (mc + nc)).split_at_mut(mc * kpad)
+        };
 
         let mut j0 = 0;
         while j0 < shape.n {
             let cols = nc.min(shape.n - j0);
-            pack_columns(pb_buf, nr, group, shape.k, kpad, b, 0, j0, cols, shape.n);
+            let borrowed_b = borrowable
+                .then(|| b.column_block(0, j0, cols, kpad))
+                .flatten()
+                .filter(|_| cols.is_multiple_of(nr));
+            if borrowed_b.is_none() {
+                pack_columns(pb_buf, nr, group, shape.k, kpad, b, 0, j0, cols, shape.n);
+            }
 
             let mut i0 = 0;
             while i0 < shape.m {
                 let rows = mc.min(shape.m - i0);
-                pack_rows(pa_buf, mr, group, shape.k, kpad, a, i0, 0, rows, shape.m);
+                // A partial panel would read past the block's last row, so a block
+                // that does not divide into whole panels is packed as before.
+                let borrowed_a = borrowable
+                    .then(|| a.row_block(i0, 0, rows, kpad))
+                    .flatten()
+                    .filter(|_| rows.is_multiple_of(mr));
+                if borrowed_a.is_none() {
+                    pack_rows(pa_buf, mr, group, shape.k, kpad, a, i0, 0, rows, shape.m);
+                }
 
-                let pa: &[E] = bytemuck::TransparentWrapper::peel_slice(&*pa_buf);
-                let pb: &[E] = bytemuck::TransparentWrapper::peel_slice(&*pb_buf);
+                let pa: &[E] = match borrowed_a {
+                    Some(block) => bytemuck::TransparentWrapper::peel_slice(block),
+                    None => bytemuck::TransparentWrapper::peel_slice(&*pa_buf),
+                };
+                let pb: &[E] = match borrowed_b {
+                    Some(block) => bytemuck::TransparentWrapper::peel_slice(block),
+                    None => bytemuck::TransparentWrapper::peel_slice(&*pb_buf),
+                };
 
                 // The column panel is the inner loop's invariant, so it stays in
                 // the nearest cache while the row panels stream past it.
@@ -436,7 +615,11 @@ fn run<E, Bd, O, Ep, L>(
             let mut p0 = 0;
             while p0 < shape.k {
                 let depth = kc.min(shape.k - p0);
-                let pad = depth.div_ceil(group) * group;
+                let pad = depth.div_ceil(pad_to) * pad_to;
+                let group = match spec.lane_layout {
+                    LaneLayout::Interleaved => pad_to,
+                    LaneLayout::Contiguous => pad,
+                };
                 {
                     let buf = scratch.take(per_step * pad);
                     let (pa_buf, pb_buf) = buf.split_at_mut(mr * pad);
@@ -637,6 +820,63 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, Full, MatView, MatViewMut};
+
+    /// `CD-01`, `CB-06`: a shape narrower than the tile takes the reduce
+    /// factorization and produces the same bytes.
+    ///
+    /// Which factorization runs is decided by the shape against `nr`, so this
+    /// sweeps `n` across that boundary and compares every result against the
+    /// streaming reference. If the reduce panel layout, its horizontal sum, or
+    /// its `k`-padding were wrong, this is where it would show --- and a
+    /// matrix-vector product is the shape it matters most for.
+    #[test]
+    fn narrow_shapes_take_the_reduce_factorization_cb_06() {
+        let nr = uor_matmul_kernels::choose(
+            uor_matmul_kernels::available_i8(),
+            Backend::Auto,
+            <Full<i8> as uor_matmul_core::Bound>::VALUE,
+        )
+        .unwrap()
+        .nr;
+        assert!(nr > 1, "the tile kernel produces more than one column");
+
+        for n in [1usize, 2, 3, nr - 1, nr, nr + 1] {
+            for m in [1usize, 2, 5, 8, 13] {
+                for k in [1usize, 2, 7, 32, 33, 100, 512] {
+                    let a: Vec<i8> = (0..m * k).map(|i| ((i * 37) % 251) as i8).collect();
+                    let b: Vec<i8> = (0..k * n).map(|i| ((i * 53) % 241) as i8).collect();
+
+                    let mut want = vec![0i32; m * n];
+                    let mut got = vec![0i32; m * n];
+                    let mut buf = vec![Alphabet::<i8, Full<i8>>::ZERO; 64 * (k + 1)];
+
+                    for (out, packed) in [(&mut want, false), (&mut got, true)] {
+                        let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+                        let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+                        let cv = MatViewMut::row_major(out.as_mut_slice(), m, n).unwrap();
+                        let mut t = Triple::new(av, bv, cv).unwrap();
+                        if packed {
+                            gemm_packed(
+                                &mut t,
+                                &Linear::OVERWRITE,
+                                GemmOptions::default(),
+                                &mut Scratch::new(&mut buf),
+                            );
+                        } else {
+                            // The streaming reference: no panel, no kernel.
+                            crate::gemm(
+                                &mut t,
+                                &Linear::OVERWRITE,
+                                GemmOptions::default(),
+                                &mut Scratch::none(),
+                            );
+                        }
+                    }
+                    assert_eq!(got, want, "m={m} k={k} n={n}");
+                }
+            }
+        }
+    }
 
     /// The cursor lands on exactly the slots the declared layout names.
     ///

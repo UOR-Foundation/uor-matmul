@@ -40,6 +40,8 @@ pub mod spec;
 
 pub use spec::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
-    available_i64_exact, available_i64_modular, available_i8, choose, packed_slot, portable_i8,
-    Factorization, KernelSpec, MAX_TILE_LANES,
+    available_i64_exact, available_i64_modular, available_i8, available_reduce_i16,
+    available_reduce_i16_modular, available_reduce_i32_exact, available_reduce_i32_modular,
+    available_reduce_i64_exact, available_reduce_i64_modular, available_reduce_i8, choose,
+    choose_reduce, packed_slot, portable_i8, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
 };

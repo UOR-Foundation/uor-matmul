@@ -259,6 +259,48 @@ impl<'a, E> MatView<'a, E> {
             left: cols,
         }
     }
+
+    /// `rows` rows of `len` elements from `(i, j)`, as one slice, when the
+    /// strides already lay them out that way.
+    ///
+    /// `None` when they do not, and then the caller copies. This exists because
+    /// a packed panel is a copy, and a copy of something already in the right
+    /// shape is pure cost: for a matrix-vector product the panel is one element
+    /// written per multiply-accumulate, which is the whole of that product's
+    /// memory traffic doubled.
+    ///
+    /// The conditions are exactly what makes the block *be* the panel: elements
+    /// adjacent along the row, rows adjacent at `len`, and nothing read past
+    /// what the view names.
+    pub fn row_block(&self, i: usize, j: usize, rows: usize, len: usize) -> Option<&'a [E]> {
+        if self.strides.cs != 1 || rows == 0 || len == 0 {
+            return None;
+        }
+        if rows > 1 && self.strides.rs != len as isize {
+            return None;
+        }
+        if i.checked_add(rows)? > self.rows || j.checked_add(len)? > self.cols {
+            return None;
+        }
+        let start = self.index(i, j);
+        self.data.get(start..start.checked_add(rows * len)?)
+    }
+
+    /// `cols` columns of `len` elements from `(i, j)`, as one slice, when the
+    /// strides already lay them out that way. See [`MatView::row_block`].
+    pub fn column_block(&self, i: usize, j: usize, cols: usize, len: usize) -> Option<&'a [E]> {
+        if self.strides.rs != 1 || cols == 0 || len == 0 {
+            return None;
+        }
+        if cols > 1 && self.strides.cs != len as isize {
+            return None;
+        }
+        if i.checked_add(len)? > self.rows || j.checked_add(cols)? > self.cols {
+            return None;
+        }
+        let start = self.index(i, j);
+        self.data.get(start..start.checked_add(cols * len)?)
+    }
 }
 
 /// A strided walk through a view, one add per element.

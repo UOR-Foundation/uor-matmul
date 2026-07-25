@@ -11,7 +11,7 @@
 
 use uor_matmul_core::Backend;
 
-use crate::spec::{Factorization, KernelSpec};
+use crate::spec::{Factorization, KernelSpec, LaneLayout};
 
 /// Build one reference kernel: `mr x nr` of `E`, accumulating in `L`.
 ///
@@ -31,6 +31,7 @@ macro_rules! reference_kernel {
             factorization: $factorization,
             mr: $mr,
             nr: $nr,
+            lane_layout: LaneLayout::Interleaved,
             // The reference needs no grouping at all, which is why it is the
             // one kernel that never has a tail.
             k_group: 1,
@@ -122,4 +123,150 @@ reference_kernel!(
     /// `i16 x i16 -> i32` in `Z/2^32`.
     I16_MOD, mac_i16_mod, i16, i32, 4, 4, Factorization::Modular, 0,
     |a: i16, b: i16| i32::from(a).wrapping_mul(i32::from(b))
+);
+
+/// Build one reference *reduce* kernel: `mr` rows of `E` against one column,
+/// accumulating in `L`.
+///
+/// The reduce factorization is the one to use when the output is narrower than a
+/// tile: its lanes are steps of the reduction rather than columns of `C`, and
+/// there is always more `k` to fill them with. The reference has no lanes at all,
+/// so it is the same three lines again --- what it establishes is the *answer*
+/// the vector reduce kernels are compared against (`CB-06`).
+macro_rules! reduce_reference {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $fnname:ident, $e:ty, $l:ty, $mr:expr,
+        $factorization:expr, $cap:expr, $mul:expr
+    ) => {
+        $crate::tile_fits!($mr, 1);
+
+        $(#[$meta])*
+        pub const $name: KernelSpec<$e, $l> = KernelSpec {
+            backend: Backend::Portable,
+            factorization: $factorization,
+            mr: $mr,
+            nr: 1,
+            lane_layout: LaneLayout::Contiguous,
+            k_group: 1,
+            lane_cap: $cap,
+            max_bound: u128::MAX,
+            mac_tile: $fnname,
+        };
+
+        /// # Safety
+        ///
+        /// `pa` must have `mr * kc` readable elements with row `i` at
+        /// `pa[i * kc ..][..kc]`, `pb` must have `kc`, and `acc` must have `mr`
+        /// writable lanes.
+        unsafe fn $fnname(kc: usize, pa: *const $e, pb: *const $e, acc: *mut $l) {
+            // SAFETY: the caller guaranteed the three extents.
+            let (pa, pb, acc) = unsafe {
+                (
+                    core::slice::from_raw_parts(pa, $mr * kc),
+                    core::slice::from_raw_parts(pb, kc),
+                    core::slice::from_raw_parts_mut(acc, $mr),
+                )
+            };
+            for i in 0..$mr {
+                let row = &pa[i * kc..][..kc];
+                let mut sum = <$l>::default();
+                for p in 0..kc {
+                    // R5: the overflow behaviour is written rather than
+                    // inherited from the build profile, and for a modular lane
+                    // the wrap is the answer.
+                    sum = sum.wrapping_add($mul(row[p], pb[p]));
+                }
+                acc[i] = sum;
+            }
+        }
+    };
+}
+
+reduce_reference!(
+    /// `i8 x i8 -> i32`, exact, reducing four rows at a time.
+    R_I8_I32, red_i8_i32, i8, i32, 4, Factorization::Exact, i32::MAX as u128,
+    |a: i8, b: i8| i32::from(a) * i32::from(b)
+);
+
+reduce_reference!(
+    /// `i16 x i16 -> i64`, exact.
+    R_I16_I64, red_i16_i64, i16, i64, 4, Factorization::Exact, i64::MAX as u128,
+    |a: i16, b: i16| i64::from(a) * i64::from(b)
+);
+
+reduce_reference!(
+    /// `i16 x i16 -> i32` in `Z/2^32`.
+    R_I16_MOD, red_i16_mod, i16, i32, 4, Factorization::Modular, 0,
+    |a: i16, b: i16| i32::from(a).wrapping_mul(i32::from(b))
+);
+
+reduce_reference!(
+    /// `i32 x i32 -> i64`, exact.
+    R_I32_I64, red_i32_i64, i32, i64, 4, Factorization::Exact, i64::MAX as u128,
+    |a: i32, b: i32| i64::from(a) * i64::from(b)
+);
+
+reduce_reference!(
+    /// `i32 x i32 -> i32` in `Z/2^32`.
+    R_I32_MOD, red_i32_mod, i32, i32, 4, Factorization::Modular, 0,
+    |a: i32, b: i32| a.wrapping_mul(b)
+);
+
+reduce_reference!(
+    /// `i64 x i64 -> i128`, exact.
+    R_I64_I128, red_i64_i128, i64, i128, 4, Factorization::Exact, i128::MAX as u128,
+    |a: i64, b: i64| i128::from(a) * i128::from(b)
+);
+
+reduce_reference!(
+    /// `i64 x i64 -> i64` in `Z/2^64`.
+    R_I64_MOD, red_i64_mod, i64, i64, 4, Factorization::Modular, 0,
+    |a: i64, b: i64| a.wrapping_mul(b)
+);
+
+// One-row panels. See `AVX2_R_I8_I32_1`: a panel wider than the output is
+// zero-padded, and for a reduce kernel that padding is copied at `k` elements a
+// row. The table offers the widths the shapes need.
+
+reduce_reference!(
+    /// `i8 x i8 -> i32`, exact, one row.
+    R1_I8_I32, red1_i8_i32, i8, i32, 1, Factorization::Exact, i32::MAX as u128,
+    |a: i8, b: i8| i32::from(a) * i32::from(b)
+);
+
+reduce_reference!(
+    /// `i16 x i16 -> i64`, exact, one row.
+    R1_I16_I64, red1_i16_i64, i16, i64, 1, Factorization::Exact, i64::MAX as u128,
+    |a: i16, b: i16| i64::from(a) * i64::from(b)
+);
+
+reduce_reference!(
+    /// `i16 x i16 -> i32` in `Z/2^32`, one row.
+    R1_I16_MOD, red1_i16_mod, i16, i32, 1, Factorization::Modular, 0,
+    |a: i16, b: i16| i32::from(a).wrapping_mul(i32::from(b))
+);
+
+reduce_reference!(
+    /// `i32 x i32 -> i64`, exact, one row.
+    R1_I32_I64, red1_i32_i64, i32, i64, 1, Factorization::Exact, i64::MAX as u128,
+    |a: i32, b: i32| i64::from(a) * i64::from(b)
+);
+
+reduce_reference!(
+    /// `i32 x i32 -> i32` in `Z/2^32`, one row.
+    R1_I32_MOD, red1_i32_mod, i32, i32, 1, Factorization::Modular, 0,
+    |a: i32, b: i32| a.wrapping_mul(b)
+);
+
+reduce_reference!(
+    /// `i64 x i64 -> i128`, exact, one row.
+    R1_I64_I128, red1_i64_i128, i64, i128, 1, Factorization::Exact, i128::MAX as u128,
+    |a: i64, b: i64| i128::from(a) * i128::from(b)
+);
+
+reduce_reference!(
+    /// `i64 x i64 -> i64` in `Z/2^64`, one row.
+    R1_I64_MOD, red1_i64_mod, i64, i64, 1, Factorization::Modular, 0,
+    |a: i64, b: i64| a.wrapping_mul(b)
 );

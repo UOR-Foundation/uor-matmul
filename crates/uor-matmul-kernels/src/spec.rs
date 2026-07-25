@@ -43,6 +43,22 @@ pub const fn packed_slot(p: usize, lane: usize, lanes: usize, group: usize) -> u
     (p / group) * (lanes * group) + lane * group + (p % group)
 }
 
+/// How a packed panel arranges one lane's depth.
+///
+/// Both are [`packed_slot`] --- the difference is only what `group` is --- so
+/// there is one layout function and one packer, not two.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LaneLayout {
+    /// Lanes interleave every [`KernelSpec::k_group`] elements. This is what a
+    /// kernel wants when its vector lanes are *columns of the output*: one load
+    /// brings in the same `k`-group for every lane at once.
+    Interleaved,
+    /// Each lane's whole depth is contiguous. This is what a kernel wants when
+    /// its vector lanes are *steps of the reduction*: one load brings in a run of
+    /// `k` for a single lane.
+    Contiguous,
+}
+
 /// Which factorization of the identity a kernel realizes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Factorization {
@@ -68,6 +84,13 @@ pub struct KernelSpec<E, L> {
     pub mr: usize,
     /// Columns of `C` this kernel produces per call.
     pub nr: usize,
+    /// How the packed panels arrange each lane's depth.
+    ///
+    /// [`LaneLayout::Interleaved`] for a kernel whose vector lanes are output
+    /// columns, which is every tile kernel. [`LaneLayout::Contiguous`] for one
+    /// whose vector lanes are steps of the reduction --- see
+    /// [`available_reduce_i8`].
+    pub lane_layout: LaneLayout,
     /// How many `k`-steps this kernel consumes at once, and therefore how the
     /// packed panels are laid out.
     ///
@@ -301,6 +324,141 @@ pub fn available_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
     collect![
         true => crate::isa::portable::I64_MOD,
     ]
+}
+
+/// Every `i8` *reduce* sequence this build can run.
+///
+/// The reduce factorization puts the vector lanes on `k` rather than on the
+/// columns of `C`. It is the one to use when the output is narrower than a tile:
+/// a tile kernel produces `nr` columns per call whether they exist or not, so a
+/// single dot product fills one lane in ninety-six, while there is always more
+/// `k` to fill a lane with.
+///
+/// Not a special case and not a fallback --- the same identity, with the
+/// reduction factored across lanes instead of the output. `CB-06` asserts it
+/// agrees with the reference byte for byte, and the driver chooses between the
+/// two by comparing the shape against the tile, which is a declaration.
+pub fn available_reduce_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
+    collect![
+        true => crate::isa::portable::R1_I8_I32,
+        true => crate::isa::portable::R_I8_I32,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32_1,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32,
+        crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32_1,
+        crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32,
+        crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32_1,
+        crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32,
+        crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32_1,
+        crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32,
+    ]
+}
+
+/// Every exact `i16` reduce sequence. See [`available_reduce_i8`].
+pub fn available_reduce_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
+    collect![
+        true => crate::isa::portable::R1_I16_I64,
+        true => crate::isa::portable::R_I16_I64,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_I64_1,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_I64,
+    ]
+}
+
+/// Every modular `i16` reduce sequence. See [`available_reduce_i8`].
+pub fn available_reduce_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
+    collect![
+        true => crate::isa::portable::R1_I16_MOD,
+        true => crate::isa::portable::R_I16_MOD,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_MOD_1,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_MOD,
+    ]
+}
+
+/// Every exact `i32` reduce sequence. See [`available_reduce_i8`].
+pub fn available_reduce_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
+    collect![
+        true => crate::isa::portable::R1_I32_I64,
+        true => crate::isa::portable::R_I32_I64,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_I64_1,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_I64,
+    ]
+}
+
+/// Every modular `i32` reduce sequence. See [`available_reduce_i8`].
+pub fn available_reduce_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
+    collect![
+        true => crate::isa::portable::R1_I32_MOD,
+        true => crate::isa::portable::R_I32_MOD,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_MOD_1,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_MOD,
+    ]
+}
+
+/// Every exact `i64` reduce sequence.
+///
+/// An `i64 x i64` product needs 128 bits and no SIMD multiply reaches that width
+/// on any supported target, so the reference is the whole of what the hardware
+/// offers --- but the reduce *traversal* still buys this family what it buys
+/// every other: a narrow output stops paying for columns that are not there.
+pub fn available_reduce_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
+    collect![
+        true => crate::isa::portable::R1_I64_I128,
+        true => crate::isa::portable::R_I64_I128,
+    ]
+}
+
+/// Every modular `i64` reduce sequence. See [`available_reduce_i64_exact`].
+pub fn available_reduce_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
+    collect![
+        true => crate::isa::portable::R1_I64_MOD,
+        true => crate::isa::portable::R_I64_MOD,
+    ]
+}
+
+/// Choose a reduce sequence: the widest panel `rows` actually fills.
+///
+/// A panel wider than the block is zero-padded, and for a reduce kernel that
+/// padding is *copied*, at `k` elements a row. So a four-row panel serving one
+/// row does four times the memory traffic of the product itself, and a one-row
+/// panel serving four rows re-reads the column four times. The rule is therefore
+/// the widest panel that the rows fill, and the narrowest when none does.
+///
+/// The rows are a shape --- a declaration the caller made when they constructed
+/// the view --- so this is selection by declaration, like every other choice in
+/// this crate. Every candidate computes the same integer (`CB-06`).
+pub fn choose_reduce<E, L>(
+    specs: impl Iterator<Item = KernelSpec<E, L>>,
+    requested: Backend,
+    bound: u128,
+    rows: usize,
+) -> Option<KernelSpec<E, L>> {
+    // One pass. The list is ordered reference-first, and within a backend
+    // narrowest-panel-first, so "a later entry of a different backend is wider"
+    // and "a later entry of the same backend is a wider panel" are both just the
+    // order --- which is what makes this a single comparison per entry rather
+    // than a walk to find the backend and a second walk to find the panel.
+    let mut best: Option<KernelSpec<E, L>> = None;
+    for spec in specs.filter(|s| s.max_bound >= bound) {
+        let Some(b) = best else {
+            best = Some(spec);
+            continue;
+        };
+        let take = if spec.backend == b.backend {
+            // The widest panel the rows fill; the narrowest when none does.
+            if b.mr > rows {
+                spec.mr <= rows || spec.mr < b.mr
+            } else {
+                spec.mr <= rows && spec.mr > b.mr
+            }
+        } else {
+            // A later entry is a wider backend --- take it, unless the caller
+            // named one and this is already it.
+            !(requested != Backend::Auto && b.backend == requested)
+        };
+        if take {
+            best = Some(spec);
+        }
+    }
+    best
 }
 
 /// The reference `i8` kernel. Always present, always correct, never a

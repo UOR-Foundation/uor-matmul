@@ -34,3 +34,25 @@ pub const AVX2_I16_MOD: KernelSpec<i16, i32> = portable::I16_MOD;
 pub const AVX512_DPWSSD_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
 /// Unreachable: [`avx512vnni_available`] is `false`.
 pub const AVX512_DPBUSD_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
+
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I8_I32: KernelSpec<i8, i32> = portable::R_I8_I32;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I16_I64: KernelSpec<i16, i64> = portable::R_I16_I64;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I16_MOD: KernelSpec<i16, i32> = portable::R_I16_MOD;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I32_I64: KernelSpec<i32, i64> = portable::R_I32_I64;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I32_MOD: KernelSpec<i32, i32> = portable::R_I32_MOD;
+
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I8_I32_1: KernelSpec<i8, i32> = portable::R1_I8_I32;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I16_I64_1: KernelSpec<i16, i64> = portable::R1_I16_I64;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I16_MOD_1: KernelSpec<i16, i32> = portable::R1_I16_MOD;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I32_I64_1: KernelSpec<i32, i64> = portable::R1_I32_I64;
+/// Absent here; the reference reduce sequence carries this family.
+pub const AVX2_R_I32_MOD_1: KernelSpec<i32, i32> = portable::R1_I32_MOD;
