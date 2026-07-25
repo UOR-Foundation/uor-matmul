@@ -82,10 +82,10 @@ fn arithmetic_scaling_exponent_cg_01() {
 
 /// `CG-01`, float half: our exact `f32` path against the classical ones.
 ///
-/// The exponents are what to compare. The constant is expected to favour the
-/// oracles --- exact accumulation into a 619-bit register costs more per
-/// element than one FMA, which is non-goal N4 stated as a number rather than as
-/// an excuse.
+/// The exponents are what to compare, and the constant is a gap to be closed
+/// rather than a property of exactness. It was `134x` when the placement into the
+/// complete accumulator happened once per product; it is smaller now that it
+/// happens once per reduction, and what remains is named in `ANALYSIS.md`.
 #[test]
 fn float_scaling_exponent_cg_01() {
     let sweep = Sweep::standard();
@@ -447,8 +447,8 @@ fn tabulation_census_and_throughput_cg_10() {
         Shape, Traversal,
     };
     use uor_matmul_gemm::{
-        gemm_tabulated, gemm_tabulated_counted, suggested_tabulation, Census, GemmOptions, Linear,
-        Scratch, TabulatedTriple,
+        gemm_tabulated, gemm_tabulated_counted, suggested_tabulation, suggested_tabulation_lanes,
+        Census, GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
     };
 
     let table = e8_table::<Full<i8>>().expect("i8 holds E8");
@@ -511,15 +511,17 @@ fn tabulation_census_and_throughput_cg_10() {
             .collect();
         let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
         let shape = Shape { m, k, n };
-        let offer = suggested_tabulation::<i8>(shape, space);
+        let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
+        let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
         let mut panel: Vec<Alphabet<i8, Full<i8>>> = Vec::new();
         let mut c = vec![0i32; m * n];
 
         let run = |traversal: Traversal,
                    c: &mut Vec<i32>,
                    panel: &mut Vec<Alphabet<i8, Full<i8>>>,
-                   accumulators: &mut Vec<AccOf<i8>>| {
+                   accumulators: &mut Vec<AccOf<i8>>,
+                   words: &mut [i64]| {
             let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
             let cv = MatViewMut::row_major(c, m, n).unwrap();
             let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
@@ -532,29 +534,38 @@ fn tabulation_census_and_throughput_cg_10() {
                     ..Default::default()
                 },
                 &mut Scratch::with_accumulators(panel, accumulators),
+                &mut Tabulation::new(words),
             );
         };
 
         let time = |traversal: Traversal,
                     c: &mut Vec<i32>,
                     panel: &mut Vec<Alphabet<i8, Full<i8>>>,
-                    accumulators: &mut Vec<AccOf<i8>>|
+                    accumulators: &mut Vec<AccOf<i8>>,
+                    words: &mut [i64]|
          -> f64 {
-            run(traversal, c, panel, accumulators);
+            run(traversal, c, panel, accumulators, words);
             let s = std::time::Instant::now();
             for _ in 0..3 {
-                run(traversal, c, panel, accumulators);
+                run(traversal, c, panel, accumulators, words);
             }
             s.elapsed().as_secs_f64() / 3.0
         };
 
-        let t_tab = time(Traversal::Tabulated, &mut c, &mut panel, &mut accumulators);
+        let t_tab = time(
+            Traversal::Tabulated,
+            &mut c,
+            &mut panel,
+            &mut accumulators,
+            &mut words,
+        );
         let tabulated_bytes = c.clone();
         let t_stream = time(
             Traversal::OutputMajor,
             &mut c,
             &mut panel,
             &mut accumulators,
+            &mut words,
         );
         assert_eq!(
             tabulated_bytes, c,
@@ -576,6 +587,7 @@ fn tabulation_census_and_throughput_cg_10() {
                     ..Default::default()
                 },
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut Tabulation::new(&mut words),
                 &mut census,
             );
             census

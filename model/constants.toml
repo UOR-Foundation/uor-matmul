@@ -174,3 +174,10 @@ cache_line_bytes = 64
 # traversal stops paying. Like the four above, it can change which traversal
 # produces an output byte and never which byte (CD-13).
 l1_bytes = 32768
+# The second level of data cache. It sizes the *depth* of a tabulation stack:
+# `depth` tables are built once and then reduced into a lane held in registers, so
+# the exact accumulator is touched once per chunk instead of once per block.
+# Deeper is better until the stack leaves this budget --- and measured, a stack at
+# half of L2 already thrashes against the code stream and the accumulator tile, so
+# `tabulation_depth` takes a quarter of it.
+l2_bytes = 524288

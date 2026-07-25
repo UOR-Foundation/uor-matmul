@@ -68,6 +68,29 @@ pub trait Element: Copy + PartialEq + Send + Sync + core::fmt::Debug + 'static {
 
     /// Fold a completed narrow partial into the wide accumulator.
     fn combine_narrow(acc: Self::Acc, narrow: i64) -> Self::Acc;
+
+    /// Does this element type have a *32-bit* narrow register?
+    ///
+    /// The second entry of [`crate::NARROW_CAPS`], as a product primitive. It
+    /// exists for the same reason the 64-bit one does and buys something the
+    /// 64-bit one cannot: a 32-bit multiply-add is eight lanes to a 256-bit
+    /// register where a 64-bit one is four and, on x86, is not a single
+    /// instruction at all. Reaching it is worth an order of magnitude in any loop
+    /// that is bound by products rather than by memory.
+    ///
+    /// `false` means every run takes [`Element::mac_narrow`] or the wide
+    /// accumulator. That changes nothing about the answer (R13).
+    const HAS_NARROW32: bool = false;
+
+    /// Accumulate into the 32-bit narrow register.
+    ///
+    /// Only called for a run [`crate::fits_narrow`] has admitted against
+    /// `i32::MAX`, so this is exact wherever it is reached. The default is
+    /// unreachable and is never called, because a type with `HAS_NARROW32 = false`
+    /// is never offered a 32-bit run.
+    fn mac_narrow32(acc: i32, _a: Self, _w: Self) -> i32 {
+        acc
+    }
 }
 
 /// Elements with a magnitude, and therefore an alphabet.
@@ -430,6 +453,15 @@ macro_rules! impl_element_for_signed {
 
             fn combine_narrow(acc: i128, narrow: i64) -> i128 {
                 acc + narrow as i128
+            }
+
+            // The product of two values of this type needs at most 32 bits, so an
+            // i32 register can hold a run of them --- again for exactly as long
+            // as `fits_narrow` says.
+            const HAS_NARROW32: bool = 2 * <$t>::BITS <= 31;
+
+            fn mac_narrow32(acc: i32, a: Self, w: Self) -> i32 {
+                acc + (a as i32) * (w as i32)
             }
         }
 

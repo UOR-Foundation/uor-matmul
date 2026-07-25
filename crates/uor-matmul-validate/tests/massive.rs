@@ -266,9 +266,9 @@ fn sustained_throughput_on_super_massive_input_cg_08() {
 
 /// `CG-08`, the float half: the same shapes the exact float path can afford.
 ///
-/// The exact float path is two orders of magnitude slower per element than the
-/// integer one --- N4 --- so the shapes here are the ones it finishes on. What is
-/// reported is the same thing: whether the rate holds across passes.
+/// The exact float path is still slower per element than the integer one, so the
+/// shapes here are the ones it finishes on. What is reported is the same thing:
+/// whether the rate holds across passes.
 #[test]
 #[ignore = "minutes, and gigabytes of operands: `just massive`"]
 fn sustained_float_throughput_on_super_massive_input_cg_08() {

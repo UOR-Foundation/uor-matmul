@@ -48,6 +48,7 @@
 //! and it is the orientation in which a code names `Bk` consecutive *outputs*.
 //! Tabulation simply has nothing to sum there.
 
+use bytemuck::TransparentWrapper;
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
@@ -141,158 +142,347 @@ impl Ledger for Census {
 }
 
 // ---------------------------------------------------------------------------
+// The lane
+// ---------------------------------------------------------------------------
+
+/// A word the table and the column accumulation are held in.
+///
+/// The exact accumulator is 128 bits wide or more, and the column loop touches
+/// one per output cell per block of the reduction. At `m*n*k/Bk` touches that is
+/// not arithmetic, it is *traffic*: a 64x1024x4096 product moves a gigabyte of
+/// accumulator through the cache to compute a quarter of a billion products.
+///
+/// A lane is where that stops. One table entry is a sum of `MAX_BLOCK` products
+/// of two alphabet elements, and a chunk of the reduction is a sum of those, so a
+/// narrow register holds it exactly for a depth this trait states. The exact
+/// accumulator is then touched once per *chunk* instead of once per block, and
+/// the words the inner loop moves halve or better.
+///
+/// This is the same narrow/wide factorization the tile kernels already run under
+/// [`uor_matmul_core::fits_narrow`], at a different place in the traversal. Both
+/// lanes compute the same integer, and `CD-13` asserts the bytes.
+pub trait LaneWord: Copy + Send + Sync + 'static {
+    /// The additive identity.
+    const ZERO: Self;
+    /// Exact within the lane's declared capacity, which is the only place it is
+    /// reached.
+    fn add(self, other: Self) -> Self;
+}
+
+/// A lane for a particular element type: how to fill it, and how to place it.
+pub trait Lane<E: Element>: LaneWord {
+    /// The most products this lane holds exactly, for an alphabet bounded by `b`.
+    ///
+    /// `None` is unbounded --- the exact accumulator, which the width derivation
+    /// already sized against every depth any machine can address.
+    fn capacity(b: u128) -> Option<usize>;
+
+    /// Accumulate one exact product. The only multiply the traversal issues.
+    fn mac(self, a: E, w: E) -> Self;
+
+    /// Place a completed chunk into the exact accumulator.
+    fn place(self, acc: E::Acc) -> E::Acc;
+}
+
+impl LaneWord for i64 {
+    const ZERO: Self = 0;
+
+    fn add(self, other: Self) -> Self {
+        // Exact: both operands are partial sums of a chunk whose length
+        // `capacity` bounded, so this cannot overflow where it is reached. A
+        // derivation error would panic under the checked profile, which is what
+        // that profile is for (`CT-02`).
+        self + other
+    }
+}
+
+impl<E: Element> Lane<E> for i64 {
+    fn capacity(b: u128) -> Option<usize> {
+        // The worst-case magnitude of one product is `b * b`; a bound of zero is
+        // an alphabet containing only zero, for which every depth fits.
+        let per_step = b.saturating_mul(b);
+        if per_step == 0 {
+            return None;
+        }
+        let room = (i64::MAX as u128) / per_step;
+        Some(if room > usize::MAX as u128 {
+            usize::MAX
+        } else {
+            room as usize
+        })
+    }
+
+    fn mac(self, a: E, w: E) -> Self {
+        E::mac_narrow(self, a, w)
+    }
+
+    fn place(self, acc: E::Acc) -> E::Acc {
+        E::combine_narrow(acc, self)
+    }
+}
+
+impl LaneWord for i32 {
+    const ZERO: Self = 0;
+
+    fn add(self, other: Self) -> Self {
+        // Exact within the capacity below, which is the only place it is reached.
+        self + other
+    }
+}
+
+impl<E: Element> Lane<E> for i32 {
+    fn capacity(b: u128) -> Option<usize> {
+        let per_step = b.saturating_mul(b);
+        if per_step == 0 {
+            return None;
+        }
+        let room = (i32::MAX as u128) / per_step;
+        Some(if room > usize::MAX as u128 {
+            usize::MAX
+        } else {
+            room as usize
+        })
+    }
+
+    fn mac(self, a: E, w: E) -> Self {
+        E::mac_narrow32(self, a, w)
+    }
+
+    fn place(self, acc: E::Acc) -> E::Acc {
+        E::combine_narrow(acc, self as i64)
+    }
+}
+
+/// The exact accumulator, as a lane.
+///
+/// The wrapper exists so that "the accumulator used as a lane" and "the narrow
+/// register used as a lane" are two types rather than two code paths. It is
+/// `repr(transparent)`, so a caller's accumulator offer *is* a buffer of these
+/// and no copy stands between them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, TransparentWrapper)]
+#[repr(transparent)]
+pub struct Wide<A>(pub A);
+
+impl<A: Accumulator> LaneWord for Wide<A> {
+    const ZERO: Self = Wide(A::ZERO);
+
+    fn add(self, other: Self) -> Self {
+        Wide(self.0.combine(other.0))
+    }
+}
+
+impl<E: Element> Lane<E> for Wide<E::Acc> {
+    fn capacity(_: u128) -> Option<usize> {
+        // The width derivation already covers every depth any addressable machine
+        // can present, so there is nothing left to bound (§3.2).
+        None
+    }
+
+    fn mac(mut self, a: E, w: E) -> Self {
+        E::mac(&mut self.0, a, w);
+        self
+    }
+
+    fn place(self, acc: E::Acc) -> E::Acc {
+        acc.combine(self.0)
+    }
+}
+
+/// One code's contribution to a tile of `R` rows: one table read and one add
+/// each, and no multiply.
+///
+/// Two arrays of a *compile-time* length, so the whole thing is `R` registers and
+/// there is no index arithmetic, no bounds check and no loop framing in it at all.
+/// That is not tidiness: it is what makes `CU-06`'s disassembly half a statement
+/// about the accumulation rather than about addressing, and measured it was worth
+/// more than everything else in this module put together.
+#[inline(always)]
+fn add_entry<const R: usize, L: LaneWord>(entry: &[L; R], acc: &mut [L; R]) {
+    for i in 0..R {
+        acc[i] = acc[i].add(entry[i]);
+    }
+}
+
+/// The accumulation of [`add_entry`] in the narrowest lane at the widest tile,
+/// named so that `CU-06`'s disassembly gate has a symbol to read.
+///
+/// Not a second path and not a test hook: it is the same function, named once at
+/// an instantiation the shipped traversal reaches, because a generic function
+/// emits no code until something instantiates it and a gate cannot read
+/// instructions that were never emitted.
+#[inline(never)]
+pub fn add_entry_narrow(entry: &[i32; 8], acc: &mut [i32; 8]) {
+    add_entry(entry, acc);
+}
+
+/// The same, in the exact lane, for the element families that have no narrow
+/// register at all.
+#[inline(never)]
+pub fn add_entry_wide(entry: &[Wide<i128>; 8], acc: &mut [Wide<i128>; 8]) {
+    add_entry(entry, acc);
+}
+
+// ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
 
-/// The tabulation buffer for one row tile and one block of the reduction.
+/// The tabulation buffer for one row tile and a chunk of the reduction.
 ///
-/// Borrowed, never owned: it lives in the caller's accumulator offer like every
-/// other working buffer in this library (R7, S13). `code_space * rows`
-/// accumulator words, row-major in the *code* index, so the column loop reads
-/// consecutive words for the `rows` outputs of one code and the prefetcher sees a
-/// stride it can follow.
+/// Borrowed, never owned: it lives in the caller's offer like every other working
+/// buffer in this library (R7, S13). `depth * code_space * rows` lane words,
+/// indexed block-major then code-major, so one code's entry is a contiguous run
+/// of `rows` words and [`add_entry`] walks it against the column accumulation
+/// without a stride.
+///
+/// The *depth* is why the exact accumulator stops being traffic. A stack of
+/// `depth` tables lets the column loop reduce `depth` blocks into a lane held in
+/// registers and place the result once, so the accumulator is touched
+/// `m*n*(k/Bk)/depth` times instead of `m*n*(k/Bk)`.
 #[derive(Debug)]
-pub struct Table<'s, A: Accumulator> {
-    words: &'s mut [A],
+pub struct Table<'s, L> {
+    words: &'s mut [L],
     code_space: usize,
     rows: usize,
+    depth: usize,
 }
 
-impl<'s, A: Accumulator> Table<'s, A> {
-    /// How many accumulator words a table for `rows` rows of a `code_space`-wide
-    /// enumeration occupies.
+impl<'s, L: LaneWord> Table<'s, L> {
+    /// How many lane words a stack of `depth` tables over `rows` rows of a
+    /// `code_space`-wide enumeration occupies.
     ///
     /// A query, so an embedded caller can size a static and know the answer
     /// before it calls anything.
-    pub const fn words(code_space: usize, rows: usize) -> usize {
-        code_space.saturating_mul(rows)
+    pub const fn words(code_space: usize, rows: usize, depth: usize) -> usize {
+        code_space.saturating_mul(rows).saturating_mul(depth)
     }
 
-    /// Borrow `words` as the table for `rows` rows.
+    /// Borrow `words` as a stack of `depth` tables.
     ///
     /// `None` when the borrow is shorter than the table it is asked to be, which
     /// means no such table exists in that offer. Decided here, before any
     /// arithmetic, and answered by the caller taking the streaming traversal
     /// instead --- not by an error reaching anyone (C6).
-    pub fn new(words: &'s mut [A], code_space: usize, rows: usize) -> Option<Self> {
-        if code_space == 0 || rows == 0 || words.len() < Self::words(code_space, rows) {
+    pub fn new(words: &'s mut [L], code_space: usize, rows: usize, depth: usize) -> Option<Self> {
+        if code_space == 0
+            || rows == 0
+            || depth == 0
+            || words.len() < Self::words(code_space, rows, depth)
+        {
             return None;
         }
         Some(Self {
             words,
             code_space,
             rows,
+            depth,
         })
     }
 
-    /// Distinct codes this table is indexed by.
+    /// Distinct codes each table in the stack is indexed by.
     pub const fn code_space(&self) -> usize {
         self.code_space
     }
 
-    /// Rows of `A` this table covers.
+    /// Rows of `A` the stack covers.
     pub const fn rows(&self) -> usize {
         self.rows
     }
 
-    /// Every entry for one block of the reduction.
+    /// Blocks of the reduction the stack holds at once.
+    pub const fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Every entry of one block of the reduction, into stack slot `slot`.
     ///
     /// `code_space * block * rows` products, and the only multiplies the tabulated
     /// traversal issues at all.
     ///
-    /// Codes outer, rows inner. That order is not free to choose: it decodes each
-    /// codeword's `block` elements once per *tile* rather than once per row, which
-    /// is `code_space * block` decode calls instead of `code_space * block * rows`
-    /// --- and for a book codec whose table is in L2, the decode is the expensive
-    /// half.
-    pub fn build<E, Bd, C, L>(
+    /// The reduction's step outer, the code space inner. That order is not free to
+    /// choose, and it is the whole cost of the build:
+    ///
+    /// - The `R` activations of one step are read **once** and stay in registers
+    ///   across the entire code space. Codes-outer would re-read them
+    ///   `code_space` times, and measured that re-read was half the traversal.
+    /// - Each codeword's `block` elements are still decoded once per tile rather
+    ///   than once per row, which is `code_space * block` decode calls and not
+    ///   `code_space * block * R`.
+    ///
+    /// `R` is the tile's height and a compile-time one, because the last tile of a
+    /// shape that does not divide is shorter and the caller walks down
+    /// [`ROW_TILES`] rather than passing a runtime length. The stride stays the
+    /// table's, so a ragged tile changes what is written and never where.
+    pub fn build<const R: usize, E, Bd, C, Lg>(
         &mut self,
         codec: &C,
         a: &MatView<'_, Alphabet<E, Bd>>,
         row0: usize,
-        rows: usize,
+        slot: usize,
         block_index: usize,
-        ledger: &mut L,
+        ledger: &mut Lg,
     ) where
-        E: IntegerElement + Element<Acc = A>,
+        E: IntegerElement,
         Bd: Bound,
         C: Enumerable<E, Bd>,
-        L: Ledger,
+        L: Lane<E>,
+        Lg: Ledger,
     {
         let block = C::MAX_BLOCK;
         let base = block_index * block;
-        // A ragged last tile builds fewer entries and keeps the table's stride, so
-        // the addressing is the same whether the shape divides or not (`CS-06`).
-        let rows = rows.min(self.rows);
-        let stride = self.rows;
-        for index in 0..self.code_space {
-            let code = C::code_at(index);
-            let entry = &mut self.words[index * stride..index * stride + rows];
-            entry.fill(A::ZERO);
-            for t in 0..block {
-                // One decode, then `rows` products against it. This is the only
-                // place the codec is consulted: below the build there are no
-                // codes left, only indices.
-                let w = codec.decode_element(code, t).get();
-                ledger.decoded(1);
-                for (i, slot) in entry.iter_mut().enumerate() {
-                    E::mac(slot, a.at(row0 + i, base + t).get(), w);
-                }
-                ledger.multiplied(rows as u64);
+        let slab = self.code_space * R;
+        let start = slot * slab;
+        let words = &mut self.words[start..start + slab];
+        words.fill(L::ZERO);
+        for t in 0..block {
+            // One column of the activation tile, read once for the whole code
+            // space and held in `R` registers.
+            let mut column = [E::ZERO; R];
+            for (i, cell) in column.iter_mut().enumerate() {
+                *cell = a.at(row0 + i, base + t).get();
             }
+            // Codes walked, not indexed: one entry per chunk, so the step is a
+            // decode, a broadcast and `R` multiply-accumulates, with no address
+            // arithmetic and no bounds check between them.
+            for (index, entry) in words.chunks_exact_mut(R).enumerate() {
+                // This is the only place the codec is consulted: below the build
+                // there are no codes left, only indices.
+                let w = codec.decode_element(C::code_at(index), t).get();
+                if let Some(entry) = entry.first_chunk_mut::<R>() {
+                    for i in 0..R {
+                        entry[i] = entry[i].mac(column[i], w);
+                    }
+                }
+            }
+            ledger.decoded(self.code_space as u64);
+            ledger.multiplied((self.code_space * R) as u64);
         }
     }
 
-    /// One code's entry: the partial sum for each of the tile's first `rows` rows.
+    /// The stack itself, one slab of `code_space * rows` words per block held.
     ///
-    /// A contiguous run, which is why the code index is the *outer* index of the
-    /// layout. The column loop hands this straight to [`add_entry`] and the two
-    /// slices walk together.
-    ///
-    /// `rows` is the tile's height rather than the table's, because the last tile
-    /// of a shape that does not divide is shorter. The stride stays the table's,
-    /// so a ragged tile changes what is read and never where it is read from.
+    /// The column loop walks it with [`slice::chunks_exact`], so the slot's base
+    /// advances by an add rather than a multiply and the slab's bounds are checked
+    /// once for the whole walk instead of once per code.
+    pub fn stack(&self) -> &[L] {
+        self.words
+    }
+
+    /// Words per block held: one entry per code, one word per row.
+    pub const fn slab(&self) -> usize {
+        self.code_space * self.rows
+    }
+
+    /// One code's entry in one slot of the stack: the partial sum for each of the
+    /// tile's `R` rows, as an array so the column loop keeps it in registers.
     ///
     /// No bounds check is needed in principle: [`Enumerable::index_of`] is total
-    /// below `CODE_SPACE` and the buffer is `CODE_SPACE` entries wide by
+    /// below `CODE_SPACE` and the buffer is `CODE_SPACE` entries wide per slot by
     /// construction, which is what `CT-07` asserts.
     #[inline(always)]
-    pub fn entry(&self, code_index: usize, rows: usize) -> &[A] {
-        let at = code_index * self.rows;
-        &self.words[at..at + rows.min(self.rows)]
+    pub fn entry<const R: usize>(&self, slot: usize, code_index: usize) -> Option<&[L; R]> {
+        let at = (slot * self.code_space + code_index) * self.rows;
+        self.words.get(at..at + R)?.first_chunk::<R>()
     }
-
-    /// One tabulated partial sum.
-    #[inline(always)]
-    pub fn get(&self, code_index: usize, row: usize) -> A {
-        self.words[code_index * self.rows + row]
-    }
-}
-
-/// One code's contribution to a tile of output columns: one table read and one
-/// exact add per row, and no multiply.
-///
-/// Two slices of the same length, walked together. There is no index arithmetic
-/// in here at all, which is not tidiness --- it is what makes `CU-06`'s
-/// disassembly half a statement about the *accumulation* rather than about
-/// addressing.
-#[inline(always)]
-fn add_entry<A: Accumulator>(entry: &[A], acc: &mut [A]) {
-    for (slot, &partial) in acc.iter_mut().zip(entry) {
-        *slot = slot.combine(partial);
-    }
-}
-
-/// The accumulation of [`add_entry`] at one concrete instantiation, so that
-/// `CU-06`'s disassembly gate has a symbol to read.
-///
-/// Not a second path and not a test hook: it is the same function, named once at
-/// a width the shipped integer families resolve to, because a generic function
-/// emits no code until something instantiates it and a gate cannot read
-/// instructions that were never emitted.
-#[inline(never)]
-pub fn add_entry_wide(entry: &[i128], acc: &mut [i128]) {
-    add_entry(entry, acc);
 }
 
 // ---------------------------------------------------------------------------
@@ -352,14 +542,109 @@ impl<'a, 'w, 'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, O>
 }
 
 // ---------------------------------------------------------------------------
+// The offer
+// ---------------------------------------------------------------------------
+
+/// The narrow lane the tabulated traversal accumulates chunks of the reduction
+/// in, offered by the caller.
+///
+/// A separate offer for the same reason [`crate::Collapse`] is one: it is a
+/// different buffer with a different element type, and the library owns neither.
+/// Offering none is well formed --- an element family with a narrow register then
+/// tabulates in the exact accumulator out of [`Scratch`], and one without was
+/// always going to.
+#[derive(Debug)]
+pub struct Tabulation<'s> {
+    lanes: &'s mut [i64],
+}
+
+impl<'s> Tabulation<'s> {
+    /// Offer a narrow lane buffer.
+    pub fn new(lanes: &'s mut [i64]) -> Self {
+        Self { lanes }
+    }
+
+    /// Offer none.
+    ///
+    /// Not a degraded mode and not a fallback: the same identity, accumulated in
+    /// a wider register (R13).
+    pub fn none() -> Tabulation<'static> {
+        Tabulation { lanes: &mut [] }
+    }
+
+    /// How much was offered.
+    pub fn len(&self) -> usize {
+        self.lanes.len()
+    }
+
+    /// Was nothing offered?
+    pub fn is_empty(&self) -> bool {
+        self.lanes.is_empty()
+    }
+}
+
+/// How many narrow lane words would let the tabulated traversal run at its
+/// intended stack depth for this shape and this codec.
+///
+/// A *query*, like [`crate::suggested_scratch`]. Zero when the element type has no
+/// narrow register, in which case the traversal accumulates in the exact one and
+/// wants that much more of [`suggested_tabulation`] instead.
+///
+/// It does not grow with `n`, and it grows with `k` only until the stack reaches
+/// the depth the cache holds.
+pub fn suggested_tabulation_lanes<E: IntegerElement, Bd: Bound>(
+    shape: Shape,
+    code_space: usize,
+    block: usize,
+) -> usize {
+    let lane = LaneChoice::resolve::<E, Bd>(block);
+    if lane.is_exact(core::mem::size_of::<AccOf<E>>()) {
+        return 0;
+    }
+    let Some(plan) = Plan::choose(code_space, shape, lane, usize::MAX, usize::MAX, block) else {
+        return 0;
+    };
+    // Reported in `i64` words, which is what the offer is made of.
+    plan.lane_words(code_space)
+        .saturating_mul(lane.bytes)
+        .div_ceil(core::mem::size_of::<i64>())
+}
+
+/// How many exact accumulators would let the tabulated traversal run at the whole
+/// output width for this shape and this codec.
+///
+/// A *query*, like [`crate::suggested_scratch`]. Offering less narrows the column
+/// block; offering none gives the same bytes from the streaming traversal
+/// (`CD-13`). It does not grow with `k`.
+///
+/// When the element type has no narrow register this covers the table stack too,
+/// because there is then nowhere else for it to live.
+pub fn suggested_tabulation<E: IntegerElement, Bd: Bound>(
+    shape: Shape,
+    code_space: usize,
+    block: usize,
+) -> usize {
+    let lane = LaneChoice::resolve::<E, Bd>(block);
+    let exact = lane.is_exact(core::mem::size_of::<AccOf<E>>());
+    let Some(plan) = Plan::choose(code_space, shape, lane, usize::MAX, usize::MAX, block) else {
+        return 0;
+    };
+    let tile = plan.rows.saturating_mul(plan.cols);
+    if exact {
+        tile.saturating_add(plan.lane_words(code_space))
+    } else {
+        tile
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Selection
 // ---------------------------------------------------------------------------
 
-/// Does a table for `rows` rows of a `code_space`-wide enumeration fit the
-/// declared cache budget?
+/// Does a table for `rows` rows of a `code_space`-wide enumeration fit L1?
 ///
-/// The factor of two leaves half of L1 for the code stream and the output
-/// accumulators. A table that does not sit in L1 turns every output column into a
+/// The factor of two leaves half of L1 for the code stream and the column
+/// accumulation. A table that does not sit in L1 turns every output column into a
 /// cache miss, and the traversal stops paying long before the op count says it
 /// should --- which is why residency is a term of the predicate and not an
 /// afterthought.
@@ -367,13 +652,13 @@ pub const fn tabulation_fits(
     code_space: usize,
     rows: usize,
     l1_bytes: usize,
-    acc_bytes: usize,
+    lane_bytes: usize,
 ) -> bool {
     code_space > 0
         && rows > 0
         && code_space
             .saturating_mul(rows)
-            .saturating_mul(acc_bytes)
+            .saturating_mul(lane_bytes)
             .saturating_mul(2)
             <= l1_bytes
 }
@@ -398,23 +683,23 @@ pub const fn tabulation_pays(
     cols: usize,
     rows: usize,
     l1_bytes: usize,
-    acc_bytes: usize,
+    lane_bytes: usize,
 ) -> bool {
     block > 1
         && cols.saturating_mul(block - 1) > code_space.saturating_mul(block)
-        && tabulation_fits(code_space, rows, l1_bytes, acc_bytes)
+        && tabulation_fits(code_space, rows, l1_bytes, lane_bytes)
 }
 
 /// The most rows of `A` one table can cover and still sit in L1.
 ///
-/// Derived from the cache budget and the code space, and capped by the same
-/// `MC` the blocked traversal uses --- not by a number chosen for this traversal
-/// (R8). Zero means no table fits at all, which selects the streaming traversal.
-pub const fn tabulation_rows(code_space: usize, l1_bytes: usize, acc_bytes: usize) -> usize {
-    if code_space == 0 || acc_bytes == 0 {
+/// Derived from the cache budget and the code space, and capped by the same `MC`
+/// the blocked traversal uses --- not by a number chosen for this traversal (R8).
+/// Zero means no table fits at all, which selects the streaming traversal.
+pub const fn tabulation_rows(code_space: usize, l1_bytes: usize, lane_bytes: usize) -> usize {
+    if code_space == 0 || lane_bytes == 0 {
         return 0;
     }
-    let room = l1_bytes / (2 * code_space * acc_bytes);
+    let room = l1_bytes / (2 * code_space * lane_bytes);
     if room < blocking::MC {
         room
     } else {
@@ -422,26 +707,171 @@ pub const fn tabulation_rows(code_space: usize, l1_bytes: usize, acc_bytes: usiz
     }
 }
 
-/// How many exact accumulators would let the tabulated traversal run at the whole
-/// output width for this shape and this codec.
+/// How many blocks of the reduction one stack of tables may hold at once.
 ///
-/// A *query*, like [`crate::suggested_scratch`]. Offering less narrows the column
-/// block; offering none gives the same bytes from the streaming traversal
-/// (`CD-13`). It does not grow with `k`.
-pub fn suggested_tabulation<E: IntegerElement>(shape: Shape, code_space: usize) -> usize {
-    let acc_bytes = core::mem::size_of::<AccOf<E>>();
-    let rows = tabulation_rows(code_space, blocking::L1_BYTES, acc_bytes)
-        .min(shape.m)
-        .max(1);
-    // The table, plus one exact partial sum per output cell of the row tile.
-    Table::<AccOf<E>>::words(code_space, rows).saturating_add(rows.saturating_mul(shape.n))
+/// Two bounds, and the smaller wins. The stack is read once per output column, so
+/// it must sit in the last level of cache the column loop can afford: that is the
+/// `l2_bytes` term. And a chunk of the reduction is accumulated in one lane word,
+/// so it may be no longer than the lane holds exactly: that is `lane_capacity`,
+/// which is `None` for the exact accumulator because the width derivation already
+/// covers every depth a machine can address.
+///
+/// Depth is the whole reason the exact accumulator stops being traffic. At depth
+/// `d` it is touched `m*n*(k/Bk)/d` times instead of `m*n*(k/Bk)`.
+pub const fn tabulation_depth(
+    code_space: usize,
+    rows: usize,
+    block: usize,
+    lane_capacity: Option<usize>,
+    l2_bytes: usize,
+    lane_bytes: usize,
+) -> usize {
+    if code_space == 0 || rows == 0 || lane_bytes == 0 || block == 0 {
+        return 0;
+    }
+    let per_slot = code_space * rows * lane_bytes;
+    // A quarter of L2, not a half. The stack is not alone in there: the code
+    // stream and the exact accumulator tile pass through the same cache, and
+    // measured, a stack at half of L2 gave up a fifth of the throughput a stack at
+    // a quarter of it reached.
+    let mut depth = l2_bytes / (4 * per_slot);
+    if depth == 0 {
+        depth = 1;
+    }
+    match lane_capacity {
+        // The lane holds `cap` products; a block contributes `block` of them.
+        Some(cap) => {
+            let by_lane = cap / block;
+            if by_lane < depth {
+                by_lane
+            } else {
+                depth
+            }
+        }
+        None => depth,
+    }
+}
+
+/// A lane's two facts, as the planner needs them: how wide one word is, and how
+/// many products one word holds exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct LaneChoice {
+    bytes: usize,
+    capacity: Option<usize>,
+}
+
+impl LaneChoice {
+    /// The lane this instantiation resolves to: the **narrowest** that can hold a
+    /// block of the reduction.
+    ///
+    /// The same scan, and the same reason, as
+    /// [`uor_matmul_core::narrow_cap_for`]: every lane computes the same integer,
+    /// and a narrower word halves the table, doubles the rows that sit in L1 and
+    /// doubles the depth that sits in L2. Traffic is what the column loop is bound
+    /// by, so the narrowest lane is the fastest one.
+    ///
+    /// `None` for [`Element::HAS_NARROW`] false means the exact accumulator, which
+    /// the width derivation already sized against every depth (§3.2).
+    fn resolve<E: IntegerElement, Bd: Bound>(block: usize) -> Self {
+        let holds = |c: Option<usize>| c.is_some_and(|c| c >= block);
+        if E::HAS_NARROW32 {
+            let narrow32 = <i32 as Lane<E>>::capacity(Bd::VALUE);
+            if holds(narrow32) {
+                return Self {
+                    bytes: core::mem::size_of::<i32>(),
+                    capacity: narrow32,
+                };
+            }
+        }
+        if E::HAS_NARROW {
+            let narrow64 = <i64 as Lane<E>>::capacity(Bd::VALUE);
+            if holds(narrow64) {
+                return Self {
+                    bytes: core::mem::size_of::<i64>(),
+                    capacity: narrow64,
+                };
+            }
+        }
+        Self {
+            bytes: core::mem::size_of::<AccOf<E>>(),
+            capacity: None,
+        }
+    }
+
+    /// Is this the exact accumulator rather than a narrow register?
+    const fn is_exact(&self, acc_bytes: usize) -> bool {
+        self.capacity.is_none() && self.bytes == acc_bytes
+    }
+}
+
+/// The row tile, column block and stack depth one call resolves to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Plan {
+    rows: usize,
+    cols: usize,
+    depth: usize,
+}
+
+impl Plan {
+    /// Lane words the plan needs: the stack, and nothing else.
+    ///
+    /// The column accumulation itself is `R` registers and never a buffer, which
+    /// is what [`row_tile`]'s compile-time row count buys.
+    const fn lane_words(&self, code_space: usize) -> usize {
+        code_space
+            .saturating_mul(self.rows)
+            .saturating_mul(self.depth)
+    }
+
+    /// The largest plan the two offers support.
+    ///
+    /// Rows first, from the cache budget: a wider row tile shares each decode
+    /// across more outputs and puts more lane words under one vector instruction.
+    /// Then the column block, as wide as the exact offer allows, because the build
+    /// repeats once per column block. Then the depth, as deep as the lane offer
+    /// and the lane's own capacity allow, because depth is what keeps the exact
+    /// accumulator out of the inner loop.
+    fn choose(
+        code_space: usize,
+        shape: Shape,
+        lane: LaneChoice,
+        exact_offer: usize,
+        lane_offer: usize,
+        block: usize,
+    ) -> Option<Self> {
+        if code_space == 0 || block == 0 || shape.m == 0 || shape.n == 0 {
+            return None;
+        }
+        let LaneChoice {
+            bytes: lane_bytes,
+            capacity: cap,
+        } = lane;
+        let row_cap = tabulation_rows(code_space, blocking::L1_BYTES, lane_bytes)
+            .min(shape.m)
+            .min(exact_offer);
+        // The row tile is one of the counts the column loop is compiled for, so
+        // that its accumulation is registers and not a buffer. Widest first.
+        let rows = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= row_cap && code_space.saturating_mul(r) <= lane_offer)?;
+        let cols = shape.n.min(exact_offer / rows);
+        if cols == 0 {
+            return None;
+        }
+        let blocks = shape.k / block;
+        let by_cache =
+            tabulation_depth(code_space, rows, block, cap, blocking::L2_BYTES, lane_bytes);
+        let by_offer = lane_offer / (code_space * rows);
+        let depth = by_cache.min(by_offer).min(blocks.max(1)).max(1);
+        Some(Self { rows, cols, depth })
+    }
 }
 
 // ---------------------------------------------------------------------------
 // The traversal
 // ---------------------------------------------------------------------------
 
-/// `C := epilogue(A * W^T, C)`, with the table when the offer admits one.
+/// `C := epilogue(A * W^T, C)`, with the table when the offers admit one.
 ///
 /// Returns `()`, for the same reason [`crate::gemm`] does.
 pub fn gemm_tabulated<E, Bd, C, O, Ep>(
@@ -449,6 +879,7 @@ pub fn gemm_tabulated<E, Bd, C, O, Ep>(
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
+    lanes: &mut Tabulation<'_>,
 ) where
     E: IntegerElement,
     Bd: Bound,
@@ -456,19 +887,20 @@ pub fn gemm_tabulated<E, Bd, C, O, Ep>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    run(triple, epilogue, options, scratch, &mut ());
+    run(triple, epilogue, options, scratch, lanes, &mut ());
 }
 
 /// The same traversal, with the operation census written out.
 ///
-/// Not a second path: [`gemm_tabulated`] is this function at `L = ()`, where every
-/// ledger call has an empty body and disappears. `CU-06` reads the census this
-/// returns and `CD-13` asserts the two give the same bytes.
+/// Not a second path: [`gemm_tabulated`] is this function at `Lg = ()`, where
+/// every ledger call has an empty body and disappears. `CU-06` reads the census
+/// this returns and `CD-13` asserts the two give the same bytes.
 pub fn gemm_tabulated_counted<E, Bd, C, O, Ep>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
+    lanes: &mut Tabulation<'_>,
     census: &mut Census,
 ) where
     E: IntegerElement,
@@ -477,42 +909,23 @@ pub fn gemm_tabulated_counted<E, Bd, C, O, Ep>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    run(triple, epilogue, options, scratch, census);
+    run(triple, epilogue, options, scratch, lanes, census);
 }
 
-/// The row tile and column block this offer supports, or `None` for neither.
-///
-/// Widest column block first, then as many rows as what is left allows. That
-/// order is derived, not preferred: the build is repeated once per column block
-/// and shared across the rows of a tile, so a narrow block multiplies the
-/// products while a short tile only multiplies the decodes.
-fn partition(offered: usize, cols: usize, code_space: usize, row_cap: usize) -> (usize, usize) {
-    if code_space == 0 || cols == 0 {
-        return (0, 0);
-    }
-    let per_row = cols.saturating_add(code_space);
-    let rows = (offered / per_row.max(1)).min(row_cap);
-    if rows >= 1 {
-        return (rows, cols);
-    }
-    // Not enough for one row at the whole width: one row, and as wide a block as
-    // the remainder buys.
-    (1, offered.saturating_sub(code_space).min(cols))
-}
-
-fn run<E, Bd, C, O, Ep, L>(
+fn run<E, Bd, C, O, Ep, Lg>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
-    ledger: &mut L,
+    lanes: &mut Tabulation<'_>,
+    ledger: &mut Lg,
 ) where
     E: IntegerElement,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
-    L: Ledger,
+    Lg: Ledger,
 {
     let shape = triple.shape();
     if shape.m == 0 || shape.n == 0 {
@@ -523,100 +936,282 @@ fn run<E, Bd, C, O, Ep, L>(
 
     let space = C::CODE_SPACE;
     let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
-    let acc_bytes = core::mem::size_of::<AccOf<E>>();
-    let row_cap = tabulation_rows(space, blocking::L1_BYTES, acc_bytes)
-        .min(shape.m)
-        .max(1);
-    let (rows, cols) = partition(scratch.accumulators(), shape.n, space, row_cap);
-
     // A code stream whose blocks are not a fixed width has no `p`-th block to
     // index, so there is nothing for a table to be built per block of. The one
     // such tier does not implement `Enumerable`, so this is unreachable through
     // the shipped codecs; it is here because the trait does not forbid it.
-    let addressable = <C as uor_matmul_codec::Codec<E, Bd>>::IS_FIXED_WIDTH && block >= 1;
-
-    let tabulate = addressable
-        && rows >= 1
-        && cols >= 1
-        && match options.traversal {
-            // Streaming was asked for by name.
-            Traversal::OutputMajor => false,
-            // The default: take the table when it is the cheaper factorization.
-            Traversal::Blocked => {
-                tabulation_pays(space, block, cols, rows, blocking::L1_BYTES, acc_bytes)
-            }
-            // Named by the caller: take the table wherever one fits, whether or
-            // not the op count says it wins. `CD-13` needs this to compare bytes
-            // on both sides of the predicate, and a caller measuring its own
-            // shapes needs it for the same reason.
-            Traversal::Tabulated => tabulation_fits(space, rows, blocking::L1_BYTES, acc_bytes),
-        };
-
-    if !tabulate {
+    let addressable =
+        <C as uor_matmul_codec::Codec<E, Bd>>::IS_FIXED_WIDTH && block >= 1 && space > 0;
+    if !addressable || options.traversal == Traversal::OutputMajor {
         stream(triple, epilogue, options, ledger);
         return;
     }
 
-    let blocks = shape.k / block;
-    let reads_c = epilogue.reads_c();
-    let codes_per_row = triple.w.codes_per_row();
-    let want = Table::<AccOf<E>>::words(space, rows) + rows * cols;
-    let (_, accumulators) = scratch.split(0, want);
-    let (tile, words) = accumulators.split_at_mut(rows * cols);
-    let mut table = match Table::new(words, space, rows) {
-        Some(t) => t,
-        // `partition` sized the offer for exactly this, so a `None` here means
-        // the offer shrank under us, which it cannot. Streaming gives the same
-        // bytes either way, which is why this needs no report (C6).
-        None => {
+    // The narrowest lane that holds a block of the reduction, the same scan the
+    // tile kernels run. Every lane computes the same integer; this is a question
+    // about register width and traffic, and `CD-13` asserts the bytes across it.
+    let lane = LaneChoice::resolve::<E, Bd>(block);
+    let acc_bytes = core::mem::size_of::<AccOf<E>>();
+    let exact_offer = scratch.accumulators();
+
+    if lane.is_exact(acc_bytes) {
+        // The exact accumulator as the lane, out of the same offer the tile comes
+        // from. Wider words and a shallower stack; the same identity, and for
+        // `i64` and complex elements the only lane there is.
+        let Some(plan) = Plan::choose(space, shape, lane, exact_offer, exact_offer, block) else {
+            stream(triple, epilogue, options, ledger);
+            return;
+        };
+        let tile = plan.rows * plan.cols;
+        let want = tile + plan.lane_words(space);
+        if want > exact_offer || !admits(options.traversal, space, block, plan, lane.bytes) {
             stream(triple, epilogue, options, ledger);
             return;
         }
+        let (_, accumulators) = scratch.split(0, want);
+        let (exact, stack) = accumulators.split_at_mut(tile);
+        let words: &mut [Wide<AccOf<E>>] = Wide::wrap_slice_mut(stack);
+        tabulate::<E, Bd, C, O, Ep, Wide<AccOf<E>>, Lg>(
+            triple, epilogue, options, exact, words, plan, ledger,
+        );
+        return;
+    }
+
+    // A narrow lane, out of the caller's lane offer. The offer is `i64`-shaped
+    // because that is the widest narrow word; a 32-bit lane reads twice as many
+    // of them out of the same bytes.
+    let offered = core::mem::size_of_val(lanes.lanes) / lane.bytes;
+    let Some(plan) = Plan::choose(space, shape, lane, exact_offer, offered, block) else {
+        stream(triple, epilogue, options, ledger);
+        return;
     };
+    if !admits(options.traversal, space, block, plan, lane.bytes) {
+        stream(triple, epilogue, options, ledger);
+        return;
+    }
+    let (_, exact) = scratch.split(0, plan.rows * plan.cols);
+    let want = plan.lane_words(space);
+    if lane.bytes == core::mem::size_of::<i32>() {
+        let words: &mut [i32] = bytemuck::cast_slice_mut(lanes.lanes);
+        tabulate::<E, Bd, C, O, Ep, i32, Lg>(
+            triple,
+            epilogue,
+            options,
+            exact,
+            &mut words[..want],
+            plan,
+            ledger,
+        );
+    } else {
+        tabulate::<E, Bd, C, O, Ep, i64, Lg>(
+            triple,
+            epilogue,
+            options,
+            exact,
+            &mut lanes.lanes[..want],
+            plan,
+            ledger,
+        );
+    }
+}
+
+/// Does the caller's named traversal admit the table this plan describes?
+///
+/// [`Traversal::Blocked`] is the default and takes the table when it is the
+/// cheaper factorization. [`Traversal::Tabulated`] takes it wherever one fits,
+/// whether or not the op count says it wins: `CD-13` needs that to compare bytes
+/// on both sides of the predicate, and a caller measuring its own shapes needs it
+/// for the same reason.
+fn admits(
+    traversal: Traversal,
+    code_space: usize,
+    block: usize,
+    plan: Plan,
+    lane_bytes: usize,
+) -> bool {
+    match traversal {
+        Traversal::OutputMajor => false,
+        Traversal::Blocked => tabulation_pays(
+            code_space,
+            block,
+            plan.cols,
+            plan.rows,
+            blocking::L1_BYTES,
+            lane_bytes,
+        ),
+        Traversal::Tabulated => {
+            tabulation_fits(code_space, plan.rows, blocking::L1_BYTES, lane_bytes)
+        }
+    }
+}
+
+/// Row counts the column loop is compiled for, widest first.
+///
+/// Eight lane words are one 256-bit register at 32 bits each, and the entry they
+/// read is one cache line. Sixteen was measured and is worse: it doubles the slab,
+/// which halves the depth the L2 budget allows, and the placement traffic that
+/// buys back costs more than the halved per-step overhead saves.
+///
+/// Every entry computes the same integer. A shape that does not divide walks down
+/// the list; it does not take a different path, and `CD-13` asserts the bytes at
+/// every `m`.
+const ROW_TILES: [usize; 4] = [8, 4, 2, 1];
+
+/// One row tile, at a compile-time row count.
+///
+/// `R` is what makes the column loop a *register* loop. A `rows`-long slice of
+/// unknown length compiles to a bounds check, a scalar prologue and a vector
+/// epilogue around eight adds; measured, that framing cost more than the adds by
+/// an order of magnitude. With `R` known, the whole chunk's accumulation is `R`
+/// registers and the table read is one contiguous `R`-word load.
+#[allow(clippy::too_many_arguments)]
+fn row_tile<const R: usize, E, Bd, C, O, Ep, L, Lg>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    exact: &mut [AccOf<E>],
+    lanes: &mut [L],
+    plan: Plan,
+    row0: usize,
+    ledger: &mut Lg,
+) where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    L: Lane<E>,
+    Lg: Ledger,
+{
+    let shape = triple.shape();
+    let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
+    let blocks = shape.k / block;
+    let reads_c = epilogue.reads_c();
+    let codes_per_row = triple.w.codes_per_row();
+    let codes = triple.w.codes();
+
+    // The stack is shaped to *this* tile, so its stride is `R` and its slab is
+    // `CODE_SPACE * R` --- both compile-time. That is what turns the step's
+    // address arithmetic into a shift and lets the bounds of the entry be proved
+    // rather than checked: `index < CODE_SPACE`, so `index * R + R <= slab`.
+    let space = C::CODE_SPACE;
+    let slab = space * R;
+    let Some(mut table) = Table::new(lanes, space, R, plan.depth) else {
+        stream(triple, epilogue, options, ledger);
+        return;
+    };
+
+    let mut col0 = 0usize;
+    while col0 < shape.n {
+        let cols = plan.cols.min(shape.n - col0);
+        let acc = &mut exact[..R * cols];
+        acc.fill(<AccOf<E> as Accumulator>::ZERO);
+
+        let mut p0 = 0usize;
+        while p0 < blocks {
+            let depth = plan.depth.min(blocks - p0);
+            for slot in 0..depth {
+                table.build::<R, E, Bd, C, Lg>(
+                    triple.w.codec(),
+                    &triple.a,
+                    row0,
+                    slot,
+                    p0 + slot,
+                    ledger,
+                );
+            }
+
+            // No multiply below this line, and no exact accumulator either:
+            // `depth` blocks reduce into `R` lane words held in registers, and
+            // the placement happens once for all of them.
+            //
+            // Everything the step needs is walked rather than indexed: the codes
+            // of one column are a contiguous run, the stack is one slab per
+            // block, and the output tile is one chunk per column. That leaves the
+            // step with one load, one mask, one add of the entry's base, and `R`
+            // adds --- no multiply, no bounds check, and no loop framing.
+            let stack = table.stack();
+            for (j, cell) in acc.chunks_exact_mut(R).enumerate() {
+                let mut lane = [L::ZERO; R];
+                let base = (col0 + j) * codes_per_row + p0;
+                for (&code, slot) in codes[base..base + depth]
+                    .iter()
+                    .zip(stack.chunks_exact(slab))
+                {
+                    let at = C::index_of(code) * R;
+                    if let Some(entry) = slot.get(at..).and_then(<[L]>::first_chunk::<R>) {
+                        add_entry(entry, &mut lane);
+                    }
+                }
+                for (out, word) in cell.iter_mut().zip(lane) {
+                    *out = word.place(*out);
+                }
+            }
+            ledger.read((cols * depth * R) as u64);
+            ledger.added((cols * depth * R) as u64);
+            p0 += depth;
+        }
+
+        // The single encode step, exactly once per output element.
+        for i in 0..R {
+            for j in 0..cols {
+                let (r, c) = (row0 + i, col0 + j);
+                let prior = if reads_c {
+                    Some(*triple.c.at(r, c))
+                } else {
+                    None
+                };
+                *triple.c.at_mut(r, c) = epilogue.finish(acc[j * R + i], prior, options.encode);
+            }
+        }
+        col0 += cols;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tabulate<E, Bd, C, O, Ep, L, Lg>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    exact: &mut [AccOf<E>],
+    lanes: &mut [L],
+    plan: Plan,
+    ledger: &mut Lg,
+) where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    L: Lane<E>,
+    Lg: Ledger,
+{
+    let shape = triple.shape();
 
     let mut row0 = 0usize;
     while row0 < shape.m {
-        let tile_rows = rows.min(shape.m - row0);
-        let mut col0 = 0usize;
-        while col0 < shape.n {
-            let tile_cols = cols.min(shape.n - col0);
-            let acc = &mut tile[..tile_rows * tile_cols];
-            acc.fill(<AccOf<E> as Accumulator>::ZERO);
-
-            for p in 0..blocks {
-                table.build::<E, Bd, C, L>(triple.w.codec(), &triple.a, row0, tile_rows, p, ledger);
-
-                // No multiply below this line. `acc` is column-major within the
-                // tile and the table is code-major, so both sides of the add are
-                // contiguous runs of `tile_rows` words.
-                for j in 0..tile_cols {
-                    let code = triple.w.codes()[(col0 + j) * codes_per_row + p];
-                    let index = C::index_of(code);
-                    add_entry(
-                        table.entry(index, tile_rows),
-                        &mut acc[j * tile_rows..j * tile_rows + tile_rows],
-                    );
-                    ledger.read(tile_rows as u64);
-                    ledger.added(tile_rows as u64);
-                }
-            }
-
-            // The single encode step, exactly once per output element.
-            for i in 0..tile_rows {
-                for j in 0..tile_cols {
-                    let (r, c) = (row0 + i, col0 + j);
-                    let prior = if reads_c {
-                        Some(*triple.c.at(r, c))
-                    } else {
-                        None
-                    };
-                    *triple.c.at_mut(r, c) =
-                        epilogue.finish(acc[j * tile_rows + i], prior, options.encode);
-                }
-            }
-            col0 += tile_cols;
+        // The widest compiled tile the plan and the remaining rows admit. A shape
+        // that does not divide walks down the list; it does not take a different
+        // path, and `CD-13` asserts the bytes at every `m`.
+        let rows = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= plan.rows && r <= shape.m - row0)
+            .unwrap_or(1);
+        match rows {
+            8 => row_tile::<8, E, Bd, C, O, Ep, L, Lg>(
+                triple, epilogue, options, exact, lanes, plan, row0, ledger,
+            ),
+            4 => row_tile::<4, E, Bd, C, O, Ep, L, Lg>(
+                triple, epilogue, options, exact, lanes, plan, row0, ledger,
+            ),
+            2 => row_tile::<2, E, Bd, C, O, Ep, L, Lg>(
+                triple, epilogue, options, exact, lanes, plan, row0, ledger,
+            ),
+            _ => row_tile::<1, E, Bd, C, O, Ep, L, Lg>(
+                triple, epilogue, options, exact, lanes, plan, row0, ledger,
+            ),
         }
-        row0 += tile_rows;
+        row0 += rows;
     }
 }
 
@@ -626,18 +1221,18 @@ fn run<E, Bd, C, O, Ep, L>(
 /// it needs no offer at all, and `CD-13` asserts it produces the same bytes as the
 /// table does. A caller on a target whose RAM cannot hold a table gets this and
 /// loses nothing but time.
-fn stream<E, Bd, C, O, Ep, L>(
+fn stream<E, Bd, C, O, Ep, Lg>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
-    ledger: &mut L,
+    ledger: &mut Lg,
 ) where
     E: IntegerElement,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
-    L: Ledger,
+    Lg: Ledger,
 {
     let shape = triple.shape();
     let reads_c = epilogue.reads_c();
@@ -730,7 +1325,10 @@ mod tests {
         c
     }
 
-    /// One tabulated product at one traversal and one offer.
+    /// One tabulated product at one traversal and one pair of offers.
+    ///
+    /// The offers scale together, because a caller who halves one halves the
+    /// other; `CD-13` sweeps the fraction rather than the two independently.
     fn tabulated<C: Enumerable<i8, Full<i8>> + Copy>(
         w: &CodedMatrix<'_, i8, Full<i8>, C>,
         a: &[i8],
@@ -740,7 +1338,23 @@ mod tests {
         offer: usize,
     ) -> (Vec<i32>, Census) {
         let k = w.cols();
-        let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
+        let shape = Shape { m, k, n };
+        let block = <C as uor_matmul_codec::Codec<i8, Full<i8>>>::MAX_BLOCK;
+        let want_acc = suggested_tabulation::<i8, Full<i8>>(shape, C::CODE_SPACE, block).max(1);
+        let want_lanes =
+            suggested_tabulation_lanes::<i8, Full<i8>>(shape, C::CODE_SPACE, block).max(1);
+        // `offer` is a numerator over the suggested amount, so one knob sweeps
+        // both buffers and the extremes -- nothing, one word, exactly enough --
+        // are all reachable.
+        let scale = |want: usize| -> usize {
+            if offer >= OFFER_STEPS {
+                want.saturating_mul(offer - OFFER_STEPS + 1)
+            } else {
+                want * offer / OFFER_STEPS
+            }
+        };
+        let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; scale(want_acc)];
+        let mut lane_words = vec![0i64; scale(want_lanes)];
         let mut panel: Vec<A8> = Vec::new();
         let mut c = vec![0i32; m * n];
         let mut census = Census::default();
@@ -753,11 +1367,17 @@ mod tests {
                 &Linear::OVERWRITE,
                 options(traversal),
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut Tabulation::new(&mut lane_words),
                 &mut census,
             );
         }
         (c, census)
     }
+
+    /// Fractions of the suggested offer that `CD-13` sweeps. `OFFER_STEPS` is
+    /// "exactly the suggested amount"; below it is a fraction, above it a
+    /// multiple.
+    const OFFER_STEPS: usize = 8;
 
     /// Every traversal at every offer, against the dense driver's bytes.
     fn every_traversal_agrees<C: Enumerable<i8, Full<i8>> + Copy>(
@@ -772,16 +1392,8 @@ mod tests {
         let a: Vec<i8> = fill(m * k, 0xa11, |x| ((x % 255) as i64 - 127) as i8);
         let want = reference(&w, &a, m, k, n);
 
-        let full = suggested_tabulation::<i8>(Shape { m, k, n }, C::CODE_SPACE);
-        let offers = [
-            0,
-            1,
-            C::CODE_SPACE,
-            C::CODE_SPACE + 5,
-            full.saturating_sub(1),
-            full,
-            full.saturating_mul(3),
-        ];
+        // Nothing, a sliver, most of it, exactly it, and three times it.
+        let offers = [0, 1, 2, OFFER_STEPS - 1, OFFER_STEPS, OFFER_STEPS + 2];
         for traversal in [
             Traversal::Tabulated,
             Traversal::Blocked,
@@ -799,7 +1411,7 @@ mod tests {
 
         // And the comparison is not vacuous: the table really was reached at the
         // offer sized for it, and really was not at an offer of nothing.
-        let (_, with) = tabulated(&w, &a, m, n, Traversal::Tabulated, full);
+        let (_, with) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS);
         let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0);
         assert!(
             with.table_reads > 0,
@@ -861,8 +1473,7 @@ mod tests {
         let w = CodedMatrix::new(book, n, k, &stream).expect("65536 rows of one code");
         let a: Vec<i8> = fill(k, 0xfeed, |x| ((x % 255) as i64 - 127) as i8);
 
-        let full = suggested_tabulation::<i8>(Shape { m: 1, k, n }, 256);
-        let (got, census) = tabulated(&w, &a, 1, n, Traversal::Tabulated, full);
+        let (got, census) = tabulated(&w, &a, 1, n, Traversal::Tabulated, OFFER_STEPS);
         assert!(census.table_reads > 0, "the table must have been read");
         assert_eq!(got, reference(&w, &a, 1, k, n));
 
@@ -900,8 +1511,10 @@ mod tests {
         let (m, k, n) = (8usize, 32usize, 2048usize);
         let blocks = k / block;
 
-        let rows =
-            tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<AccOf<i8>>()).min(m);
+        // The narrow lane, which is what `i8` resolves to: an `i64` word holds a
+        // chunk of this reduction exactly, so the table is `i64` and twice as many
+        // rows fit L1 as would in the exact accumulator.
+        let rows = tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<i64>()).min(m);
         assert!(
             rows >= 1 && m % rows == 0,
             "an exact tiling, so the closed forms are exact"
@@ -911,8 +1524,7 @@ mod tests {
         let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
         let a: Vec<i8> = fill(m * k, activation_salt(), |x| ((x % 255) as i64 - 127) as i8);
 
-        let full = suggested_tabulation::<i8>(Shape { m, k, n }, space);
-        let (got, census) = tabulated(&w, &a, m, n, Traversal::Blocked, full);
+        let (got, census) = tabulated(&w, &a, m, n, Traversal::Blocked, OFFER_STEPS);
         assert_eq!(
             got,
             reference(&w, &a, m, k, n),
@@ -956,7 +1568,7 @@ mod tests {
 
         // The streaming traversal is the same identity and issues the products
         // themselves, which is what makes the comparison above mean anything.
-        let (streamed, plain) = tabulated(&w, &a, m, n, Traversal::OutputMajor, full);
+        let (streamed, plain) = tabulated(&w, &a, m, n, Traversal::OutputMajor, OFFER_STEPS);
         assert_eq!(streamed, got);
         assert_eq!(plain.multiplies, dense);
         assert_eq!(plain.table_reads, 0);
@@ -975,7 +1587,7 @@ mod tests {
     /// function of the same two numbers.
     #[test]
     fn the_predicate_is_the_derivation_cm_04() {
-        let acc = core::mem::size_of::<AccOf<i8>>();
+        let acc = core::mem::size_of::<i64>();
         let l1 = blocking::L1_BYTES;
         let rows = tabulation_rows(256, l1, acc);
         assert!(

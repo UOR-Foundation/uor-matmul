@@ -173,6 +173,10 @@ pub struct Blocking {
     /// The first level of data cache, in bytes. Sizes the tabulation table, which
     /// is read once per output column and must be resident to pay.
     pub l1_bytes: usize,
+    /// The last level of cache a per-column read can afford, in bytes. Sizes the
+    /// depth of a tabulation stack, which is what keeps the exact accumulator out
+    /// of the inner loop.
+    pub l2_bytes: usize,
 }
 
 /// `model/widths.toml`.

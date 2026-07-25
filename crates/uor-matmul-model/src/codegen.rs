@@ -263,6 +263,16 @@ pub fn render(model: &Model) -> String {
         "    pub const L1_BYTES: usize = {};",
         model.constants.blocking.l1_bytes
     );
+    let _ = writeln!(
+        w,
+        "    /// The cache a per-column read can afford: what a tabulation stack \
+         must fit."
+    );
+    let _ = writeln!(
+        w,
+        "    pub const L2_BYTES: usize = {};",
+        model.constants.blocking.l2_bytes
+    );
     let _ = writeln!(w, "}}");
 
     // R1's pin. The plan permits `133144` to appear inside a `const _` assert

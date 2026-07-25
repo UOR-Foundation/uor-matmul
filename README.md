@@ -135,11 +135,16 @@ Consequences, stated plainly:
 | N1 | Reproducing another library's float rounding | mathematics | this library computes the correctly-rounded result of the exact sum. A classical GEMM computes an order-dependent approximation of it. Where they differ, the difference is the other library's rounding error, and this repository measures it rather than matching it. |
 | N2 | A proof development in this repository | scope | the formalization is upstream and is cited. This repo is a Rust library and is judged on the library. |
 | N3 | Any quality claim about a codebook | discipline | VQ quality is measured per (model, codebook) and reported `open`, never asserted |
-| N4 | Beating `matrixmultiply` / `faer` on f32 throughput | scope | exact accumulation into a complete accumulator costs more per element than one FMA. The claim made instead is: the same exponent, a lower residency constant, and an exactly defined result. |
-| N5 | A second method for any case, however hard | design | there is nothing this library does not do with decode-accumulate-encode, so there is nothing left over for a second method to cover |
+| N4 | A second method for any case, however hard | design | there is nothing this library does not do with decode-accumulate-encode, so there is nothing left over for a second method to cover |
 
-Note what is **not** on that list. Asymmetric quantization is not a non-goal: a
-zero point is the codec `d(c) = c - z`, expressed as `Offset<C>`. A reduction
+Note what is **not** on that list. **Throughput is not a non-goal.** It used to be
+one, on floats, on the grounds that a complete accumulator costs more per element
+than one FMA. That was wrong: most of the gap was not the price of exactness, it
+was a placement done once per product that belongs once per reduction, and moving
+it was worth `3.4x` with no change to a single output byte. Every remaining gap is
+measured, named, and carried in `ANALYSIS.md` as work, not as scope.
+
+Asymmetric quantization is not a non-goal: a zero point is the codec `d(c) = c - z`, expressed as `Offset<C>`. A reduction
 depth is not a non-goal: the accumulator cannot overflow. An unaligned or prime
 shape is not a non-goal: padding with the alphabet's zero is exact. A float
 input is not a non-goal: it is a code.
@@ -225,6 +230,19 @@ once per reduction. Scaling both panels' significands to a common base turns the
 exact float dot product into an exact *integer* dot product at one known scale
 --- see `ANALYSIS.md` §"The float placement" for the three lanes that follow, the
 bit counts that choose between them, and what is still left on the table.
+
+The second figure that is not a constant factor is what a *code* costs. When the
+weights are coded, a partial sum of one row of `A` against every codeword can be
+computed once per block of the reduction and then read; the column loop below it
+is one table read and one add per code, covering `MAX_BLOCK` weights, with no
+multiply in it at all. Over the E8 codebook that is **16x fewer multiplies and
+5.3x fewer operations** than the dense traversal at `n = 4096`, counted by an
+operation census rather than timed, and the census and the clock cross the
+derived break-even at the same `n`. Against this library's own packed AVX2 path
+over the decoded weights it is **6.6x ahead at `m = 1`** and **2.1x at `m = 8`**
+--- the decode-time and small-batch regime a coded weight matrix exists for ---
+and behind past `m = 64`, by an amount `ANALYSIS.md` §"The other constraint that
+is nobody's" measures and attributes rather than excuses.
 
 ## Licence
 

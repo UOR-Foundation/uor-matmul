@@ -414,6 +414,123 @@ is the near one. Getting that wrong is expensive and was: walking the rows of
 `C^T` outermost over a row-major `C` reads a cache line per cell, and it held the
 column figure at parity until the loops were exchanged.
 
+## The other constraint that is nobody's
+
+The collapse traversal is about the operand having fewer *meanings* than
+expressions. This one is about the operand being a *code* at all.
+
+`crates/uor-matmul-gemm/src/coded.rs` used to describe itself accurately: the
+weights arrive as codes, they are decoded, and from there it is the same
+accumulation the dense driver runs. That is decode-then-multiply. It issues the
+same `m*k*n` products and adds a decode on top, so the codec buys residency and
+pays for it in throughput --- the wrong direction, because the codec is the thing
+that should make the arithmetic cheaper.
+
+When the operand is a code, the product is a table read:
+
+```text
+T[i][p][c] = sum over t < Bk of  A[i, p*Bk + t] * decode(c, t)
+C[i][j]    = sum over p       of  T[i][p][ index_of(w[p][j]) ]
+```
+
+The table is built once per row tile and per block of the reduction, and read `n`
+times. Its column loop is one read and one add per code, covering `Bk` weights,
+and it contains no multiply.
+
+### Why it is available here and nowhere classical
+
+`T[i][p][c]` is a partial sum of the same products, and the total is the sum of
+those partial sums. A sum is a function of the multiset of its products, so
+regrouping them changes nothing --- the same licence tiling already uses.
+
+A classical `sgemm` cannot do this at all. Its `T[c]` would carry its own
+rounding error, and reusing it across `n` columns would propagate that error `n`
+times. It would have to argue about the *order* of its additions, which is
+exactly the thing it cannot do. Tabulation is available only to a library whose
+sum is exact, and that is the sense in which it is not a GEMM trick borrowed from
+elsewhere.
+
+### The op counts, and where they cross
+
+`m*(k/Bk)` tables, each `S*Bk` products to build and read `n` times, against
+`m*k*n` products:
+
+```text
+tabulated = m*k*S + m*k*n/Bk        dense = m*k*n
+```
+
+so tabulation is cheaper exactly when `n*(Bk - 1) > S*Bk`. `model/tiers.toml`
+records the crossing per codec and `CM-04` recomputes it. Measured at
+`8 x 256 x n` over `Book<256,8>`, whose crossing is `n = 293`:
+
+| `n` | ops vs dense | multiplies vs dense | wall clock vs streaming |
+| --- | --- | --- | --- |
+| 64 | 0.24x | 0.25x | 0.26x |
+| 256 | 0.89x | 1.00x | 1.00x |
+| 512 | **1.60x** | 2.00x | 1.82x |
+| 4096 | **5.33x** | 16.0x | 4.94x |
+
+The census and the clock cross in the same place, and the ratios at `n = 4096`
+are the derivation's `16x` and `5.33x` exactly. `CG-10` prints this; `CU-06`
+asserts the closed forms behind it --- `adds == table_reads == m*n*(k/Bk)` and
+`multiplies == m*k*S`, so every multiply the traversal issues is in the build.
+
+### Against the kernels, which is the harder question
+
+Beating the streaming traversal is not the bar. The bar is this library's own
+packed AVX2 tile path over the *decoded* weights. Over `Book<256,8>`:
+
+| `m x k x n` | tabulated | packed | vs packed |
+| --- | --- | --- | --- |
+| `1x1024x4096` | **7.41** | 1.13 | **6.56x** |
+| `8x1024x4096` | **14.26** | 6.86 | **2.08x** |
+| `64x1024x4096` | 13.90 | 24.66 | 0.56x |
+| `64x4096x4096` | 12.38 | 15.87 | 0.78x |
+| `256x1024x4096` | 12.72 | 33.90 | 0.38x |
+| `64x1024x16384` | 18.36 | 24.22 | 0.76x |
+
+The first version of this traversal reached `2.95` on the fourth row. Everything
+between that and `13.90` was overhead, and none of it was arithmetic:
+
+| what was removed | `64x1024x4096` |
+| --- | --- |
+| the first working version | 2.95 |
+| the exact accumulator out of the block loop, into a narrow lane | 5.51 |
+| the row count made a compile-time one | 9.03 |
+| the stack depth sized against a quarter of L2 rather than half | 10.55 |
+| the step's addressing walked instead of indexed | 13.09 |
+| the table's stride made the compile-time row count | 13.90 |
+
+Four of those five are the same bug in different places: **a runtime length where
+a compile-time one belongs.** An `R`-word slice of unknown length compiles to a
+bounds check, a scalar prologue and a vector epilogue wrapped around eight adds,
+and measured that framing cost an order of magnitude more than the adds. With `R`
+a constant the accumulation is registers, the entry is one cache line, and the
+entry's address is a shift.
+
+The fifth is the placement. The exact accumulator is sixteen bytes and the naive
+loop touches one per output cell per block: `m*n*k/Bk` touches, a gigabyte of
+accumulator moved to compute a quarter of a billion products. A lane fixes it for
+the same reason the float path's did --- a chunk of the reduction is a sum of
+`Bk`-product entries, so a 32-bit register holds it exactly for a depth
+`fits_narrow` states, and the placement happens once per chunk. The lane is
+chosen narrowest-first by the same scan `narrow_cap_for` runs.
+
+### What is left
+
+At `m = 1` and `m = 8` tabulation is `6.6x` and `2.1x` the packed path, which is
+the decode-time and small-batch regime a coded weight matrix exists for: a tile
+kernel at `n = 1` has one useful lane in ninety-six, and tabulation has no lanes
+to waste. Past `m = 64` the packed path wins, and the reason is measured rather
+than supposed. The remaining time splits roughly `13.5 ms` in the column loop
+against `5.8 ms` in the build at `64x1024x4096`; the column loop is `4.19M`
+code-steps at about eleven cycles each, which is an L2 hit that is not being
+hidden. The stack is `128 KiB` and every step's address depends on a just-loaded
+code, so there is a two-deep dependent load per step and `depth` of them in
+flight. Closing it means either prefetching the entry a step ahead or shrinking
+the slab so the whole stack sits in L1, and neither is built. It is work, not a
+property of the construction.
+
 ## Against the oracles
 
 C3 is a hard constraint: scaling is compared against the oracle's scaling. Both
@@ -522,7 +639,7 @@ family and there are two, which is the largest single piece. It is one of two
 places an oracle is ahead, and the sweep says so.
 
 **On floats the library is roughly 39x behind `matrixmultiply`.** It was 134x,
-and calling that the trade N4 names was wrong: most of it was not the price of
+and calling that a trade was wrong: most of it was not the price of
 exactness, it was a placement done once per product that can be done once per
 reduction. See "The float placement" below. What remains is a real gap and it is
 still the largest one in this document.

@@ -126,6 +126,8 @@ pub mod blocking {
     pub const CACHE_LINE_BYTES: usize = 64;
     /// The first level of data cache, in bytes: what a tabulation table must fit.
     pub const L1_BYTES: usize = 32768;
+    /// The cache a per-column read can afford: what a tabulation stack must fit.
+    pub const L2_BYTES: usize = 524288;
 }
 
 // R1: the W8A8 threshold, pinned. This is the one place in the shipped

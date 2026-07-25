@@ -97,3 +97,8 @@ fuzz duration="60":
 # outputs are committed and their digests are recorded.
 oracles:
     python3 oracles/numpy/generate.py
+
+# CG-10: the tabulated traversal against this library's own packed kernels, over
+# shapes large enough for the table to amortize. Minutes.
+tabulation:
+    cargo run --release -p uor-matmul-validate --example tabulation_sweep
