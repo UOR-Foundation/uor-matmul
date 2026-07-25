@@ -35,3 +35,15 @@ Feature: Backend parity
     Given the standing corpus
     When the suite exercises CB-05
     Then the claim holds byte for byte
+
+  @CB-06 @build
+  Scenario: Every reduce sequence equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes
+    Given the standing corpus
+    When the suite exercises CB-06
+    Then the claim holds byte for byte
+
+  @CB-07 @build
+  Scenario: Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet
+    Given the standing corpus
+    When the suite exercises CB-07
+    Then the claim holds byte for byte

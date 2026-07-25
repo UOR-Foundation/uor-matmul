@@ -219,6 +219,66 @@ impl<const L: usize> Limbs<L> {
         L > 0 && (self.0[L - 1] >> 63) == 1
     }
 
+    /// Bit `i`, counting from bit 0 of the register.
+    pub fn bit(&self, i: u32) -> bool {
+        let limb = (i / 64) as usize;
+        limb < L && (self.0[limb] >> (i % 64)) & 1 == 1
+    }
+
+    /// The `n` bits starting at bit `at`, with `n <= 64`.
+    ///
+    /// One shift-pair rather than `n` bit tests. That matters more than it
+    /// looks: reading a significand a bit at a time is `n` passes over a
+    /// register that is 67 limbs wide for `f64`, and the encode step is once per
+    /// output element.
+    pub fn window(&self, at: u32, n: u32) -> u64 {
+        debug_assert!(n <= 64);
+        let limb = (at / 64) as usize;
+        let sh = at % 64;
+        let lo = if limb < L { self.0[limb] >> sh } else { 0 };
+        // `sh == 0` would shift a `u64` by 64, which is not a shift.
+        let hi = if sh != 0 && limb + 1 < L {
+            self.0[limb + 1] << (64 - sh)
+        } else {
+            0
+        };
+        let w = lo | hi;
+        if n < 64 {
+            w & ((1u64 << n) - 1)
+        } else {
+            w
+        }
+    }
+
+    /// The index of the highest set bit, or `None` when every limb is zero.
+    pub fn high_bit(&self) -> Option<u32> {
+        for i in (0..L).rev() {
+            let limb = self.0[i];
+            if limb != 0 {
+                let within = 63u32.wrapping_sub(limb.leading_zeros());
+                return Some((i as u32).wrapping_mul(64).wrapping_add(within));
+            }
+        }
+        None
+    }
+
+    /// Is any bit strictly below `i` set? The sticky bit.
+    pub fn any_below(&self, i: u32) -> bool {
+        let full = (i / 64) as usize;
+        for j in 0..full.min(L) {
+            if self.0[j] != 0 {
+                return true;
+            }
+        }
+        if full < L {
+            let rem = i % 64;
+            if rem > 0 && self.0[full] & ((1u64 << rem).wrapping_sub(1)) != 0 {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Add a sign-extended `i128` in place, propagating the carry only as far
     /// as it reaches.
     ///
@@ -648,63 +708,38 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
         !self.nan && !self.pos_inf && !self.neg_inf && self.limbs.limbs().iter().all(|&l| l == 0)
     }
 
+    /// The magnitude of this register, as an unsigned limb string.
+    ///
+    /// An encoder wants the leading one, then `P` significand bits, then a round
+    /// bit and a sticky bit --- and every one of those is a question about the
+    /// *magnitude*. Forming it once and asking [`Limbs`] the questions is the
+    /// difference between one negation and one per bit read, which for `f64`'s
+    /// sixty-seven limbs is fifty-five passes over the register per output
+    /// element.
+    pub fn magnitude(&self) -> Limbs<L> {
+        if self.is_negative() {
+            self.limbs.neg()
+        } else {
+            self.limbs
+        }
+    }
+
     /// The index of the highest set bit of the magnitude, or `None` for zero.
     ///
     /// This is what an encoder needs to find the leading one, from which the
     /// output exponent and the round and sticky bits follow.
     pub fn magnitude_high_bit(&self) -> Option<u32> {
-        let m = if self.is_negative() {
-            self.limbs.neg()
-        } else {
-            self.limbs
-        };
-        for i in (0..L).rev() {
-            let limb = m.limbs()[i];
-            if limb != 0 {
-                let within = 63u32.wrapping_sub(limb.leading_zeros());
-                return Some((i as u32).wrapping_mul(64).wrapping_add(within));
-            }
-        }
-        None
+        self.magnitude().high_bit()
     }
 
     /// Bit `i` of the magnitude, counting from bit 0 of the register.
     pub fn magnitude_bit(&self, i: u32) -> bool {
-        let m = if self.is_negative() {
-            self.limbs.neg()
-        } else {
-            self.limbs
-        };
-        let limb = (i / 64) as usize;
-        if limb >= L {
-            return false;
-        }
-        (m.limbs()[limb] >> (i % 64)) & 1 == 1
+        self.magnitude().bit(i)
     }
 
     /// Is any bit of the magnitude below `i` set? The sticky bit.
     pub fn magnitude_any_below(&self, i: u32) -> bool {
-        let m = if self.is_negative() {
-            self.limbs.neg()
-        } else {
-            self.limbs
-        };
-        let full_limbs = (i / 64) as usize;
-        for j in 0..full_limbs.min(L) {
-            if m.limbs()[j] != 0 {
-                return true;
-            }
-        }
-        if full_limbs < L {
-            let rem = i % 64;
-            if rem > 0 {
-                let mask = (1u64 << rem).wrapping_sub(1);
-                if m.limbs()[full_limbs] & mask != 0 {
-                    return true;
-                }
-            }
-        }
-        false
+        self.magnitude().any_below(i)
     }
 }
 
@@ -870,7 +905,8 @@ macro_rules! impl_encode_into_float {
                 }
 
                 let negative = acc.is_negative();
-                let Some(high) = acc.magnitude_high_bit() else {
+                let mag = acc.magnitude();
+                let Some(high) = mag.high_bit() else {
                     // An exactly zero sum. IEEE 754 gives `+0` for a sum that
                     // cancels under round-to-nearest, and the sign of a zero
                     // that arose from cancellation carries no information, so
@@ -902,11 +938,9 @@ macro_rules! impl_encode_into_float {
                 }
                 let lsb = lsb as u32;
 
-                // The P significand bits, read out of the register.
-                let mut sig: u64 = 0;
-                for j in (0..P).rev() {
-                    sig = (sig << 1) | u64::from(acc.magnitude_bit(lsb + j));
-                }
+                // The P significand bits, read out of the register in one
+                // window rather than one at a time.
+                let sig: u64 = mag.window(lsb, P);
 
                 // Round, once, under the caller's mode. `Nearest` is
                 // round-half-to-even, which is IEEE 754's default and what
@@ -915,7 +949,7 @@ macro_rules! impl_encode_into_float {
                 let (round_bit, sticky) = if lsb == 0 {
                     (false, false)
                 } else {
-                    (acc.magnitude_bit(lsb - 1), acc.magnitude_any_below(lsb - 1))
+                    (mag.bit(lsb - 1), mag.any_below(lsb - 1))
                 };
                 let increment = match mode {
                     EncodeMode::Nearest => round_bit && (sticky || (sig & 1) == 1),

@@ -66,6 +66,8 @@ returns an error the model does not sanction.
 | `CB-03` | `build` | AVX-512 VNNI equals portable, on all three of its sequences |
 | `CB-04` | `build` | NEON and NEON dotprod equal portable |
 | `CB-05` | `build` | wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on |
+| `CB-06` | `build` | Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes |
+| `CB-07` | `build` | Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet |
 
 ## `CU-*` --- Purity: one method, no classical path, no fallback
 

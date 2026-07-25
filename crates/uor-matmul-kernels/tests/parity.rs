@@ -356,7 +356,7 @@ fn lane_depth_follows_the_declaration_cu_02() {
     assert_eq!(modular.lane_depth(1), usize::MAX);
 }
 
-/// `CU-03`, at the extremes of every alphabet a sequence declares.
+/// `CB-07`, at the extremes of every alphabet a sequence declares.
 ///
 /// A random fill will not find the one input where a paired-product instruction
 /// overflows its intermediate: `madd` sums two products into an `i32`, and two
@@ -369,7 +369,7 @@ fn lane_depth_follows_the_declaration_cu_02() {
 /// the input that decides whether a kernel is exact on what it declares or
 /// merely exact on likely data.
 #[test]
-fn the_extremes_of_every_alphabet_are_exact_cu_03() {
+fn the_extremes_of_every_alphabet_are_exact_cb_07() {
     /// The largest and smallest value an alphabet bounded by `bound` holds,
     /// within the element type.
     fn extremes(bound: u128, type_bound: u128) -> (i64, i64) {
@@ -427,14 +427,14 @@ fn the_extremes_of_every_alphabet_are_exact_cu_03() {
     }
 }
 
-/// `CU-02`: selection respects the alphabet a sequence declares.
+/// `CB-07`: selection respects the alphabet a sequence declares.
 ///
 /// The `i16` family has two AVX2 sequences whose declared alphabets differ, so
 /// this is where the rule is falsifiable: at a bound the paired sequence admits,
 /// it is chosen; one past that, it is not considered at all. Not because it is
 /// riskier there --- because there it computes a different number.
 #[test]
-fn selection_respects_the_declared_alphabet_cu_02() {
+fn selection_respects_the_declared_alphabet_cb_07() {
     let all: Vec<_> = available_i16().collect();
     if !all.iter().any(|s| s.backend == Backend::Avx2) {
         eprintln!("no AVX2 i16 sequence on this host; the cross-architecture job covers it");

@@ -174,6 +174,18 @@ suite = "backends"
 statement = """wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on"""
 
 [[id]]
+id = "CB-06"
+level = "build"
+suite = "backends"
+statement = """Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes"""
+
+[[id]]
+id = "CB-07"
+level = "build"
+suite = "backends"
+statement = """Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet"""
+
+[[id]]
 id = "CU-01"
 level = "build"
 suite = "purity"
