@@ -1,71 +1,122 @@
-//! The reference kernel (§7.2, row `Scalar`).
+//! The reference kernels (§7.2, row `Scalar`).
 //!
-//! This is the model transcribed: widen, multiply, add, in an `i32` lane. It
-//! contains no `unsafe` beyond the raw-pointer reads its shared signature
-//! requires, it runs under Miri, and it is never optimized (R6).
+//! The model transcribed: widen, multiply, add. No `unsafe` beyond the raw
+//! reads the shared signature requires, runs under Miri, and never optimized
+//! (R6).
 //!
-//! It is not a fallback. Every other kernel in this crate is a factorization of
-//! *this* accumulation into wider instructions, and `CB-01` pins it to
-//! [`uor_matmul_core::dot_ref`] so that the whole chain is anchored to the one
+//! These are not fallbacks. Every other kernel in this crate is a factorization
+//! of *these* accumulations into wider instructions, and `CB-01` pins the `i8`
+//! one to [`uor_matmul_core::dot_ref`] so the whole chain is anchored to the
 //! reference the plan names.
 
 use uor_matmul_core::Backend;
 
-use crate::spec::KernelSpec;
+use crate::spec::{Factorization, KernelSpec};
 
-/// Rows of `C` per call.
-pub const MR: usize = 4;
-/// Columns of `C` per call.
-pub const NR: usize = 4;
-/// The `k`-multiple the packing must respect. One: this kernel needs no
-/// grouping at all, which is why it is the one that never has a tail.
-pub const K_GROUP: usize = 1;
-
-/// The reference kernel's spec.
-pub const SPEC: KernelSpec = KernelSpec {
-    backend: Backend::Portable,
-    mr: MR,
-    nr: NR,
-    k_group: K_GROUP,
-    lane_cap: i32::MAX as u128,
-    mac_tile,
-};
-
-/// Accumulate a `4 x 4` tile.
+/// Build one reference kernel: `mr x nr` of `E`, accumulating in `L`.
 ///
-/// # Safety
-///
-/// `pa` must have `MR * kc` readable elements, `pb` must have `NR * kc`, and
-/// `acc` must have `MR * NR` writable lanes. [`KernelSpec::mac_tile`]
-/// establishes all three before calling.
-unsafe fn mac_tile(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
-    // SAFETY: the caller guaranteed `MR * kc` readable elements at `pa`,
-    // `NR * kc` at `pb`, and `MR * NR` writable lanes at `acc`. Turning them
-    // into slices once, here, is what lets the whole loop below be safe
-    // indexing rather than forty separate raw reads.
-    let (pa, pb, acc) = unsafe {
-        (
-            core::slice::from_raw_parts(pa, MR * kc),
-            core::slice::from_raw_parts(pb, NR * kc),
-            core::slice::from_raw_parts_mut(acc, MR * NR),
-        )
-    };
+/// The body is the same three lines at every instantiation, which is the point:
+/// the families differ in their widths and in nothing else.
+macro_rules! reference_kernel {
+    (
+        $(#[$meta:meta])*
+        $name:ident, $fnname:ident, $e:ty, $l:ty, $mr:expr, $nr:expr,
+        $factorization:expr, $cap:expr, $mul:expr
+    ) => {
+        $crate::tile_fits!($mr, $nr);
 
-    let mut tile = [0i32; MR * NR];
-    for p in 0..kc {
-        for i in 0..MR {
-            let a = pa[p * MR + i] as i32;
-            for j in 0..NR {
-                let b = pb[p * NR + j] as i32;
-                // Exact: `|a * b| <= 128 * 128`, and the driver only offers a
-                // tile whose depth `narrow_cap_for` admitted for this lane, so
-                // the running sum stays inside `i32` (§5.1). Written with
-                // `wrapping_*` because R5 asks the overflow behaviour to be
-                // written rather than inherited from the build profile --- not
-                // because a wrap can occur.
-                tile[i * NR + j] = tile[i * NR + j].wrapping_add(a.wrapping_mul(b));
+        $(#[$meta])*
+        pub const $name: KernelSpec<$e, $l> = KernelSpec {
+            backend: Backend::Portable,
+            factorization: $factorization,
+            mr: $mr,
+            nr: $nr,
+            // The reference needs no grouping at all, which is why it is the
+            // one kernel that never has a tail.
+            k_group: 1,
+            lane_cap: $cap,
+            mac_tile: $fnname,
+        };
+
+        /// # Safety
+        ///
+        /// `pa` must have `mr * kc` readable elements, `pb` must have
+        /// `nr * kc`, and `acc` must have `mr * nr` writable lanes.
+        unsafe fn $fnname(kc: usize, pa: *const $e, pb: *const $e, acc: *mut $l) {
+            // SAFETY: the caller guaranteed the three extents. Turning them
+            // into slices once, here, is what lets the loop below be safe
+            // indexing rather than three raw reads per product.
+            let (pa, pb, acc) = unsafe {
+                (
+                    core::slice::from_raw_parts(pa, $mr * kc),
+                    core::slice::from_raw_parts(pb, $nr * kc),
+                    core::slice::from_raw_parts_mut(acc, $mr * $nr),
+                )
+            };
+            let mut tile = [<$l>::default(); $mr * $nr];
+            for p in 0..kc {
+                for i in 0..$mr {
+                    let a = pa[p * $mr + i];
+                    for j in 0..$nr {
+                        let m: $l = $mul(a, pb[p * $nr + j]);
+                        // The driver only offers a chunk whose depth this
+                        // lane admits, so the running sum stays inside it.
+                        // Spelled `wrapping_add` because R5 asks the overflow
+                        // behaviour to be written rather than inherited from
+                        // the build profile --- and because for a modular lane
+                        // the wrap is the answer.
+                        tile[i * $nr + j] = tile[i * $nr + j].wrapping_add(m);
+                    }
+                }
             }
+            acc.copy_from_slice(&tile);
         }
-    }
-    acc.copy_from_slice(&tile);
+    };
 }
+
+reference_kernel!(
+    /// `i8 x i8 -> i32`, exact. The reference `CB-01` pins to `dot_ref`.
+    I8_I32, mac_i8_i32, i8, i32, 4, 4, Factorization::Exact, i32::MAX as u128,
+    |a: i8, b: i8| i32::from(a) * i32::from(b)
+);
+
+reference_kernel!(
+    /// `i16 x i16 -> i64`, exact.
+    I16_I64, mac_i16_i64, i16, i64, 4, 4, Factorization::Exact, i64::MAX as u128,
+    |a: i16, b: i16| i64::from(a) * i64::from(b)
+);
+
+reference_kernel!(
+    /// `i32 x i32 -> i64`, exact. Two full-range products fill the lane, which
+    /// is why a declared narrower bound buys so much here.
+    I32_I64, mac_i32_i64, i32, i64, 4, 4, Factorization::Exact, i64::MAX as u128,
+    |a: i32, b: i32| i64::from(a) * i64::from(b)
+);
+
+reference_kernel!(
+    /// `i32 x i32 -> i32` in `Z/2^32`. Exact in the quotient the caller asked
+    /// to encode into, and therefore unbounded in depth.
+    I32_MOD, mac_i32_mod, i32, i32, 4, 4, Factorization::Modular, 0,
+    |a: i32, b: i32| a.wrapping_mul(b)
+);
+
+reference_kernel!(
+    /// `i64 x i64 -> i64` in `Z/2^64`. The only factorization there is for
+    /// `i64`: an exact product needs 128 bits, and the quotient needs the low
+    /// 64, which is what `wrapping_mul` gives.
+    I64_MOD, mac_i64_mod, i64, i64, 4, 4, Factorization::Modular, 0,
+    |a: i64, b: i64| a.wrapping_mul(b)
+);
+
+reference_kernel!(
+    /// `i64 x i64 -> i128`, exact. The lane is the only width that holds the
+    /// product, which is why no SIMD reaches it on any supported target.
+    I64_I128, mac_i64_i128, i64, i128, 4, 4, Factorization::Exact, i128::MAX as u128,
+    |a: i64, b: i64| i128::from(a) * i128::from(b)
+);
+
+reference_kernel!(
+    /// `i16 x i16 -> i32` in `Z/2^32`.
+    I16_MOD, mac_i16_mod, i16, i32, 4, 4, Factorization::Modular, 0,
+    |a: i16, b: i16| i32::from(a).wrapping_mul(i32::from(b))
+);

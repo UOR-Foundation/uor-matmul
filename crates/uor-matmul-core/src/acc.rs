@@ -557,6 +557,41 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
         }
     }
 
+    /// Accumulate `mantissa * 2^exp`, with the sign carried in the mantissa.
+    ///
+    /// The hot path of a float GEMM. A signed mantissa costs one branch on the
+    /// sign instead of threading a `bool` through the decode, the product, and
+    /// the placement --- and for `f32` the whole product fits a `u64`, so the
+    /// `u128` shifts the general form needs are not paid for.
+    pub fn add_signed(&mut self, mantissa: i64, exp: i32) {
+        if mantissa == 0 {
+            return;
+        }
+        let shift = exp.saturating_sub(MIN_EXP); // R3-ok: an exponent placement, checked below
+        if shift < 0 {
+            return;
+        }
+        let shift = shift as u32;
+        let at = (shift / 64) as usize;
+        let bit = shift % 64;
+        let negative = mantissa < 0;
+        let mag = mantissa.unsigned_abs();
+
+        // Two limbs, not three: a 64-bit magnitude shifted by less than 64 bits
+        // spans at most 128, and the caller's `mantissa` is at most 2^48 for
+        // `f32` and comes pre-split for `f64`.
+        let spread = if bit == 0 {
+            [mag, 0, 0]
+        } else {
+            [mag << bit, mag >> (64 - bit), 0]
+        };
+        if negative {
+            sub_at(&mut self.limbs.0, at, spread);
+        } else {
+            add_at(&mut self.limbs.0, at, spread);
+        }
+    }
+
     /// Record that a NaN reached this accumulation. Sticky and absorbing.
     pub fn set_nan(&mut self) {
         self.nan = true;

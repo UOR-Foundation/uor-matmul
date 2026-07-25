@@ -52,10 +52,10 @@ pub use acc::{AccOf, Accumulator, Complete, EncodeFrom, Limbs};
 pub use alphabet::{
     as_alphabet, as_alphabet_full, as_alphabet_full_mut, observe_bound, Alphabet, Bnd, Bound,
     Complex, ComplexAcc, Decoded, Element, FloatElement, Full, IntegerElement, ObservedBound,
-    NARROW_CAP,
+    PackedCode, NARROW_CAP,
 };
 pub use bounds::{acc_bits, narrow_cap_for, NARROW_CAPS};
 pub use dot::{dot_instrumented, dot_ref, dot_wide};
 pub use error::NotAProduct;
-pub use layout::{MatView, MatViewMut, Shape, Strides, Triple};
+pub use layout::{MatView, MatViewMut, Shape, Strides, Triple, Walk};
 pub use policy::{Backend, EncodeMode, Traversal};

@@ -138,8 +138,9 @@ pub fn gemm_float_for_scaling<E, O>(triple: &mut Triple<'_, '_, '_, E, O>)
 where
     E: uor_matmul_core::FloatElement,
     O: uor_matmul_core::EncodeFrom<uor_matmul_core::AccOf<E>>,
-    uor_matmul_core::AccOf<E>:
-        uor_matmul_gemm::epilogue::ScaleExact + uor_matmul_gemm::epilogue::AbsorbPrior<O>,
+    uor_matmul_core::AccOf<E>: uor_matmul_gemm::epilogue::ScaleExact
+        + uor_matmul_gemm::epilogue::AbsorbPrior<O>
+        + uor_matmul_gemm::SignedPlace,
     O: Copy,
 {
     uor_matmul::gemm_float(triple, &Linear::OVERWRITE, GemmOptions::default());

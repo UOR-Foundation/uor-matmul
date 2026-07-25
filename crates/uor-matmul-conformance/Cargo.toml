@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 uor-matmul-model = { workspace = true }
-uor-matmul = { path = "../uor-matmul" }
+uor-matmul = { path = "../uor-matmul", features = ["std"] }
 uor-matmul-core = { workspace = true }
 uor-matmul-validate = { path = "../uor-matmul-validate" }
 

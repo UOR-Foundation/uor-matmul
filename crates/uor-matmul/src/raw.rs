@@ -106,7 +106,7 @@ unsafe fn raw_gemm<E>(
     csc: isize,
 ) where
     E: uor_matmul_core::FloatElement + uor_matmul_core::EncodeFrom<uor_matmul_core::AccOf<E>>,
-    uor_matmul_core::AccOf<E>: ScaleExact + AbsorbPrior<E>,
+    uor_matmul_core::AccOf<E>: ScaleExact + AbsorbPrior<E> + uor_matmul_gemm::float::SignedPlace,
 {
     if m == 0 || n == 0 {
         return;

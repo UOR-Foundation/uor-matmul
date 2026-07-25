@@ -12,7 +12,7 @@
 use std::time::Instant;
 
 use uor_matmul::prelude::*;
-use uor_matmul_core::EncodeMode;
+use uor_matmul_core::{EncodeMode, Full};
 
 /// One point of a sweep.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -288,20 +288,23 @@ pub fn ours_i32_timed(p: &Point) -> f64 {
     let a = vec![1i32; p.m * p.k];
     let b = vec![1i32; p.k * p.n];
     let mut out = vec![0i32; p.m * p.n];
+    let mut scratch = vec![Alphabet::<i32, Full<i32>>::ZERO; 1 << 20];
     let started = Instant::now();
     {
         let av = MatView::row_major(as_alphabet_full(&a), p.m, p.k).expect("A fits");
         let bv = MatView::row_major(as_alphabet_full(&b), p.k, p.n).expect("B fits");
         let cv = MatViewMut::row_major(&mut out, p.m, p.n).expect("C fits");
         let mut t = Triple::new(av, bv, cv).expect("the product exists");
-        gemm(
+        // The packed driver, which is what the library runs. Timing the generic
+        // one would be timing a factorization the caller never gets.
+        uor_matmul::gemm_packed(
             &mut t,
             &Linear::OVERWRITE,
             GemmOptions {
                 encode: EncodeMode::Wrapping,
                 ..Default::default()
             },
-            &mut Scratch::none(),
+            &mut Scratch::new(&mut scratch),
         );
     }
     // The timed call must be correct, or the number describes nothing.

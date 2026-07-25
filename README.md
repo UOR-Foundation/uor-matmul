@@ -186,14 +186,33 @@ axes to the claims it discharges, and lists the defect that was planted to prove
 each gate can fail. `VALIDATION.md` is how a third party reproduces all of it
 without trusting this repository.
 
+## The `std` feature and which kernel runs
+
+`std` buys runtime CPU feature detection and nothing else in the numerical
+path. Without it a backend is available only if the *build* declared its target
+feature, so a hosted build with neither `std` nor `-C target-cpu=native` runs
+the portable kernel --- correctly, and several times slower than the machine can
+manage. On an embedded target that is right; on a server it is not what was
+meant. `uor_matmul::kernels::available_i8()` says which kernels a build can run.
+
 ## Performance
 
-`ANALYSIS.md` §"Where the time goes" has the measured figures and what dominates
-them. In short: the kernel-driven `i8` path reaches about 2.1 Gmac/s on a
-two-core runner with AVX2, and `f32` is roughly 25 times slower --- which is the
-cost of a complete accumulator, and the trade N4 already names. The library
-makes exactly one copy of each operand, into the packed panels, and packs the
-reused operand once per column block rather than once per output block.
+`ANALYSIS.md` §"Against the oracles" has the sweep --- throughput, latency, and
+fitted exponents from `n = 1` to `n = 1024`, beside every oracle. In short, on a
+two-core runner with AVX2:
+
+| | uor-matmul | oracle | |
+| --- | --- | --- | --- |
+| `i32`, `n = 1024` | 12.3 Gmac/s | ndarray 0.21 | **59x ahead** |
+| `i32`, `n = 1024` | 12.3 Gmac/s | nalgebra 4.68 | **2.7x ahead** |
+| `f32`, `n = 1024` | 0.36 Gmac/s | matrixmultiply 42.5 | 120x behind |
+| latency at `n = 1` | 100 ns | ndarray 69 ns | 1.4x behind |
+
+The integer paths are ahead of both integer oracles and hold flat from `n = 128`
+upward. The float path is two orders of magnitude behind, and that is N4 stated
+as a number rather than as an excuse: one FMA per element against a decode, an
+integer significand multiply, and a placement into a 619-bit register that never
+rounds until the end.
 
 ## Licence
 

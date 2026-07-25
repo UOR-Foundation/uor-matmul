@@ -11,7 +11,7 @@
 //! schedule-independent, tile-independent, and substrate-independent --- and
 //! why it is *not* bit-identical to a classical `sgemm` (N1).
 
-use uor_matmul_core::{AccOf, Accumulator, EncodeFrom, FloatElement, Triple};
+use uor_matmul_core::{AccOf, Accumulator, Complete, EncodeFrom, FloatElement, PackedCode, Triple};
 
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
@@ -28,9 +28,37 @@ pub fn gemm_float<E, O, Ep>(
     options: GemmOptions,
 ) where
     E: FloatElement,
-    O: EncodeFrom<AccOf<E>>,
+    O: EncodeFrom<AccOf<E>> + Copy,
     Ep: Epilogue<E, O>,
-    O: Copy,
+    AccOf<E>: SignedPlace,
+{
+    gemm_float_packed(triple, epilogue, options, &mut [], &mut [])
+}
+
+/// The same operation, with somewhere to decode into.
+///
+/// A float is a code, and decoding it is real work: a bit test, two shifts, a
+/// mask, and a branch. The naive traversal decodes `B[p][j]` once for every row
+/// of `A`, so every element of `B` is decoded `m` times and every element of
+/// `A` is decoded `n` times. Decoding once into a panel and multiplying many
+/// times removes both factors, which is the same structural point the integer
+/// driver makes by packing --- and here it is worth more, because a decode
+/// costs far more than a copy.
+///
+/// The panels are the caller's, so this still allocates nothing. Offering none
+/// runs the streaming traversal, which decodes per element and gives the same
+/// bytes (S13, `CD-04`).
+pub fn gemm_float_packed<E, O, Ep>(
+    triple: &mut Triple<'_, '_, '_, E, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    pa: &mut [PackedCode],
+    pb: &mut [PackedCode],
+) where
+    E: FloatElement,
+    O: EncodeFrom<AccOf<E>> + Copy,
+    Ep: Epilogue<E, O>,
+    AccOf<E>: SignedPlace,
 {
     let shape = triple.shape();
     if shape.m == 0 || shape.n == 0 {
@@ -39,17 +67,222 @@ pub fn gemm_float<E, O, Ep>(
     let reads_c = epilogue.reads_c();
     let (a, b, c) = triple.parts();
 
-    for i in 0..shape.m {
-        for j in 0..shape.n {
-            let mut acc = <AccOf<E> as Accumulator>::ZERO;
-            for p in 0..shape.k {
-                // Decode, then accumulate exactly. No rounding happens here,
-                // at any depth, for any magnitude.
-                E::mac(&mut acc, *a.at(i, p), *b.at(p, j));
+    // One row of `A` and one column of `B` is the smallest offer that removes a
+    // whole factor of redundant decoding; below it, the streaming traversal
+    // runs. The same identity, walked differently (S13).
+    if pa.len() < shape.k || pb.len() < shape.k {
+        for i in 0..shape.m {
+            for j in 0..shape.n {
+                let mut acc = <AccOf<E> as Accumulator>::ZERO;
+                for p in 0..shape.k {
+                    acc.accumulate_one(a.at(i, p).pack(), b.at(p, j).pack());
+                }
+                let prior = if reads_c { Some(*c.at(i, j)) } else { None };
+                *c.at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
             }
-            let prior = if reads_c { Some(*c.at(i, j)) } else { None };
-            *c.at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
         }
+        return;
+    }
+
+    // Columns of `B` that fit the offer at once. Every column decodes `B`'s
+    // whole depth once and then serves every row of `A`.
+    let block = (pb.len() / shape.k).min(shape.n).max(1);
+
+    let mut j0 = 0;
+    while j0 < shape.n {
+        let cols = block.min(shape.n - j0);
+        for (jj, j) in (j0..j0 + cols).enumerate() {
+            let dst = &mut pb[jj * shape.k..jj * shape.k + shape.k];
+            for (slot, v) in dst.iter_mut().zip(b.column_walk(0, j, shape.k)) {
+                *slot = v.pack();
+            }
+        }
+
+        for i in 0..shape.m {
+            // Decode row `i` of `A` once, and serve every column of this block
+            // from it. Walking rather than indexing, for the reason the integer
+            // packer walks: two multiplies per element is most of the cost of a
+            // decode that is otherwise a handful of bit operations.
+            for (slot, v) in pa[..shape.k].iter_mut().zip(a.row_walk(i, 0, shape.k)) {
+                *slot = v.pack();
+            }
+            for (jj, j) in (j0..j0 + cols).enumerate() {
+                let mut acc = <AccOf<E> as Accumulator>::ZERO;
+                acc.accumulate_panels(&pa[..shape.k], &pb[jj * shape.k..jj * shape.k + shape.k]);
+                let prior = if reads_c { Some(*c.at(i, j)) } else { None };
+                *c.at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
+            }
+        }
+        j0 += cols;
+    }
+}
+
+/// A limb window over a complete accumulator (D-12).
+///
+/// Every product must land at its own position for the sum to be exact, and
+/// that is what makes a complete accumulator expensive: a spread across limbs
+/// and a carry, per product.
+///
+/// But a *run* of products whose exponents share a limb can be summed in one
+/// 128-bit register first and placed once. For weights and activations of
+/// similar magnitude --- which is the ordinary case, and the whole reason
+/// quantization works --- that is nearly every product, and the cost per
+/// product falls to one shift and one add.
+///
+/// It is not an approximation and not a fast path. The window holds an exact
+/// integer at a known scale; flushing it adds that integer at that scale. What
+/// changes is how often the wide register is touched, and nothing else.
+struct Window<'a, const L: usize, const MIN_EXP: i32> {
+    acc: &'a mut Complete<L, MIN_EXP>,
+    /// The limb the window sits at, or `usize::MAX` when it is empty.
+    at: usize,
+    /// The window's contents, at scale `64 * at`.
+    bits: i128,
+}
+
+impl<const L: usize, const MIN_EXP: i32> Window<'_, L, MIN_EXP> {
+    #[inline(always)]
+    fn place(&mut self, mantissa: i64, exp: i32) {
+        if mantissa == 0 {
+            return;
+        }
+        let shift = exp.wrapping_sub(MIN_EXP);
+        if shift < 0 {
+            // Below the register's floor. Unreachable for any pair of finite
+            // values of the element type this register was sized for.
+            return;
+        }
+        let at = (shift as u32 / 64) as usize;
+        let bit = shift as u32 % 64;
+        let value = i128::from(mantissa) << bit;
+
+        if at == self.at {
+            // The window's own capacity decides when to flush, and it is asked
+            // rather than assumed. A term reaches `2^125` for `f64`, so any
+            // fixed count would be either wrong or needlessly small --- and a
+            // fixed count is an arbitrary ceiling, which R8 does not permit.
+            // `checked_add` is the exact question, and its `None` branch is
+            // taken about once per `2^60` products for realistic data.
+            if let Some(sum) = self.bits.checked_add(value) {
+                self.bits = sum;
+                return;
+            }
+        }
+        self.flush();
+        self.at = at;
+        self.bits = value;
+    }
+
+    #[inline]
+    fn flush(&mut self) {
+        if self.at == usize::MAX || self.bits == 0 {
+            return;
+        }
+        // The window holds an exact integer at scale `64 * at`; placing it is
+        // the same `add_signed` a single product would have used, at the two
+        // halves of the register the window spans.
+        let negative = self.bits < 0;
+        let mag = self.bits.unsigned_abs();
+        let scale = MIN_EXP + (self.at as i32) * 64;
+        let lo = mag as u64;
+        let hi = (mag >> 64) as u64;
+        let sgn = |v: u64| if negative { -(v as i64) } else { v as i64 };
+        // Split at 63 bits rather than 64, so each half fits a *signed* 64-bit
+        // mantissa without wrapping into the sign bit.
+        self.acc.add_signed(sgn(lo & ((1u64 << 63) - 1)), scale);
+        self.acc.add_signed(sgn(lo >> 63), scale + 63);
+        self.acc
+            .add_signed(sgn(hi & ((1u64 << 63) - 1)), scale + 64);
+        self.acc.add_signed(sgn(hi >> 63), scale + 127);
+        self.bits = 0;
+    }
+}
+
+/// Accumulate a whole dot product of two decoded panels.
+///
+/// Straight-line for the finite case, which is every product in every ordinary
+/// matrix, with one predictable branch guarding the IEEE clause 6 rules.
+#[inline]
+fn accumulate_run<const L: usize, const MIN_EXP: i32>(
+    acc: &mut Complete<L, MIN_EXP>,
+    pa: &[PackedCode],
+    pb: &[PackedCode],
+) {
+    let mut window = Window {
+        acc,
+        at: usize::MAX,
+        bits: 0,
+    };
+    for (a, b) in pa.iter().zip(pb) {
+        if a.is_finite() && b.is_finite() {
+            // Does the product fit a signed 64-bit mantissa? For `f32` it
+            // always does --- two 24-bit significands make 48 bits --- and for
+            // `f64` it sometimes does. `checked_mul` asks exactly that
+            // question, so there is no width constant to get wrong and no
+            // element type this branch is tuned for.
+            if let Some(product) = a.mantissa.checked_mul(b.mantissa) {
+                window.place(product, a.exp + b.exp);
+            } else {
+                let sign = (a.mantissa < 0) != (b.mantissa < 0);
+                let (ua, ub) = (a.mantissa.unsigned_abs(), b.mantissa.unsigned_abs());
+                let (lo, hi) = (ua & 0xFFFF_FFFF, ua >> 32);
+                let sgn = |v: u128| {
+                    if sign {
+                        -((v & ((1 << 62) - 1)) as i64)
+                    } else {
+                        (v & ((1 << 62) - 1)) as i64
+                    }
+                };
+                let l = u128::from(lo) * u128::from(ub);
+                let h = u128::from(hi) * u128::from(ub);
+                let e = a.exp + b.exp;
+                window.place(sgn(l), e);
+                window.place(sgn(l >> 62), e + 62);
+                window.place(sgn(h), e + 32);
+                window.place(sgn(h >> 62), e + 94);
+            }
+            continue;
+        }
+        window.flush();
+        if a.is_nan() || b.is_nan() {
+            window.acc.set_nan();
+            continue;
+        }
+        // An infinity times a zero is a NaN, by IEEE 754 clause 7.2; otherwise
+        // the sign is the product of the two mantissa signs, which the packing
+        // already arranged.
+        let (inf, other) = if a.is_infinite() { (a, b) } else { (b, a) };
+        if other.is_finite() && other.mantissa == 0 {
+            window.acc.set_nan();
+        } else {
+            window
+                .acc
+                .set_infinity((inf.mantissa < 0) != (other.mantissa < 0));
+        }
+    }
+    window.flush();
+}
+
+/// What the packed float loop needs from an accumulator.
+///
+/// A trait rather than an inherent method so that `gemm_float_packed` stays
+/// generic over the element type while the hot path stays monomorphic.
+pub trait SignedPlace {
+    /// Accumulate a whole dot product of two decoded panels, exactly.
+    fn accumulate_panels(&mut self, pa: &[PackedCode], pb: &[PackedCode]);
+    /// Accumulate one product of two decoded codes.
+    fn accumulate_one(&mut self, a: PackedCode, b: PackedCode);
+}
+
+impl<const L: usize, const MIN_EXP: i32> SignedPlace for Complete<L, MIN_EXP> {
+    #[inline]
+    fn accumulate_panels(&mut self, pa: &[PackedCode], pb: &[PackedCode]) {
+        accumulate_run(self, pa, pb);
+    }
+
+    #[inline]
+    fn accumulate_one(&mut self, a: PackedCode, b: PackedCode) {
+        accumulate_run(self, &[a], &[b]);
     }
 }
 
@@ -240,5 +473,115 @@ mod tests {
         let mut t = Triple::new(av, bv, cv).unwrap();
         gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
         assert_eq!(c[0], 1.0f64);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_types)]
+mod window_tests {
+    use super::*;
+    use std::vec;
+    use std::vec::Vec;
+    use uor_matmul_core::{MatView, MatViewMut};
+
+    /// The window is exact for adversarial exponents.
+    ///
+    /// A window holds an exact integer at a known scale, and a term reaches
+    /// `2^125` for `f64`. Any fixed flush count would be wrong for some input;
+    /// this is the input that finds it. The exponents are chosen so that every
+    /// product lands in the same limb with the largest possible shift within
+    /// it, which is the worst case for the window's capacity.
+    #[test]
+    fn the_window_is_exact_at_full_width_cu_04() {
+        for k in [1usize, 2, 3, 4, 5, 8, 17, 64, 1000] {
+            // Significands with every bit set, so each product is full width.
+            let a: Vec<f64> = (0..k)
+                .map(|i| f64::from_bits(0x433F_FFFF_FFFF_FFFF - (i as u64 % 3)))
+                .collect();
+            let b: Vec<f64> = (0..k)
+                .map(|i| f64::from_bits(0x433F_FFFF_FFFF_FFFF - (i as u64 % 5)))
+                .collect();
+
+            let mut packed = [0.0f64];
+            {
+                let av = MatView::row_major(&a, 1, k).unwrap();
+                let bv = MatView::row_major(&b, k, 1).unwrap();
+                let cv = MatViewMut::row_major(&mut packed, 1, 1).unwrap();
+                let mut t = Triple::new(av, bv, cv).unwrap();
+                let mut pa = vec![uor_matmul_core::PackedCode::default(); k];
+                let mut pb = vec![uor_matmul_core::PackedCode::default(); k];
+                gemm_float_packed(
+                    &mut t,
+                    &crate::epilogue::Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut pa,
+                    &mut pb,
+                );
+            }
+
+            // The streaming traversal, which places every product on its own
+            // and never fills a window. If the two disagree, the window lost a
+            // carry.
+            let mut streamed = [0.0f64];
+            {
+                let av = MatView::row_major(&a, 1, k).unwrap();
+                let bv = MatView::row_major(&b, k, 1).unwrap();
+                let cv = MatViewMut::row_major(&mut streamed, 1, 1).unwrap();
+                let mut t = Triple::new(av, bv, cv).unwrap();
+                gemm_float_packed(
+                    &mut t,
+                    &crate::epilogue::Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut [],
+                    &mut [],
+                );
+            }
+            assert_eq!(
+                packed, streamed,
+                "k={k}: the window disagreed with per-product placement"
+            );
+        }
+    }
+
+    /// The window carries exactly across a limb boundary, where a term in one
+    /// limb and a term in the next must not be added to each other.
+    #[test]
+    fn the_window_carries_across_limbs_cu_04() {
+        // Exponents 64 apart put consecutive products in different limbs.
+        let k = 128usize;
+        let a: Vec<f64> = (0..k).map(|i| (2.0f64).powi(i as i32 * 8 - 500)).collect();
+        let b: Vec<f64> = vec![1.0; k];
+
+        let mut packed = [0.0f64];
+        let mut pa = vec![uor_matmul_core::PackedCode::default(); k];
+        let mut pb = vec![uor_matmul_core::PackedCode::default(); k];
+        {
+            let av = MatView::row_major(&a, 1, k).unwrap();
+            let bv = MatView::row_major(&b, k, 1).unwrap();
+            let cv = MatViewMut::row_major(&mut packed, 1, 1).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            gemm_float_packed(
+                &mut t,
+                &crate::epilogue::Linear::OVERWRITE,
+                GemmOptions::default(),
+                &mut pa,
+                &mut pb,
+            );
+        }
+        let mut streamed = [0.0f64];
+        {
+            let av = MatView::row_major(&a, 1, k).unwrap();
+            let bv = MatView::row_major(&b, k, 1).unwrap();
+            let cv = MatViewMut::row_major(&mut streamed, 1, 1).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            gemm_float_packed(
+                &mut t,
+                &crate::epilogue::Linear::OVERWRITE,
+                GemmOptions::default(),
+                &mut [],
+                &mut [],
+            );
+        }
+        assert_eq!(packed, streamed);
     }
 }

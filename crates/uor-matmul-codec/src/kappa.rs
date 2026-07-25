@@ -107,6 +107,8 @@ impl Out<'_> {
     }
 
     fn push_u128(&mut self, mut v: u128) {
+        // 39 is the decimal width of `u128::MAX`, so this buffer cannot be
+        // outrun by any input. A derivation, not a choice (R8).
         let mut digits = [0u8; 39];
         let mut n = 0;
         if v == 0 {

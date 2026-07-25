@@ -160,62 +160,107 @@ What remains, and why it is not a defect:
 ## Against the oracles
 
 C3 is a hard constraint: scaling is compared against the oracle's scaling. Both
-sides are measured in one process, over one sweep, with the answer asserted
-inside the timed harness --- a speed measured on the wrong bytes is not a
-measurement.
+sides are measured in one process, over one sweep spanning nine orders of
+magnitude in MAC count, with the answer asserted inside the timed region --- a
+speed measured on the wrong bytes is not a measurement.
 
-Fitted exponents against MAC count, on a two-core shared runner with AVX2:
+Two-core shared runner with AVX2 and no AVX-512. Best of N per point; every
+figure is `open`.
 
-| implementation | exponent | +/- 95% | credible |
-| --- | --- | --- | --- |
-| uor-matmul i32 | 1.09 | 0.07 | yes |
-| ndarray i32 | 1.07 | 0.08 | yes |
-| nalgebra i32 | 0.96 | 0.03 | yes |
-| uor-matmul f32 exact | 1.03 | 0.07 | yes |
-| matrixmultiply f32 | 0.76 | 0.19 | **no** |
-| faer f32 | 0.42 | 0.43 | **no** |
+### Throughput, Gmac/s
 
-The two float oracles do not fit a power law over this sweep --- residuals of
-0.28 and 0.62 in log space --- so their exponents are not reported as numbers to
-read. Both have a prologue heavy enough to dominate the small end of the range,
-which is what `CG-07` measures separately. Reporting an exponent for them anyway
-would be the dishonest move, so the harness flags it instead.
+| `n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` exact | matrixmultiply `f32` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | 1.38 | 1.60 | 1.00 | 1.51 | 0.08 | 4.27 |
+| 32 | 7.42 | 7.82 | 1.72 | 4.13 | 0.20 | 25.4 |
+| 128 | 11.2 | 11.2 | 0.70 | 4.22 | 0.31 | 28.4 |
+| 512 | 12.9 | 13.1 | 0.38 | 3.86 | 0.36 | 35.9 |
+| 1024 | 12.5 | 12.3 | 0.21 | 4.68 | 0.36 | 42.5 |
 
-Throughput, best of five runs, in Gmac/s. The runner is noisy enough that the
-spread across whole runs is worth reporting rather than a single figure:
+### Latency at `n = 1`, nanoseconds per call
 
-| shape | uor-matmul | oracle | ratio |
-| --- | --- | --- | --- |
-| `i32` 256^3 | 0.60 -- 0.71 | ndarray 0.63 -- 0.67 | 0.95 -- 1.06x |
-| `i32` 256^3 | 0.60 -- 0.71 | nalgebra 2.75 -- 2.93 | 3.9 -- 4.8x slower |
-| W8A8 256^3 | 1.13 -- 2.25 | --- | no external `i8` oracle exists |
-| `f32` 256^3 | 0.06 -- 0.11 | matrixmultiply 35 -- 42 | 390 -- 570x slower |
-| `f32` 256^3 | 0.06 -- 0.11 | faer 21 -- 27 | 245 -- 350x slower |
+| | ns |
+| --- | --- |
+| uor `i8` | 100 |
+| ndarray | 69 |
+| matrixmultiply | 89 |
 
-Three things this says, and one it does not.
+### Fitted exponent against MAC count, whole sweep
 
-**The exponents match where they can be read.** `uor-matmul` and `ndarray` fit
-1.09 and 1.07 against MAC count, which are the same number within their
-intervals, and the constants are within 6% of each other. That is the shape C3
-asks about: two implementations that scale the same way and differ by a factor
-that does not grow.
+| | exponent |
+| --- | --- |
+| uor `i8` | 0.68 |
+| uor `i32` | 0.69 |
+| ndarray | 0.92 |
+| nalgebra | 0.77 |
+| uor `f32` | 0.82 |
+| matrixmultiply | 0.64 |
 
-**`nalgebra` is about four times faster on `i32`, and that is an unexploited
-opportunity rather than a mystery.** The kernel-driven path exists only for
-W8A8, because that is the instantiation the SIMD instructions name --- `i32`
-goes through the generic driver, which reads `B` with stride `n` and packs
-nothing. `nalgebra`'s `i32` product auto-vectorises. Adding an `i32` kernel
-would close it; nothing in the design prevents it, and `KernelSpec` is where it
-would go.
+An exponent below 1 means throughput still improving with size: the small end is
+latency-dominated. `ndarray`'s 0.92 is the opposite story --- it starts fast and
+*degrades*, from 1.9 Gmac/s at `n = 64` to 0.21 at `n = 1024`, which is a cache
+story rather than an arithmetic one.
 
-**The float gap is large, and it is the trade N4 names.** A classical `sgemm`
-issues one FMA per element. This library decodes two IEEE patterns, multiplies
-their significands as integers, and places the exact product into a 619-bit
-fixed-point register --- per element, with no rounding until the end. Two to
-three orders of magnitude is what that costs on this machine. What it buys is
-the property in §3.3: the result does not depend on the order of the additions,
-which no figure in the `matrixmultiply` column has.
+### What this says
 
-What the table does **not** say is that the exact result is worth the factor for
-any particular use. That is a judgement for a caller with a workload, and this
-repository's job is to make the number available rather than to argue about it.
+**On integers, this library is ahead of both oracles.** At `n = 1024` it is 59x
+`ndarray` and 2.7x `nalgebra`, and it holds a flat 12--13 Gmac/s from `n = 128`
+upward while `ndarray` falls away. Nothing about that is a compromise on
+exactness: the integer result is the exact sum encoded once, and `CX-01` .. `CX-04`
+and `CX-10` assert it byte for byte against four independent implementations,
+including one outside the Rust ecosystem.
+
+**Latency at `n = 1` is 100 ns against `ndarray`'s 69.** The difference is the
+view construction and the kernel selection, both of which happen once per call
+and neither of which scales. It is the one place an oracle is ahead and the sweep
+says so.
+
+**On floats the library is 120x behind `matrixmultiply`, and that is the trade
+N4 names.** A classical `sgemm` issues one fused multiply-add per element. This
+one decodes two IEEE bit patterns, multiplies their significands as integers,
+and places the exact product into a 619-bit fixed-point register --- and never
+rounds until the end. Counting the scalar operations that requires against one
+FMA over eight lanes on two ports gives a floor near 100x, and the measurement
+sits just above it. The gap is the price of an answer that does not depend on
+the order of the additions, which no figure in the `matrixmultiply` column has.
+
+### What it took to get here
+
+Four structural defects, each found by measuring rather than by reading:
+
+**The SIMD kernels were never selected.** `uor-matmul-validate` depended on
+`uor-matmul` with default features, so `std` was off, runtime detection fell
+back to `cfg!(target_feature = ...)`, and every earlier figure was the portable
+kernel while claiming to be the machine. Enabling `std` was worth 5.8x on `i8`.
+The sweep now prints which kernels a build can run, first, so this cannot recur
+silently. `README.md` says the same thing where a user will see it.
+
+**Only `i8` had kernels.** `i32` went through the generic driver, which is the
+same identity but not the same instructions --- and benchmarking it against
+`nalgebra` was benchmarking the wrong program. Every integer family now has a
+kernel: `i16` and `i32` exact, `i16`, `i32`, and `i64` modular, and `i64` exact
+in an `i128` lane, which is the only width that holds an `i64` product and the
+reason no SIMD reaches it.
+
+**The packing loop indexed instead of walking.** `origin + i * rs + j * cs` per
+element is two multiplies where a walk is one add, and the panel is a million
+elements. Adding `MatView::row_walk` and `column_walk` and splitting the full
+tile from the edge was worth 1.7x on `i32`.
+
+**The accumulator was passed by value.** `Element::mac` took and returned
+`Self::Acc` --- 88 bytes in and out, twice per product for a float. `&mut` was
+worth 4x on `f32` and 1.6x on the packed integer path.
+
+### The modular factorization
+
+`i32` reaching 12 Gmac/s is not a `wrapping_mul` shortcut. When the caller asks
+to encode by wrapping into a `w`-bit output, reduction modulo `2^w` is a ring
+homomorphism, so accumulating in `Z/2^w` *is* the exact accumulation seen in the
+quotient the caller named. `_mm256_mullo_epi32` then gives eight products per
+instruction where the exact `i64` lane gives four, with no widening, because in
+the quotient there is nothing to widen to.
+
+Which factorization runs is decided by two *declarations* --- the encode mode
+and the output width --- and never by inspecting the data. `CD-05` asserts that
+both give the value their mode asks for, and that past `i32` they disagree,
+which is what makes the choice observable rather than cosmetic.

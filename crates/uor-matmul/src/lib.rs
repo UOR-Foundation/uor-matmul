@@ -57,6 +57,23 @@
 //! claim about any codebook, does not aim to beat `matrixmultiply` on f32
 //! throughput, and has no second method for any case however hard.
 
+//! # A note on the `std` feature
+//!
+//! `std` buys exactly two things: runtime CPU feature detection, and
+//! `core::error::Error` impls. Nothing in the numerical path changes when it is
+//! off --- the bytes are identical, which `CA-02` asserts across targets.
+//!
+//! What *does* change is which kernel runs. Without `std` there is nothing to
+//! detect, so a backend is available only if the *build* declared its target
+//! feature. A hosted build that forgets `std` and does not set
+//! `-C target-cpu=native` therefore runs the portable kernel, correctly and
+//! several times slower than the machine can manage. On an embedded target
+//! that is exactly right, because there is nothing to detect; on a server it is
+//! almost certainly not what was meant.
+//!
+//! `uor_matmul::kernels::available_i8()` reports which kernels a build can
+//! actually run, and it is worth printing once if throughput is surprising.
+
 #![no_std]
 // The facade carries the raw-pointer face (`CS-05`), whose contract is a
 // caller obligation rather than a checkable property, so this crate cannot
@@ -78,12 +95,12 @@ pub use uor_matmul_codec::{
 pub use uor_matmul_core::{
     acc_bits, as_alphabet, as_alphabet_full, dot_ref, narrow_cap_for, observe_bound, AccOf,
     Accumulator, Alphabet, Backend, Bnd, Bound, Complex, Decoded, Element, EncodeMode,
-    FloatElement, Full, IntegerElement, MatView, MatViewMut, NotAProduct, Shape, Strides,
-    Traversal, Triple,
+    FloatElement, Full, IntegerElement, MatView, MatViewMut, NotAProduct, PackedCode, Shape,
+    Strides, Traversal, Triple,
 };
 pub use uor_matmul_gemm::{
-    coded_gemm, gemm, gemm_float, gemm_w8a8, suggested_scratch, Bias, CodedTriple, Epilogue,
-    GemmOptions, Linear, Partition, Scratch, Tile,
+    coded_gemm, gemm, gemm_float, gemm_float_packed, gemm_packed, suggested_scratch, Bias,
+    CodedTriple, Epilogue, GemmOptions, Kernelized, Linear, Partition, Scratch, SignedPlace, Tile,
 };
 pub use uor_matmul_kernels as kernels;
 

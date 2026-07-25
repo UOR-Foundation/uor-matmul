@@ -8,7 +8,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
-uor-matmul = { path = "../uor-matmul" }
+# `std` is what turns on runtime CPU detection. Without it the kernels
+# crate answers from `cfg!(target_feature = ...)`, which is false on a generic
+# build --- so every measurement would be of the portable kernel while claiming
+# to be of the machine.
+uor-matmul = { path = "../uor-matmul", features = ["std"] }
 uor-matmul-core = { workspace = true }
 uor-matmul-codec = { workspace = true }
 uor-matmul-gemm = { workspace = true }

@@ -234,7 +234,66 @@ impl<'a, E> MatView<'a, E> {
         // coordinate the view names; `place` established that at construction.
         self.origin.wrapping_add_signed(off)
     }
+
+    /// A `rows`-long walk down column `j`, starting at row `i`.
+    ///
+    /// The packing loop's inner step. Computing `origin + i * rs + j * cs` per
+    /// element costs two multiplies and an add; walking costs one add, and at
+    /// a million elements per panel that is the difference between the packing
+    /// being a rounding error and being a third of the work.
+    pub fn column_walk(&self, i: usize, j: usize, rows: usize) -> Walk<'_, E> {
+        Walk {
+            data: self.data,
+            at: self.index(i, j),
+            step: self.strides.rs,
+            left: rows,
+        }
+    }
+
+    /// A `cols`-long walk along row `i`, starting at column `j`.
+    pub fn row_walk(&self, i: usize, j: usize, cols: usize) -> Walk<'_, E> {
+        Walk {
+            data: self.data,
+            at: self.index(i, j),
+            step: self.strides.cs,
+            left: cols,
+        }
+    }
 }
+
+/// A strided walk through a view, one add per element.
+///
+/// Yields exactly the elements [`MatView::at`] would, in the same order. It is
+/// not a different way of reading the matrix --- it is the same reads with the
+/// index arithmetic strength-reduced, which is why nothing downstream can tell
+/// which was used.
+#[derive(Clone, Debug)]
+pub struct Walk<'a, E> {
+    data: &'a [E],
+    at: usize,
+    step: isize,
+    left: usize,
+}
+
+impl<'a, E> Iterator for Walk<'a, E> {
+    type Item = &'a E;
+
+    fn next(&mut self) -> Option<&'a E> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        let here = self.at;
+        self.at = self.at.wrapping_add_signed(self.step);
+        self.data.get(here)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.left, Some(self.left))
+    }
+}
+
+impl<E> ExactSizeIterator for Walk<'_, E> {}
 
 impl<'a, E> MatViewMut<'a, E> {
     /// Borrow `data` mutably as an `rows x cols` matrix. See [`MatView::new`].

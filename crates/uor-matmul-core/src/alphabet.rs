@@ -130,6 +130,85 @@ pub enum Decoded {
     NotANumber,
 }
 
+/// A decoded float code, flattened for the inner loop.
+///
+/// Named for what it is rather than `Packed`, which in this workspace is a
+/// codec tier --- a different thing that would otherwise share the name.
+///
+/// Sixteen bytes: a signed significand and an exponent. The sign lives in the
+/// mantissa, so a product is one signed multiply; the non-finite kinds live in
+/// a sentinel exponent, so the struct needs no flag bytes and a packed panel
+/// costs half the cache it otherwise would. Both matter: this array is read
+/// once per multiply-accumulate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PackedCode {
+    /// The signed integer significand, or the sign for a non-finite code.
+    pub mantissa: i64,
+    /// The binary exponent of bit 0 of `mantissa`, or a sentinel.
+    pub exp: i32,
+}
+
+/// The exponent that marks an infinity. Below every real product exponent, and
+/// distinct from [`PackedCode::NAN_EXP`].
+const INF_EXP: i32 = i32::MIN + 1;
+/// The exponent that marks a NaN.
+const NAN_EXP: i32 = i32::MIN;
+
+impl PackedCode {
+    /// The sentinel exponent of an infinity.
+    pub const INF_EXP: i32 = INF_EXP;
+    /// The sentinel exponent of a NaN.
+    pub const NAN_EXP: i32 = NAN_EXP;
+
+    /// Pack a decoded code.
+    pub const fn of(d: Decoded) -> Self {
+        match d {
+            Decoded::Finite {
+                sign,
+                mantissa,
+                exp,
+            } => Self {
+                mantissa: if sign {
+                    -(mantissa as i64)
+                } else {
+                    mantissa as i64
+                },
+                exp,
+            },
+            // The sign of an infinity rides in the mantissa, as `-1` or `1`,
+            // so the product's sign is the product of the two mantissas and
+            // needs no separate rule.
+            Decoded::Infinite { sign } => Self {
+                mantissa: if sign { -1 } else { 1 },
+                exp: INF_EXP,
+            },
+            Decoded::NotANumber => Self {
+                mantissa: 0,
+                exp: NAN_EXP,
+            },
+        }
+    }
+
+    /// Is this an ordinary finite value?
+    ///
+    /// The overwhelmingly common case, and the one the inner loop is written
+    /// straight-line for. One comparison, because both sentinels are below
+    /// every real exponent.
+    pub const fn is_finite(&self) -> bool {
+        self.exp > INF_EXP
+    }
+
+    /// Is this a NaN?
+    pub const fn is_nan(&self) -> bool {
+        self.exp == NAN_EXP
+    }
+
+    /// Is this an infinity?
+    pub const fn is_infinite(&self) -> bool {
+        self.exp == INF_EXP
+    }
+}
+
 /// Elements that are IEEE codes.
 ///
 /// A float is a code, and this trait is its codec: the decode from a bit
@@ -143,6 +222,12 @@ pub trait FloatElement: Element {
     const MAX_PRODUCT_EXP: i32;
     /// The codec. Total on all bit patterns, non-finite ones included.
     fn decode(self) -> Decoded;
+
+    /// The codec's output in packed form, for a driver that decodes once and
+    /// multiplies many times.
+    fn pack(self) -> PackedCode {
+        PackedCode::of(self.decode())
+    }
 }
 
 /// The largest magnitude the portable reference's narrow register holds.

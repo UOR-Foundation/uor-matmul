@@ -28,12 +28,18 @@
 #![deny(missing_docs)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-// The tests below build panels on the heap. That is a property of the tests,
-// not of the kernels: nothing in a shipped code path allocates (R7).
-#[cfg(test)]
+// `std` is linked for two reasons and no others: runtime CPU feature detection
+// behind the `std` feature (C1 --- an embedded build has nothing to detect and
+// does not want it), and the heap the tests build panels on. Nothing in a
+// shipped code path allocates (R7).
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 pub mod isa;
 pub mod spec;
 
-pub use spec::{available, portable, select, KernelSpec};
+pub use spec::{
+    available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
+    available_i64_exact, available_i64_modular, available_i8, choose, portable_i8, Factorization,
+    KernelSpec, MAX_TILE_LANES,
+};

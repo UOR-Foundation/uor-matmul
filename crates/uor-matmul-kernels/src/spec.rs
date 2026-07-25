@@ -1,19 +1,52 @@
 //! The kernel table (§7.1).
 //!
-//! One signature per element type, identical across ISAs. A [`KernelSpec`] is a
-//! value; adding an ISA adds one and touches no driver code.
+//! One signature per element family, identical across ISAs. A [`KernelSpec`] is
+//! a value; adding an ISA adds one and touches no driver code.
+//!
+//! # The two factorizations
+//!
+//! Both compute the same thing. Neither is a fallback, and neither is a
+//! classical method: they are the one identity, factored two ways.
+//!
+//! [`Factorization::Exact`] accumulates in a lane wide enough that the partial
+//! sum cannot leave it, and the lanes fold into `AccOf<E>` --- which cannot
+//! overflow at all --- before the single encode step. The lane width is decided
+//! from the declared alphabet bound.
+//!
+//! [`Factorization::Modular`] applies when the caller asks to encode by
+//! wrapping into a `w`-bit output. Reduction modulo `2^w` is a ring
+//! homomorphism, so reducing the exact sum once at the end equals reducing at
+//! every step: accumulating in `Z/2^w` *is* the exact accumulation, seen in the
+//! quotient the caller asked for. That is the same fact §3.4 rests on for the
+//! integer oracles, and it is what lets a `w`-bit lane carry an unbounded depth
+//! with no wide accumulator behind it.
+//!
+//! Which one runs is decided by the caller's *declarations* --- the alphabet
+//! bound and the encode mode --- never by a heuristic and never by the data.
 
 use uor_matmul_core::Backend;
 
-/// One backend's microkernel and its blocking shape.
+/// Which factorization of the identity a kernel realizes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Factorization {
+    /// The lane holds the partial sum exactly; lanes fold into `AccOf<E>`.
+    Exact,
+    /// The lane is `Z/2^w` for the `w`-bit output the caller asked to wrap
+    /// into. Exact in the quotient, by ring homomorphism.
+    Modular,
+}
+
+/// One backend's microkernel for one element family, and its blocking shape.
 ///
-/// The driver reads `mr`, `nr`, and `k_group` through this value rather than
-/// through a `match` on [`Backend`], which is what keeps the driver free of
-/// per-ISA code.
-#[derive(Clone, Copy)]
-pub struct KernelSpec {
+/// `E` is the packed element type and `L` is the lane the kernel accumulates
+/// in. The driver reads `mr`, `nr`, and `k_group` through this value rather
+/// than through a `match` on [`Backend`], which is what keeps the driver free
+/// of per-ISA code.
+pub struct KernelSpec<E, L> {
     /// Which backend this is.
     pub backend: Backend,
+    /// Which factorization it realizes.
+    pub factorization: Factorization,
     /// Rows of `C` this kernel produces per call.
     pub mr: usize,
     /// Columns of `C` this kernel produces per call.
@@ -24,11 +57,10 @@ pub struct KernelSpec {
     /// alphabet's zero, which is exact, so an arbitrary `k` takes this path and
     /// not a different one (S8).
     pub k_group: usize,
-    /// The largest magnitude this kernel's accumulator lane holds.
+    /// The largest magnitude one lane holds.
     ///
-    /// Read by [`uor_matmul_core::narrow_cap_for`] to decide whether a tile of
-    /// a given depth fits. A tile that does not fit takes a wider lane and
-    /// computes the same integer (§5.1).
+    /// Ignored for [`Factorization::Modular`], where the lane wraps by design
+    /// and the depth is unbounded.
     pub lane_cap: u128,
     /// Accumulate an `mr x nr` tile of `C` over a `kc`-deep packed panel pair.
     ///
@@ -37,14 +69,24 @@ pub struct KernelSpec {
     /// The caller must ensure `pa` has `mr * kc` readable elements, `pb` has
     /// `nr * kc`, `acc` has `mr * nr` writable lanes, and that the target
     /// features this backend names are present on the host. [`Self::mac_tile`]
-    /// establishes the first three; [`available`] establishes the fourth.
-    pub mac_tile: unsafe fn(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32),
+    /// establishes the first three; the `available_*` functions establish the
+    /// fourth.
+    pub mac_tile: unsafe fn(kc: usize, pa: *const E, pb: *const E, acc: *mut L),
 }
 
-impl core::fmt::Debug for KernelSpec {
+impl<E, L> Clone for KernelSpec<E, L> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E, L> Copy for KernelSpec<E, L> {}
+
+impl<E, L> core::fmt::Debug for KernelSpec<E, L> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("KernelSpec")
             .field("backend", &self.backend)
+            .field("factorization", &self.factorization)
             .field("mr", &self.mr)
             .field("nr", &self.nr)
             .field("k_group", &self.k_group)
@@ -52,280 +94,192 @@ impl core::fmt::Debug for KernelSpec {
     }
 }
 
-impl KernelSpec {
+impl<E, L> KernelSpec<E, L> {
     /// The safe entry point: accumulate an `mr x nr` tile.
     ///
     /// Panics only on a length disagreement, which is a programming error in
     /// the *driver* rather than a condition of the data --- no input a caller
     /// can supply reaches it, which is why `gemm` still returns `()`.
-    pub fn mac_tile(&self, kc: usize, pa: &[i8], pb: &[i8], acc: &mut [i32]) {
+    pub fn mac_tile(&self, kc: usize, pa: &[E], pb: &[E], acc: &mut [L]) {
         assert_eq!(pa.len(), self.mr * kc, "packed A panel is mr * kc");
         assert_eq!(pb.len(), self.nr * kc, "packed B panel is nr * kc");
         assert_eq!(acc.len(), self.mr * self.nr, "accumulator tile is mr * nr");
         // SAFETY: the three lengths are exactly what `mac_tile` requires, and
-        // this `KernelSpec` was obtained from `select` or `available`, both of
-        // which only ever return a spec whose target features the host has.
+        // this `KernelSpec` came from one of the `available_*` functions, which
+        // only ever return a spec whose target features the host has.
         unsafe { (self.mac_tile)(kc, pa.as_ptr(), pb.as_ptr(), acc.as_mut_ptr()) }
     }
-}
 
-/// The reference. Always present, always correct, never a fallback (R6).
-pub const fn portable() -> KernelSpec {
-    crate::isa::portable::SPEC
-}
-
-/// Every backend this build can run, portable first.
-///
-/// With `std`, this consults the host at runtime. Without it, the answer is
-/// whatever the target features say at compile time --- which is what an
-/// embedded target wants, because there is nothing to detect (C1, S11).
-pub fn available() -> impl Iterator<Item = KernelSpec> {
-    let mut specs = [None::<KernelSpec>; 8];
-    let mut n = 0;
-    let mut push = |s: KernelSpec| {
-        specs[n] = Some(s);
-        n += 1;
-    };
-
-    push(portable());
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::isa::avx2::is_available() {
-            push(crate::isa::avx2::SPEC);
-        }
-        if crate::isa::avx512vnni::is_available() {
-            push(crate::isa::avx512vnni::SPEC_DPWSSD);
-            push(crate::isa::avx512vnni::SPEC_DPBUSD);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if crate::isa::neon::is_available() {
-            push(crate::isa::neon::SPEC);
-        }
-        if crate::isa::neon_dotprod::is_available() {
-            push(crate::isa::neon_dotprod::SPEC);
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        if crate::isa::wasm_simd128::is_available() {
-            push(crate::isa::wasm_simd128::SPEC);
-        }
-    }
-
-    specs.into_iter().flatten()
-}
-
-/// The fastest available factorization, or the one the caller named.
-///
-/// Selection cannot fail. [`Backend::Auto`] takes the last entry of
-/// [`available`], which is the widest one the host can run; a named backend the
-/// host cannot run yields the portable kernel, which computes the same integer.
-/// That is not a fallback --- there is no answer being given up (R13).
-pub fn select(requested: Backend) -> KernelSpec {
-    match requested {
-        Backend::Auto => available().last().unwrap_or_else(portable),
-        named => available()
-            .find(|s| s.backend == named)
-            .unwrap_or_else(portable),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::vec;
-    use std::vec::Vec;
-    use uor_matmul_core::{as_alphabet_full, dot_ref};
-
-    /// Reference: the exact `mr x nr` tile, computed by the core's own
-    /// accumulation. Every kernel is compared against this.
-    fn reference_tile(spec: &KernelSpec, kc: usize, pa: &[i8], pb: &[i8]) -> Vec<i32> {
-        let mut out = vec![0i32; spec.mr * spec.nr];
-        for i in 0..spec.mr {
-            // The packed A panel is k-major: `pa[p * mr + i]`.
-            let a: Vec<i8> = (0..kc).map(|p| pa[p * spec.mr + i]).collect();
-            for j in 0..spec.nr {
-                let b: Vec<i8> = (0..kc).map(|p| pb[p * spec.nr + j]).collect();
-                let exact = dot_ref(as_alphabet_full(&a), as_alphabet_full(&b));
-                out[i * spec.nr + j] = exact as i32;
-            }
-        }
-        out
-    }
-
-    fn fill(len: usize, salt: u64) -> Vec<i8> {
-        let mut s = 0x243F_6A88_85A3_08D3u64 ^ salt;
-        (0..len)
-            .map(|_| {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                (s >> 33) as i8
-            })
-            .collect()
-    }
-
-    /// `CB-01`: the portable kernel equals `dot_ref` on the whole corpus.
-    #[test]
-    fn portable_equals_dot_ref_cb_01() {
-        let spec = portable();
-        for kc in [0usize, 1, 2, 3, 4, 7, 8, 16, 31, 64, 127, 256] {
-            let pa = fill(spec.mr * kc, kc as u64);
-            let pb = fill(spec.nr * kc, kc as u64 ^ 0x5A);
-            let mut acc = vec![0i32; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            assert_eq!(acc, reference_tile(&spec, kc, &pa, &pb), "kc={kc}");
-        }
-    }
-
-    /// `CB-02` .. `CB-05`, `CD-01`: every backend this host can run equals the
-    /// portable reference, byte for byte.
+    /// The deepest chunk this lane holds for an alphabet bounded by `bound`.
     ///
-    /// The test enumerates what the host actually supports and asserts that
-    /// each one agrees. A host with no SIMD still exercises the portable
-    /// kernel, and the assertion at the end makes "nothing ran" a failure
-    /// rather than a pass.
-    #[test]
-    fn every_backend_equals_portable_cb_02() {
-        let mut checked = 0usize;
-        for spec in available() {
-            for kc in [0usize, 1, 2, 3, 5, 8, 16, 17, 64, 129, 512] {
-                let pa = fill(spec.mr * kc, kc as u64 ^ 0xC0);
-                let pb = fill(spec.nr * kc, kc as u64 ^ 0x0D);
-                let mut acc = vec![0i32; spec.mr * spec.nr];
-                spec.mac_tile(kc, &pa, &pb, &mut acc);
-                assert_eq!(
-                    acc,
-                    reference_tile(&spec, kc, &pa, &pb),
-                    "{} disagrees with the reference at kc={kc}",
-                    spec.backend.as_str()
-                );
-            }
-            checked += 1;
+    /// A question about a register, not a limit on `k`: a deeper accumulation
+    /// is split into more chunks, and the chunks combine exactly. For a modular
+    /// lane there is nothing to bound --- the wrap *is* the encode.
+    pub fn lane_depth(&self, bound: u128) -> usize {
+        if matches!(self.factorization, Factorization::Modular) {
+            return usize::MAX;
         }
-        assert!(checked >= 1, "at least the portable kernel must have run");
-        // Report what was actually exercised, so a green run on a host with no
-        // SIMD is not mistaken for a green run on one with it.
-        std::eprintln!(
-            "CB-02: {checked} backend(s) checked: {}",
-            available()
-                .map(|s| s.backend.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+        let per_step = bound.saturating_mul(bound); // R3-ok: a lane-width question, not an accumulation
+        if per_step == 0 {
+            return usize::MAX;
+        }
+        usize::try_from(self.lane_cap / per_step)
+            .unwrap_or(usize::MAX)
+            .max(1)
+    }
+}
+
+/// The specs a build can run, portable first.
+///
+/// A chain of options rather than a fixed array, so the number of kernels a
+/// family may have is not capped by a constant somebody chose. Adding one adds
+/// a line here and nothing else (R8).
+macro_rules! collect {
+    ($($cond:expr => $spec:expr),* $(,)?) => {{
+        core::iter::empty()
+        $(
+            .chain(core::iter::once_with(|| if $cond { Some($spec) } else { None }))
+        )*
+        .flatten()
+    }};
+}
+
+/// The largest `mr * nr` any shipped kernel produces.
+///
+/// Derived rather than chosen: every kernel below carries a `const` assertion
+/// that its own tile fits, so a kernel too large for this fails the *build*
+/// rather than overflowing a buffer. That is what keeps it a derivation and not
+/// a ceiling --- there is no input that can reach it, and no way to add a
+/// kernel that quietly exceeds it.
+pub const MAX_TILE_LANES: usize = 8 * 16;
+
+/// Assert at compile time that a kernel's tile fits [`MAX_TILE_LANES`].
+#[macro_export]
+macro_rules! tile_fits {
+    ($mr:expr, $nr:expr) => {
+        const _: () = assert!(
+            $mr * $nr <= $crate::MAX_TILE_LANES,
+            "this kernel's tile exceeds MAX_TILE_LANES; raise it in the same commit"
         );
-    }
+    };
+}
 
-    /// `CU-03`: every instruction sequence agrees at depths straddling its own
-    /// threshold.
-    ///
-    /// The worst case for a signed byte pair is `128 * 128` per step, so these
-    /// depths are chosen around where each sequence's lane would fill. The
-    /// values are the extremes, not random, because a random fill cancels and
-    /// would never reach the threshold at all.
-    #[test]
-    fn sequences_agree_across_their_thresholds_cu_03() {
-        for spec in available() {
-            for kc in [1usize, 2, 3, 4, 8, 15, 16, 17, 128, 129, 130] {
-                // All-extreme inputs, so the lane fills as fast as it can.
-                let pa = vec![i8::MIN; spec.mr * kc];
-                let pb = vec![i8::MIN; spec.nr * kc];
-                let mut acc = vec![0i32; spec.mr * spec.nr];
-                spec.mac_tile(kc, &pa, &pb, &mut acc);
-                let expect = (kc as i32) * 128 * 128;
-                assert!(
-                    acc.iter().all(|&x| x == expect),
-                    "{} at kc={kc}: expected {expect}",
-                    spec.backend.as_str()
-                );
-            }
+/// Every `i8 x i8 -> i32` kernel this build can run, portable first.
+pub fn available_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
+    collect![
+        true => crate::isa::portable::I8_I32,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32,
+        crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPWSSD_I8_I32,
+        crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPBUSD_I8_I32,
+        crate::isa::arm::neon_available() => crate::isa::arm::NEON_I8_I32,
+        crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_I8_I32,
+        crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_I8_I32,
+    ]
+}
+
+/// Every `i16 x i16 -> i64` kernel this build can run.
+///
+/// `_mm256_madd_epi16` multiplies signed words and sums adjacent pairs into an
+/// `i32`, which is exactly this family's arithmetic --- so `i16` reaches the
+/// same instruction `i8` reaches after widening, without the widening.
+pub fn available_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
+    collect![
+        true => crate::isa::portable::I16_I64,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64,
+    ]
+}
+
+/// Every exact `i32 x i32 -> i64` kernel this build can run.
+///
+/// The product of two `i32` needs 62 bits, so the lane must be 64.
+/// `_mm256_mul_epi32` is a signed `32x32 -> 64` multiply, which is this
+/// family's whole arithmetic in one instruction.
+pub fn available_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
+    collect![
+        true => crate::isa::portable::I32_I64,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64,
+    ]
+}
+
+/// Every modular `i32 x i32 -> i32` kernel this build can run.
+///
+/// The lane is `Z/2^32`. Legitimate exactly when the caller asked to encode by
+/// wrapping into a 32-bit output, because then the lane's own wrap *is* the
+/// encode and nothing is lost that the caller did not ask to lose.
+pub fn available_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
+    collect![
+        true => crate::isa::portable::I32_MOD,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD,
+    ]
+}
+
+/// Every exact `i64 x i64 -> i128` kernel this build can run.
+///
+/// The product of two `i64` needs 128 bits, so the lane is an `i128`. No SIMD
+/// integer multiply reaches that width on any target this crate supports, so
+/// the portable kernel is not a placeholder here --- it is the whole of what
+/// the hardware offers, and packing still buys it the locality every other
+/// family gets.
+pub fn available_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
+    collect![
+        true => crate::isa::portable::I64_I128,
+    ]
+}
+
+/// Every modular `i16 x i16 -> i32` kernel this build can run.
+///
+/// Twice the lanes of the exact `i16` kernel, because in `Z/2^32` there is
+/// nothing to widen to: `madd` already lands in `i32` and the accumulation
+/// stays there.
+pub fn available_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
+    collect![
+        true => crate::isa::portable::I16_MOD,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD,
+    ]
+}
+
+/// Every modular `i64 x i64 -> i64` kernel this build can run.
+///
+/// A single `i64 x i64` product needs 128 bits, so there is no exact 64-bit
+/// lane and no SIMD integer multiply that reaches it. In the quotient there is:
+/// `Z/2^64` needs only the low half of each product, which is what a plain
+/// `wrapping_mul` gives.
+pub fn available_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
+    collect![
+        true => crate::isa::portable::I64_MOD,
+    ]
+}
+
+/// The reference `i8` kernel. Always present, always correct, never a
+/// fallback (R6).
+pub const fn portable_i8() -> KernelSpec<i8, i32> {
+    crate::isa::portable::I8_I32
+}
+
+/// Choose from a family: the backend the caller named, or the widest available.
+///
+/// Selection cannot fail. [`Backend::Auto`] takes the last entry, which is the
+/// widest one the host can run; a named backend the host cannot run yields the
+/// first, which computes the same value. That is not a fallback --- there is no
+/// answer being given up (R13).
+pub fn choose<E, L>(
+    specs: impl Iterator<Item = KernelSpec<E, L>>,
+    requested: Backend,
+) -> Option<KernelSpec<E, L>> {
+    let mut first = None;
+    let mut widest = None;
+    let mut named = None;
+    for spec in specs {
+        if first.is_none() {
+            first = Some(spec);
         }
-    }
-
-    /// Check one named backend against the reference, and say whether the host
-    /// could run it. Shared by `CB-03`, `CB-04`, and `CB-05`.
-    fn check_named(backend: Backend) -> bool {
-        let Some(spec) = available().find(|s| s.backend == backend) else {
-            std::eprintln!(
-                "{}: not available on this host; the cross-architecture CI job runs it",
-                backend.as_str()
-            );
-            return false;
-        };
-        for kc in [0usize, 1, 2, 3, 4, 5, 8, 16, 17, 63, 64, 129, 512] {
-            let pa = fill(spec.mr * kc, kc as u64 ^ 0xAB);
-            let pb = fill(spec.nr * kc, kc as u64 ^ 0xCD);
-            let mut acc = vec![0i32; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            assert_eq!(
-                acc,
-                reference_tile(&spec, kc, &pa, &pb),
-                "{} disagrees at kc={kc}",
-                backend.as_str()
-            );
+        if spec.backend == requested {
+            named = Some(spec);
         }
-        true
+        widest = Some(spec);
     }
-
-    /// `CB-03`: AVX-512 VNNI equals portable, on all of its sequences.
-    ///
-    /// `available` returns both the `dpwssd` and the `dpbusd` spec under the
-    /// same `Backend`, so `check_named` exercises whichever comes first and the
-    /// loop below covers the rest. Two sequences, one answer.
-    #[test]
-    fn avx512vnni_equals_portable_cb_03() {
-        let ran = check_named(Backend::Avx512Vnni);
-        if ran {
-            let mut sequences = 0usize;
-            for spec in available().filter(|s| s.backend == Backend::Avx512Vnni) {
-                for kc in [1usize, 4, 5, 64, 129] {
-                    let pa = fill(spec.mr * kc, 1);
-                    let pb = fill(spec.nr * kc, 2);
-                    let mut acc = vec![0i32; spec.mr * spec.nr];
-                    spec.mac_tile(kc, &pa, &pb, &mut acc);
-                    assert_eq!(acc, reference_tile(&spec, kc, &pa, &pb));
-                }
-                sequences += 1;
-            }
-            assert!(sequences >= 2, "both VNNI sequences must be exercised");
-        }
-    }
-
-    /// `CB-04`: NEON and NEON dotprod equal portable.
-    #[test]
-    fn neon_equals_portable_cb_04() {
-        let _ = check_named(Backend::Neon);
-        let _ = check_named(Backend::NeonDotprod);
-    }
-
-    /// `CB-05`: wasm SIMD128 equals portable, and a SIMD128-off build agrees
-    /// with a SIMD128-on one.
-    ///
-    /// The second half is what the portable kernel is for: on wasm without
-    /// `simd128` the driver runs it, and `CB-01` already pins it to `dot_ref`.
-    /// So "SIMD128-off equals SIMD128-on" is the composition of `CB-01` and
-    /// this test, and the wasm CI job runs both configurations.
-    #[test]
-    fn wasm_simd128_equals_portable_cb_05() {
-        let _ = check_named(Backend::WasmSimd128);
-    }
-
-    /// `CD-01`: the backend a caller names never changes the answer, and
-    /// naming one the host cannot run is not an error.
-    #[test]
-    fn backend_selection_cannot_fail_cd_01() {
-        for backend in Backend::ALL {
-            let spec = select(backend);
-            let kc = 33;
-            let pa = fill(spec.mr * kc, 1);
-            let pb = fill(spec.nr * kc, 2);
-            let mut acc = vec![0i32; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            assert_eq!(acc, reference_tile(&spec, kc, &pa, &pb));
-        }
-        // `Auto` is the widest available, never a failure.
-        let _ = select(Backend::Auto);
+    match requested {
+        Backend::Auto => widest.or(first),
+        _ => named.or(first),
     }
 }

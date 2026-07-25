@@ -68,7 +68,7 @@ fn a_gemm_call_allocates_nothing_ca_01() {
         let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
         let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
         let mut t = Triple::new(av, bv, cv).unwrap();
-        uor_matmul::gemm_w8a8(
+        uor_matmul::gemm_packed(
             &mut t,
             &Linear::OVERWRITE,
             GemmOptions::default(),
@@ -83,7 +83,7 @@ fn a_gemm_call_allocates_nothing_ca_01() {
         let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
         let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
         let mut t = Triple::new(av, bv, cv).unwrap();
-        uor_matmul::gemm_w8a8(
+        uor_matmul::gemm_packed(
             &mut t,
             &Linear::OVERWRITE,
             GemmOptions::default(),
@@ -304,7 +304,7 @@ fn one_accumulation_path_per_family_cu_05() {
         let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
         let cv = MatViewMut::row_major(&mut packed, m, n).unwrap();
         let mut t = Triple::new(av, bv, cv).unwrap();
-        uor_matmul::gemm_w8a8(
+        uor_matmul::gemm_packed(
             &mut t,
             &Linear::OVERWRITE,
             GemmOptions {
