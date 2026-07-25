@@ -79,7 +79,14 @@ pub fn gemm<E, Bd, O, Ep>(
         // Streaming: one output element at a time, no packed panel at all.
         Traversal::OutputMajor => 0,
         // Blocked: as long a k-panel as the offer supports.
-        Traversal::Blocked => scratch.panel(shape.k),
+        //
+        // `Tabulated` is the same length here. A dense operand is
+        // `Identity`-coded, whose code space is the alphabet itself, so there is
+        // no table to index --- which the type system says at
+        // [`crate::tabulated::gemm_tabulated`]'s boundary rather than here. This
+        // is not a fallback: both walk the same products into the same exact sum,
+        // and `CD-13` asserts the bytes (R13, C5).
+        Traversal::Blocked | Traversal::Tabulated => scratch.panel(shape.k),
     };
 
     let (a, b, c) = triple.parts();

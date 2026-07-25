@@ -37,6 +37,7 @@ pub mod float;
 pub mod kernel;
 pub mod partition;
 pub mod scratch;
+pub mod tabulated;
 
 pub use coded::{coded_gemm, CodedTriple};
 pub use collapse::{gemm_collapsed, suggested_collapse_index, suggested_collapse_rows, Collapse};
@@ -46,3 +47,7 @@ pub use float::{gemm_float, gemm_float_packed, SignedPlace};
 pub use kernel::{gemm_packed, Kernelized};
 pub use partition::{Partition, Tile};
 pub use scratch::{suggested_accumulators, suggested_scratch, Scratch};
+pub use tabulated::{
+    add_entry_wide, gemm_tabulated, gemm_tabulated_counted, suggested_tabulation, tabulation_fits,
+    tabulation_pays, tabulation_rows, Census, Ledger, Table, TabulatedTriple,
+};

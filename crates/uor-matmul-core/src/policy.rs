@@ -57,6 +57,29 @@ pub enum Traversal {
     /// Cache-blocked panels, the shape a conventional GEMM uses.
     #[default]
     Blocked,
+    /// A table indexed by code, so the column loop has no multiply in it.
+    ///
+    /// When the operand is a code, the product is a table read. For one row of
+    /// `A` and one block of the reduction, the partial sum against *every* code
+    /// in the codec's space is computed once; the columns then read it. The
+    /// column loop is one read and one add per code, covering `MAX_BLOCK`
+    /// weights, and it issues no multiply at all.
+    ///
+    /// This is the same regrouping of the same products that [`Blocked`] and
+    /// [`OutputMajor`] are, and `CD-13` asserts the bytes are identical. It is
+    /// available *because* the accumulation is exact: a classical `sgemm` cannot
+    /// share a partial sum across columns, because its `T[c]` would carry its own
+    /// rounding error and reusing it would propagate that error `n` times. There
+    /// is no error to propagate here.
+    ///
+    /// Requires a codec whose code space can be enumerated, and enough of the
+    /// caller's accumulator offer to hold the table. Neither is a failure: a
+    /// caller who offers nothing gets the same bytes from [`Blocked`], which is
+    /// the same rule every other offer in this library follows.
+    ///
+    /// [`Blocked`]: Traversal::Blocked
+    /// [`OutputMajor`]: Traversal::OutputMajor
+    Tabulated,
 }
 
 /// Which factorization of the identity to run.

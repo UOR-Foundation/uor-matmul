@@ -365,3 +365,137 @@ fn packed_panels_are_byte_equal_across_tiers_ck_03() {
         "the packed panel must not be all zeros"
     );
 }
+
+/// `CK-09`: `Enumerable`'s two laws, for every codec that implements it.
+///
+/// Law 1 is the round trip, checked over the *whole* code space rather than a
+/// sample: an enumeration with one hole is an enumeration that indexes a dead
+/// table entry, and a sample would miss it.
+///
+/// Law 2 is totality of `index_of` on the code *type*, not on the enumeration ---
+/// checked over every `u8` and every `u16`, including values no encoder would
+/// ever produce. That is the law the tabulated traversal cashes in when it reads
+/// the table without a bounds check (`CT-07`).
+#[test]
+fn the_enumeration_round_trips_and_is_total_ck_09() {
+    use uor_matmul_codec::Enumerable;
+
+    /// Law 1 and law 2 for one codec, plus the decode agreement that makes an
+    /// index a stand-in for a code at all.
+    fn laws<C, F>(name: &str, codec: &C, block: usize, every_code: F)
+    where
+        C: Enumerable<i8, Full<i8>>,
+        F: Fn(&mut dyn FnMut(C::Code)),
+    {
+        assert!(
+            C::CODE_SPACE > 0,
+            "{name}: a codec that enumerates nothing cannot be tabulated"
+        );
+
+        // Law 1, over the whole space.
+        for i in 0..C::CODE_SPACE {
+            assert_eq!(
+                C::index_of(C::code_at(i)),
+                i,
+                "{name}: index_of(code_at({i})) must be {i}"
+            );
+        }
+
+        // Law 2, over the whole code type, and the decode agreement with it:
+        // two codes at the same index must decode alike, or the table would
+        // answer one of them wrongly.
+        every_code(&mut |code| {
+            let index = C::index_of(code);
+            assert!(
+                index < C::CODE_SPACE,
+                "{name}: index_of is not total; a code landed at {index} of {}",
+                C::CODE_SPACE
+            );
+            let canonical = C::code_at(index);
+            for t in 0..block {
+                assert_eq!(
+                    codec.decode_element(code, t).get(),
+                    codec.decode_element(canonical, t).get(),
+                    "{name}: two codes share index {index} but decode differently at {t}"
+                );
+            }
+        });
+    }
+
+    let table = i4_table();
+    let grid = Grid::<i8, Full<i8>, 16>::new(&table);
+    laws("Grid<16>", &grid, 1, |f: &mut dyn FnMut(u16)| {
+        for c in 0..=u16::MAX {
+            f(c)
+        }
+    });
+
+    let packed = Packed::<_, 2>::new(grid).expect("2 divides 8");
+    laws(
+        "Packed<Grid<16>, 2>",
+        &packed,
+        2,
+        |f: &mut dyn FnMut(u8)| {
+            for c in 0..=u8::MAX {
+                f(c)
+            }
+        },
+    );
+
+    let quad_table: [A8; 4] = core::array::from_fn(|i| Alphabet::of((i as i8) - 2));
+    let quad = Grid::<i8, Full<i8>, 4>::new(&quad_table);
+    let packed4 = Packed::<_, 4>::new(quad).expect("4 divides 8");
+    laws(
+        "Packed<Grid<4>, 4>",
+        &packed4,
+        4,
+        |f: &mut dyn FnMut(u8)| {
+            for c in 0..=u8::MAX {
+                f(c)
+            }
+        },
+    );
+
+    // A grid narrower than its own field: two nibbles over a ten-entry table, so
+    // the sub-space is ten and the total space is a hundred rather than 256.
+    let ten_table: [A8; 10] = core::array::from_fn(|i| Alphabet::of((i as i8) - 5));
+    let ten = Grid::<i8, Full<i8>, 10>::new(&ten_table);
+    let packed_ten = Packed::<_, 2>::new(ten).expect("2 divides 8");
+    assert_eq!(
+        <Packed<Grid<'_, i8, Full<i8>, 10>, 2> as Enumerable<i8, Full<i8>>>::CODE_SPACE,
+        100,
+        "a ten-entry grid packed two to a byte enumerates ten squared"
+    );
+    laws(
+        "Packed<Grid<10>, 2>",
+        &packed_ten,
+        2,
+        |f: &mut dyn FnMut(u8)| {
+            for c in 0..=u8::MAX {
+                f(c)
+            }
+        },
+    );
+
+    let e8 = uor_matmul_codec::e8_table::<Full<i8>>().expect("i8 holds E8");
+    let book = uor_matmul_codec::e8_codec(&e8);
+    laws("Book<256, 8>", &book, 8, |f: &mut dyn FnMut(u16)| {
+        for c in 0..=u16::MAX {
+            f(c)
+        }
+    });
+
+    // A zero point relabels the image and not the code space, so the offset
+    // tier's enumeration is the inner one and needs no new law.
+    // The inner bound has to leave the zero point room, which is the O(1) check
+    // `Offset::new` already performs; the enumeration is unaffected either way.
+    let narrow: [Alphabet<i8, Bnd<8>>; 16] =
+        core::array::from_fn(|i| Alphabet::new((i as i8) - 8).expect("|-8..7| <= 8"));
+    let offset =
+        Offset::<i8, Bnd<8>, Full<i8>, _>::new(Grid::<i8, Bnd<8>, 16>::new(&narrow), 3).unwrap();
+    laws("Offset<Grid<16>>", &offset, 1, |f: &mut dyn FnMut(u16)| {
+        for c in 0..=u16::MAX {
+            f(c)
+        }
+    });
+}

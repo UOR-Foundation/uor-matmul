@@ -41,3 +41,9 @@ Feature: Totality
     Given the standing corpus
     When the suite exercises CT-06
     Then the claim holds byte for byte
+
+  @CT-07 @build
+  Scenario: Tabulation is total: every code the codec can hold indexes a live table entry
+    Given the standing corpus
+    When the suite exercises CT-07
+    Then the claim holds byte for byte

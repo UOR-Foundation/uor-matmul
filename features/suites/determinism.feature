@@ -77,3 +77,9 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-12
     Then the claim holds byte for byte
+
+  @CD-13 @build
+  Scenario: Tabulated, Blocked, and OutputMajor produce byte-identical output at every shape
+    Given the standing corpus
+    When the suite exercises CD-13
+    Then the claim holds byte for byte

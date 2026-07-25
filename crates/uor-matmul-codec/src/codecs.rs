@@ -10,7 +10,14 @@ use core::marker::PhantomData;
 use bytemuck::TransparentWrapper as _;
 use uor_matmul_core::{Alphabet, Bound, IntegerElement};
 
-use crate::tier::{Codec, TierId};
+use crate::tier::{Codec, Enumerable, TierId};
+
+/// How many codes a `u16`-indexed table can actually be reached with.
+///
+/// A property of the code type, not a limit on the table: a `Grid<70000>` is a
+/// well-formed decode whose entries past this are unreachable, and saying so is
+/// how the enumeration stays honest about its own size.
+const U16_CODES: usize = u16::MAX as usize + 1;
 
 /// The three parameters `Offset` carries without storing: the input bound, the
 /// output bound, and the element type. Invariant in none of them, so the marker
@@ -44,6 +51,13 @@ impl<E: IntegerElement, Bd: Bound> Codec<E, Bd> for Identity {
         codes.len()
     }
 }
+
+// `Identity` does not implement `Enumerable`, deliberately. Its code space is
+// the alphabet itself --- `2^32` values over `i32` --- and its block is one, so
+// a table indexed by it would be both unholdable and pointless: `tabulation_pays`
+// refuses `MAX_BLOCK == 1` on op count anyway. The absence is enforced by the
+// type system rather than by a runtime refusal, which is why the tabulated
+// traversal needs no branch for it (§4).
 
 // ---------------------------------------------------------------------------
 // Grid
@@ -83,6 +97,26 @@ impl<E: IntegerElement, Bd: Bound, const N: usize> Codec<E, Bd> for Grid<'_, E, 
 
     fn decode_element(&self, code: Self::Code, _i: usize) -> Alphabet<E, Bd> {
         self.table[(code as usize) % N]
+    }
+}
+
+impl<E: IntegerElement, Bd: Bound, const N: usize> Enumerable<E, Bd> for Grid<'_, E, Bd, N> {
+    // The reachable code space, which is the table size unless the table is
+    // wider than the code type can address.
+    const CODE_SPACE: usize = if N < U16_CODES { N } else { U16_CODES };
+
+    fn code_at(index: usize) -> Self::Code {
+        // `index < CODE_SPACE <= U16_CODES`, so the cast is the identity on the
+        // enumeration's own domain. The `%` is what makes it total off it, and
+        // the `max(1)` keeps it total for a table with no entries at all --- a
+        // codec `tabulation_pays` refuses, so no traversal reaches it.
+        (index % Self::CODE_SPACE.max(1)) as u16
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        // The same reduction `decode_element` performs, so equal indices and
+        // equal decodes are the same relation.
+        (code as usize) % Self::CODE_SPACE.max(1)
     }
 }
 
@@ -147,6 +181,67 @@ where
     }
 }
 
+/// How many distinct sub-codes one field of a packed byte can store.
+///
+/// The inner codec's own space, unless the field is narrower than that space ---
+/// a `Grid<256>` packed two to a byte can only ever be handed a nibble, so its
+/// reachable sub-space is sixteen and not two hundred and fifty-six. Getting
+/// this wrong in either direction breaks a law: too large and `code_at` names
+/// codes the byte cannot hold, too small and `index_of` collides.
+const fn sub_space(inner: usize, sub_bits: u32) -> usize {
+    let per_field = 1usize << sub_bits;
+    if inner < per_field {
+        inner
+    } else {
+        per_field
+    }
+}
+
+impl<E, Bd, C, const P: usize> Enumerable<E, Bd> for Packed<C, P>
+where
+    E: IntegerElement,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    C::Code: From<u8>,
+{
+    // Mixed radix in the sub-space, which is at most `2^(SUB_BITS * P) = 256`,
+    // so this cannot overflow whatever `P` and `C` are.
+    const CODE_SPACE: usize = sub_space(C::CODE_SPACE, Self::SUB_BITS).pow(P as u32);
+
+    fn code_at(index: usize) -> Self::Code {
+        let bits = Self::SUB_BITS;
+        let radix = sub_space(C::CODE_SPACE, bits).max(1);
+        let mut rest = index % Self::CODE_SPACE.max(1);
+        let mut code = 0u8;
+        for field in 0..P {
+            let digit = rest % radix;
+            rest /= radix;
+            // Low sub-code first, the same order `decode_element` reads them in.
+            code |= (digit as u8) << (bits * field as u32);
+        }
+        code
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        let bits = Self::SUB_BITS;
+        let mask: u8 = if bits >= 8 {
+            u8::MAX
+        } else {
+            (1u8 << bits) - 1
+        };
+        let radix = sub_space(C::CODE_SPACE, bits).max(1);
+        let mut index = 0usize;
+        let mut place = 1usize;
+        for field in 0..P {
+            let sub = (code >> (bits * field as u32)) & mask;
+            let digit = C::index_of(C::Code::from(sub)) % radix;
+            index += digit * place;
+            place *= radix;
+        }
+        index
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Book
 // ---------------------------------------------------------------------------
@@ -186,6 +281,20 @@ impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Codec<E, Bd
     fn decode_into(&self, code: Self::Code, out: &mut [Alphabet<E, Bd>]) -> usize {
         out[..BLK].copy_from_slice(&self.table[(code as usize) % N]);
         BLK
+    }
+}
+
+impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Enumerable<E, Bd>
+    for Book<'_, E, Bd, N, BLK>
+{
+    const CODE_SPACE: usize = if N < U16_CODES { N } else { U16_CODES };
+
+    fn code_at(index: usize) -> Self::Code {
+        (index % Self::CODE_SPACE.max(1)) as u16
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        (code as usize) % Self::CODE_SPACE.max(1)
     }
 }
 
@@ -255,6 +364,27 @@ where
         // declared output alphabet. The wrap is therefore not an unchecked
         // assertion; it is the O(1) check in `new` being cashed in.
         Alphabet::<E, BdOut>::wrap(inner.sub(self.zero))
+    }
+}
+
+impl<E, BdIn, BdOut, C> Enumerable<E, BdOut> for Offset<E, BdIn, BdOut, C>
+where
+    E: IntegerElement,
+    BdIn: Bound,
+    BdOut: Bound,
+    C: Enumerable<E, BdIn>,
+{
+    // A zero point relabels the *image*, never the code space: the same codes
+    // name the same blocks, shifted. So the enumeration is the inner one,
+    // unchanged, and a tabulated asymmetric quantization needs nothing new.
+    const CODE_SPACE: usize = C::CODE_SPACE;
+
+    fn code_at(index: usize) -> Self::Code {
+        C::code_at(index)
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        C::index_of(code)
     }
 }
 
@@ -346,6 +476,13 @@ impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>, const MAX_RUN: usize> Codec<
     }
 }
 
+// `Runs` does not implement `Enumerable`. A run code carries a *length*, so the
+// table would have to be indexed by `(value, length)` rather than by code, and
+// the length is data rather than an enumerable space. That is expressible, but
+// it is a second construction and no measurement calls for it yet, so it is not
+// built (§4). The absence is a type error at the traversal's boundary, not a
+// runtime refusal.
+
 // ---------------------------------------------------------------------------
 // Transcode
 // ---------------------------------------------------------------------------
@@ -411,3 +548,16 @@ where
         self.inner.decode_element(self.map.map(code), i)
     }
 }
+
+// `Transcode` does not implement `Enumerable`, and the reason is the shape of
+// this repository's spelling rather than anything about tabulation. The plan
+// spells the composite `Transcode<C1, C2>` with two codecs; here the first
+// parameter is a [`CodeMap`] --- a *function* --- because a decode into the
+// alphabet cannot be the input of another decode, only a relabelling can. A
+// function's domain cannot be enumerated and `code_at` would need its inverse.
+//
+// Nothing is lost. `decode(c) = inner.decode(map(c))`, so the table over the
+// inner code space *is* the table for the composite: a caller tabulates `C` and
+// reaches the entry with `C::index_of(map(code))`. The relabelling is a property
+// of the code stream, and tabulation has already left the code stream behind by
+// the time it reads the table.

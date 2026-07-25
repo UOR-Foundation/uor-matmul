@@ -43,6 +43,7 @@ returns an error the model does not sanction.
 | `CT-04` | `build` | Zero, one, and prime dimensions take the same path as any other, and a zero-extent view constructs rather than erroring |
 | `CT-05` | `build` | The two reportable conditions --- a non-conformant shape and an output whose strides map two coordinates onto one cell --- are the only ones, and both are decided at view construction before any arithmetic is named |
 | `CT-06` | `build` | A super-massive product --- operands past the last level of cache, a depth past every lane's capacity, and an extent past every block --- is exact, on every traversal the offer admits |
+| `CT-07` | `build` | Tabulation is total: every code value the codec can hold indexes a live table entry, so no input can produce a miss, a bounds failure, or a panic |
 
 ## `CD-*` --- Determinism: same inputs, same bytes
 
@@ -60,6 +61,7 @@ returns an error the model does not sanction.
 | `CD-10` | `build` | `Scratch::None`, one byte, `suggested_scratch - 1`, `suggested_scratch`, and ten times it all give the same bytes |
 | `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room |
 | `CD-12` | `build` | Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer |
+| `CD-13` | `build` | `Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
 
@@ -82,6 +84,7 @@ returns an error the model does not sanction.
 | `CU-03` | `build` | Every instruction sequence agrees at depths straddling its own threshold |
 | `CU-04` | `build` | Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases |
 | `CU-05` | `build` | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph |
+| `CU-06` | `build` | The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop |
 
 ## `CK-*` --- Codec: tier equivalence, transcode, kappa addressing
 
@@ -94,6 +97,7 @@ returns an error the model does not sanction.
 | `CK-05` | `build` | Two `CodedMatrix` values with different kappa labels and equal decodes give equal output bytes |
 | `CK-06` | `build` | A run codec's returned counts sum to the declared row width on every row |
 | `CK-08` | `build` | The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected |
+| `CK-09` | `build` | `Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type |
 
 ## `CX-*` --- Cross-library agreement against an external library
 
@@ -137,6 +141,7 @@ returns an error the model does not sanction.
 | `CG-08` | `open` | Sustained throughput on super-massive input, reported per pass, against every oracle that finishes |
 | `CG-09` | `open` | Throughput against the degeneracy of the operand, including the price of looking when there is none |
 | `CG-07` | `open` | Small-shape latency, where a heavyweight prologue costs more than an asymptote |
+| `CG-10` | `open` | Operation census and wall time for `Tabulated` against `Blocked` and against every oracle, swept over `n` through the derived break-even, with the duplicate-entry ratio of the enumeration reported |
 
 ## `CM-*` --- Model integrity: the model is the single source of every constant
 
@@ -145,6 +150,7 @@ returns an error the model does not sanction.
 | `CM-01` | `build` | The generated Rust consts equal `model/constants.toml` |
 | `CM-02` | `build` | Every ID in `model/ids.toml` has a scenario and a test, and every test's ID is in the register |
 | `CM-03` | `build` | Every `some-true` claim has a row in `model/authorities.toml` with a citation |
+| `CM-04` | `build` | `tabulation_pays`'s inputs come from `model/tiers.toml`, and the resolved break-even matches the model's recorded value for every enumerable codec |
 
 ## Cited authorities
 
@@ -160,6 +166,7 @@ Never re-derived, vendored, or gated on.
 | `RING-HOM-2W` | Elementary. Z -> Z/2^w is a ring homomorphism, so reducing a sum once at the end equals reducing at every step. | `CX-01`, `CX-02`, `CX-03`, `CX-04`, `CX-10` |
 | `INTEL-VNNI` | Intel Intrinsics Guide, `_mm512_dpbusd_epi32`, `_mm512_dpwssd_epi32`. | `CB-03`, `CU-03` |
 | `UOR-ADDR-1` | UOR-Foundation/uor-addr-1 v0.1.0, `uor_addr_1::address`. | `CK-05` |
+| `UOR-R4-OPKERNEL` | UOR-Foundation/uor-r4, `crates/uor-r4-core/src/transformerless/runtime.rs`, `OpKernel`. | `CU-06`, `CG-10` |
 
 ## Claims that are not conformance IDs
 

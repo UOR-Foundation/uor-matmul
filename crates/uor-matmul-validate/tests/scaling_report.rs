@@ -425,3 +425,182 @@ fn throughput_against_degeneracy_cg_09() {
         );
     }
 }
+
+/// `CG-10` (open): the operation census and the wall time of `Tabulated` against
+/// the streaming traversal, swept over `n` through the derived break-even.
+///
+/// The census is the part that is machine-independent, and it is why this test
+/// exists at all: a wall-clock ratio on one host says what that host did, while
+/// "the column loop issued no multiply and `m*n*k/Bk` adds" is a property of the
+/// traversal. Both are reported. Neither is asserted --- what *is* asserted is
+/// that the timed runs agreed byte for byte, because a speed that came from a
+/// different answer is not a speed.
+///
+/// The duplicate-entry ratio is reported too: two indices that decode alike leave
+/// a dead entry in the table, which is a cost the enumeration pays and the op
+/// count above does not see.
+#[test]
+fn tabulation_census_and_throughput_cg_10() {
+    use uor_matmul_codec::{e8_codec, e8_table, Codec, CodedMatrix, Enumerable};
+    use uor_matmul_core::{
+        as_alphabet_full, AccOf, Accumulator, Alphabet, EncodeMode, Full, MatView, MatViewMut,
+        Shape, Traversal,
+    };
+    use uor_matmul_gemm::{
+        gemm_tabulated, gemm_tabulated_counted, suggested_tabulation, Census, GemmOptions, Linear,
+        Scratch, TabulatedTriple,
+    };
+
+    let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+    let book = e8_codec(&table);
+    type Book<'a> = uor_matmul_codec::Book<'a, i8, Full<i8>, 256, 8>;
+    let space = <Book<'_> as Enumerable<i8, Full<i8>>>::CODE_SPACE;
+    let block = <Book<'_> as Codec<i8, Full<i8>>>::MAX_BLOCK;
+
+    // The codebook's duplicate-entry ratio: how much of the table is dead weight
+    // because two indices decode alike. E8's entries are distinct, so this is one.
+    let mut distinct = 0usize;
+    for i in 0..space {
+        let word: Vec<i8> = (0..block)
+            .map(|t| {
+                book.decode_element(<Book<'_> as Enumerable<i8, Full<i8>>>::code_at(i), t)
+                    .get()
+            })
+            .collect();
+        let first = (0..i).any(|j| {
+            (0..block).all(|t| {
+                book.decode_element(<Book<'_> as Enumerable<i8, Full<i8>>>::code_at(j), t)
+                    .get()
+                    == word[t]
+            })
+        });
+        if !first {
+            distinct += 1;
+        }
+    }
+    eprintln!(
+        "CG-10 (open): Book<{space}, {block}> live entries {distinct}/{space} \
+         ({:.3} of the table carries a distinct meaning)",
+        distinct as f64 / space as f64
+    );
+
+    let fill = |len: usize, salt: u64| -> Vec<u64> {
+        let mut s = 0x243F_6A88_85A3_08D3u64 ^ salt;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s >> 33
+            })
+            .collect()
+    };
+
+    let (m, k) = (8usize, 256usize);
+    let blocks = k / block;
+    let a: Vec<i8> = fill(m * k, 0xa11)
+        .into_iter()
+        .map(|x| ((x % 255) as i64 - 127) as i8)
+        .collect();
+
+    // Straddling the derived break-even of 293: two below, two above.
+    for n in [64usize, 256, 512, 4096] {
+        let stream: Vec<u16> = fill(n * blocks, 0xb00c)
+            .into_iter()
+            .map(|x| (x % 256) as u16)
+            .collect();
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let shape = Shape { m, k, n };
+        let offer = suggested_tabulation::<i8>(shape, space);
+        let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
+        let mut panel: Vec<Alphabet<i8, Full<i8>>> = Vec::new();
+        let mut c = vec![0i32; m * n];
+
+        let run = |traversal: Traversal,
+                   c: &mut Vec<i32>,
+                   panel: &mut Vec<Alphabet<i8, Full<i8>>>,
+                   accumulators: &mut Vec<AccOf<i8>>| {
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let cv = MatViewMut::row_major(c, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            gemm_tabulated(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    encode: EncodeMode::Wrapping,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(panel, accumulators),
+            );
+        };
+
+        let time = |traversal: Traversal,
+                    c: &mut Vec<i32>,
+                    panel: &mut Vec<Alphabet<i8, Full<i8>>>,
+                    accumulators: &mut Vec<AccOf<i8>>|
+         -> f64 {
+            run(traversal, c, panel, accumulators);
+            let s = std::time::Instant::now();
+            for _ in 0..3 {
+                run(traversal, c, panel, accumulators);
+            }
+            s.elapsed().as_secs_f64() / 3.0
+        };
+
+        let t_tab = time(Traversal::Tabulated, &mut c, &mut panel, &mut accumulators);
+        let tabulated_bytes = c.clone();
+        let t_stream = time(
+            Traversal::OutputMajor,
+            &mut c,
+            &mut panel,
+            &mut accumulators,
+        );
+        assert_eq!(
+            tabulated_bytes, c,
+            "the timed traversals must agree byte for byte at n = {n}"
+        );
+
+        let mut census = |traversal: Traversal| -> Census {
+            let mut census = Census::default();
+            let mut out = vec![0i32; m * n];
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let cv = MatViewMut::row_major(&mut out, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            gemm_tabulated_counted(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    encode: EncodeMode::Wrapping,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut census,
+            );
+            census
+        };
+        let tab = census(Traversal::Tabulated);
+        let dense = census(Traversal::OutputMajor);
+        let macs = (m * k * n) as f64;
+        let ops = |c: &Census| c.multiplies + c.adds;
+
+        eprintln!(
+            "CG-10 (open): {m}x{k}x{n} pays={:<5} | ops {} vs {} ({:.2}x) | \
+             multiplies {} vs {} ({:.2}x) | adds {} reads {} | \
+             tabulated {:.2} Gmac/s, streamed {:.2} Gmac/s ({:.2}x)",
+            (n * (block - 1) > space * block),
+            ops(&tab),
+            ops(&dense),
+            ops(&dense) as f64 / ops(&tab) as f64,
+            tab.multiplies,
+            dense.multiplies,
+            dense.multiplies as f64 / tab.multiplies.max(1) as f64,
+            tab.adds,
+            tab.table_reads,
+            macs / t_tab / 1e9,
+            macs / t_stream / 1e9,
+            t_stream / t_tab,
+        );
+    }
+}

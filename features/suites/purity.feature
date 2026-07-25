@@ -35,3 +35,9 @@ Feature: Purity
     Given the standing corpus
     When the suite exercises CU-05
     Then the claim holds byte for byte
+
+  @CU-06 @build
+  Scenario: The tabulated inner loop issues no multiply
+    Given the standing corpus
+    When the suite exercises CU-06
+    Then the claim holds byte for byte

@@ -66,3 +66,9 @@ Feature: Scaling
     Given the standing corpus
     When the suite exercises CG-09
     Then the figure is reported and not asserted
+
+  @CG-10 @open
+  Scenario: Operation census and wall time for Tabulated against Blocked, swept over n through the break-even
+    Given the standing corpus
+    When the suite exercises CG-10
+    Then the figure is reported and not asserted

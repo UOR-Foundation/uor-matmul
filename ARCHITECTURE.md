@@ -83,6 +83,44 @@ when they constructed the view. Within the reduce family the same rule picks the
 panel *height*: the widest one the rows fill, because a panel wider than the
 output is zero-padded and for a reduce kernel that padding is copied.
 
+## Tabulation: when the operand is a code, the product is a table read
+
+Every traversal above issues one product per `(i, p, j)` whatever the operands
+hold. That is a property of the traversal, not of the identity. When the weights
+are coded, a cheaper grouping exists:
+
+```text
+T[i][p][c] = sum over t < Bk of  A[i, p*Bk + t] * decode(c, t)
+C[i][j]    = sum over p       of  T[i][p][ index_of(w[p][j]) ]
+```
+
+The table is built once per row tile and per block of the reduction and then read
+`n` times. Its column loop is one read and one add per code, covering `Bk`
+weights, and it contains no multiply --- asserted twice, by the operation census
+(`Census`) and by reading the emitted instructions of the loop itself (`CU-06`).
+
+The op counts follow from the two shapes: `m*k*S + m*k*n/Bk` against `m*k*n`, so
+tabulation is cheaper exactly when `n * (Bk - 1) > S * Bk`. For `Book<256,8>` that
+is `n > 292`, which `model/tiers.toml` records and `CM-04` recomputes.
+
+Three things make this a factorization of the same identity rather than a
+different algorithm:
+
+- **It is exact for the same reason tiling is.** A sum is a function of the
+  multiset of its products, so regrouping them changes nothing. A classical
+  `sgemm` cannot do this at all: its `T[c]` would carry its own rounding error and
+  reusing it across `n` columns would propagate that error `n` times. Tabulation
+  is available *only* to an exact library.
+- **Which codecs admit it is a type-level fact.** `Enumerable` adds the code
+  *space* that `Codec` never exposed. `Identity` and `Runs` do not implement it,
+  for stated reasons, so a codec that cannot be tabulated cannot be handed to the
+  traversal.
+- **The reduction must run along the code block.** A code whose `Bk` elements land
+  in `Bk` different output columns contributes one product to each and no partial
+  sum to any. So the coded operand is `n x k` --- one row per output column --- and
+  the product is `C := A * W^T`. `coded.rs`'s `k x n` orientation is the streaming
+  one and needs no offer at all.
+
 ## Borrowing instead of packing
 
 A packed panel is a copy, so a copy of something already in the panel's shape is

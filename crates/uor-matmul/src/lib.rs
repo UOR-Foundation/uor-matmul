@@ -90,7 +90,7 @@ pub use uor_matmul_core as core_types;
 pub use uor_matmul_gemm as driver;
 
 pub use uor_matmul_codec::{
-    Book, Codec, CodedMatrix, Grid, Identity, Offset, Packed, Runs, TierId, Transcode,
+    Book, Codec, CodedMatrix, Enumerable, Grid, Identity, Offset, Packed, Runs, TierId, Transcode,
 };
 pub use uor_matmul_core::{
     acc_bits, as_alphabet, as_alphabet_full, dot_ref, narrow_cap_for, observe_bound, AccOf,
@@ -99,10 +99,11 @@ pub use uor_matmul_core::{
     Strides, Traversal, Triple,
 };
 pub use uor_matmul_gemm::{
-    coded_gemm, gemm, gemm_collapsed, gemm_float, gemm_float_packed, gemm_packed,
-    suggested_accumulators, suggested_collapse_index, suggested_collapse_rows, suggested_scratch,
-    Bias, CodedTriple, Collapse, Epilogue, GemmOptions, Kernelized, Linear, Partition, Scratch,
-    SignedPlace, Tile,
+    coded_gemm, gemm, gemm_collapsed, gemm_float, gemm_float_packed, gemm_packed, gemm_tabulated,
+    gemm_tabulated_counted, suggested_accumulators, suggested_collapse_index,
+    suggested_collapse_rows, suggested_scratch, suggested_tabulation, tabulation_fits,
+    tabulation_pays, tabulation_rows, Bias, Census, CodedTriple, Collapse, Epilogue, GemmOptions,
+    Kernelized, Ledger, Linear, Partition, Scratch, SignedPlace, Table, TabulatedTriple, Tile,
 };
 pub use uor_matmul_kernels as kernels;
 

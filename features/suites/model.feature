@@ -23,3 +23,9 @@ Feature: Model integrity
     Given the standing corpus
     When the suite exercises CM-03
     Then the claim holds byte for byte
+
+  @CM-04 @build
+  Scenario: `tabulation_pays`'s inputs come from `model/tiers.toml` and the resolved break-even matches
+    Given the standing corpus
+    When the suite exercises CM-04
+    Then the claim holds byte for byte

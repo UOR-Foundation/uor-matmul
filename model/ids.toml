@@ -96,6 +96,12 @@ suite = "totality"
 statement = """A super-massive product --- operands past the last level of cache, a depth past every lane's capacity, and an extent past every block --- is exact, on every traversal the offer admits"""
 
 [[id]]
+id = "CT-07"
+level = "build"
+suite = "totality"
+statement = """Tabulation is total: every code value the codec can hold indexes a live table entry, so no input can produce a miss, a bounds failure, or a panic"""
+
+[[id]]
 id = "CD-01"
 level = "build"
 suite = "determinism"
@@ -168,6 +174,12 @@ suite = "determinism"
 statement = """Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer"""
 
 [[id]]
+id = "CD-13"
+level = "build"
+suite = "determinism"
+statement = """`Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all"""
+
+[[id]]
 id = "CB-01"
 level = "build"
 suite = "backends"
@@ -238,6 +250,12 @@ id = "CU-05"
 level = "build"
 suite = "purity"
 statement = """There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph"""
+
+[[id]]
+id = "CU-06"
+level = "build"
+suite = "purity"
+statement = """The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop"""
 
 [[id]]
 id = "CK-01"
@@ -366,6 +384,12 @@ suite = "codec"
 statement = """The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected"""
 
 [[id]]
+id = "CK-09"
+level = "build"
+suite = "codec"
+statement = """`Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type"""
+
+[[id]]
 id = "CG-01"
 level = "open"
 suite = "scaling"
@@ -420,6 +444,12 @@ suite = "scaling"
 statement = """Small-shape latency, where a heavyweight prologue costs more than an asymptote"""
 
 [[id]]
+id = "CG-10"
+level = "open"
+suite = "scaling"
+statement = """Operation census and wall time for `Tabulated` against `Blocked` and against every oracle, swept over `n` through the derived break-even, with the duplicate-entry ratio of the enumeration reported"""
+
+[[id]]
 id = "CM-01"
 level = "build"
 suite = "model"
@@ -436,3 +466,9 @@ id = "CM-03"
 level = "build"
 suite = "model"
 statement = """Every `some-true` claim has a row in `model/authorities.toml` with a citation"""
+
+[[id]]
+id = "CM-04"
+level = "build"
+suite = "model"
+statement = """`tabulation_pays`'s inputs come from `model/tiers.toml`, and the resolved break-even matches the model's recorded value for every enumerable codec"""

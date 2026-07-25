@@ -124,6 +124,8 @@ pub mod blocking {
     pub const NC: usize = 1024;
     /// The machine's cache line, in bytes.
     pub const CACHE_LINE_BYTES: usize = 64;
+    /// The first level of data cache, in bytes: what a tabulation table must fit.
+    pub const L1_BYTES: usize = 32768;
 }
 
 // R1: the W8A8 threshold, pinned. This is the one place in the shipped

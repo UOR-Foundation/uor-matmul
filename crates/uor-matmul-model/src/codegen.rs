@@ -253,6 +253,16 @@ pub fn render(model: &Model) -> String {
         "    pub const CACHE_LINE_BYTES: usize = {};",
         model.constants.blocking.cache_line_bytes
     );
+    let _ = writeln!(
+        w,
+        "    /// The first level of data cache, in bytes: what a tabulation table \
+         must fit."
+    );
+    let _ = writeln!(
+        w,
+        "    pub const L1_BYTES: usize = {};",
+        model.constants.blocking.l1_bytes
+    );
     let _ = writeln!(w, "}}");
 
     // R1's pin. The plan permits `133144` to appear inside a `const _` assert

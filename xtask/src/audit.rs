@@ -486,6 +486,10 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
 
     let mut checked = 0usize;
     let mut violations = Vec::new();
+    // `CU-06`: the tabulated column loop, found by symbol and read instruction by
+    // instruction. A source grep cannot see what the optimizer emitted, and the
+    // whole claim of the tabulated traversal is about what it emitted.
+    let mut column_loops = 0usize;
 
     for krate in ["uor-matmul-kernels", "uor-matmul-core", "uor-matmul-gemm"] {
         let status = std::process::Command::new(env!("CARGO"))
@@ -516,25 +520,138 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
                     violations.push(format!("{name}:{}: `{op}`\n    {}", i + 1, line.trim()));
                 }
             }
+            for (label, body) in function_bodies(&text, TABULATED_COLUMN_LOOP) {
+                column_loops += 1;
+                for (i, line) in body {
+                    if let Some(op) = integer_multiply_opcode(line) {
+                        violations.push(format!(
+                            "CU-06: {name}:{i}: `{op}` in `{label}`\n    {line}"
+                        ));
+                    }
+                }
+            }
         }
     }
 
     if checked == 0 {
         return Err("CU-01 disassembled nothing; the gate would pass vacuously".into());
     }
+    if column_loops == 0 {
+        return Err(format!(
+            "CU-06 found no symbol containing `{TABULATED_COLUMN_LOOP}`, so the claim that \
+             the tabulated column loop issues no multiply would pass vacuously. The loop is \
+             generic; `uor_matmul_gemm::tabulated` names one concrete instantiation of it \
+             precisely so that this gate has instructions to read."
+        )
+        .into());
+    }
     if !violations.is_empty() {
         return Err(format!(
             "R2, CU-01: the library never adds two floats. A float arithmetic opcode in a \
              shipped kernel means an accumulation is not exact, which breaks every claim in \
-             §3.\n\n{}",
+             §3.\n\
+             CU-06: the tabulated column loop never multiplies. A multiply there means a \
+             product the table was supposed to have already computed, which is the whole \
+             content of the traversal.\n\n{}",
             violations.join("\n")
         )
         .into());
     }
     println!(
-        "audit-disassembly: no float arithmetic opcode in {checked} shipped object(s) (CU-01)"
+        "audit-disassembly: no float arithmetic opcode in {checked} shipped object(s) (CU-01), \
+         and no multiply in {column_loops} tabulated column loop(s) (CU-06)"
     );
     Ok(())
+}
+
+/// The symbol fragment that names the tabulated column loop's accumulation.
+const TABULATED_COLUMN_LOOP: &str = "add_entry_wide";
+
+/// Every emitted function whose symbol contains `fragment`, as `(label, body)`,
+/// where the body is the `(line number, instruction)` pairs between the label and
+/// the function's end marker.
+///
+/// Read from the assembler's own framing rather than by a window around a grep
+/// hit: a multiply three lines after a label may belong to the next function, and
+/// a gate that could not tell would be reporting on the wrong code.
+fn function_bodies<'t>(text: &'t str, fragment: &str) -> Vec<(String, Vec<(usize, &'t str)>)> {
+    let mut out = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    for (start, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        // A label, not a directive mentioning the symbol.
+        let Some(label) = trimmed.strip_suffix(':') else {
+            continue;
+        };
+        if label.starts_with('.') || !label.contains(fragment) {
+            continue;
+        }
+        let mut body = Vec::new();
+        for (i, inner) in lines.iter().enumerate().skip(start + 1) {
+            let inner = inner.trim();
+            if inner.starts_with(".Lfunc_end") || inner.starts_with(".size") {
+                break;
+            }
+            if inner.is_empty()
+                || inner.starts_with('.')
+                || inner.starts_with('#')
+                || inner.starts_with("//")
+                || inner.ends_with(':')
+            {
+                continue;
+            }
+            body.push((i + 1, inner));
+        }
+        out.push((label.to_string(), body));
+    }
+    out
+}
+
+/// Integer multiply opcodes, across the ISAs this workspace targets.
+///
+/// Shifts are *not* here. A shift by a constant is how a compiler scales an
+/// index, and index arithmetic cannot change an output value --- which is the
+/// same `R3-ok` distinction the source-level gate draws. What is forbidden is a
+/// multiply of two *values*, which in the column loop would mean a product that
+/// the table was supposed to have already computed.
+const INTEGER_MULTIPLY_OPCODES: &[&str] = &[
+    // x86
+    "imul",
+    "mul",
+    "mulx",
+    "pmul",
+    "vpmul",
+    "pmadd",
+    "vpmadd",
+    "pmull",
+    "vpdp",
+    // aarch64
+    "madd",
+    "msub",
+    "mneg",
+    "smull",
+    "umull",
+    "smlal",
+    "umlal",
+    "mla",
+    "mls",
+    "sdot",
+    "udot",
+    // wasm
+    "i32.mul",
+    "i64.mul",
+    "i32x4.mul",
+    "i16x8.mul",
+    "i32x4.dot",
+];
+
+/// The integer multiply opcode on this instruction line, if any.
+fn integer_multiply_opcode(line: &str) -> Option<&'static str> {
+    let mnemonic = line.split_whitespace().next()?;
+    INTEGER_MULTIPLY_OPCODES
+        .iter()
+        .copied()
+        .find(|op| mnemonic == *op || mnemonic.starts_with(op))
 }
 
 /// Float arithmetic opcodes, across the ISAs this workspace targets.

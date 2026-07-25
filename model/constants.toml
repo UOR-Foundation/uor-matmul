@@ -168,3 +168,9 @@ nc = 1024
 # machine's cache line in bytes; like the three above it can change which
 # traversal produces an output byte and never which byte.
 cache_line_bytes = 64
+# The first level of data cache, in bytes. It sizes the tabulation table: a table
+# of `code_space * mr` accumulator words is read once per output column, so a
+# table that does not sit in L1 turns every column into a cache miss and the
+# traversal stops paying. Like the four above, it can change which traversal
+# produces an output byte and never which byte (CD-13).
+l1_bytes = 32768

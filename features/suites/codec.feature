@@ -47,3 +47,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-08
     Then the claim holds byte for byte
+
+  @CK-09 @build
+  Scenario: `Enumerable`'s laws hold for every implementing codec
+    Given the standing corpus
+    When the suite exercises CK-09
+    Then the claim holds byte for byte

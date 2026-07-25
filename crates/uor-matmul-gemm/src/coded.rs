@@ -1,9 +1,28 @@
-//! GEMM against a coded operand (§6.3).
+//! GEMM against a coded operand, streaming (§6.3).
 //!
 //! Not a second driver. The weights arrive as codes instead of as alphabet
 //! elements, they are decoded, and from there this is the same accumulation the
 //! dense driver runs --- which is the whole content of `CL-MM01` and what
 //! `CK-05` measures.
+//!
+//! # Decoding is not the only thing a code is good for
+//!
+//! Decode-then-multiply issues the same `m * k * n` products the dense driver
+//! does and adds a decode on top, so the codec buys residency and pays for it in
+//! throughput. [`crate::tabulated`] is the other direction: it indexes a table
+//! *by* the code, so the column loop is one read and one add per code covering
+//! `MAX_BLOCK` weights and contains no multiply at all.
+//!
+//! Which one applies is a question about the operand's layout, not about quality.
+//! Here `B` is `k x n` and a code names `MAX_BLOCK` consecutive elements of one
+//! *row* --- `MAX_BLOCK` different output columns --- so there is nothing for a
+//! partial sum to be a partial sum of. Tabulation needs the code block to run
+//! along the reduction, which is the `n x k` orientation, and that is the shape
+//! [`crate::TabulatedTriple`] takes.
+//!
+//! This traversal keeps the property that one has to give up for a table: it
+//! needs no scratch at all, not even one decoded row, so it runs on a target
+//! whose RAM cannot hold either (S13).
 
 use uor_matmul_codec::{Codec, CodedMatrix};
 use uor_matmul_core::{
@@ -63,7 +82,7 @@ impl<'a, 'b, 'c, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>, O>
 
 /// The same aliasing question [`uor_matmul_core::Strides`] answers, asked here
 /// because a `CodedTriple` builds its own output view.
-fn self_aliases(rows: usize, cols: usize, rs: isize, cs: isize) -> bool {
+pub(crate) fn self_aliases(rows: usize, cols: usize, rs: isize, cs: isize) -> bool {
     if rows == 0 || cols == 0 {
         // An empty output has no two distinct coordinates to collide.
         return false;

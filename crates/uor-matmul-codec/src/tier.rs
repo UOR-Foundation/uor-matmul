@@ -92,6 +92,59 @@ pub trait Codec<E: IntegerElement, Bd: Bound>: Send + Sync {
     }
 }
 
+/// A codec whose code space can be enumerated.
+///
+/// [`Codec`] decodes *from* a code. That is the whole of what a
+/// decode-then-multiply driver needs, and it is why a table indexed by code
+/// cannot be written against [`Codec`] alone: such a table requires the *set* of
+/// codes, and nothing in [`Codec`] hands it over. This trait is that set.
+///
+/// # Why this is separate from [`Codec`]
+///
+/// Not every codec should be tabulated. [`crate::Identity`] over `i32` has a
+/// code space of `2^32`, and a trait that admitted it would invite a table
+/// nobody can hold. Requiring this trait at the tabulated traversal's boundary
+/// makes "this codec cannot be tabulated" a compile-time fact rather than a
+/// runtime refusal.
+///
+/// # Laws
+///
+/// 1. `index_of(code_at(i)) == i` for every `i < CODE_SPACE`.
+/// 2. `index_of` is total: every value of [`Codec::Code`] the codec can hold
+///    lands strictly below `CODE_SPACE`. This is what makes the tabulated
+///    traversal total --- no code can miss the table (`CT-07`).
+///
+/// Both are asserted by `CK-09`. Note what is *not* a law: `code_at` need not be
+/// injective *on decodes*. Two indices may decode alike, in which case the table
+/// carries a dead entry. That is not an error, it is a cost, and `CG-10` reports
+/// the ratio.
+///
+/// # The enumeration is stateless
+///
+/// Both methods are associated functions rather than methods on `&self`, because
+/// the enumeration is a property of the code *space* and not of any particular
+/// table. A composing tier defers to its inner codec's enumeration without
+/// holding an instance of it.
+pub trait Enumerable<E: IntegerElement, Bd: Bound>: Codec<E, Bd> {
+    /// The number of distinct codes.
+    ///
+    /// `N` for an `N`-entry [`crate::Grid`] or [`crate::Book`], and the product
+    /// of the sub-spaces for a [`crate::Packed`] byte. Never larger than the
+    /// code type can address: an enumeration wider than its own code type would
+    /// name codes that cannot be stored.
+    const CODE_SPACE: usize;
+
+    /// The `index`-th code. Total for `index < CODE_SPACE`.
+    fn code_at(index: usize) -> Self::Code;
+
+    /// Where `code` sits in the enumeration.
+    ///
+    /// Total for every value of [`Codec::Code`], including values no encoder
+    /// would produce. That totality is not politeness; it is what lets the
+    /// tabulated traversal read the table with no bounds check and no branch.
+    fn index_of(code: Self::Code) -> usize;
+}
+
 /// Which tier a codec is.
 ///
 /// A label, never a dispatch key: nothing in the library branches on it, and

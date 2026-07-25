@@ -170,6 +170,9 @@ pub struct Blocking {
     /// The machine's cache line, in bytes. Sizes the transpose a reduce panel
     /// needs so that the operand is read once rather than once per column.
     pub cache_line_bytes: usize,
+    /// The first level of data cache, in bytes. Sizes the tabulation table, which
+    /// is read once per output column and must be resident to pay.
+    pub l1_bytes: usize,
 }
 
 /// `model/widths.toml`.
@@ -230,6 +233,8 @@ pub struct Tiers {
     pub tier: Vec<Tier>,
     /// One row per shipped codebook.
     pub codebook: Vec<Codebook>,
+    /// One row per enumerable codec: the codecs a table can be indexed by.
+    pub tabulation: Vec<Tabulation>,
 }
 
 /// One instantiation of the `Codec` trait.
@@ -249,6 +254,33 @@ pub struct Tier {
     #[serde(default)]
     pub note: String,
     /// The honesty level of the tier's claim.
+    pub honesty: Level,
+}
+
+/// One enumerable codec, with the break-even the op counts put it at.
+///
+/// The numbers here are *derivations*, not measurements: `break_even_n` is where
+/// the tabulated op count crosses the dense one, and `CM-04` recomputes it rather
+/// than trusting it. What it costs in wall time is `CG-10` and is `open`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Tabulation {
+    /// The codec, spelled as the caller writes it.
+    pub codec: String,
+    /// Distinct codes: `Enumerable::CODE_SPACE`.
+    pub code_space: usize,
+    /// Alphabet elements one code names: `Codec::MAX_BLOCK`.
+    pub block: usize,
+    /// The first `n` at which tabulation issues fewer operations than blocking.
+    ///
+    /// Absent when `block == 1`, where no such `n` exists: one code names one
+    /// element, so the table replaces every multiply with a read and removes no
+    /// add at all.
+    #[serde(default)]
+    pub break_even_n: Option<usize>,
+    /// Free-form notes.
+    #[serde(default)]
+    pub note: String,
+    /// The honesty level of the row's claim.
     pub honesty: Level,
 }
 

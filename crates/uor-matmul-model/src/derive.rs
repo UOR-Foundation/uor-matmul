@@ -54,6 +54,28 @@ pub const fn threshold(cap: u128, per_step: u128) -> u128 {
     cap / per_step
 }
 
+/// The first `n` at which tabulating a `code_space`-wide enumeration of `block`
+/// elements issues fewer operations than the blocked traversal.
+///
+/// `m * (k / block)` tables, each costing `code_space * block` products to build
+/// and read `n` times at one read and one add per code, against `m * k * n`
+/// products. So tabulation is cheaper when
+/// `code_space + n / block < n`, that is `n * (block - 1) > code_space * block`.
+///
+/// `None` when `block == 1`: one code names one element, so the table removes
+/// every multiply and no add, and no `n` makes the *op count* cross. That case is
+/// not worthless --- a read is cheaper than a widening multiply --- but the
+/// justification is residency rather than arithmetic, so this derivation declines
+/// to claim it.
+pub const fn tabulation_break_even(code_space: usize, block: usize) -> Option<usize> {
+    if block <= 1 {
+        return None;
+    }
+    // The predicate is strict, so the first satisfying `n` is one past the
+    // quotient whether or not the division is exact.
+    Some(code_space * block / (block - 1) + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -95,3 +95,16 @@ checksum = "Cargo.lock"
 checksum_reason = "a crates.io dependency; the resolved version is the pin"
 statement = "JCS-RFC8785 + NFC then SHA-256 over the canonical manifest"
 realized_by = ["CK-05"]
+
+[[authority]]
+id = "UOR-R4-OPKERNEL"
+name = "the operation census, and the absence of a multiplication field in it"
+citation = "UOR-Foundation/uor-r4, `crates/uor-r4-core/src/transformerless/runtime.rs`, `OpKernel`."
+checksum = "none"
+checksum_reason = """an upstream source file, cited and not vendored (N2). What
+this repository pins is its own census, which `CU-06` reads."""
+statement = """the runtime declares its complete arithmetic interface as an
+operation census --- adds, xors, shifts, compares, table reads, candidate scans
+--- and there is no multiplication method and no multiplication field. When the
+operand is a code, the product is a table read."""
+realized_by = ["CU-06", "CG-10"]

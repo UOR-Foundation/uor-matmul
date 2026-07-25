@@ -71,6 +71,64 @@ note = "the upstream transcode_decode composite"
 honesty = "build"
 
 # --------------------------------------------------------------------------
+# Tabulation. One row per *enumerable* codec: a codec whose code space can be
+# enumerated, which is what a table indexed by code requires.
+#
+# When the operand is a code, the product is a table read. `T[i][p][c]` is the
+# partial sum of one row of A against the block code `c` decodes to, so the
+# column loop below it contains one table read and one add per code and no
+# multiply at all. That is not an approximation of the dense traversal: an exact
+# sum is a function of the multiset of its products, so regrouping them changes
+# nothing, and CD-13 asserts it byte for byte.
+#
+#   tabulated ops = m*k*code_space + m*k*n/block
+#   dense ops     = m*k*n
+#
+# so tabulation issues fewer operations when `n * (block - 1) > code_space * block`,
+# and `break_even_n` is the first `n` that satisfies it. A codec with `block = 1`
+# has no such `n` --- it saves every multiply and no adds --- and records none.
+#
+# CM-04 recomputes every `break_even_n` here from `code_space` and `block`, and
+# checks both against the codec's own `Enumerable` and `Codec` consts.
+# --------------------------------------------------------------------------
+
+[[tabulation]]
+codec = "Grid<16>"
+code_space = 16
+block = 1
+note = "the i4 grid. One code, one element: the memory table saves the multiply and no adds, so no n makes it pay on op count and `tabulation_pays` refuses it."
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<16>, 2>"
+code_space = 256
+block = 2
+break_even_n = 513
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<4>, 4>"
+code_space = 256
+block = 4
+break_even_n = 342
+honesty = "build"
+
+[[tabulation]]
+codec = "Book<256, 8>"
+code_space = 256
+block = 8
+break_even_n = 293
+note = "E8. The row to read first: 293 is below every transformer layer width in practical use, and the amortization is over n, so it holds for a single decoded token as much as for a prefill."
+honesty = "build"
+
+[[tabulation]]
+codec = "Offset<Grid<16>>"
+code_space = 16
+block = 1
+note = "a zero point relabels the image, never the code space, so an asymmetric quantization tabulates exactly as its inner codec does."
+honesty = "build"
+
+# --------------------------------------------------------------------------
 # Codebooks. A codebook is data, borrowed from the caller, never owned and
 # never learned here. No quality claim is attached to any row (N3).
 # --------------------------------------------------------------------------
