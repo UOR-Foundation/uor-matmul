@@ -22,3 +22,11 @@ std = []
 
 [lints]
 workspace = true
+
+# The integration tests need the crate's own runtime feature detection. Without
+# this the test harness links the crate with `std` off, every `available_*`
+# predicate answers from the build's target features, and `CB-02` compares the
+# portable kernel against itself while claiming to cover the host --- which is
+# what it did until `CB-02` was made to assert otherwise.
+[dev-dependencies]
+uor-matmul-kernels = { path = ".", features = ["std"] }

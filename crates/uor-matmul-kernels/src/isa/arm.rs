@@ -38,7 +38,10 @@ pub const NEON_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     factorization: Factorization::Exact,
     mr: 4,
     nr: 8,
-    k_group: 8,
+    k_group: 1,
+    // `vmull_s8` widens across the *columns* of one `k`-step, not across `k`, so
+    // this kernel consumes one step at a time and wants the plain `k`-major
+    // panel. The eight is the vector's width in columns, which is `nr`.
     lane_cap: i32::MAX as u128,
     mac_tile: neon_i8,
 };
@@ -165,49 +168,30 @@ unsafe fn neon_dotprod_inner(kc: usize, pa: *const i8, pb: *const i8, acc: *mut 
     };
     let mut tile = [[vdupq_n_s32(0); QUADS]; DOT_MR];
 
-    let groups = kc / G;
-    for q in 0..groups {
-        let base = q * G;
-        // B, transposed into `k`-quads per column: lane `4c + g` holds
-        // `b[base + g][4 * quad + c]`, which is the layout `sdot` reads.
-        let mut bq = [[0i8; 16]; QUADS];
-        for (quad, block) in bq.iter_mut().enumerate() {
-            for c in 0..4 {
-                for g in 0..G {
-                    block[c * 4 + g] = pb[(base + g) * DOT_NR + quad * 4 + c];
-                }
-            }
-        }
+    for q in 0..kc / G {
+        // The panel is packed in `k`-quads, so lane `4c + g` of a sixteen-byte
+        // load already holds `b[4q + g][4 * quad + c]`, which is exactly the
+        // layout `sdot` reads --- no transpose, one load per quad of columns.
         let bv: [int8x16_t; QUADS] = core::array::from_fn(|quad| {
-            // SAFETY: each block is exactly sixteen bytes.
-            unsafe { vld1q_s8(bq[quad].as_ptr()) }
+            // SAFETY: `q * DOT_NR * G + quad * 16 + 16 <= DOT_NR * kc`.
+            unsafe { vld1q_s8(pb.as_ptr().add(q * DOT_NR * G + quad * 16)) }
         });
 
         for (i, row) in tile.iter_mut().enumerate() {
-            let mut aq = [0u8; 4];
-            for (g, slot) in aq.iter_mut().enumerate() {
-                *slot = pa[(base + g) * DOT_MR + i] as u8;
-            }
-            let av = vreinterpretq_s8_s32(vdupq_n_s32(i32::from_le_bytes(aq)));
+            // `A`'s four `k`-steps for this row are four contiguous bytes.
+            //
+            // SAFETY: `q * DOT_MR * G + i * G + 3 < DOT_MR * kc`, and
+            // `read_unaligned` waives `i32`'s alignment.
+            let quad = unsafe {
+                pa.as_ptr()
+                    .add(q * DOT_MR * G + i * G)
+                    .cast::<i32>()
+                    .read_unaligned()
+            };
+            let av = vreinterpretq_s8_s32(vdupq_n_s32(quad));
             for (quad, lane) in row.iter_mut().enumerate() {
                 // SAFETY: `dotprod` is enabled on this function.
                 *lane = unsafe { sdot(*lane, av, bv[quad]) };
-            }
-        }
-    }
-
-    // The `k`-tail, one step at a time. Zero padding would have been exact too;
-    // walking the tail is simply cheaper than materialising a padded panel.
-    for p in (groups * G)..kc {
-        for (i, row) in tile.iter_mut().enumerate() {
-            let a = i32::from(pa[p * DOT_MR + i]);
-            for (quad, lane) in row.iter_mut().enumerate() {
-                let mut cols = [0i32; 4];
-                for (c, slot) in cols.iter_mut().enumerate() {
-                    *slot = a.wrapping_mul(i32::from(pb[p * DOT_NR + quad * 4 + c]));
-                }
-                // SAFETY: `cols` holds exactly four i32.
-                *lane = vaddq_s32(*lane, unsafe { vld1q_s32(cols.as_ptr()) });
             }
         }
     }

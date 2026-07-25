@@ -9,8 +9,28 @@
 use uor_matmul_core::{as_alphabet_full, dot_ref, Backend};
 use uor_matmul_kernels::{
     available_i16, available_i32_exact, available_i32_modular, available_i64_modular, available_i8,
-    choose, portable_i8, Factorization, KernelSpec,
+    choose, packed_slot, portable_i8, Factorization, KernelSpec,
 };
+
+/// Element `p` of lane `l`, read the way the kernel reads it.
+///
+/// The panel layout is the kernel contract, so the reference goes through the
+/// crate's own [`packed_slot`] rather than restating it. A kernel that
+/// misreads its panel therefore fails here, which is the whole point.
+fn at<T: Copy>(panel: &[T], p: usize, lane: usize, lanes: usize, group: usize) -> T {
+    panel[packed_slot(p, lane, lanes, group)]
+}
+
+/// The depths a kernel can be handed: a whole number of `k`-groups, which is
+/// what the driver always packs (it pads with the alphabet's zero).
+fn depths<E, L>(spec: &KernelSpec<E, L>) -> Vec<usize> {
+    let mut v: Vec<usize> = DEPTHS
+        .iter()
+        .map(|&kc| kc.div_ceil(spec.k_group) * spec.k_group)
+        .collect();
+    v.dedup();
+    v
+}
 
 /// Deterministic fill. A recorded generator rather than a crate, so a failure
 /// reproduces from the seed alone.
@@ -30,10 +50,11 @@ fn fill<T, F: Fn(i64) -> T>(len: usize, salt: u64, map: F) -> Vec<T> {
 /// accumulation. This is the link that anchors the whole chain to `dot_ref`.
 fn reference_i8(spec: &KernelSpec<i8, i32>, kc: usize, pa: &[i8], pb: &[i8]) -> Vec<i32> {
     let mut out = vec![0i32; spec.mr * spec.nr];
+    let g = spec.k_group;
     for i in 0..spec.mr {
-        let a: Vec<i8> = (0..kc).map(|p| pa[p * spec.mr + i]).collect();
+        let a: Vec<i8> = (0..kc).map(|p| at(pa, p, i, spec.mr, g)).collect();
         for j in 0..spec.nr {
-            let b: Vec<i8> = (0..kc).map(|p| pb[p * spec.nr + j]).collect();
+            let b: Vec<i8> = (0..kc).map(|p| at(pb, p, j, spec.nr, g)).collect();
             out[i * spec.nr + j] = dot_ref(as_alphabet_full(&a), as_alphabet_full(&b)) as i32;
         }
     }
@@ -46,7 +67,7 @@ const DEPTHS: &[usize] = &[0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 63, 64, 65, 129, 
 #[test]
 fn portable_equals_dot_ref_cb_01() {
     let spec = portable_i8();
-    for &kc in DEPTHS {
+    for kc in depths(&spec) {
         let pa = fill(spec.mr * kc, kc as u64, |v| v as i8);
         let pb = fill(spec.nr * kc, kc as u64 ^ 0x5A, |v| v as i8);
         let mut acc = vec![0i32; spec.mr * spec.nr];
@@ -61,7 +82,7 @@ fn portable_equals_dot_ref_cb_01() {
 fn every_i8_backend_equals_portable_cb_02() {
     let mut names = Vec::new();
     for spec in available_i8() {
-        for &kc in DEPTHS {
+        for kc in depths(&spec) {
             let pa = fill(spec.mr * kc, kc as u64 ^ 0xC0, |v| v as i8);
             let pb = fill(spec.nr * kc, kc as u64 ^ 0x0D, |v| v as i8);
             let mut acc = vec![0i32; spec.mr * spec.nr];
@@ -75,11 +96,23 @@ fn every_i8_backend_equals_portable_cb_02() {
         }
         names.push(spec.backend.as_str());
     }
+    eprintln!("CB-02: {} i8 backend(s): {}", names.len(), names.join(", "));
     assert!(
         !names.is_empty(),
         "at least the portable kernel must have run"
     );
-    eprintln!("CB-02: {} i8 backend(s): {}", names.len(), names.join(", "));
+    // A test that only ever ran the reference against itself would pass while
+    // asserting nothing, which is exactly what this test did before the
+    // `std` feature reached it: without runtime detection every `available_*`
+    // predicate answered from the *build*'s target features, and on a stock
+    // x86-64 build that is none of them. So the vacuous case is named.
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+        assert!(
+            names.len() > 1,
+            "x86-64 and aarch64 both have an i8 kernel past the portable one; \
+             seeing only {names:?} means feature detection did not reach this test"
+        );
+    }
 }
 
 /// Check one named `i8` backend, and say whether the host could run it.
@@ -91,7 +124,7 @@ fn check_named(backend: Backend) -> bool {
         );
         return false;
     };
-    for &kc in DEPTHS {
+    for kc in depths(&spec) {
         let pa = fill(spec.mr * kc, kc as u64 ^ 0xAB, |v| v as i8);
         let pb = fill(spec.nr * kc, kc as u64 ^ 0xCD, |v| v as i8);
         let mut acc = vec![0i32; spec.mr * spec.nr];
@@ -136,7 +169,9 @@ fn wasm_simd128_equals_portable_cb_05() {
 #[test]
 fn sequences_agree_across_their_thresholds_cu_03() {
     for spec in available_i8() {
-        for kc in [1usize, 2, 3, 4, 8, 15, 16, 17, 128, 129, 130] {
+        for kc in [1usize, 2, 3, 4, 8, 15, 16, 17, 128, 129, 130]
+            .map(|kc| kc.div_ceil(spec.k_group) * spec.k_group)
+        {
             let pa = vec![i8::MIN; spec.mr * kc];
             let pb = vec![i8::MIN; spec.nr * kc];
             let mut acc = vec![0i32; spec.mr * spec.nr];
@@ -161,7 +196,7 @@ fn sequences_agree_across_their_thresholds_cu_03() {
 #[test]
 fn the_wider_families_equal_their_references_cb_02() {
     for spec in available_i16() {
-        for &kc in DEPTHS {
+        for kc in depths(&spec) {
             let pa = fill(spec.mr * kc, 7, |v| (v * 251) as i16);
             let pb = fill(spec.nr * kc, 8, |v| (v * 251) as i16);
             let mut acc = vec![0i64; spec.mr * spec.nr];
@@ -169,7 +204,10 @@ fn the_wider_families_equal_their_references_cb_02() {
             for i in 0..spec.mr {
                 for j in 0..spec.nr {
                     let want: i64 = (0..kc)
-                        .map(|p| i64::from(pa[p * spec.mr + i]) * i64::from(pb[p * spec.nr + j]))
+                        .map(|p| {
+                            i64::from(at(&pa, p, i, spec.mr, spec.k_group))
+                                * i64::from(at(&pb, p, j, spec.nr, spec.k_group))
+                        })
                         .sum();
                     assert_eq!(
                         acc[i * spec.nr + j],
@@ -187,7 +225,7 @@ fn the_wider_families_equal_their_references_cb_02() {
         // depth below. The kernel's own lane is bounded the same way, and the
         // driver only ever offers it a chunk `lane_depth` admits --- testing it
         // past that would be testing something the driver never asks for.
-        for &kc in DEPTHS {
+        for kc in depths(&spec) {
             let pa = fill(spec.mr * kc, 9, |v| ((v & 0xFFFF) - 0x8000) as i32);
             let pb = fill(spec.nr * kc, 10, |v| ((v & 0xFFFF) - 0x8000) as i32);
             let mut acc = vec![0i64; spec.mr * spec.nr];
@@ -195,7 +233,10 @@ fn the_wider_families_equal_their_references_cb_02() {
             for i in 0..spec.mr {
                 for j in 0..spec.nr {
                     let want: i64 = (0..kc)
-                        .map(|p| i64::from(pa[p * spec.mr + i]) * i64::from(pb[p * spec.nr + j]))
+                        .map(|p| {
+                            i64::from(at(&pa, p, i, spec.mr, spec.k_group))
+                                * i64::from(at(&pb, p, j, spec.nr, spec.k_group))
+                        })
                         .sum();
                     assert_eq!(
                         acc[i * spec.nr + j],
@@ -211,7 +252,7 @@ fn the_wider_families_equal_their_references_cb_02() {
     // The modular lanes wrap, and that *is* the answer in the quotient: the
     // references below wrap too, deliberately.
     for spec in available_i32_modular() {
-        for &kc in DEPTHS {
+        for kc in depths(&spec) {
             let pa = fill(spec.mr * kc, 11, |v| (v.wrapping_mul(99_991)) as i32);
             let pb = fill(spec.nr * kc, 12, |v| (v.wrapping_mul(65_537)) as i32);
             let mut acc = vec![0i32; spec.mr * spec.nr];
@@ -219,7 +260,13 @@ fn the_wider_families_equal_their_references_cb_02() {
             for i in 0..spec.mr {
                 for j in 0..spec.nr {
                     let want = (0..kc).fold(0i32, |s, p| {
-                        s.wrapping_add(pa[p * spec.mr + i].wrapping_mul(pb[p * spec.nr + j]))
+                        s.wrapping_add(at(&pa, p, i, spec.mr, spec.k_group).wrapping_mul(at(
+                            &pb,
+                            p,
+                            j,
+                            spec.nr,
+                            spec.k_group,
+                        )))
                     });
                     assert_eq!(
                         acc[i * spec.nr + j],
@@ -233,7 +280,7 @@ fn the_wider_families_equal_their_references_cb_02() {
     }
 
     for spec in available_i64_modular() {
-        for &kc in DEPTHS {
+        for kc in depths(&spec) {
             let pa = fill(spec.mr * kc, 13, |v| {
                 v.wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64)
             });
@@ -243,7 +290,13 @@ fn the_wider_families_equal_their_references_cb_02() {
             for i in 0..spec.mr {
                 for j in 0..spec.nr {
                     let want = (0..kc).fold(0i64, |s, p| {
-                        s.wrapping_add(pa[p * spec.mr + i].wrapping_mul(pb[p * spec.nr + j]))
+                        s.wrapping_add(at(&pa, p, i, spec.mr, spec.k_group).wrapping_mul(at(
+                            &pb,
+                            p,
+                            j,
+                            spec.nr,
+                            spec.k_group,
+                        )))
                     });
                     assert_eq!(
                         acc[i * spec.nr + j],
@@ -263,7 +316,7 @@ fn the_wider_families_equal_their_references_cb_02() {
 fn backend_selection_cannot_fail_cd_01() {
     for backend in Backend::ALL {
         let spec = choose(available_i8(), backend).expect("the portable kernel is always there");
-        let kc = 33;
+        let kc = 33usize.div_ceil(spec.k_group) * spec.k_group;
         let pa = fill(spec.mr * kc, 1, |v| v as i8);
         let pb = fill(spec.nr * kc, 2, |v| v as i8);
         let mut acc = vec![0i32; spec.mr * spec.nr];

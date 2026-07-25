@@ -26,6 +26,23 @@
 
 use uor_matmul_core::Backend;
 
+/// Where element `p` of lane `l` sits inside a packed panel of `lanes` lanes
+/// grouped by `group`.
+///
+/// The panel layout is part of the kernel contract, so it is written down once,
+/// here, next to [`KernelSpec::k_group`]: `k`-major in groups of `group`,
+/// lane-major within a group. At `group == 1` this is the plain `k`-major layout
+/// the reference kernels read.
+///
+/// Every kernel's index arithmetic is this function specialized to its own
+/// constants, the driver's packer is this function directly, and the parity
+/// tests read panels through it --- so a kernel that disagrees with the layout
+/// disagrees with the reference, which is what `CB-01` through `CB-05` catch.
+#[inline(always)]
+pub const fn packed_slot(p: usize, lane: usize, lanes: usize, group: usize) -> usize {
+    (p / group) * (lanes * group) + lane * group + (p % group)
+}
+
 /// Which factorization of the identity a kernel realizes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Factorization {
@@ -51,11 +68,20 @@ pub struct KernelSpec<E, L> {
     pub mr: usize,
     /// Columns of `C` this kernel produces per call.
     pub nr: usize,
-    /// The `k`-multiple the packing must respect.
+    /// How many `k`-steps this kernel consumes at once, and therefore how the
+    /// packed panels are laid out.
     ///
-    /// Not a restriction on the caller's `k`: the driver pads the tail with the
-    /// alphabet's zero, which is exact, so an arbitrary `k` takes this path and
-    /// not a different one (S8).
+    /// A panel is `k`-major in groups of `k_group` and lane-major within a
+    /// group, so element `p` of lane `l` sits at
+    /// `(p / k_group) * (lanes * k_group) + l * k_group + (p % k_group)`. A
+    /// kernel that consumes two `k`-steps per instruction therefore finds them
+    /// adjacent, and needs neither a shuffle to pair them nor a scalar gather to
+    /// build the pair by hand.
+    ///
+    /// Not a restriction on the caller's `k`: the driver pads the depth to a
+    /// multiple of this with the alphabet's zero, which contributes nothing to
+    /// the sum and nothing to the lane. An arbitrary `k` therefore takes this
+    /// path and not a different one, and no kernel has a `k`-tail (S8).
     pub k_group: usize,
     /// The largest magnitude one lane holds.
     ///
@@ -104,6 +130,10 @@ impl<E, L> KernelSpec<E, L> {
         assert_eq!(pa.len(), self.mr * kc, "packed A panel is mr * kc");
         assert_eq!(pb.len(), self.nr * kc, "packed B panel is nr * kc");
         assert_eq!(acc.len(), self.mr * self.nr, "accumulator tile is mr * nr");
+        assert!(
+            kc.is_multiple_of(self.k_group),
+            "the packed depth is a whole number of k-groups"
+        );
         // SAFETY: the three lengths are exactly what `mac_tile` requires, and
         // this `KernelSpec` came from one of the `available_*` functions, which
         // only ever return a spec whose target features the host has.

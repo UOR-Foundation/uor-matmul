@@ -286,15 +286,24 @@ fn run<E, Bd, O, Ep, L>(
         "the tile buffer covers every shipped kernel"
     );
 
-    // With less than one `k`-step of room there is no panel to pack, so the
+    // The kernel reads its `k` in groups of `k_group`, so a panel is packed in
+    // groups and a depth that is not a multiple of one is padded to it. The
+    // padding is the alphabet's zero, which contributes nothing to the sum and
+    // nothing to the lane --- so it is exact, it cannot push a lane past its
+    // cap, and there is no `k`-tail in any kernel to get wrong (S8).
+    let group = spec.k_group.max(1);
+
+    // With less than one packed group of room there is no panel to pack, so the
     // streaming traversal runs instead --- the same identity, walked
     // differently (S13).
-    if scratch.len() < per_step {
+    if scratch.len() < per_step * group {
         crate::gemm(triple, epilogue, options, scratch);
         return;
     }
 
-    let kc = (scratch.len() / per_step).min(lane_depth).max(1);
+    // A whole number of groups, so a chunk's padded depth never outgrows what
+    // was reserved for it.
+    let kc = (scratch.len() / per_step).min(lane_depth) / group * group;
     let reads_c = epilogue.reads_c();
 
     // The panels are the only copies this driver makes, and which loop they sit
@@ -319,44 +328,61 @@ fn run<E, Bd, O, Ep, L>(
     // assert the bytes are the same either way.
     let mut tile = [L::default(); MAX_TILE];
     let (a, b, c) = triple.parts();
-    let budget = if shape.k == 0 {
-        0
-    } else {
-        scratch.len() / shape.k
-    };
+    let kpad = shape.k.div_ceil(group) * group;
+    let budget = scratch.len().checked_div(kpad).unwrap_or(0);
 
     if shape.k <= kc && budget >= per_step {
-        // `mc` and `nc` are whole numbers of microkernel panels, so a block
-        // holds no partial panel and the tile loops below need no second case.
-        // Each is capped by the cache-shaped constant, by the matrix itself, and
-        // by what the offer pays for --- in that order, with `A` yielding to `B`
-        // when the offer is tight, because it is `A` that gets repacked.
+        use uor_matmul_core::generated::blocking;
+
+        // The declared blocking is a working *set*, not a column count: `KC * NC`
+        // elements of `B` are what has to stay resident while the row blocks
+        // stream past, and `MC * KC` of `A`. Read that way it still says the right
+        // thing when the panel's depth is the whole of `k` --- the block narrows
+        // as the depth grows, so what stays resident stays the same size. Read as
+        // a column count it would put a `k`-times-oversized panel in the cache
+        // for a deep problem, and at `k = 1024` that is the difference between a
+        // panel in L2 and a panel in memory.
+        //
+        // `mc` and `nc` are whole numbers of microkernel panels, so a block holds
+        // no partial panel and the tile loops below need no second case. Each is
+        // capped by the working set, by the matrix itself, and by what the offer
+        // pays for --- in that order, with `A` yielding to `B` when the offer is
+        // tight, because it is `A` that gets repacked.
         let mc_want = shape
             .m
-            .min(uor_matmul_core::generated::blocking::MC)
+            .min(blocking::MC)
+            .min((blocking::MC * blocking::KC / kpad).max(mr))
             .div_ceil(mr)
             * mr;
         let nc_want = shape
             .n
-            .min(uor_matmul_core::generated::blocking::NC)
+            .min(blocking::NC)
+            .min((blocking::KC * blocking::NC / kpad).max(nr))
             .div_ceil(nr)
             * nr;
         let mc = mc_want.min((budget - nr) / mr * mr).max(mr);
         let nc = ((budget - mc) / nr * nr).min(nc_want).max(nr);
 
-        let depth = shape.k;
-        let buf = scratch.take(depth * (mc + nc));
-        let (pa_buf, pb_buf) = buf.split_at_mut(mc * depth);
+        // Spread the extents evenly over the number of blocks they already imply.
+        // The count is what decides how often `A` is repacked, and it does not
+        // change here --- what changes is that the last block is a full one
+        // instead of a sliver, so every panel is the same size and the tail costs
+        // a repack of the same block rather than of a 16-column stub.
+        let mc = shape.m.div_ceil(shape.m.div_ceil(mc)).div_ceil(mr) * mr;
+        let nc = shape.n.div_ceil(shape.n.div_ceil(nc)).div_ceil(nr) * nr;
+
+        let buf = scratch.take(kpad * (mc + nc));
+        let (pa_buf, pb_buf) = buf.split_at_mut(mc * kpad);
 
         let mut j0 = 0;
         while j0 < shape.n {
             let cols = nc.min(shape.n - j0);
-            pack_columns(pb_buf, nr, depth, b, 0, j0, cols, shape.n);
+            pack_columns(pb_buf, nr, group, shape.k, kpad, b, 0, j0, cols, shape.n);
 
             let mut i0 = 0;
             while i0 < shape.m {
                 let rows = mc.min(shape.m - i0);
-                pack_rows(pa_buf, mr, depth, a, i0, 0, rows, shape.m);
+                pack_rows(pa_buf, mr, group, shape.k, kpad, a, i0, 0, rows, shape.m);
 
                 let pa: &[E] = bytemuck::TransparentWrapper::peel_slice(&*pa_buf);
                 let pb: &[E] = bytemuck::TransparentWrapper::peel_slice(&*pb_buf);
@@ -365,11 +391,11 @@ fn run<E, Bd, O, Ep, L>(
                 // the nearest cache while the row panels stream past it.
                 let mut jj = 0;
                 while jj < cols {
-                    let bp = &pb[(jj / nr) * nr * depth..][..nr * depth];
+                    let bp = &pb[(jj / nr) * nr * kpad..][..nr * kpad];
                     let mut ii = 0;
                     while ii < rows {
-                        let ap = &pa[(ii / mr) * mr * depth..][..mr * depth];
-                        spec.mac_tile(depth, ap, bp, &mut tile[..mr * nr]);
+                        let ap = &pa[(ii / mr) * mr * kpad..][..mr * kpad];
+                        spec.mac_tile(kpad, ap, bp, &mut tile[..mr * nr]);
 
                         for i in 0..mr.min(rows - ii) {
                             for j in 0..nr.min(cols - jj) {
@@ -401,17 +427,18 @@ fn run<E, Bd, O, Ep, L>(
             let mut p0 = 0;
             while p0 < shape.k {
                 let depth = kc.min(shape.k - p0);
+                let pad = depth.div_ceil(group) * group;
                 {
-                    let buf = scratch.take(per_step * depth);
-                    let (pa_buf, pb_buf) = buf.split_at_mut(mr * depth);
-                    pack_rows(pa_buf, mr, depth, a, i0, p0, mr, shape.m);
-                    pack_columns(pb_buf, nr, depth, b, p0, j0, nr, shape.n);
+                    let buf = scratch.take(per_step * pad);
+                    let (pa_buf, pb_buf) = buf.split_at_mut(mr * pad);
+                    pack_rows(pa_buf, mr, group, depth, pad, a, i0, p0, mr, shape.m);
+                    pack_columns(pb_buf, nr, group, depth, pad, b, p0, j0, nr, shape.n);
                 }
 
-                let buf = scratch.take(per_step * depth);
+                let buf = scratch.take(per_step * pad);
                 let raw: &[E] = bytemuck::TransparentWrapper::peel_slice(&*buf);
-                let (pa, pb) = raw.split_at(mr * depth);
-                spec.mac_tile(depth, pa, pb, &mut tile[..mr * nr]);
+                let (pa, pb) = raw.split_at(mr * pad);
+                spec.mac_tile(pad, pa, pb, &mut tile[..mr * nr]);
 
                 if matches!(spec.factorization, Factorization::Modular) {
                     // The ring's own addition: chunks combine in the quotient.
@@ -450,17 +477,59 @@ fn run<E, Bd, O, Ep, L>(
     }
 }
 
-/// Pack `count` rows of `A` into `ceil(count / lanes)` microkernel panels, each
-/// `k`-major.
+/// A lane's cursor through a packed panel.
 ///
-/// Walks each row once rather than indexing per element, and splits the full
-/// panel from the edge so the common case carries no bounds branch. Rows past
-/// the block take the alphabet's zero; zero padding is exact, so an unaligned
-/// shape takes this path and not a different one (S8).
+/// The slot of element `p` in lane `l` is
+/// [`uor_matmul_kernels::packed_slot`], but computing it per element costs a
+/// division and a remainder by a value that is not a compile-time constant here
+/// --- which, measured, cost more than the packing itself. Walking it costs an
+/// increment and one predictable branch, and lands on the same slots: `CD-01`
+/// asserts the bytes, and `the_cursor_agrees_with_the_declared_layout` asserts
+/// the slots directly.
+struct Cursor {
+    at: usize,
+    within: usize,
+    group: usize,
+    /// The step from the last element of one group to the first of the next.
+    carry: usize,
+}
+
+impl Cursor {
+    #[inline(always)]
+    fn new(lane: usize, lanes: usize, group: usize) -> Self {
+        Self {
+            at: lane * group,
+            within: 0,
+            group,
+            carry: lanes * group - (group - 1),
+        }
+    }
+
+    #[inline(always)]
+    fn advance(&mut self) {
+        self.within += 1;
+        if self.within == self.group {
+            self.within = 0;
+            self.at += self.carry;
+        } else {
+            self.at += 1;
+        }
+    }
+}
+
+/// Pack `count` rows of `A` into `ceil(count / lanes)` microkernel panels.
+///
+/// Walks each row once rather than indexing per element. Rows past the block,
+/// and depth past `depth` up to the padded `kpad`, take the alphabet's zero:
+/// zero padding contributes nothing to the sum, so an arbitrary shape and an
+/// arbitrary `k` take this path and not a different one (S8).
+#[allow(clippy::too_many_arguments)]
 fn pack_rows<E: IntegerElement, Bd: Bound>(
     out: &mut [Alphabet<E, Bd>],
     lanes: usize,
+    group: usize,
     depth: usize,
+    kpad: usize,
     a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
     row0: usize,
     col0: usize,
@@ -472,28 +541,29 @@ fn pack_rows<E: IntegerElement, Bd: Bound>(
     let mut done = 0;
     while done < count {
         let full = lanes.min(count - done);
-        let panel = &mut out[base..base + lanes * depth];
+        let panel = &mut out[base..base + lanes * kpad];
         for lane in 0..full {
-            for (p, v) in a.row_walk(row0 + done + lane, col0, depth).enumerate() {
-                panel[p * lanes + lane] = *v;
+            let mut cursor = Cursor::new(lane, lanes, group);
+            for v in a.row_walk(row0 + done + lane, col0, depth) {
+                panel[cursor.at] = *v;
+                cursor.advance();
             }
         }
-        for lane in full..lanes {
-            for p in 0..depth {
-                panel[p * lanes + lane] = Alphabet::ZERO;
-            }
-        }
-        base += lanes * depth;
+        pad_panel(panel, lanes, group, depth, kpad, full);
+        base += lanes * kpad;
         done += lanes;
     }
 }
 
 /// Pack `count` columns of `B` into `ceil(count / lanes)` panels. See
 /// [`pack_rows`].
+#[allow(clippy::too_many_arguments)]
 fn pack_columns<E: IntegerElement, Bd: Bound>(
     out: &mut [Alphabet<E, Bd>],
     lanes: usize,
+    group: usize,
     depth: usize,
+    kpad: usize,
     b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
     row0: usize,
     col0: usize,
@@ -505,19 +575,45 @@ fn pack_columns<E: IntegerElement, Bd: Bound>(
     let mut done = 0;
     while done < count {
         let full = lanes.min(count - done);
-        let panel = &mut out[base..base + lanes * depth];
+        let panel = &mut out[base..base + lanes * kpad];
         for lane in 0..full {
-            for (p, v) in b.column_walk(row0, col0 + done + lane, depth).enumerate() {
-                panel[p * lanes + lane] = *v;
+            let mut cursor = Cursor::new(lane, lanes, group);
+            for v in b.column_walk(row0, col0 + done + lane, depth) {
+                panel[cursor.at] = *v;
+                cursor.advance();
             }
         }
-        for lane in full..lanes {
-            for p in 0..depth {
-                panel[p * lanes + lane] = Alphabet::ZERO;
-            }
-        }
-        base += lanes * depth;
+        pad_panel(panel, lanes, group, depth, kpad, full);
+        base += lanes * kpad;
         done += lanes;
+    }
+}
+
+/// Zero everything a walk did not write: the lanes past the block's edge, and
+/// the depth past `depth` in every lane.
+fn pad_panel<E: IntegerElement, Bd: Bound>(
+    panel: &mut [Alphabet<E, Bd>],
+    lanes: usize,
+    group: usize,
+    depth: usize,
+    kpad: usize,
+    full: usize,
+) {
+    if full == lanes && depth == kpad {
+        // Nothing was left unwritten. Saying so costs one comparison and skips
+        // a walk over the whole panel, which is the ordinary case.
+        return;
+    }
+    for lane in 0..lanes {
+        let from = if lane < full { depth } else { 0 };
+        let mut cursor = Cursor::new(lane, lanes, group);
+        for _ in 0..from {
+            cursor.advance();
+        }
+        for _ in from..kpad {
+            panel[cursor.at] = Alphabet::ZERO;
+            cursor.advance();
+        }
     }
 }
 
@@ -532,6 +628,31 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, Full, MatView, MatViewMut};
+
+    /// The cursor lands on exactly the slots the declared layout names.
+    ///
+    /// The packer walks the panel instead of computing
+    /// [`uor_matmul_kernels::packed_slot`] per element, so the two must agree by
+    /// construction rather than by inspection --- and the kernels read the
+    /// declared layout, so a cursor that drifted would corrupt every panel.
+    #[test]
+    fn the_cursor_agrees_with_the_declared_layout() {
+        for lanes in 1..=16usize {
+            for group in 1..=8usize {
+                for lane in 0..lanes {
+                    let mut cursor = super::Cursor::new(lane, lanes, group);
+                    for p in 0..64usize {
+                        assert_eq!(
+                            cursor.at,
+                            uor_matmul_kernels::packed_slot(p, lane, lanes, group),
+                            "lanes={lanes} group={group} lane={lane} p={p}"
+                        );
+                        cursor.advance();
+                    }
+                }
+            }
+        }
+    }
 
     /// Run one instantiation through the packed driver.
     #[allow(clippy::too_many_arguments)]

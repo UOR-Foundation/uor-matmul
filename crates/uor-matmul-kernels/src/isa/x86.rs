@@ -87,68 +87,48 @@ unsafe fn avx2_i8_inner(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) 
             core::slice::from_raw_parts_mut(acc, MR * NR),
         )
     };
-    // Two `__m256i` per row. Their lanes are *permuted*: `madd` consumes the
-    // interleave `unpack` produces, and `unpack` works within 128-bit halves,
-    // so `lo` holds columns 0..3 and 8..11 and `hi` holds 4..7 and 12..15. The
-    // permutation is undone once per tile at the store, rather than being
-    // avoided by interleaving `B` a scalar element at a time --- which is what
-    // this kernel used to do, and it cost sixteen stores per `k`-step.
+    // The panel is packed in `k`-pairs, so the two bytes `madd` multiplies and
+    // sums are already adjacent in memory for both operands. `B`'s 32 bytes for
+    // this pair widen straight into the two `i16` vectors `madd` consumes, in
+    // column order, so there is no interleave to do and no permutation to undo.
     let mut lo = [_mm256_setzero_si256(); MR];
     let mut hi = [_mm256_setzero_si256(); MR];
 
-    let pairs = kc / 2;
-    for q in 0..pairs {
-        let (p0, p1) = (q * 2, q * 2 + 1);
-        // SAFETY: `pb[p * NR ..][..16]` is in bounds; each is one 128-bit load
-        // widened to sixteen `i16`.
-        let (b0, b1) = unsafe {
+    for q in 0..kc / 2 {
+        // SAFETY: `pb[q * NR * 2 ..][..32]` is in bounds; each is one 128-bit
+        // load widened to sixteen `i16`, and lane `j` holds the pair
+        // `(b[p0][j], b[p1][j])`, which is what `madd` sums.
+        let (bv_lo, bv_hi) = unsafe {
+            let base = pb.as_ptr().add(q * NR * 2);
             (
-                _mm256_cvtepi8_epi16(_mm_loadu_si128(pb.as_ptr().add(p0 * NR).cast::<__m128i>())),
-                _mm256_cvtepi8_epi16(_mm_loadu_si128(pb.as_ptr().add(p1 * NR).cast::<__m128i>())),
+                _mm256_cvtepi8_epi16(_mm_loadu_si128(base.cast::<__m128i>())),
+                _mm256_cvtepi8_epi16(_mm_loadu_si128(base.add(16).cast::<__m128i>())),
             )
         };
-        // Lane `j` of the result holds the pair `(b[p0][j], b[p1][j])`, which is
-        // what `madd` sums.
-        let bv_lo = _mm256_unpacklo_epi16(b0, b1);
-        let bv_hi = _mm256_unpackhi_epi16(b0, b1);
 
         for i in 0..MR {
-            let a0 = i16::from(pa[p0 * MR + i]);
-            let a1 = i16::from(pa[p1 * MR + i]);
-            let av = _mm256_set1_epi32(((a1 as u16 as u32) << 16 | (a0 as u16 as u32)) as i32);
+            // Broadcasting the *pair* as a word and sign-extending it gives
+            // `(a1 << 16) | a0` in every 32-bit lane: two instructions, against
+            // the two loads, two shifts and an or it takes to build that value
+            // out of a `k`-major panel.
+            //
+            // SAFETY: `q * MR * 2 + i * 2 + 1 < MR * kc`, and `read_unaligned`
+            // waives the alignment `i16` would otherwise require.
+            let av = unsafe {
+                let pair = pa.as_ptr().add(q * MR * 2 + i * 2).cast::<i16>();
+                _mm256_cvtepi8_epi16(_mm_set1_epi16(pair.read_unaligned()))
+            };
             // Exact: `|a0*b0 + a1*b1| <= 2 * 128 * 128`, far inside `i32`.
             lo[i] = _mm256_add_epi32(lo[i], _mm256_madd_epi16(av, bv_lo));
             hi[i] = _mm256_add_epi32(hi[i], _mm256_madd_epi16(av, bv_hi));
         }
     }
 
-    // The `k`-tail, one step at a time, in the same permuted lane order. Zero
-    // padding would have been exact too; walking the tail is simply cheaper
-    // than materialising a padded panel.
-    for p in (pairs * 2)..kc {
-        // SAFETY: `pb[p * NR ..][..16]` is in bounds.
-        let b0 = unsafe {
-            _mm256_cvtepi8_epi16(_mm_loadu_si128(pb.as_ptr().add(p * NR).cast::<__m128i>()))
-        };
-        let zero = _mm256_setzero_si256();
-        let bv_lo = _mm256_unpacklo_epi16(b0, zero);
-        let bv_hi = _mm256_unpackhi_epi16(b0, zero);
-        for i in 0..MR {
-            let av = _mm256_set1_epi32(i32::from(pa[p * MR + i]));
-            lo[i] = _mm256_add_epi32(lo[i], _mm256_madd_epi16(av, bv_lo));
-            hi[i] = _mm256_add_epi32(hi[i], _mm256_madd_epi16(av, bv_hi));
-        }
-    }
-
     for i in 0..MR {
-        // Undo the permutation: `lo` holds j 0..3 and 8..11, `hi` holds 4..7
-        // and 12..15, so the low halves make j 0..7 and the high halves j 8..15.
-        let j0_7 = _mm256_permute2x128_si256(lo[i], hi[i], 0x20);
-        let j8_15 = _mm256_permute2x128_si256(lo[i], hi[i], 0x31);
         // SAFETY: `i < MR`, so these two stores land inside `MR * NR`.
         unsafe {
-            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast::<__m256i>(), j0_7);
-            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR + 8).cast::<__m256i>(), j8_15);
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast::<__m256i>(), lo[i]);
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR + 8).cast::<__m256i>(), hi[i]);
         }
     }
 }
@@ -203,21 +183,23 @@ unsafe fn avx2_i16_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i6
     // Two `__m256i` of four i64 lanes each cover the eight columns.
     let mut tile = [[_mm256_setzero_si256(); 2]; MR];
 
-    let pairs = kc / 2;
-    for q in 0..pairs {
-        let (p0, p1) = (q * 2, q * 2 + 1);
-        let mut b_pairs = [0i16; NR * 2];
-        for j in 0..NR {
-            b_pairs[j * 2] = pb[p0 * NR + j];
-            b_pairs[j * 2 + 1] = pb[p1 * NR + j];
-        }
-        // SAFETY: `b_pairs` holds 16 i16, exactly one 256-bit load.
-        let bv = unsafe { _mm256_loadu_si256(b_pairs.as_ptr().cast::<__m256i>()) };
+    for q in 0..kc / 2 {
+        // The panel is packed in `k`-pairs, so lane `j` of this load already
+        // holds `(b[p0][j], b[p1][j])` --- the pair `madd` sums.
+        //
+        // SAFETY: `pb[q * NR * 2 ..][..16]` is in bounds: one 256-bit load.
+        let bv = unsafe { _mm256_loadu_si256(pb.as_ptr().add(q * NR * 2).cast::<__m256i>()) };
 
         for (i, row) in tile.iter_mut().enumerate() {
-            let a0 = pa[p0 * MR + i];
-            let a1 = pa[p1 * MR + i];
-            let av = _mm256_set1_epi32(((a1 as u16 as u32) << 16 | (a0 as u16 as u32)) as i32);
+            // The two `i16` of `A`'s pair are adjacent, so the broadcast is one
+            // unaligned dword load.
+            //
+            // SAFETY: `q * MR * 2 + i * 2 + 1 < MR * kc`, and `read_unaligned`
+            // waives the alignment `i32` would otherwise require.
+            let av = unsafe {
+                let pair = pa.as_ptr().add(q * MR * 2 + i * 2).cast::<i32>();
+                _mm256_set1_epi32(pair.read_unaligned())
+            };
             // Eight i32 pair-sums, each exact and at most 2^31.
             let m = _mm256_madd_epi16(av, bv);
             // Widen to i64 before accumulating, so no depth can fill the lane.
@@ -226,25 +208,6 @@ unsafe fn avx2_i16_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i6
                 row[1],
                 _mm256_cvtepi32_epi64(_mm256_extracti128_si256(m, 1)),
             );
-        }
-    }
-
-    for p in (pairs * 2)..kc {
-        for (i, row) in tile.iter_mut().enumerate() {
-            let a = i64::from(pa[p * MR + i]);
-            let mut lane = [0i64; NR];
-            for (j, slot) in lane.iter_mut().enumerate() {
-                *slot = a * i64::from(pb[p * NR + j]);
-            }
-            // SAFETY: `lane` holds 8 i64, exactly two 256-bit loads.
-            let (l0, l1) = unsafe {
-                (
-                    _mm256_loadu_si256(lane.as_ptr().cast::<__m256i>()),
-                    _mm256_loadu_si256(lane.as_ptr().add(4).cast::<__m256i>()),
-                )
-            };
-            row[0] = _mm256_add_epi64(row[0], l0);
-            row[1] = _mm256_add_epi64(row[1], l1);
         }
     }
 
@@ -457,48 +420,29 @@ unsafe fn avx2_i16_mod_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mu
     };
     let mut tile = [[_mm256_setzero_si256(); 2]; MR];
 
-    let pairs = kc / 2;
-    for q in 0..pairs {
-        let (p0, p1) = (q * 2, q * 2 + 1);
-        let mut b_pairs = [0i16; NR * 2];
-        for j in 0..NR {
-            b_pairs[j * 2] = pb[p0 * NR + j];
-            b_pairs[j * 2 + 1] = pb[p1 * NR + j];
-        }
-        // SAFETY: `b_pairs` holds 32 i16 = two 256-bit loads.
+    for q in 0..kc / 2 {
+        // The panel is packed in `k`-pairs, so lane `j` already holds the pair
+        // `madd` sums.
+        //
+        // SAFETY: `pb[q * NR * 2 ..][..32]` is in bounds: two 256-bit loads.
         let (bv0, bv1) = unsafe {
+            let base = pb.as_ptr().add(q * NR * 2);
             (
-                _mm256_loadu_si256(b_pairs.as_ptr().cast::<__m256i>()),
-                _mm256_loadu_si256(b_pairs.as_ptr().add(16).cast::<__m256i>()),
+                _mm256_loadu_si256(base.cast::<__m256i>()),
+                _mm256_loadu_si256(base.add(16).cast::<__m256i>()),
             )
         };
         for (i, row) in tile.iter_mut().enumerate() {
-            let a0 = pa[p0 * MR + i];
-            let a1 = pa[p1 * MR + i];
-            let av = _mm256_set1_epi32(((a1 as u16 as u32) << 16 | (a0 as u16 as u32)) as i32);
+            // SAFETY: `q * MR * 2 + i * 2 + 1 < MR * kc`, and `read_unaligned`
+            // waives the alignment `i32` would otherwise require.
+            let av = unsafe {
+                let pair = pa.as_ptr().add(q * MR * 2 + i * 2).cast::<i32>();
+                _mm256_set1_epi32(pair.read_unaligned())
+            };
             // `madd` and the add both wrap, and both are the ring operations of
             // `Z/2^32`, so the lane holds the value the caller asked to encode.
             row[0] = _mm256_add_epi32(row[0], _mm256_madd_epi16(av, bv0));
             row[1] = _mm256_add_epi32(row[1], _mm256_madd_epi16(av, bv1));
-        }
-    }
-
-    for p in (pairs * 2)..kc {
-        for (i, row) in tile.iter_mut().enumerate() {
-            let a = i32::from(pa[p * MR + i]);
-            let mut lane = [0i32; NR];
-            for (j, slot) in lane.iter_mut().enumerate() {
-                *slot = a.wrapping_mul(i32::from(pb[p * NR + j]));
-            }
-            // SAFETY: `lane` holds 16 i32 = two 256-bit loads.
-            let (l0, l1) = unsafe {
-                (
-                    _mm256_loadu_si256(lane.as_ptr().cast::<__m256i>()),
-                    _mm256_loadu_si256(lane.as_ptr().add(8).cast::<__m256i>()),
-                )
-            };
-            row[0] = _mm256_add_epi32(row[0], l0);
-            row[1] = _mm256_add_epi32(row[1], l1);
         }
     }
 
@@ -577,27 +521,32 @@ unsafe fn dpwssd_inner(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
         )
     };
     let mut tile = [_mm512_setzero_si512(); V_MR];
-    let pairs = kc / 2;
 
-    for q in 0..pairs {
-        let (p0, p1) = (q * 2, q * 2 + 1);
-        let mut b_pairs = [0i16; V_NR * 2];
-        for j in 0..V_NR {
-            b_pairs[j * 2] = i16::from(pb[p0 * V_NR + j]);
-            b_pairs[j * 2 + 1] = i16::from(pb[p1 * V_NR + j]);
-        }
-        // SAFETY: `b_pairs` holds 32 i16 = 512 bits.
-        let bv = unsafe { _mm512_loadu_si512(b_pairs.as_ptr().cast()) };
+    for q in 0..kc / 2 {
+        // The panel is packed in `k`-pairs, so `B`'s 32 bytes for this pair
+        // widen straight into the 32 `i16` `dpwssd` consumes, in column order.
+        //
+        // SAFETY: `pb[q * V_NR * 2 ..][..32]` is in bounds: one 256-bit load,
+        // widened to 512 bits of `i16`.
+        let bv = unsafe {
+            _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                pb.as_ptr().add(q * V_NR * 2).cast::<__m256i>(),
+            ))
+        };
         for (i, lane) in tile.iter_mut().enumerate() {
-            let a0 = i16::from(pa[p0 * V_MR + i]);
-            let a1 = i16::from(pa[p1 * V_MR + i]);
-            let av = _mm512_set1_epi32(((a1 as u16 as u32) << 16 | (a0 as u16 as u32)) as i32);
+            // Broadcasting the pair as a word and sign-extending it puts
+            // `(a1 << 16) | a0` in every 32-bit lane.
+            //
+            // SAFETY: `q * V_MR * 2 + i * 2 + 1 < V_MR * kc`, and
+            // `read_unaligned` waives `i16`'s alignment.
+            let av = unsafe {
+                let pair = pa.as_ptr().add(q * V_MR * 2 + i * 2).cast::<i16>();
+                _mm512_cvtepi8_epi16(_mm256_set1_epi16(pair.read_unaligned()))
+            };
             *lane = _mm512_dpwssd_epi32(*lane, av, bv);
         }
     }
 
-    // SAFETY: same features, same lengths, `pairs * 2 <= kc`.
-    unsafe { vnni_tail(kc, pairs * 2, pa, pb, &mut tile) };
     // SAFETY: `acc` has `V_MR * V_NR` lanes.
     unsafe { vnni_store(acc, &tile) };
 }
@@ -625,66 +574,45 @@ unsafe fn dpbusd_inner(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
         )
     };
     let mut tile = [_mm512_setzero_si512(); V_MR];
-    let mut colsum = [0i32; V_NR];
+    // The offset identity's compensation term, `sum(b)` per column. Accumulated
+    // with `dpbusd` against an all-ones unsigned vector, which is the same
+    // instruction the products use and reads the same packed bytes.
+    let mut colsum = _mm512_setzero_si512();
+    let ones = _mm512_set1_epi32(0x0101_0101);
 
-    let groups = kc / G;
-    for q in 0..groups {
-        let base = q * G;
-        let mut b_quads = [0u8; V_NR * G];
-        for j in 0..V_NR {
-            for g in 0..G {
-                let v = pb[(base + g) * V_NR + j];
-                b_quads[j * G + g] = v as u8;
-                colsum[j] = colsum[j].wrapping_add(i32::from(v));
-            }
-        }
-        // SAFETY: `b_quads` holds 64 bytes = 512 bits.
-        let bv = unsafe { _mm512_loadu_si512(b_quads.as_ptr().cast()) };
+    for q in 0..kc / G {
+        // The panel is packed in `k`-quads, so `B`'s 64 bytes for this quad are
+        // exactly the `dpbusd` operand: column-major, `k` within a column.
+        //
+        // SAFETY: `pb[q * V_NR * G ..][..64]` is in bounds: one 512-bit load.
+        let bv = unsafe { _mm512_loadu_si512(pb.as_ptr().add(q * V_NR * G).cast()) };
+        colsum = _mm512_dpbusd_epi32(colsum, ones, bv);
         for (i, lane) in tile.iter_mut().enumerate() {
-            let mut a_quad = [0u8; 4];
-            for (g, slot) in a_quad.iter_mut().enumerate() {
-                // `a + 128` is exactly `a as u8` with its top bit flipped,
-                // which is why the identity costs no arithmetic here.
-                *slot = (pa[(base + g) * V_MR + i] as u8) ^ 0x80;
-            }
-            *lane = _mm512_dpbusd_epi32(*lane, _mm512_set1_epi32(i32::from_le_bytes(a_quad)), bv);
+            // `a + 128` is exactly `a as u8` with its top bit flipped, so the
+            // identity costs one xor over the whole quad.
+            //
+            // SAFETY: `q * V_MR * G + i * G + 3 < V_MR * kc`, and
+            // `read_unaligned` waives `u32`'s alignment.
+            let quad = unsafe {
+                pa.as_ptr()
+                    .add(q * V_MR * G + i * G)
+                    .cast::<u32>()
+                    .read_unaligned()
+            };
+            let av = _mm512_set1_epi32((quad ^ 0x8080_8080) as i32);
+            *lane = _mm512_dpbusd_epi32(*lane, av, bv);
         }
     }
 
-    // The compensation, then the tail in the plain sequence. Both are exact
-    // integers, so the total is still the exact accumulation.
-    // SAFETY: `colsum` holds 16 i32 = 512 bits.
-    let comp = unsafe { _mm512_loadu_si512(colsum.as_ptr().cast()) };
-    let scaled = _mm512_mullo_epi32(comp, _mm512_set1_epi32(128));
+    // The compensation. Both terms are exact integers, so the total is still
+    // the exact accumulation.
+    let scaled = _mm512_mullo_epi32(colsum, _mm512_set1_epi32(128));
     for lane in tile.iter_mut() {
         *lane = _mm512_sub_epi32(*lane, scaled);
     }
 
-    // SAFETY: same features, same lengths, `groups * G <= kc`.
-    unsafe { vnni_tail(kc, groups * G, pa, pb, &mut tile) };
     // SAFETY: `acc` has `V_MR * V_NR` lanes.
     unsafe { vnni_store(acc, &tile) };
-}
-
-/// The `k`-tail, one step at a time, in the plain sequence.
-///
-/// # Safety
-///
-/// The host must have `avx512f`, `avx512bw`, `avx512vnni`.
-#[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
-unsafe fn vnni_tail(kc: usize, from: usize, pa: &[i8], pb: &[i8], tile: &mut [__m512i; V_MR]) {
-    for p in from..kc {
-        let mut lane = [0i32; V_NR];
-        for (j, slot) in lane.iter_mut().enumerate() {
-            *slot = i32::from(pb[p * V_NR + j]);
-        }
-        // SAFETY: `lane` holds 16 i32 = 512 bits.
-        let bv = unsafe { _mm512_loadu_si512(lane.as_ptr().cast()) };
-        for (i, t) in tile.iter_mut().enumerate() {
-            let a = i32::from(pa[p * V_MR + i]);
-            *t = _mm512_add_epi32(*t, _mm512_mullo_epi32(bv, _mm512_set1_epi32(a)));
-        }
-    }
 }
 
 /// # Safety

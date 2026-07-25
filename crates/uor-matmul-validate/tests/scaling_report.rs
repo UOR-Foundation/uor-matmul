@@ -180,25 +180,39 @@ fn working_set_scaling_cg_04() {
     let mut previous = 0usize;
     for s in [16usize, 32, 64, 128, 256, 512] {
         let want = uor_matmul::suggested_scratch(Shape { m: s, k: s, n: s });
-        eprintln!("CG-04 (open): {s}^3 suggests {want} scratch elements");
-        // Monotone in the shape, and bounded by the blocking parameters rather
-        // than by the problem: that bound is the whole point of a fixed panel.
+        let operands = s * s * 2;
+        eprintln!(
+            "CG-04 (open): {s}^3 suggests {want} scratch elements, \
+             {:.3} of the operands",
+            want as f64 / operands as f64
+        );
         assert!(
             want >= previous,
             "the suggestion must not shrink as the shape grows"
         );
         previous = want;
     }
-    let huge = uor_matmul::suggested_scratch(Shape {
-        m: 1 << 20,
-        k: 1 << 20,
-        n: 1 << 20,
-    });
-    eprintln!("CG-04 (open): a 2^20 cube still suggests only {huge} elements");
-    assert!(
-        huge < 1 << 20,
-        "the suggestion is bounded by the blocking, not by the shape"
-    );
+
+    // The suggestion asks for one block of each operand at the full depth, so it
+    // grows with `k` --- and the bound that matters is that it is never more
+    // than the operands themselves, because `MC <= m` and `NC <= n` after the
+    // clamps. A caller who wants less offers less and gets the same bytes from
+    // the chunked traversal (`CD-04`, `CD-10`), which is what makes this a query
+    // and not a requirement.
+    for (m, k, n) in [
+        (1usize, 1usize << 30, 1usize),
+        (1 << 20, 1 << 20, 1 << 20),
+        (4, 1 << 24, 4),
+        (1 << 16, 3, 1 << 16),
+    ] {
+        let want = uor_matmul::suggested_scratch(Shape { m, k, n });
+        let operands = k.saturating_mul(m) + k.saturating_mul(n);
+        eprintln!("CG-04 (open): {m}x{k}x{n} suggests {want}, operands are {operands}");
+        assert!(
+            want <= operands,
+            "the suggestion never exceeds the operands it packs from"
+        );
+    }
 }
 
 /// `CG-05`: allocation count and peak bytes. Zero here, whatever an oracle does.

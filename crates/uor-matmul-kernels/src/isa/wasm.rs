@@ -52,46 +52,28 @@ unsafe fn simd128_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
     let mut lo = [i32x4_splat(0); MR];
     let mut hi = [i32x4_splat(0); MR];
 
-    let pairs = kc / 2;
-    for q in 0..pairs {
-        let (p0, p1) = (q * 2, q * 2 + 1);
-        let mut b_pairs = [0i16; NR * 2];
-        for j in 0..NR {
-            b_pairs[j * 2] = i16::from(pb[p0 * NR + j]);
-            b_pairs[j * 2 + 1] = i16::from(pb[p1 * NR + j]);
-        }
-        // SAFETY: `b_pairs` holds 16 i16 = two v128 loads.
-        let (bv0, bv1) = unsafe {
-            (
-                v128_load(b_pairs.as_ptr().cast()),
-                v128_load(b_pairs.as_ptr().add(8).cast()),
-            )
-        };
+    for q in 0..kc / 2 {
+        // The panel is packed in `k`-pairs, so the sixteen bytes of `B` for this
+        // pair widen straight into the two `i16x8` vectors `dot` consumes: the
+        // low half is columns 0..3 and the high half columns 4..7, each lane
+        // holding the pair `(b[p0][j], b[p1][j])`.
+        //
+        // SAFETY: `pb[q * NR * 2 ..][..16]` is in bounds: one v128 load.
+        let raw = unsafe { v128_load(pb.as_ptr().add(q * NR * 2).cast()) };
+        let bv0 = i16x8_extend_low_i8x16(raw);
+        let bv1 = i16x8_extend_high_i8x16(raw);
         for i in 0..MR {
-            let a0 = i16::from(pa[p0 * MR + i]);
-            let a1 = i16::from(pa[p1 * MR + i]);
-            let av = i32x4_splat(((a1 as u16 as u32) << 16 | (a0 as u16 as u32)) as i32);
+            // Splatting the pair as a halfword and sign-extending it puts
+            // `(a1 << 16) | a0` in every 32-bit lane.
+            //
+            // SAFETY: `q * MR * 2 + i * 2 + 1 < MR * kc`.
+            let av = unsafe {
+                i16x8_extend_low_i8x16(v128_load16_splat(
+                    pa.as_ptr().add(q * MR * 2 + i * 2).cast(),
+                ))
+            };
             lo[i] = i32x4_add(lo[i], i32x4_dot_i16x8(av, bv0));
             hi[i] = i32x4_add(hi[i], i32x4_dot_i16x8(av, bv1));
-        }
-    }
-
-    for p in (pairs * 2)..kc {
-        for i in 0..MR {
-            let a = i32::from(pa[p * MR + i]);
-            let mut lane = [0i32; NR];
-            for (j, slot) in lane.iter_mut().enumerate() {
-                *slot = a.wrapping_mul(i32::from(pb[p * NR + j]));
-            }
-            // SAFETY: `lane` holds 8 i32 = two v128 loads.
-            let (l0, l1) = unsafe {
-                (
-                    v128_load(lane.as_ptr().cast()),
-                    v128_load(lane.as_ptr().add(4).cast()),
-                )
-            };
-            lo[i] = i32x4_add(lo[i], l0);
-            hi[i] = i32x4_add(hi[i], l1);
         }
     }
 

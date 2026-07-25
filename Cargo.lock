@@ -1716,6 +1716,7 @@ name = "uor-matmul-kernels"
 version = "0.1.0"
 dependencies = [
  "uor-matmul-core",
+ "uor-matmul-kernels",
 ]
 
 [[package]]
