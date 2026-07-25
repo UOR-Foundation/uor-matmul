@@ -38,11 +38,14 @@ pub const NEON_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     factorization: Factorization::Exact,
     mr: 4,
     nr: 8,
-    k_group: 1,
     // `vmull_s8` widens across the *columns* of one `k`-step, not across `k`, so
     // this kernel consumes one step at a time and wants the plain `k`-major
-    // panel. The eight is the vector's width in columns, which is `nr`.
+    // panel. Its eight is the vector's width in columns, which is `nr`.
+    k_group: 1,
     lane_cap: i32::MAX as u128,
+    // `vmull_s8` widens each product to `i16` and this kernel widens again to
+    // `i32` before accumulating, so nothing narrower than the lane is held.
+    max_bound: u128::MAX,
     mac_tile: neon_i8,
 };
 
@@ -58,6 +61,7 @@ pub const NEON_DOTPROD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: 12,
     k_group: 4,
     lane_cap: i32::MAX as u128,
+    max_bound: u128::MAX,
     mac_tile: neon_dotprod_i8,
 };
 

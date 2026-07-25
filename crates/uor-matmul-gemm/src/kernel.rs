@@ -41,8 +41,11 @@ pub trait Kernelized: IntegerElement {
     /// The lane the modular kernels accumulate in, when one exists.
     type Modular: Copy + Default + 'static;
 
-    /// The exact kernel for this backend. Always present.
-    fn exact_spec(backend: Backend) -> KernelSpec<Self, Self::Exact>;
+    /// The exact kernel for this backend, on an alphabet bounded by `bound`.
+    ///
+    /// Always present: the reference sequence is exact on every alphabet, so
+    /// narrowing the choice can never empty it.
+    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, Self::Exact>;
 
     /// The modular kernel for this backend, if the output width admits it.
     ///
@@ -51,7 +54,11 @@ pub trait Kernelized: IntegerElement {
     /// a type no wider than the lane: reduction modulo `2^w` is a ring
     /// homomorphism, so the lane's own wrap is the encode, and nothing is lost
     /// that the caller did not ask to lose (§3.4).
-    fn modular_spec(backend: Backend, out_bits: u32) -> Option<KernelSpec<Self, Self::Modular>>;
+    fn modular_spec(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+    ) -> Option<KernelSpec<Self, Self::Modular>>;
 
     /// Fold an exact lane into the accumulator that cannot overflow.
     fn fold_exact(acc: &mut Self::Acc, lane: Self::Exact);
@@ -67,11 +74,11 @@ impl Kernelized for i8 {
     type Exact = i32;
     type Modular = i32;
 
-    fn exact_spec(backend: Backend) -> KernelSpec<Self, i32> {
-        choose(available_i8(), backend).expect("the portable kernel is always present")
+    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i32> {
+        choose(available_i8(), backend, bound).expect("the portable kernel is always present")
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32) -> Option<KernelSpec<Self, i32>> {
+    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
         if out_bits > 32 {
             return None;
         }
@@ -81,7 +88,7 @@ impl Kernelized for i8 {
         // encode, so the same kernel carries any depth in one chunk. Same
         // instructions, same bytes, one fewer fold: that is the homomorphism
         // being cashed in rather than a second kernel being written.
-        let spec = choose(available_i8(), backend)?;
+        let spec = choose(available_i8(), backend, bound)?;
         Some(KernelSpec {
             factorization: Factorization::Modular,
             ..spec
@@ -105,18 +112,18 @@ impl Kernelized for i16 {
     type Exact = i64;
     type Modular = i32;
 
-    fn exact_spec(backend: Backend) -> KernelSpec<Self, i64> {
-        choose(available_i16(), backend).expect("the portable kernel is always present")
+    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i64> {
+        choose(available_i16(), backend, bound).expect("the portable kernel is always present")
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32) -> Option<KernelSpec<Self, i32>> {
+    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
         if out_bits > 32 {
             return None;
         }
         // Not a shortcut for the exact lane's benefit --- that lane already
         // reaches every addressable `k` for `i16`. It is twice the columns per
         // instruction, because in `Z/2^32` there is nothing to widen to.
-        choose(available_i16_modular(), backend)
+        choose(available_i16_modular(), backend, bound)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i64) {
@@ -136,15 +143,16 @@ impl Kernelized for i32 {
     type Exact = i64;
     type Modular = i32;
 
-    fn exact_spec(backend: Backend) -> KernelSpec<Self, i64> {
-        choose(available_i32_exact(), backend).expect("the portable kernel is always present")
+    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i64> {
+        choose(available_i32_exact(), backend, bound)
+            .expect("the portable kernel is always present")
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32) -> Option<KernelSpec<Self, i32>> {
+    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
         if out_bits > 32 {
             return None;
         }
-        choose(available_i32_modular(), backend)
+        choose(available_i32_modular(), backend, bound)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i64) {
@@ -164,20 +172,21 @@ impl Kernelized for i64 {
     type Exact = i128;
     type Modular = i64;
 
-    fn exact_spec(backend: Backend) -> KernelSpec<Self, i128> {
+    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i128> {
         // An `i64 x i64` product needs 128 bits, so the lane is an `i128`. No
         // SIMD integer multiply reaches that width on any supported target, so
         // this is not a placeholder --- it is the whole of what the hardware
         // offers, and the packing still buys it the locality every other family
         // gets.
-        choose(available_i64_exact(), backend).expect("the portable kernel is always present")
+        choose(available_i64_exact(), backend, bound)
+            .expect("the portable kernel is always present")
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32) -> Option<KernelSpec<Self, i64>> {
+    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i64>> {
         if out_bits > 64 {
             return None;
         }
-        choose(available_i64_modular(), backend)
+        choose(available_i64_modular(), backend, bound)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i128) {
@@ -225,7 +234,7 @@ pub fn gemm_packed<E, Bd, O, Ep>(
     // a type no wider than it. That is a question about two declarations --- the
     // encode mode and the output type --- and about nothing else.
     let modular = matches!(options.encode, EncodeMode::Wrapping)
-        .then(|| E::modular_spec(options.backend, O::BITS))
+        .then(|| E::modular_spec(options.backend, O::BITS, Bd::VALUE))
         .flatten();
 
     match modular {
@@ -240,7 +249,7 @@ pub fn gemm_packed<E, Bd, O, Ep>(
             usize::MAX,
         ),
         None => {
-            let spec = E::exact_spec(options.backend);
+            let spec = E::exact_spec(options.backend, Bd::VALUE);
             let depth = spec.lane_depth(Bd::VALUE);
             run::<E, Bd, O, Ep, E::Exact>(
                 triple,

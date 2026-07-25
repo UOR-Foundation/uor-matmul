@@ -35,6 +35,9 @@ macro_rules! reference_kernel {
             // one kernel that never has a tail.
             k_group: 1,
             lane_cap: $cap,
+            // The reference multiplies in the lane's own width, so there is
+            // no intermediate to outgrow and no alphabet it is inexact on.
+            max_bound: u128::MAX,
             mac_tile: $fnname,
         };
 

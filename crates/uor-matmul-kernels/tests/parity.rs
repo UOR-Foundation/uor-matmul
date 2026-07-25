@@ -315,7 +315,8 @@ fn the_wider_families_equal_their_references_cb_02() {
 #[test]
 fn backend_selection_cannot_fail_cd_01() {
     for backend in Backend::ALL {
-        let spec = choose(available_i8(), backend).expect("the portable kernel is always there");
+        let spec =
+            choose(available_i8(), backend, 128).expect("the portable kernel is always there");
         let kc = 33usize.div_ceil(spec.k_group) * spec.k_group;
         let pa = fill(spec.mr * kc, 1, |v| v as i8);
         let pb = fill(spec.nr * kc, 2, |v| v as i8);
@@ -325,12 +326,12 @@ fn backend_selection_cannot_fail_cd_01() {
 
         // Every family answers for every backend, so no instantiation is left
         // without a kernel.
-        assert!(choose(available_i16(), backend).is_some());
-        assert!(choose(available_i32_exact(), backend).is_some());
-        assert!(choose(available_i32_modular(), backend).is_some());
-        assert!(choose(available_i64_modular(), backend).is_some());
+        assert!(choose(available_i16(), backend, 32768).is_some());
+        assert!(choose(available_i32_exact(), backend, 1 << 31).is_some());
+        assert!(choose(available_i32_modular(), backend, 1 << 31).is_some());
+        assert!(choose(available_i64_modular(), backend, 1 << 63).is_some());
     }
-    assert!(choose(available_i8(), Backend::Auto).is_some());
+    assert!(choose(available_i8(), Backend::Auto, 128).is_some());
 }
 
 /// `CU-02`: a modular lane has no depth limit, because the wrap is the encode
@@ -338,8 +339,8 @@ fn backend_selection_cannot_fail_cd_01() {
 /// declared bound, not of the library.
 #[test]
 fn lane_depth_follows_the_declaration_cu_02() {
-    let exact = choose(available_i32_exact(), Backend::Auto).unwrap();
-    let modular = choose(available_i32_modular(), Backend::Auto).unwrap();
+    let exact = choose(available_i32_exact(), Backend::Auto, 1 << 31).unwrap();
+    let modular = choose(available_i32_modular(), Backend::Auto, 1 << 31).unwrap();
 
     assert_eq!(exact.factorization, Factorization::Exact);
     assert_eq!(modular.factorization, Factorization::Modular);
@@ -353,4 +354,107 @@ fn lane_depth_follows_the_declaration_cu_02() {
     // The modular lane is unbounded at every declared bound.
     assert_eq!(modular.lane_depth(1 << 31), usize::MAX);
     assert_eq!(modular.lane_depth(1), usize::MAX);
+}
+
+/// `CU-03`, at the extremes of every alphabet a sequence declares.
+///
+/// A random fill will not find the one input where a paired-product instruction
+/// overflows its intermediate: `madd` sums two products into an `i32`, and two
+/// full-magnitude `i16` products are `2 * 2^30`, which is one bit past it. That
+/// needs both operands to be exactly `i16::MIN` at both `k` of a pair, and a
+/// generator reaches it with probability `2^-64`.
+///
+/// So the extremes are asked for by name --- the extremes of
+/// [`KernelSpec::max_bound`], which is the alphabet the sequence claims. This is
+/// the input that decides whether a kernel is exact on what it declares or
+/// merely exact on likely data.
+#[test]
+fn the_extremes_of_every_alphabet_are_exact_cu_03() {
+    /// The largest and smallest value an alphabet bounded by `bound` holds,
+    /// within the element type.
+    fn extremes(bound: u128, type_bound: u128) -> (i64, i64) {
+        let b = bound.min(type_bound) as i64;
+        // A bound of `B` admits magnitudes up to `B`, and the type's own
+        // negative extreme is `-B`; the positive one is `B - 1` when the bound is
+        // the type's, and `B` when the caller declared it.
+        if bound >= type_bound {
+            (-b, b - 1)
+        } else {
+            (-b, b)
+        }
+    }
+
+    for spec in available_i16() {
+        let (lo, hi) = extremes(spec.max_bound, 32768);
+        for kc in [2usize, 4, 8, 16, 64].map(|k| k.div_ceil(spec.k_group) * spec.k_group) {
+            for (av, bv) in [(lo, lo), (lo, hi), (hi, hi), (hi, lo)] {
+                let (av, bv) = (av as i16, bv as i16);
+                let pa = vec![av; spec.mr * kc];
+                let pb = vec![bv; spec.nr * kc];
+                let mut acc = vec![0i64; spec.mr * spec.nr];
+                spec.mac_tile(kc, &pa, &pb, &mut acc);
+                let want = (kc as i64) * i64::from(av) * i64::from(bv);
+                assert!(
+                    acc.iter().all(|&x| x == want),
+                    "{} i16 (max_bound {}) at ({av}, {bv}) kc={kc}: got {:?}, want {want}",
+                    spec.backend.as_str(),
+                    spec.max_bound,
+                    &acc[..4.min(acc.len())]
+                );
+            }
+        }
+    }
+
+    for spec in available_i32_exact() {
+        let (lo, hi) = extremes(spec.max_bound, 1 << 31);
+        // One product at a time: `lane_depth` at the full bound is 1, and the
+        // driver never offers this lane more than that.
+        for (av, bv) in [(lo, lo), (lo, hi), (hi, hi)] {
+            let (av, bv) = (av as i32, bv as i32);
+            let kc = spec.k_group;
+            let pa = vec![av; spec.mr * kc];
+            let pb = vec![bv; spec.nr * kc];
+            let mut acc = vec![0i64; spec.mr * spec.nr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            let want = (kc as i64) * i64::from(av) * i64::from(bv);
+            assert!(
+                acc.iter().all(|&x| x == want),
+                "{} i32 at ({av}, {bv}): got {:?}, want {want}",
+                spec.backend.as_str(),
+                &acc[..4.min(acc.len())]
+            );
+        }
+    }
+}
+
+/// `CU-02`: selection respects the alphabet a sequence declares.
+///
+/// The `i16` family has two AVX2 sequences whose declared alphabets differ, so
+/// this is where the rule is falsifiable: at a bound the paired sequence admits,
+/// it is chosen; one past that, it is not considered at all. Not because it is
+/// riskier there --- because there it computes a different number.
+#[test]
+fn selection_respects_the_declared_alphabet_cu_02() {
+    let all: Vec<_> = available_i16().collect();
+    if !all.iter().any(|s| s.backend == Backend::Avx2) {
+        eprintln!("no AVX2 i16 sequence on this host; the cross-architecture job covers it");
+        return;
+    }
+    let narrow = choose(available_i16(), Backend::Auto, 32767).unwrap();
+    let full = choose(available_i16(), Backend::Auto, 32768).unwrap();
+    assert!(narrow.max_bound >= 32767);
+    assert!(full.max_bound >= 32768);
+    assert_eq!(narrow.backend, Backend::Avx2);
+    assert_eq!(full.backend, Backend::Avx2);
+    // Two distinct sequences, or the rule is not being exercised.
+    assert_ne!(
+        narrow.k_group, full.k_group,
+        "the two i16 sequences must actually differ"
+    );
+    // And every sequence a bound admits agrees with every other at that bound,
+    // which is what makes the choice free.
+    for bound in [1u128, 127, 32767, 32768] {
+        let picked = choose(available_i16(), Backend::Auto, bound).unwrap();
+        assert!(picked.max_bound >= bound, "bound {bound}");
+    }
 }

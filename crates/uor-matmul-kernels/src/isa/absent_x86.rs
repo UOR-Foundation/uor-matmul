@@ -22,6 +22,8 @@ pub fn avx512vnni_available() -> bool {
 pub const AVX2_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
 /// Unreachable: [`avx2_available`] is `false`.
 pub const AVX2_I16_I64: KernelSpec<i16, i64> = portable::I16_I64;
+/// Absent here; the reference sequence carries this alphabet.
+pub const AVX2_I16_I64_FULL: KernelSpec<i16, i64> = portable::I16_I64;
 /// Unreachable: [`avx2_available`] is `false`.
 pub const AVX2_I32_I64: KernelSpec<i32, i64> = portable::I32_I64;
 /// Unreachable: [`avx2_available`] is `false`.

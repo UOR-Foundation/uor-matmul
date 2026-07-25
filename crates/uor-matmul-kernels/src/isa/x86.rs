@@ -58,6 +58,9 @@ pub const AVX2_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: A2_I8_NR,
     k_group: 2,
     lane_cap: i32::MAX as u128,
+    // `madd`'s pair sum is `2 * bound^2`; an `i8` alphabet cannot reach the
+    // bound where that leaves an `i32`, so this is stated rather than binding.
+    max_bound: 32767,
     mac_tile: avx2_i8,
 };
 
@@ -140,12 +143,19 @@ unsafe fn avx2_i8_inner(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) 
 const A2_I16_MR: usize = 4;
 const A2_I16_NR: usize = 8;
 
-/// AVX2 `i16`: `madd` is exactly this family's arithmetic.
+/// AVX2 `i16` on an alphabet bounded by `32767`: `madd` is exactly this
+/// family's arithmetic.
 ///
 /// `_mm256_madd_epi16` multiplies signed words and sums adjacent pairs into an
-/// `i32`. A pair of full-range `i16` products reaches `2 * 2^30`, which is one
-/// bit past `i32` --- so the pairs are widened to `i64` before accumulating,
-/// and the lane is exact at every depth the driver offers.
+/// `i32`. That pair sum is `2 * bound^2`, so the sequence is exact exactly while
+/// `bound <= 32767` --- and *not* at the full `i16` alphabet, where two products
+/// of `i16::MIN * i16::MIN` reach `2^31` and the intermediate wraps. Widening
+/// the result to `i64` afterwards cannot undo that; the overflow has already
+/// happened inside the instruction.
+///
+/// So this sequence declares its alphabet, and [`AVX2_I16_I64_FULL`] is the one
+/// that runs at the full one. Both are exact on what they declare, which is what
+/// makes them two factorizations rather than a fast one and a safe one.
 pub const AVX2_I16_I64: KernelSpec<i16, i64> = KernelSpec {
     backend: Backend::Avx2,
     factorization: Factorization::Exact,
@@ -153,6 +163,7 @@ pub const AVX2_I16_I64: KernelSpec<i16, i64> = KernelSpec {
     nr: A2_I16_NR,
     k_group: 2,
     lane_cap: i64::MAX as u128,
+    max_bound: 32767,
     mac_tile: avx2_i16,
 };
 
@@ -220,6 +231,83 @@ unsafe fn avx2_i16_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i6
     }
 }
 
+/// AVX2 `i16` at the full alphabet: widen, then multiply at the product's own
+/// width.
+///
+/// `_mm256_cvtepi16_epi32` widens eight columns and `_mm256_mullo_epi32`
+/// multiplies them, and an `i16 x i16` product needs 31 bits --- so every
+/// product is exact for every `i16`, including `i16::MIN * i16::MIN`. The
+/// products are then widened to `i64` and accumulated, so no depth fills the
+/// lane either.
+///
+/// It issues more instructions per product than [`AVX2_I16_I64`], and it is not
+/// a safe fallback for it: at the full alphabet the paired sequence computes a
+/// different number, so there is no choice being made between speed and
+/// correctness. There are two alphabets and one sequence for each.
+pub const AVX2_I16_I64_FULL: KernelSpec<i16, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: A2_I16_MR,
+    nr: A2_I16_NR,
+    k_group: 1,
+    lane_cap: i64::MAX as u128,
+    max_bound: u128::MAX,
+    mac_tile: avx2_i16_full,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `8 * kc`, `acc` 32 writable
+/// lanes, and the host must have `avx2`.
+unsafe fn avx2_i16_full(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i16_full_inner(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_i16_full`].
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_i16_full_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
+    const MR: usize = A2_I16_MR;
+    const NR: usize = A2_I16_NR;
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    let mut tile = [[_mm256_setzero_si256(); 2]; MR];
+
+    for p in 0..kc {
+        // SAFETY: `pb[p * NR ..][..8]` is in bounds: one 128-bit load widened to
+        // eight `i32`.
+        let bv = unsafe {
+            _mm256_cvtepi16_epi32(_mm_loadu_si128(pb.as_ptr().add(p * NR).cast::<__m128i>()))
+        };
+        for (i, row) in tile.iter_mut().enumerate() {
+            let av = _mm256_set1_epi32(i32::from(pa[p * MR + i]));
+            // Exact: `|a * b| <= 2^30`, inside `i32`, for every pair of `i16`.
+            let m = _mm256_mullo_epi32(av, bv);
+            row[0] = _mm256_add_epi64(row[0], _mm256_cvtepi32_epi64(_mm256_castsi256_si128(m)));
+            row[1] = _mm256_add_epi64(
+                row[1],
+                _mm256_cvtepi32_epi64(_mm256_extracti128_si256(m, 1)),
+            );
+        }
+    }
+
+    for (i, row) in tile.iter().enumerate() {
+        // SAFETY: `i < MR`, so these two stores land inside `MR * NR`.
+        unsafe {
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast::<__m256i>(), row[0]);
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR + 4).cast::<__m256i>(), row[1]);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // i32 x i32 -> i64, exact
 // ---------------------------------------------------------------------------
@@ -240,6 +328,8 @@ pub const AVX2_I32_I64: KernelSpec<i32, i64> = KernelSpec {
     nr: A2_I32_NR,
     k_group: 1,
     lane_cap: i64::MAX as u128,
+    // Each product is computed at its own full width, so every alphabet.
+    max_bound: u128::MAX,
     mac_tile: avx2_i32_exact,
 };
 
@@ -319,6 +409,7 @@ pub const AVX2_I32_MOD: KernelSpec<i32, i32> = KernelSpec {
     nr: 16,
     k_group: 1,
     lane_cap: 0,
+    max_bound: u128::MAX,
     mac_tile: avx2_i32_mod,
 };
 
@@ -391,6 +482,9 @@ pub const AVX2_I16_MOD: KernelSpec<i16, i32> = KernelSpec {
     nr: 16,
     k_group: 2,
     lane_cap: 0,
+    // `madd` wraps, and in `Z/2^32` the wrap *is* the answer --- so the pair
+    // sum overflowing an `i32` is not an error here, it is the ring's addition.
+    max_bound: u128::MAX,
     mac_tile: avx2_i16_mod,
 };
 
@@ -471,6 +565,10 @@ pub const AVX512_DPWSSD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: V_NR,
     k_group: 2,
     lane_cap: i32::MAX as u128,
+    // `dpwssd` accumulates pair sums into the `i32` lane itself, so the depth
+    // bound above is the whole of the question: `lane_cap / bound^2` keeps the
+    // running total inside the lane, and there is no separate intermediate.
+    max_bound: u128::MAX,
     mac_tile: vnni_dpwssd,
 };
 
@@ -495,6 +593,7 @@ pub const AVX512_DPBUSD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: V_NR,
     k_group: 4,
     lane_cap: (i32::MAX as u128) / 255 * 128,
+    max_bound: u128::MAX,
     mac_tile: vnni_dpbusd,
 };
 

@@ -88,6 +88,24 @@ pub struct KernelSpec<E, L> {
     /// Ignored for [`Factorization::Modular`], where the lane wraps by design
     /// and the depth is unbounded.
     pub lane_cap: u128,
+    /// The widest alphabet bound at which this sequence is exact.
+    ///
+    /// A lane's *depth* is bounded by [`Self::lane_cap`], and the driver answers
+    /// that by chunking. This is the other question, and chunking cannot answer
+    /// it: some sequences have an intermediate narrower than the lane, and there
+    /// is a magnitude past which that intermediate is wrong however shallow the
+    /// chunk.
+    ///
+    /// `_mm256_madd_epi16` is the case. It sums two products into an `i32`, and
+    /// two full-magnitude `i16` products are `2 * 2^30` --- one bit past it. For
+    /// any bound at or below `32767` the pair fits and the sequence is exact; at
+    /// the full `i16` alphabet it is not, and no depth makes it so.
+    ///
+    /// So the sequence declares the alphabet it is exact on, and [`choose`]
+    /// respects the declaration. That is the same shape of rule as the modular
+    /// factorization's: which instructions are admissible is a question about
+    /// the caller's declarations, never about the data (R13).
+    pub max_bound: u128,
     /// Accumulate an `mr x nr` tile of `C` over a `kc`-deep packed panel pair.
     ///
     /// # Safety
@@ -116,6 +134,7 @@ impl<E, L> core::fmt::Debug for KernelSpec<E, L> {
             .field("mr", &self.mr)
             .field("nr", &self.nr)
             .field("k_group", &self.k_group)
+            .field("max_bound", &self.max_bound)
             .finish_non_exhaustive()
     }
 }
@@ -209,12 +228,16 @@ pub fn available_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
 
 /// Every `i16 x i16 -> i64` kernel this build can run.
 ///
-/// `_mm256_madd_epi16` multiplies signed words and sums adjacent pairs into an
-/// `i32`, which is exactly this family's arithmetic --- so `i16` reaches the
-/// same instruction `i8` reaches after widening, without the widening.
+/// Two AVX2 sequences, and which is admissible is a question about the declared
+/// alphabet. `_mm256_madd_epi16` is this family's arithmetic in one instruction
+/// but sums its pair into an `i32`, so it is exact only up to a bound of
+/// `32767`; the widening sequence is exact at every `i16` and issues more
+/// instructions. The paired one is listed last so that a declaration admitting
+/// it gets it.
 pub fn available_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
     collect![
         true => crate::isa::portable::I16_I64,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL,
         crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64,
     ]
 }
@@ -286,20 +309,26 @@ pub const fn portable_i8() -> KernelSpec<i8, i32> {
     crate::isa::portable::I8_I32
 }
 
-/// Choose from a family: the backend the caller named, or the widest available.
+/// Choose from a family: the backend the caller named, or the widest available,
+/// among the sequences exact on an alphabet bounded by `bound`.
 ///
-/// Selection cannot fail. [`Backend::Auto`] takes the last entry, which is the
-/// widest one the host can run; a named backend the host cannot run yields the
-/// first, which computes the same value. That is not a fallback --- there is no
-/// answer being given up (R13).
+/// Selection cannot fail. [`Backend::Auto`] takes the last admissible entry,
+/// which is the widest one the host can run; a named backend the host cannot run
+/// yields the first, which computes the same value. That is not a fallback ---
+/// there is no answer being given up (R13).
+///
+/// A sequence whose [`KernelSpec::max_bound`] is below `bound` is not considered
+/// at all. It is not slower or riskier: at that alphabet it computes a different
+/// number, so it is not a factorization of this identity.
 pub fn choose<E, L>(
     specs: impl Iterator<Item = KernelSpec<E, L>>,
     requested: Backend,
+    bound: u128,
 ) -> Option<KernelSpec<E, L>> {
     let mut first = None;
     let mut widest = None;
     let mut named = None;
-    for spec in specs {
+    for spec in specs.filter(|s| s.max_bound >= bound) {
         if first.is_none() {
             first = Some(spec);
         }
