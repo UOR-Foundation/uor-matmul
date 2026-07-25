@@ -65,6 +65,11 @@ scaling:
     cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
     cargo bench -p uor-matmul-validate
 
+# CG-09: throughput against the degeneracy of the operand, over the large shapes
+# `just vv` has no time for. Minutes.
+collapse:
+    cargo run --release -p uor-matmul-validate --example collapse_sweep
+
 # CT-06, CG-08: super-massive input. Minutes, and gigabytes of operands, so it is
 # its own recipe rather than part of `vv`.
 massive:

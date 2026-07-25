@@ -71,3 +71,9 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-11
     Then the claim holds byte for byte
+
+  @CD-12 @build
+  Scenario: Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer
+    Given the standing corpus
+    When the suite exercises CD-12
+    Then the claim holds byte for byte

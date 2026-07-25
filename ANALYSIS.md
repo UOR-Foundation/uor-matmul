@@ -278,6 +278,115 @@ What remains, and why:
   comparing a library to itself says nothing about whether the cost is
   reasonable.
 
+## The constraint that is nobody's
+
+The section above is about a constraint a classical GEMM has and this library
+does not. This one is about a constraint neither has noticed.
+
+Every traversal in this library --- and every classical GEMM --- issues
+`m * k * n` products whatever the operands hold. That is not a property of the
+identity. It is a property of how the identity has been walked. Two equal rows of
+`A` name the same sum against every column of `B`, so a driver that computes both
+has computed one thing twice, and no amount of blocking or vectorisation
+recovers it: the arithmetic was already issued.
+
+The upstream Atlas measures the same thing from the other side. Its finite sector
+has `3^7 = 2187` length-seven braid words and **26** distinct canonical states ---
+a degeneracy of 84 --- and it charges per distinct state, content-addressed by
+`kappa`, rather than per word. What it says about this library is that the number
+of *expressions* an operand is written in and the number of *meanings* it carries
+are different numbers, and only one of them is worth paying for.
+
+[`Collapse`] is that here. One pass numbers each row of `A` by the first row
+equal to it; the product is taken over the distinct rows only; the output is
+expanded in place. `CD-12` asserts it byte-identical to the packed and streaming
+traversals at every degeneracy from one meaning to all of them, and at every
+offer including none.
+
+**Why this library may do it and a classical one may not.** Sharing a result
+between two rows is sound exactly when the two rows name the same value. Here
+they do: the sum is over a declared alphabet, taken exactly, with no rounding
+between the products and the single encode, so equal operands give equal sums by
+definition. A classical `sgemm` sharing a row would additionally have to argue
+that the *order* of its additions was the same, because its answer depends on
+that order --- and it is the same argument it cannot make about chunking.
+
+### Throughput against degeneracy, Gmac/s
+
+Against the nominal `m * k * n`, which is what the caller asked for. Reporting
+against the products actually issued would print the same number in every row and
+hide the whole effect. Every figure is `open`.
+
+| `m x k x n` | `d = 1` | `m/8` | `m/2` | `d = m` | uor packed | ndarray |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4096x512x512 | 715 | 217 | -- | 38.6 | 40.2 | 0.53 |
+| 4096x64x64 | 76.0 | 42.6 | -- | 12.0 | 13.7 | 1.85 |
+| 65536x128x128 | 166 | 95.3 | 29.8 | 17.6 | 19.8 | 0.70 |
+
+At `4096 x 512 x 512` with one distinct row that is **17.8x** this library's own
+packed traversal and **1350x** `ndarray`, on an answer asserted byte for byte
+against both.
+
+### The price of looking
+
+The last two columns are the row to read second. An operand whose rows are
+pairwise distinct pays the pass and gets nothing: 4% at `k = 512`, 12% at
+`k = 64`, 11% at `65536 x 128 x 128`. That is the honest cost of the question,
+and it is why the traversal is entered through an *offer* rather than always.
+`Scratch` set the precedent --- a caller who cannot spare the memory gets the
+same bytes from a different walk --- and the same rule applies here: a caller who
+knows their `A` has no repeated rows offers nothing and pays nothing.
+
+Three things were measured and fixed before that price was 4% rather than 25%:
+
+**The pass hashed through the wrapper.** `Alphabet`'s derived `Hash` and
+`PartialEq` ask for one on the *bound*, which is a marker with nothing to
+compare, so the comparison was element by element where the peeled slices are one
+`memcmp`. At one distinct row --- every row compared against the representative
+--- that was half the pass.
+
+**One hash lane is a serial multiply chain.** FNV's mix has five-cycle latency
+and one-cycle throughput, so a single accumulator runs at a fifth of the
+multiplier's rate. Eight independent lanes over `chunks_exact(8)`, destructured
+rather than indexed so the bounds check does not survive, took the pass from
+2.4 ns per element to 0.6.
+
+**The fold cost more than a twelfth of the row.** Folding eight lanes by running
+the byte mix over all sixty-four of their bytes is sixty-four *serial*
+multiplies per row --- at `k = 512` that is a twelfth of the elements and a third
+of the time. One rotate-xor per lane and a multiply-shift finisher does it in
+sixteen operations.
+
+**The expansion wrote cells.** Replicating an output row is `n` strided writes
+each costing two index computations, where a row-major output already holds the
+row as a run. [`MatViewMut::copy_row`] is [`MatView::row_block`]'s mutable twin
+and moves it. It is also where the earlier measurement was wrong: the first
+version read 0.64 GB/s and the second 24 GB/s, and the difference was entirely
+the first touch of an 8 MB output. A copy rate measured on unfaulted pages is a
+page-fault rate.
+
+### What it is not
+
+The upstream paper is careful, and this section is careful in the same way. The
+Atlas claims polynomial-time evaluation for the *finite* sector's invariant
+decisions and explicitly disclaims subverting the `#P`-hardness of general tensor
+contraction. The analogue here is exactly as narrow: a dense product of two
+operands with no repeated content costs what it costs, and the row above says so.
+What the collapse traversal removes is the assumption that the cost of a product
+is a function of its *shape* --- and for a batch over a vocabulary, a one-hot or
+gather product, a padded batch, or a low-bit quantised operand, the shape and the
+content say very different things.
+
+Two things it does not yet do, stated rather than implied:
+
+- Columns of `B` are not collapsed. The pass is a function of a view, and `B`
+  transposed is a view, so it is the same routine against a column-major
+  compaction --- but it is not written, and a product whose sharing is on the
+  `B` side gets none of this.
+- An epilogue that reads `C` gets the packed traversal, because two rows with
+  equal rows of `A` still have different outputs when the `C` they read differs.
+  That is decided by the epilogue's own declaration and never by the data.
+
 ## Against the oracles
 
 C3 is a hard constraint: scaling is compared against the oracle's scaling. Both

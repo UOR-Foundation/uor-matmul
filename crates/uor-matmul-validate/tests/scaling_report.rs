@@ -306,3 +306,122 @@ fn the_scaling_apparatus_is_falsifiable_cg_01() {
         "two points must not fit"
     );
 }
+
+/// `CG-09`: throughput against the *degeneracy* of the operand.
+///
+/// Every classical GEMM issues `m * k * n` products whatever the operands hold.
+/// The collapse traversal issues one accumulation per distinct row of `A`, so
+/// its cost tracks how many meanings the operand carries rather than how many
+/// expressions it is written in. This measures that, and --- in the last row of
+/// each shape --- what it costs when there is nothing to find.
+///
+/// `open`: reported, never asserted. What it *does* fail on is a broken
+/// measurement, and the whole output of both traversals is compared inside the
+/// harness, because a speed that came from a different answer is not a speed.
+#[test]
+fn throughput_against_degeneracy_cg_09() {
+    use uor_matmul_core::{
+        as_alphabet_full, Alphabet, EncodeMode, Full, MatView, MatViewMut, Shape, Triple,
+    };
+    use uor_matmul_gemm::{
+        gemm_collapsed, gemm_packed, suggested_collapse_index, suggested_collapse_rows,
+        suggested_scratch, Collapse, GemmOptions, Linear, Scratch,
+    };
+
+    // Modest, because this runs inside `just vv`. The wide sweep lives in the
+    // `collapse_sweep` example, which is where the large shapes are measured.
+    let (m, k, n) = (1024usize, 128usize, 128usize);
+    let shape = Shape { m, k, n };
+    let macs = (m * k * n) as f64;
+    let options = GemmOptions {
+        encode: EncodeMode::Wrapping,
+        ..Default::default()
+    };
+
+    // A recorded generator rather than an arithmetic pattern: an arithmetic one
+    // repeats, and a sweep over degeneracy whose operand has its own accidental
+    // degeneracy measures nothing.
+    let fill = |len: usize, salt: u64| -> Vec<i8> {
+        let mut s = 0x243F_6A88_85A3_08D3u64 ^ salt;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                ((s >> 33) as i64 % 251 - 125) as i8
+            })
+            .collect()
+    };
+
+    let b: Vec<i8> = fill(k * n, 0xb1a5);
+    let mut scratch = vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_scratch(shape)];
+    let mut index = vec![0usize; suggested_collapse_index(m)];
+    let mut rows = vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_collapse_rows(shape)];
+
+    for meanings in [1usize, 32, 256, m] {
+        let base = fill(meanings * k, 0x5eed);
+        let a: Vec<i8> = (0..m * k)
+            .map(|x| base[(x / k % meanings) * k + x % k])
+            .collect();
+
+        let mut c = vec![0i32; m * n];
+        let time = |run: &mut dyn FnMut()| {
+            // Warm, then measure: the first touch of an output is a page fault
+            // rate and not a copy rate.
+            run();
+            let s = std::time::Instant::now();
+            for _ in 0..3 {
+                run();
+            }
+            s.elapsed().as_secs_f64() / 3.0
+        };
+
+        let t_collapsed = {
+            let (a, b, c, scratch, index, rows) =
+                (&a, &b, &mut c, &mut scratch, &mut index, &mut rows);
+            time(&mut || {
+                let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+                let bv = MatView::row_major(as_alphabet_full(b), k, n).unwrap();
+                let cv = MatViewMut::row_major(c, m, n).unwrap();
+                let mut t = Triple::new(av, bv, cv).unwrap();
+                gemm_collapsed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    options,
+                    &mut Scratch::new(scratch),
+                    &mut Collapse::new(index, rows),
+                );
+            })
+        };
+        let collapsed = c.clone();
+
+        let t_packed = {
+            let (a, b, c, scratch) = (&a, &b, &mut c, &mut scratch);
+            time(&mut || {
+                let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+                let bv = MatView::row_major(as_alphabet_full(b), k, n).unwrap();
+                let cv = MatViewMut::row_major(c, m, n).unwrap();
+                let mut t = Triple::new(av, bv, cv).unwrap();
+                gemm_packed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    options,
+                    &mut Scratch::new(scratch),
+                );
+            })
+        };
+
+        // Not a spot check: the whole output, both traversals.
+        assert_eq!(
+            collapsed, c,
+            "the timed traversals must agree byte for byte at {meanings} meanings"
+        );
+
+        eprintln!(
+            "CG-09 (open): {m}x{k}x{n}, {meanings} distinct rows: collapsed {:.1} Gmac/s, packed {:.1} Gmac/s ({:.2}x)",
+            macs / t_collapsed / 1e9,
+            macs / t_packed / 1e9,
+            t_packed / t_collapsed,
+        );
+    }
+}

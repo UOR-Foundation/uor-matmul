@@ -381,8 +381,62 @@ impl<'a, E> MatViewMut<'a, E> {
         &mut self.data[idx]
     }
 
+    /// The first `rows` rows of this output, as an output in their own right.
+    ///
+    /// The same buffer, the same origin, and the same strides --- only fewer
+    /// rows named. Nothing is copied and nothing is re-placed, so a view of the
+    /// first `rows` rows reaches exactly the cells this one reaches at those
+    /// coordinates.
+    ///
+    /// `None` when the view does not have that many rows. It exists for the
+    /// collapse traversal, which computes one output row per *distinct* row of
+    /// `A` and then expands; the compacted product is a product in its own
+    /// right, and this is how it is named.
+    pub fn top_rows(&mut self, rows: usize) -> Option<MatViewMut<'_, E>> {
+        if rows > self.rows {
+            return None;
+        }
+        Some(MatViewMut {
+            data: self.data,
+            origin: self.origin,
+            rows,
+            cols: self.cols,
+            strides: self.strides,
+        })
+    }
+
     fn index(&self, i: usize, j: usize) -> usize {
         self.origin.wrapping_add_signed(self.strides.offset(i, j))
+    }
+}
+
+impl<E: Copy> MatViewMut<'_, E> {
+    /// Copy row `from` onto row `to` as one run, when the strides lay the rows
+    /// out as runs.
+    ///
+    /// [`MatView::row_block`]'s mutable twin, and it exists for the same reason:
+    /// a row-major output already holds each row as `cols` adjacent elements, so
+    /// replicating one is a move of that run rather than `cols` strided writes
+    /// each costing two index computations. Measured on the collapse traversal,
+    /// where replicating the output is the whole cost once the arithmetic has
+    /// been shared, that was the difference between 2.4 ns per cell and the
+    /// machine's copy rate.
+    ///
+    /// `false` when the strides do not lay it out that way, and then the caller
+    /// walks. The bytes written are the same either way.
+    pub fn copy_row(&mut self, from: usize, to: usize) -> bool {
+        if self.cols == 0 || from == to {
+            return true;
+        }
+        if self.strides.cs != 1 || from >= self.rows || to >= self.rows {
+            return false;
+        }
+        let src = self.index(from, 0);
+        // `cs == 1` makes `index(row, j)` equal `index(row, 0) + j`, and every
+        // coordinate the view names is in bounds, so both runs are.
+        self.data
+            .copy_within(src..src + self.cols, self.index(to, 0));
+        true
     }
 }
 

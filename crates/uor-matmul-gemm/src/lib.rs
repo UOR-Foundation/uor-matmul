@@ -30,6 +30,7 @@
 extern crate std;
 
 pub mod coded;
+pub mod collapse;
 pub mod driver;
 pub mod epilogue;
 pub mod float;
@@ -38,6 +39,7 @@ pub mod partition;
 pub mod scratch;
 
 pub use coded::{coded_gemm, CodedTriple};
+pub use collapse::{gemm_collapsed, suggested_collapse_index, suggested_collapse_rows, Collapse};
 pub use driver::{gemm, GemmOptions};
 pub use epilogue::{Bias, Epilogue, Linear};
 pub use float::{gemm_float, gemm_float_packed, SignedPlace};

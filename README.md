@@ -213,7 +213,13 @@ two-core runner with AVX2:
 
 The integer paths are ahead of both integer oracles at every size that is not
 latency-bound, and hold their throughput from `n = 128` upward while `ndarray`
-falls away. The float path is two orders of magnitude behind, and that is N4 stated
+falls away. `ANALYSIS.md` §"The constraint that is nobody's" has the
+one figure that is not a constant factor: the collapse traversal charges per
+*distinct* row of `A` rather than per row, so at `4096 x 512 x 512` with one
+distinct row it runs at **715 Gmac/s** --- 17.8x this library's own packed
+traversal and 1350x `ndarray` --- on an answer asserted byte for byte against
+both. An operand with no repeated rows pays 4% for the question and is told so in
+the same table. The float path is two orders of magnitude behind, and that is N4 stated
 as a number rather than as an excuse: one FMA per element against a decode, an
 integer significand multiply, and a placement into a 619-bit register that never
 rounds until the end.

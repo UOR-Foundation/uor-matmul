@@ -59,6 +59,7 @@ returns an error the model does not sanction.
 | `CD-09` | `build` | The narrow-register tile path agrees with `dot_wide` |
 | `CD-10` | `build` | `Scratch::None`, one byte, `suggested_scratch - 1`, `suggested_scratch`, and ten times it all give the same bytes |
 | `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room |
+| `CD-12` | `build` | Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
 
@@ -134,6 +135,7 @@ returns an error the model does not sanction.
 | `CG-05` | `open` | Allocation count and peak bytes: zero here, whatever the oracle does there |
 | `CG-06` | `open` | Parallel speedup against tile count, with byte-equality asserted inside the timed harness |
 | `CG-08` | `open` | Sustained throughput on super-massive input, reported per pass, against every oracle that finishes |
+| `CG-09` | `open` | Throughput against the degeneracy of the operand, including the price of looking when there is none |
 | `CG-07` | `open` | Small-shape latency, where a heavyweight prologue costs more than an asymptote |
 
 ## `CM-*` --- Model integrity: the model is the single source of every constant

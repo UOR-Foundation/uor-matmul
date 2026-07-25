@@ -60,3 +60,9 @@ Feature: Scaling
     Given the standing corpus
     When the suite exercises CG-08
     Then the figure is reported and not asserted
+
+  @CG-09 @open
+  Scenario: Throughput against the degeneracy of the operand, including the price of looking when there is none
+    Given the standing corpus
+    When the suite exercises CG-09
+    Then the figure is reported and not asserted

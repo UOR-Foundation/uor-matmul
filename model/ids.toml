@@ -162,6 +162,12 @@ suite = "determinism"
 statement = """Forcing a wider accumulator than necessary changes nothing but the room"""
 
 [[id]]
+id = "CD-12"
+level = "build"
+suite = "determinism"
+statement = """Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer"""
+
+[[id]]
 id = "CB-01"
 level = "build"
 suite = "backends"
@@ -400,6 +406,12 @@ id = "CG-08"
 level = "open"
 suite = "scaling"
 statement = """Sustained throughput on super-massive input, reported per pass, against every oracle that finishes"""
+
+[[id]]
+id = "CG-09"
+level = "open"
+suite = "scaling"
+statement = """Throughput against the degeneracy of the operand, including the price of looking when there is none"""
 
 [[id]]
 id = "CG-07"
