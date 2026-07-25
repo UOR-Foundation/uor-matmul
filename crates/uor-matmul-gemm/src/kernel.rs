@@ -575,14 +575,17 @@ fn run<E, Bd, O, Ep, L>(
                     None => bytemuck::TransparentWrapper::peel_slice(&*pb_buf),
                 };
 
-                // The column panel is the inner loop's invariant, so it stays in
-                // the nearest cache while the row panels stream past it.
-                let mut jj = 0;
-                while jj < cols {
-                    let bp = &pb[(jj / nr) * nr * kpad..][..nr * kpad];
-                    let mut ii = 0;
-                    while ii < rows {
-                        let ap = &pa[(ii / mr) * mr * kpad..][..mr * kpad];
+                // The row panel is the inner loop's invariant, so it stays in the
+                // nearest cache while the column panels stream past it. It is the
+                // smaller of the two --- `mr * kpad` against `nr * kpad` --- and
+                // at a panel whose depth is the whole of `k` that is the
+                // difference between holding it in L1 and not.
+                let mut ii = 0;
+                while ii < rows {
+                    let ap = &pa[(ii / mr) * mr * kpad..][..mr * kpad];
+                    let mut jj = 0;
+                    while jj < cols {
+                        let bp = &pb[(jj / nr) * nr * kpad..][..nr * kpad];
                         spec.mac_tile(kpad, ap, bp, &mut tile[..mr * nr]);
 
                         for i in 0..mr.min(rows - ii) {
@@ -594,9 +597,9 @@ fn run<E, Bd, O, Ep, L>(
                                 *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
                             }
                         }
-                        ii += mr;
+                        jj += nr;
                     }
-                    jj += nr;
+                    ii += mr;
                 }
                 i0 += mc;
             }
@@ -729,16 +732,35 @@ fn pack_rows<E: IntegerElement, Bd: Bound>(
     rows: usize,
 ) {
     let count = count.min(rows.saturating_sub(row0));
+    // Which loop is inner decides which stride the *reads* walk, and the panel
+    // is written either way. A lane is a row here, so the lanes move by `rs` and
+    // the depth by `cs`: putting the lanes inside walks `rs`, putting the depth
+    // inside walks `cs`, and the right answer is whichever is smaller. Reading
+    // the wrong way round touches a new cache line per element, which for a
+    // shape whose packing is the same order as its arithmetic is the whole cost.
+    // Only worth it when there is more than one lane to put inside: a reduce
+    // panel has one, and an inner loop of one element is all overhead.
+    let lanes_inner = lanes > 1 && a.strides().rs.unsigned_abs() < a.strides().cs.unsigned_abs();
     let mut base = 0;
     let mut done = 0;
     while done < count {
         let full = lanes.min(count - done);
         let panel = &mut out[base..base + lanes * kpad];
-        for lane in 0..full {
-            let mut cursor = Cursor::new(lane, lanes, group);
-            for v in a.row_walk(row0 + done + lane, col0, depth) {
-                panel[cursor.at] = *v;
+        if lanes_inner {
+            let mut cursor = Cursor::new(0, lanes, group);
+            for p in 0..depth {
+                for (lane, v) in a.column_walk(row0 + done, col0 + p, full).enumerate() {
+                    panel[cursor.at + lane * group] = *v;
+                }
                 cursor.advance();
+            }
+        } else {
+            for lane in 0..full {
+                let mut cursor = Cursor::new(lane, lanes, group);
+                for v in a.row_walk(row0 + done + lane, col0, depth) {
+                    panel[cursor.at] = *v;
+                    cursor.advance();
+                }
             }
         }
         pad_panel(panel, lanes, group, depth, kpad, full);
@@ -763,16 +785,30 @@ fn pack_columns<E: IntegerElement, Bd: Bound>(
     cols: usize,
 ) {
     let count = count.min(cols.saturating_sub(col0));
+    // A lane is a column here, so the lanes move by `cs` and the depth by `rs`.
+    // See [`pack_rows`]: a row-major `B` wants the lanes inside, and walking it
+    // the other way round is a cache line per element.
+    let lanes_inner = lanes > 1 && b.strides().cs.unsigned_abs() < b.strides().rs.unsigned_abs();
     let mut base = 0;
     let mut done = 0;
     while done < count {
         let full = lanes.min(count - done);
         let panel = &mut out[base..base + lanes * kpad];
-        for lane in 0..full {
-            let mut cursor = Cursor::new(lane, lanes, group);
-            for v in b.column_walk(row0, col0 + done + lane, depth) {
-                panel[cursor.at] = *v;
+        if lanes_inner {
+            let mut cursor = Cursor::new(0, lanes, group);
+            for p in 0..depth {
+                for (lane, v) in b.row_walk(row0 + p, col0 + done, full).enumerate() {
+                    panel[cursor.at + lane * group] = *v;
+                }
                 cursor.advance();
+            }
+        } else {
+            for lane in 0..full {
+                let mut cursor = Cursor::new(lane, lanes, group);
+                for v in b.column_walk(row0, col0 + done + lane, depth) {
+                    panel[cursor.at] = *v;
+                    cursor.advance();
+                }
             }
         }
         pad_panel(panel, lanes, group, depth, kpad, full);

@@ -203,13 +203,13 @@ two-core runner with AVX2:
 
 | | uor-matmul | oracle | |
 | --- | --- | --- | --- |
-| `i8`, `n = 1024` | 36.5 Gmac/s | matrixmultiply `f32` 43.5 | 1.2x behind, across element types |
-| `i32`, `n = 1024` | 26.7 Gmac/s | ndarray 0.21 | **127x ahead** |
-| `i32`, `n = 1024` | 26.7 Gmac/s | nalgebra 4.35 | **6.1x ahead** |
-| `i8`, `1024x1024x1` | 34.5 Gmac/s | ndarray 3.23 | **11x ahead** |
+| `i8`, `n = 1024` | 37.5 Gmac/s | matrixmultiply `f32` 43.5 | 1.2x behind, across element types |
+| `i32`, `n = 1024` | 28.7 Gmac/s | ndarray 0.21 | **138x ahead** |
+| `i32`, `n = 1024` | 28.7 Gmac/s | nalgebra 3.89 | **7.4x ahead** |
+| `i8`, `1024x1024x1` | 34.8 Gmac/s | ndarray 3.25 | **11x ahead** |
 | `i8`, `1x1048576x1` | 40.2 Gmac/s | ndarray 2.43 | **17x ahead** |
-| `f32`, `n = 1024` | 0.24 Gmac/s | matrixmultiply 43.5 | 180x behind |
-| latency at `n = 1` | 140 ns | ndarray 60 ns | 2.3x behind |
+| `f32`, `n = 1024` | 0.23 Gmac/s | matrixmultiply 43.5 | 185x behind |
+| latency at `n = 1` | 150 ns | ndarray 60 ns | 2.5x behind |
 
 The integer paths are ahead of both integer oracles at every size that is not
 latency-bound, and hold their throughput from `n = 128` upward while `ndarray`

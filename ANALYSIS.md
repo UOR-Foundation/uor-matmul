@@ -146,6 +146,13 @@ the layout honour it --- `k`-major in groups, lane-major within one --- lets
 consume, and `A`'s group be one unaligned load and a broadcast. It also removed
 every kernel's `k`-tail. Worth 1.35x on `i8`.
 
+**The inner loop held the larger panel.** With the column panel as the inner
+loop's invariant, `nr * kpad` is what has to stay in L1 --- and at a panel whose
+depth is the whole of `k` that is 32 KiB at `n = 2048`. The row panel is
+`mr * kpad`, which is smaller, so it is the one to hold. Worth 1.3x at
+`n = 2048` and nothing below it, which is what a cache-residency fix should look
+like.
+
 **The block extents read the blocking as a column count.** `NC` columns of `B`
 at a panel depth of the whole `k` is a `k/KC`-times-oversized panel, which at
 `k = 1024` is the difference between a panel in L2 and a panel in memory. Read
@@ -156,6 +163,16 @@ narrows as the depth grows and what stays resident stays the same size.
 `nr` columns per call whether the output has them or not; at `n = 1` that is one
 useful lane in ninety-six. The reduce factorization puts the lanes on `k`, where
 there is always more. Worth 50x on a matrix-vector product.
+
+**The packing walked the wrong stride.** `pack_columns` looped lanes outside and
+depth inside, so it read a row-major `B` down its columns --- a new cache line
+per element. Which loop is inner decides which stride the reads walk, and the
+right answer is whichever stride is smaller, which is a question about the
+*declared* strides. It is invisible on a square, where the packing is amortized
+over the row blocks, and it is the whole cost when `m` is small: worth 1.8x on
+`1x1024x1024` and 2.0x on `4096x2x4096`. It also has to be *off* for a
+one-lane reduce panel, where an inner loop of one element is all overhead ---
+which measuring caught, at a 2x regression on `8x262144x8`.
 
 **A packed panel is a copy, and some panels were already there.** For a
 `LaneLayout::Contiguous` kernel the panel *is* a run of rows or of columns, so a
@@ -182,11 +199,11 @@ What remains, and why:
 - The generic and coded drivers walk `k` innermost, so `B` is read with stride
   `n`. Fixing that needs an accumulator row, which is again memory the library
   cannot own. The kernel-driven path is the one that packs.
-- `m = 1` against a wide `n` still fills a `6`-row panel with one real row. The
-  shape is memory-bound either way --- `B` must be read once for `k*n` products
-  --- and the library is ahead of both integer oracles there, so the padding is
-  hidden. It is the one shape where a narrower tile panel would still buy
-  something.
+- `m = 1` against a wide `n` still fills a `6`-row panel with one real row, so
+  the kernel does six times the arithmetic the product needs. It is now level
+  with `matrixmultiply` and 4.6x ahead of `ndarray` on that shape, because the
+  packing rather than the arithmetic was the cost; a narrower tile panel is the
+  one thing left that would buy something there.
 - `f32` is far slower than the integer paths. The size of that gap is measured
   against the *oracles* below, not against our own integer path, because
   comparing a library to itself says nothing about whether the cost is
@@ -210,12 +227,17 @@ Every figure is `open`.
 
 | `n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` exact | matrixmultiply `f32` |
 | --- | --- | --- | --- | --- | --- | --- |
-| 8 | 0.64 | 0.84 | 1.00 | 1.46 | 0.15 | 4.66 |
-| 32 | 6.10 | 5.54 | 1.75 | 3.88 | 0.21 | 26.8 |
-| 128 | 18.6 | 15.0 | 0.72 | 4.28 | 0.25 | 28.8 |
-| 512 | 36.9 | 28.1 | 0.55 | 4.66 | 0.25 | 43.4 |
-| 1024 | 36.5 | 26.7 | 0.21 | 4.35 | 0.24 | 43.5 |
-| 2048 | 25.0 | 14.8 | 0.15 | 3.95 | 0.24 | 42.8 |
+| 8 | 0.63 | 0.93 | 1.02 | 1.46 | 0.15 | 4.66 |
+| 32 | 6.56 | 6.08 | 1.74 | 4.00 | 0.21 | 26.2 |
+| 128 | 19.8 | 16.8 | 0.73 | 4.41 | 0.25 | 28.8 |
+| 512 | 38.5 | 29.6 | 0.54 | 4.68 | 0.25 | 43.5 |
+| 1024 | 37.5 | 28.7 | 0.21 | 3.89 | 0.23 | 43.5 |
+| 2048 | 23.3 | 21.4 | 0.15 | 4.76 | 0.24 | 40.7 |
+
+At `n = 2048` a single one of our repetitions already exceeds the wall-clock
+budget, so that row is a best-of-one and moves by a third between runs on a
+shared machine. It is reported rather than smoothed, and the row above it is the
+one to read.
 
 ### Throughput on shapes that are not squares, Gmac/s
 
@@ -224,13 +246,13 @@ different half of the driver.
 
 | `m x k x n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` | matrixmultiply `f32` |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1024x1024x1 | 34.5 | 16.4 | 3.23 | 0.17 | 0.19 | 2.25 |
-| 1x1024x1024 | 0.54 | 0.29 | 0.21 | 0.14 | 0.14 | 1.21 |
-| 8x262144x8 | 6.63 | 5.06 | 1.70 | 1.77 | 0.24 | 16.0 |
-| 1x1048576x1 | 40.2 | 10.2 | 2.43 | 0.40 | 0.15 | 0.31 |
-| 2048x8x2048 | 8.78 | 7.88 | 1.08 | 0.81 | 0.12 | 13.2 |
-| 4096x2x4096 | 1.19 | 2.19 | 0.42 | 0.18 | 0.05 | 0.86 |
-| 509x1021x257 | 26.3 | 23.2 | 1.22 | 5.47 | 0.24 | 41.7 |
+| 1024x1024x1 | 34.8 | 16.1 | 3.25 | 0.18 | 0.19 | 2.25 |
+| 1x1024x1024 | 1.00 | 0.84 | 0.22 | 0.15 | 0.14 | 1.18 |
+| 8x262144x8 | 6.58 | 5.14 | 1.72 | 1.71 | 0.24 | 16.1 |
+| 1x1048576x1 | 40.2 | 10.2 | 2.43 | 0.39 | 0.15 | 0.31 |
+| 2048x8x2048 | 8.67 | 7.68 | 1.09 | 0.82 | 0.12 | 12.5 |
+| 4096x2x4096 | 2.40 | 2.25 | 0.43 | 0.18 | 0.05 | 0.85 |
+| 509x1021x257 | 27.3 | 24.5 | 1.21 | 5.52 | 0.26 | 41.9 |
 
 ### Latency at the smallest shapes, nanoseconds per call
 
@@ -260,8 +282,8 @@ structure should do.
 ### What this says
 
 **On integers, this library is ahead of both oracles at every size that is not
-latency-bound.** At `n = 512` it is 67x `ndarray` and 7.9x `nalgebra`; at
-`n = 1024`, 174x and 8.4x. Nothing about that is a compromise on exactness: the
+latency-bound.** At `n = 512` it is 71x `ndarray` and 8.2x `nalgebra`; at
+`n = 1024`, 180x and 9.6x. Nothing about that is a compromise on exactness: the
 integer result is the exact sum encoded once, and `CX-01` .. `CX-04` and `CX-10`
 assert it byte for byte against four independent implementations, including one
 outside the Rust ecosystem.
@@ -281,7 +303,7 @@ closed it, and both are the same identity, factored differently.
 construction and kernel selection, both once per call and neither scaling. It is
 one of two places an oracle is ahead, and the sweep says so.
 
-**On floats the library is roughly 180x behind `matrixmultiply`, and that is the
+**On floats the library is roughly 185x behind `matrixmultiply`, and that is the
 trade N4 names.** A classical `sgemm` issues one fused multiply-add per element.
 This one decodes two IEEE bit patterns, multiplies their significands as
 integers, and places the exact product into a 619-bit fixed-point register ---
