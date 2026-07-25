@@ -44,6 +44,11 @@ no-alloc:
     cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
     cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown \
         --config 'build.rustflags=["-C","target-feature=+simd128"]'
+    # The NEON kernels compile on no host that can run them, so a break in them
+    # would otherwise reach CI before it reached the author. Building here does
+    # not exercise them --- the `cross` job does that, natively --- but it does
+    # mean the ISA the canonical instantiation cares about most cannot rot.
+    cargo check -p uor-matmul --target aarch64-unknown-linux-gnu
 
 # CA-02: the corpus digest is the same on every target.
 cross: no-alloc

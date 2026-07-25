@@ -24,8 +24,8 @@ use uor_matmul_kernels::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
     available_i64_exact, available_i64_modular, available_i8, available_reduce_i16,
     available_reduce_i16_modular, available_reduce_i32_exact, available_reduce_i32_modular,
-    available_reduce_i64_exact, available_reduce_i64_modular, available_reduce_i8, choose,
-    choose_reduce, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
+    available_reduce_i64_exact, available_reduce_i64_modular, available_reduce_i8, choose_for_rows,
+    Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
 };
 
 use crate::driver::GemmOptions;
@@ -47,7 +47,7 @@ pub trait Kernelized: IntegerElement {
     ///
     /// Always present: the reference sequence is exact on every alphabet, so
     /// narrowing the choice can never empty it.
-    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, Self::Exact>;
+    fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, Self::Exact>;
 
     /// The exact *reduce* kernel: lanes on `k` rather than on the output.
     ///
@@ -75,6 +75,7 @@ pub trait Kernelized: IntegerElement {
         backend: Backend,
         out_bits: u32,
         bound: u128,
+        rows: usize,
     ) -> Option<KernelSpec<Self, Self::Modular>>;
 
     /// Fold an exact lane into the accumulator that cannot overflow.
@@ -91,12 +92,13 @@ impl Kernelized for i8 {
     type Exact = i32;
     type Modular = i32;
 
-    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i32> {
-        choose(available_i8(), backend, bound).expect("the portable kernel is always present")
+    fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i32> {
+        choose_for_rows(available_i8(), backend, bound, rows)
+            .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i32> {
-        choose_reduce(available_reduce_i8(), backend, bound, rows)
+        choose_for_rows(available_reduce_i8(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
@@ -111,14 +113,19 @@ impl Kernelized for i8 {
         }
         // The same homomorphism the tile kernel cashes in: an `i8` reduce lane is
         // already 32 bits, and read as `Z/2^32` its wrap *is* the encode.
-        let spec = choose_reduce(available_reduce_i8(), backend, bound, rows)?;
+        let spec = choose_for_rows(available_reduce_i8(), backend, bound, rows)?;
         Some(KernelSpec {
             factorization: Factorization::Modular,
             ..spec
         })
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
+    fn modular_spec(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i32>> {
         if out_bits > 32 {
             return None;
         }
@@ -128,7 +135,7 @@ impl Kernelized for i8 {
         // encode, so the same kernel carries any depth in one chunk. Same
         // instructions, same bytes, one fewer fold: that is the homomorphism
         // being cashed in rather than a second kernel being written.
-        let spec = choose(available_i8(), backend, bound)?;
+        let spec = choose_for_rows(available_i8(), backend, bound, rows)?;
         Some(KernelSpec {
             factorization: Factorization::Modular,
             ..spec
@@ -152,12 +159,13 @@ impl Kernelized for i16 {
     type Exact = i64;
     type Modular = i32;
 
-    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i64> {
-        choose(available_i16(), backend, bound).expect("the portable kernel is always present")
+    fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
+        choose_for_rows(available_i16(), backend, bound, rows)
+            .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
-        choose_reduce(available_reduce_i16(), backend, bound, rows)
+        choose_for_rows(available_reduce_i16(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
@@ -170,17 +178,22 @@ impl Kernelized for i16 {
         if out_bits > 32 {
             return None;
         }
-        choose_reduce(available_reduce_i16_modular(), backend, bound, rows)
+        choose_for_rows(available_reduce_i16_modular(), backend, bound, rows)
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
+    fn modular_spec(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i32>> {
         if out_bits > 32 {
             return None;
         }
         // Not a shortcut for the exact lane's benefit --- that lane already
         // reaches every addressable `k` for `i16`. It is twice the columns per
         // instruction, because in `Z/2^32` there is nothing to widen to.
-        choose(available_i16_modular(), backend, bound)
+        choose_for_rows(available_i16_modular(), backend, bound, rows)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i64) {
@@ -200,13 +213,13 @@ impl Kernelized for i32 {
     type Exact = i64;
     type Modular = i32;
 
-    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i64> {
-        choose(available_i32_exact(), backend, bound)
+    fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
+        choose_for_rows(available_i32_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
-        choose_reduce(available_reduce_i32_exact(), backend, bound, rows)
+        choose_for_rows(available_reduce_i32_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
@@ -219,14 +232,19 @@ impl Kernelized for i32 {
         if out_bits > 32 {
             return None;
         }
-        choose_reduce(available_reduce_i32_modular(), backend, bound, rows)
+        choose_for_rows(available_reduce_i32_modular(), backend, bound, rows)
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i32>> {
+    fn modular_spec(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i32>> {
         if out_bits > 32 {
             return None;
         }
-        choose(available_i32_modular(), backend, bound)
+        choose_for_rows(available_i32_modular(), backend, bound, rows)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i64) {
@@ -246,18 +264,18 @@ impl Kernelized for i64 {
     type Exact = i128;
     type Modular = i64;
 
-    fn exact_spec(backend: Backend, bound: u128) -> KernelSpec<Self, i128> {
+    fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i128> {
         // An `i64 x i64` product needs 128 bits, so the lane is an `i128`. No
         // SIMD integer multiply reaches that width on any supported target, so
         // this is not a placeholder --- it is the whole of what the hardware
         // offers, and the packing still buys it the locality every other family
         // gets.
-        choose(available_i64_exact(), backend, bound)
+        choose_for_rows(available_i64_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i128> {
-        choose_reduce(available_reduce_i64_exact(), backend, bound, rows)
+        choose_for_rows(available_reduce_i64_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
@@ -270,14 +288,19 @@ impl Kernelized for i64 {
         if out_bits > 64 {
             return None;
         }
-        choose_reduce(available_reduce_i64_modular(), backend, bound, rows)
+        choose_for_rows(available_reduce_i64_modular(), backend, bound, rows)
     }
 
-    fn modular_spec(backend: Backend, out_bits: u32, bound: u128) -> Option<KernelSpec<Self, i64>> {
+    fn modular_spec(
+        backend: Backend,
+        out_bits: u32,
+        bound: u128,
+        rows: usize,
+    ) -> Option<KernelSpec<Self, i64>> {
         if out_bits > 64 {
             return None;
         }
-        choose(available_i64_modular(), backend, bound)
+        choose_for_rows(available_i64_modular(), backend, bound, rows)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i128) {
@@ -326,7 +349,7 @@ pub fn gemm_packed<E, Bd, O, Ep>(
     // encode mode and the output type --- and about nothing else.
     let wrapping = matches!(options.encode, EncodeMode::Wrapping);
     let modular = wrapping
-        .then(|| E::modular_spec(options.backend, O::BITS, Bd::VALUE))
+        .then(|| E::modular_spec(options.backend, O::BITS, Bd::VALUE, shape.m))
         .flatten();
 
     match modular {
@@ -355,7 +378,7 @@ pub fn gemm_packed<E, Bd, O, Ep>(
             )
         }
         None => {
-            let tile = E::exact_spec(options.backend, Bd::VALUE);
+            let tile = E::exact_spec(options.backend, Bd::VALUE, shape.m);
             let spec = if shape.n < tile.nr {
                 E::exact_reduce(options.backend, Bd::VALUE, shape.m)
             } else {
@@ -867,10 +890,11 @@ mod tests {
     /// matrix-vector product is the shape it matters most for.
     #[test]
     fn narrow_shapes_take_the_reduce_factorization_cb_06() {
-        let nr = uor_matmul_kernels::choose(
+        let nr = uor_matmul_kernels::choose_for_rows(
             uor_matmul_kernels::available_i8(),
             Backend::Auto,
             <Full<i8> as uor_matmul_core::Bound>::VALUE,
+            usize::MAX,
         )
         .unwrap()
         .nr;

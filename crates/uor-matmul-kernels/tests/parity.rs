@@ -9,7 +9,7 @@
 use uor_matmul_core::{as_alphabet_full, dot_ref, Backend};
 use uor_matmul_kernels::{
     available_i16, available_i32_exact, available_i32_modular, available_i64_modular, available_i8,
-    choose, packed_slot, portable_i8, Factorization, KernelSpec,
+    choose_for_rows, packed_slot, portable_i8, Factorization, KernelSpec,
 };
 
 /// Element `p` of lane `l`, read the way the kernel reads it.
@@ -315,8 +315,8 @@ fn the_wider_families_equal_their_references_cb_02() {
 #[test]
 fn backend_selection_cannot_fail_cd_01() {
     for backend in Backend::ALL {
-        let spec =
-            choose(available_i8(), backend, 128).expect("the portable kernel is always there");
+        let spec = choose_for_rows(available_i8(), backend, 128, usize::MAX)
+            .expect("the portable kernel is always there");
         let kc = 33usize.div_ceil(spec.k_group) * spec.k_group;
         let pa = fill(spec.mr * kc, 1, |v| v as i8);
         let pb = fill(spec.nr * kc, 2, |v| v as i8);
@@ -326,12 +326,12 @@ fn backend_selection_cannot_fail_cd_01() {
 
         // Every family answers for every backend, so no instantiation is left
         // without a kernel.
-        assert!(choose(available_i16(), backend, 32768).is_some());
-        assert!(choose(available_i32_exact(), backend, 1 << 31).is_some());
-        assert!(choose(available_i32_modular(), backend, 1 << 31).is_some());
-        assert!(choose(available_i64_modular(), backend, 1 << 63).is_some());
+        assert!(choose_for_rows(available_i16(), backend, 32768, usize::MAX).is_some());
+        assert!(choose_for_rows(available_i32_exact(), backend, 1 << 31, usize::MAX).is_some());
+        assert!(choose_for_rows(available_i32_modular(), backend, 1 << 31, usize::MAX).is_some());
+        assert!(choose_for_rows(available_i64_modular(), backend, 1 << 63, usize::MAX).is_some());
     }
-    assert!(choose(available_i8(), Backend::Auto, 128).is_some());
+    assert!(choose_for_rows(available_i8(), Backend::Auto, 128, usize::MAX).is_some());
 }
 
 /// `CU-02`: a modular lane has no depth limit, because the wrap is the encode
@@ -339,8 +339,9 @@ fn backend_selection_cannot_fail_cd_01() {
 /// declared bound, not of the library.
 #[test]
 fn lane_depth_follows_the_declaration_cu_02() {
-    let exact = choose(available_i32_exact(), Backend::Auto, 1 << 31).unwrap();
-    let modular = choose(available_i32_modular(), Backend::Auto, 1 << 31).unwrap();
+    let exact = choose_for_rows(available_i32_exact(), Backend::Auto, 1 << 31, usize::MAX).unwrap();
+    let modular =
+        choose_for_rows(available_i32_modular(), Backend::Auto, 1 << 31, usize::MAX).unwrap();
 
     assert_eq!(exact.factorization, Factorization::Exact);
     assert_eq!(modular.factorization, Factorization::Modular);
@@ -440,8 +441,8 @@ fn selection_respects_the_declared_alphabet_cb_07() {
         eprintln!("no AVX2 i16 sequence on this host; the cross-architecture job covers it");
         return;
     }
-    let narrow = choose(available_i16(), Backend::Auto, 32767).unwrap();
-    let full = choose(available_i16(), Backend::Auto, 32768).unwrap();
+    let narrow = choose_for_rows(available_i16(), Backend::Auto, 32767, usize::MAX).unwrap();
+    let full = choose_for_rows(available_i16(), Backend::Auto, 32768, usize::MAX).unwrap();
     assert!(narrow.max_bound >= 32767);
     assert!(full.max_bound >= 32768);
     assert_eq!(narrow.backend, Backend::Avx2);
@@ -454,7 +455,7 @@ fn selection_respects_the_declared_alphabet_cb_07() {
     // And every sequence a bound admits agrees with every other at that bound,
     // which is what makes the choice free.
     for bound in [1u128, 127, 32767, 32768] {
-        let picked = choose(available_i16(), Backend::Auto, bound).unwrap();
+        let picked = choose_for_rows(available_i16(), Backend::Auto, bound, usize::MAX).unwrap();
         assert!(picked.max_bound >= bound, "bound {bound}");
     }
 }

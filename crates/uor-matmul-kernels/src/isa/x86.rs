@@ -7,6 +7,10 @@ use uor_matmul_core::Backend;
 use crate::spec::{Factorization, KernelSpec, LaneLayout};
 
 crate::tile_fits!(6, 16);
+crate::tile_fits!(1, 16);
+crate::tile_fits!(1, 8);
+crate::tile_fits!(1, 16);
+crate::tile_fits!(1, 8);
 crate::tile_fits!(4, 8);
 crate::tile_fits!(8, 16);
 
@@ -71,15 +75,14 @@ pub const AVX2_I8_I32: KernelSpec<i8, i32> = KernelSpec {
 /// lanes, and the host must have `avx2`.
 unsafe fn avx2_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
-    unsafe { avx2_i8_inner(kc, pa, pb, acc) }
+    unsafe { avx2_i8_inner::<A2_I8_MR>(kc, pa, pb, acc) }
 }
 
 /// # Safety
 ///
 /// As [`avx2_i8`].
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_i8_inner(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
-    const MR: usize = A2_I8_MR;
+unsafe fn avx2_i8_inner<const MR: usize>(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
     const NR: usize = A2_I8_NR;
     // SAFETY: the caller guaranteed the three extents. One conversion here
     // keeps every panel read below safe, so the only remaining `unsafe` is the
@@ -175,15 +178,19 @@ pub const AVX2_I16_I64: KernelSpec<i16, i64> = KernelSpec {
 /// lanes, and the host must have `avx2`.
 unsafe fn avx2_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
-    unsafe { avx2_i16_inner(kc, pa, pb, acc) }
+    unsafe { avx2_i16_inner::<A2_I16_MR>(kc, pa, pb, acc) }
 }
 
 /// # Safety
 ///
 /// As [`avx2_i16`].
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_i16_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
-    const MR: usize = A2_I16_MR;
+unsafe fn avx2_i16_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i64,
+) {
     const NR: usize = A2_I16_NR;
     // SAFETY: the caller guaranteed the three extents.
     let (pa, pb, acc) = unsafe {
@@ -264,15 +271,19 @@ pub const AVX2_I16_I64_FULL: KernelSpec<i16, i64> = KernelSpec {
 /// lanes, and the host must have `avx2`.
 unsafe fn avx2_i16_full(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
-    unsafe { avx2_i16_full_inner(kc, pa, pb, acc) }
+    unsafe { avx2_i16_full_inner::<A2_I16_MR>(kc, pa, pb, acc) }
 }
 
 /// # Safety
 ///
 /// As [`avx2_i16_full`].
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_i16_full_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
-    const MR: usize = A2_I16_MR;
+unsafe fn avx2_i16_full_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i64,
+) {
     const NR: usize = A2_I16_NR;
     // SAFETY: the caller guaranteed the three extents.
     let (pa, pb, acc) = unsafe {
@@ -343,15 +354,19 @@ pub const AVX2_I32_I64: KernelSpec<i32, i64> = KernelSpec {
 /// lanes, and the host must have `avx2`.
 unsafe fn avx2_i32_exact(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
-    unsafe { avx2_i32_exact_inner(kc, pa, pb, acc) }
+    unsafe { avx2_i32_exact_inner::<A2_I32_MR>(kc, pa, pb, acc) }
 }
 
 /// # Safety
 ///
 /// As [`avx2_i32_exact`].
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_i32_exact_inner(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
-    const MR: usize = A2_I32_MR;
+unsafe fn avx2_i32_exact_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i32,
+    pb: *const i32,
+    acc: *mut i64,
+) {
     const NR: usize = A2_I32_NR;
     // SAFETY: the caller guaranteed the three extents.
     let (pa, pb, acc) = unsafe {
@@ -424,15 +439,19 @@ pub const AVX2_I32_MOD: KernelSpec<i32, i32> = KernelSpec {
 /// lanes, and the host must have `avx2`.
 unsafe fn avx2_i32_mod(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i32) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
-    unsafe { avx2_i32_mod_inner(kc, pa, pb, acc) }
+    unsafe { avx2_i32_mod_inner::<6>(kc, pa, pb, acc) }
 }
 
 /// # Safety
 ///
 /// As [`avx2_i32_mod`].
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_i32_mod_inner(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i32) {
-    const MR: usize = 6;
+unsafe fn avx2_i32_mod_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i32,
+    pb: *const i32,
+    acc: *mut i32,
+) {
     const NR: usize = 16;
     // SAFETY: the caller guaranteed the three extents.
     let (pa, pb, acc) = unsafe {
@@ -500,15 +519,19 @@ pub const AVX2_I16_MOD: KernelSpec<i16, i32> = KernelSpec {
 /// lanes, and the host must have `avx2`.
 unsafe fn avx2_i16_mod(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i32) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
-    unsafe { avx2_i16_mod_inner(kc, pa, pb, acc) }
+    unsafe { avx2_i16_mod_inner::<6>(kc, pa, pb, acc) }
 }
 
 /// # Safety
 ///
 /// As [`avx2_i16_mod`].
 #[target_feature(enable = "avx2")]
-unsafe fn avx2_i16_mod_inner(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i32) {
-    const MR: usize = 6;
+unsafe fn avx2_i16_mod_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i32,
+) {
     const NR: usize = 16;
     // SAFETY: the caller guaranteed the three extents.
     let (pa, pb, acc) = unsafe {
@@ -1248,4 +1271,171 @@ pub const AVX2_R_I32_I64_1: KernelSpec<i32, i64> = KernelSpec {
 unsafe fn avx2_r_i32_one(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
     // SAFETY: the caller established `avx2` and forwarded the lengths.
     unsafe { avx2_r_i32_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A tile panel taller than the output is zero-padded, and the kernel does that
+/// padding's arithmetic: at `m = 1` a six-row panel is six times the work the
+/// product needs. So the table offers the heights the shapes fill, and the
+/// driver takes the tallest one the rows do. Same instructions, same answer
+/// (`CB-06`).
+pub const AVX2_I8_I32_M1: KernelSpec<i8, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: A2_I8_NR,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 2,
+    lane_cap: i32::MAX as u128,
+    // `madd`'s pair sum is `2 * bound^2`; an `i8` alphabet cannot reach the
+    // bound where that leaves an `i32`, so this is stated rather than binding.
+    max_bound: 32767,
+    mac_tile: avx2_i8_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_i8`], with a one-row panel.
+unsafe fn avx2_i8_one(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i8_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A tile panel taller than the output is zero-padded, and the kernel does that
+/// padding's arithmetic: at `m = 1` a six-row panel is six times the work the
+/// product needs. So the table offers the heights the shapes fill, and the
+/// driver takes the tallest one the rows do. Same instructions, same answer
+/// (`CB-06`).
+pub const AVX2_I16_I64_M1: KernelSpec<i16, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: A2_I16_NR,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 2,
+    lane_cap: i64::MAX as u128,
+    max_bound: 32767,
+    mac_tile: avx2_i16_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_i16`], with a one-row panel.
+unsafe fn avx2_i16_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i16_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A tile panel taller than the output is zero-padded, and the kernel does that
+/// padding's arithmetic: at `m = 1` a six-row panel is six times the work the
+/// product needs. So the table offers the heights the shapes fill, and the
+/// driver takes the tallest one the rows do. Same instructions, same answer
+/// (`CB-06`).
+pub const AVX2_I16_I64_FULL_M1: KernelSpec<i16, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: A2_I16_NR,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 1,
+    lane_cap: i64::MAX as u128,
+    max_bound: u128::MAX,
+    mac_tile: avx2_i16_full_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_i16_full`], with a one-row panel.
+unsafe fn avx2_i16_full_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i16_full_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A tile panel taller than the output is zero-padded, and the kernel does that
+/// padding's arithmetic: at `m = 1` a six-row panel is six times the work the
+/// product needs. So the table offers the heights the shapes fill, and the
+/// driver takes the tallest one the rows do. Same instructions, same answer
+/// (`CB-06`).
+pub const AVX2_I32_I64_M1: KernelSpec<i32, i64> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: A2_I32_NR,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 1,
+    lane_cap: i64::MAX as u128,
+    // Each product is computed at its own full width, so every alphabet.
+    max_bound: u128::MAX,
+    mac_tile: avx2_i32_exact_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_i32_exact`], with a one-row panel.
+unsafe fn avx2_i32_exact_one(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i32_exact_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A tile panel taller than the output is zero-padded, and the kernel does that
+/// padding's arithmetic: at `m = 1` a six-row panel is six times the work the
+/// product needs. So the table offers the heights the shapes fill, and the
+/// driver takes the tallest one the rows do. Same instructions, same answer
+/// (`CB-06`).
+pub const AVX2_I32_MOD_M1: KernelSpec<i32, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Modular,
+    mr: 1,
+    nr: 16,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 1,
+    lane_cap: 0,
+    max_bound: u128::MAX,
+    mac_tile: avx2_i32_mod_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_i32_mod`], with a one-row panel.
+unsafe fn avx2_i32_mod_one(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i32_mod_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// The same sequence at a one-row panel.
+///
+/// A tile panel taller than the output is zero-padded, and the kernel does that
+/// padding's arithmetic: at `m = 1` a six-row panel is six times the work the
+/// product needs. So the table offers the heights the shapes fill, and the
+/// driver takes the tallest one the rows do. Same instructions, same answer
+/// (`CB-06`).
+pub const AVX2_I16_MOD_M1: KernelSpec<i16, i32> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Modular,
+    mr: 1,
+    nr: 16,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 2,
+    lane_cap: 0,
+    // `madd` wraps, and in `Z/2^32` the wrap *is* the answer --- so the pair
+    // sum overflowing an `i32` is not an error here, it is the ring's addition.
+    max_bound: u128::MAX,
+    mac_tile: avx2_i16_mod_one,
+};
+
+/// # Safety
+///
+/// As [`avx2_i16_mod`], with a one-row panel.
+unsafe fn avx2_i16_mod_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i32) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_i16_mod_inner::<1>(kc, pa, pb, acc) }
 }

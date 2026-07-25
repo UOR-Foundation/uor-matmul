@@ -240,6 +240,7 @@ macro_rules! tile_fits {
 pub fn available_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
     collect![
         true => crate::isa::portable::I8_I32,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1,
         crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32,
         crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPWSSD_I8_I32,
         crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPBUSD_I8_I32,
@@ -260,7 +261,9 @@ pub fn available_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
 pub fn available_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
     collect![
         true => crate::isa::portable::I16_I64,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL_M1,
         crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_M1,
         crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64,
     ]
 }
@@ -273,6 +276,7 @@ pub fn available_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
 pub fn available_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
     collect![
         true => crate::isa::portable::I32_I64,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64_M1,
         crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64,
     ]
 }
@@ -285,6 +289,7 @@ pub fn available_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
 pub fn available_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
     collect![
         true => crate::isa::portable::I32_MOD,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD_M1,
         crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD,
     ]
 }
@@ -310,6 +315,7 @@ pub fn available_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
 pub fn available_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
     collect![
         true => crate::isa::portable::I16_MOD,
+        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD_M1,
         crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD,
     ]
 }
@@ -414,18 +420,20 @@ pub fn available_reduce_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i6
     ]
 }
 
-/// Choose a reduce sequence: the widest panel `rows` actually fills.
+/// Choose a sequence whose panel `rows` actually fills: the tallest such, and
+/// the shortest when none does.
 ///
-/// A panel wider than the block is zero-padded, and for a reduce kernel that
-/// padding is *copied*, at `k` elements a row. So a four-row panel serving one
-/// row does four times the memory traffic of the product itself, and a one-row
-/// panel serving four rows re-reads the column four times. The rule is therefore
-/// the widest panel that the rows fill, and the narrowest when none does.
+/// A panel taller than the block is zero-padded, and the padding is not free:
+/// a tile kernel does its arithmetic, and a reduce kernel *copies* it, at `k`
+/// elements a row. So a four-row panel serving one row does four times the work
+/// the product needs --- and a one-row panel serving four rows gives up the
+/// reuse a taller one would have had, so taller is right whenever the rows are
+/// there.
 ///
 /// The rows are a shape --- a declaration the caller made when they constructed
 /// the view --- so this is selection by declaration, like every other choice in
 /// this crate. Every candidate computes the same integer (`CB-06`).
-pub fn choose_reduce<E, L>(
+pub fn choose_for_rows<E, L>(
     specs: impl Iterator<Item = KernelSpec<E, L>>,
     requested: Backend,
     bound: u128,
@@ -447,7 +455,10 @@ pub fn choose_reduce<E, L>(
             if b.mr > rows {
                 spec.mr <= rows || spec.mr < b.mr
             } else {
-                spec.mr <= rows && spec.mr > b.mr
+                // `>=` and not `>`: at equal heights the later entry wins, and
+                // the list is ordered reference-first, so later is the more
+                // specialized sequence.
+                spec.mr <= rows && spec.mr >= b.mr
             }
         } else {
             // A later entry is a wider backend --- take it, unless the caller
