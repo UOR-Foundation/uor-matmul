@@ -64,8 +64,17 @@ impl<'s, E: IntegerElement, Bd: Bound> Scratch<'s, E, Bd> {
 /// the streaming traversal (`CD-04`).
 pub fn suggested_scratch(shape: Shape) -> usize {
     use uor_matmul_core::generated::blocking;
-    // One packed k-panel of B, which is what the blocked traversal reuses
-    // across the rows of A. Everything else the traversal needs lives in
-    // registers or in the caller's own buffers.
-    shape.k.min(blocking::KC) * shape.n.min(blocking::NC)
+    // One block of each operand at the full depth: `MC` rows of A and `NC`
+    // columns of B. That is what the blocked traversal reuses --- the B block
+    // across every row block, and the A block across every column panel --- and
+    // it is the amount at which neither operand is repacked more than the
+    // blocking says.
+    //
+    // It is never more than the operands themselves: `MC <= m` and `NC <= n`
+    // after the clamps, so this is at most `k * (m + n)`. A caller who wants
+    // less offers less and gets the chunked traversal, at the same bytes
+    // (`CD-04`, `CD-10`).
+    shape
+        .k
+        .saturating_mul(shape.m.min(blocking::MC) + shape.n.min(blocking::NC))
 }

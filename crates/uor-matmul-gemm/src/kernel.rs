@@ -297,56 +297,96 @@ fn run<E, Bd, O, Ep, L>(
     let kc = (scratch.len() / per_step).min(lane_depth).max(1);
     let reads_c = epilogue.reads_c();
 
-    // Pack `B` once per column block, not once per output block.
+    // The panels are the only copies this driver makes, and which loop they sit
+    // in decides how many times each byte is copied. A microkernel panel is
+    // `mr` rows or `nr` columns wide, and packing at that granularity means one
+    // of the two operands is repacked once per panel of the other: `m*n*k/nr`
+    // element copies against `m*n*k` of arithmetic. At the shipped `nr` that is
+    // not a rounding error --- it is the same order of magnitude as the
+    // arithmetic, and it was the whole difference between this driver and the
+    // instruction ceiling of its own kernels.
     //
-    // The panels are the only copies this driver makes, and which loop they
-    // sit in decides how many times each byte is copied. With the row block
-    // outermost, `B` is repacked `m/mr` times over: `m*n*k/mr` element copies
-    // against `m*n*k` of arithmetic. Putting the column block outermost and
-    // hoisting the `B` pack out of the row loop replaces that with `n*k`
-    // copies, and leaves `A` repacked `m*n*k/nr` times --- the cheaper way
-    // round, because `nr > mr`.
+    // So the panels are packed in *blocks*: `mc` rows of `A` and `nc` columns
+    // of `B`, each covering many microkernel panels. `A` is then repacked once
+    // per column block rather than once per column panel, which divides the copy
+    // count by `nc/nr`. The block extents come from the caller's offer and the
+    // cache-shaped constants, and neither can change an output byte --- `CD-01`
+    // asserts exactly that.
     //
-    // Hoisting needs the whole depth in one chunk, because a chunked
+    // Blocking needs the whole depth in one panel, because a chunked
     // accumulation revisits each output block per chunk. When the offer is too
     // small the chunked traversal below runs instead, and `CD-01` and `CD-10`
     // assert the bytes are the same either way.
-    let hoist = shape.k <= kc && scratch.len() >= per_step * shape.k;
     let mut tile = [L::default(); MAX_TILE];
     let (a, b, c) = triple.parts();
+    let budget = if shape.k == 0 {
+        0
+    } else {
+        scratch.len() / shape.k
+    };
 
-    if hoist {
+    if shape.k <= kc && budget >= per_step {
+        // `mc` and `nc` are whole numbers of microkernel panels, so a block
+        // holds no partial panel and the tile loops below need no second case.
+        // Each is capped by the cache-shaped constant, by the matrix itself, and
+        // by what the offer pays for --- in that order, with `A` yielding to `B`
+        // when the offer is tight, because it is `A` that gets repacked.
+        let mc_want = shape
+            .m
+            .min(uor_matmul_core::generated::blocking::MC)
+            .div_ceil(mr)
+            * mr;
+        let nc_want = shape
+            .n
+            .min(uor_matmul_core::generated::blocking::NC)
+            .div_ceil(nr)
+            * nr;
+        let mc = mc_want.min((budget - nr) / mr * mr).max(mr);
+        let nc = ((budget - mc) / nr * nr).min(nc_want).max(nr);
+
         let depth = shape.k;
-        let buf = scratch.take(per_step * depth);
-        let (pa_buf, pb_buf) = buf.split_at_mut(mr * depth);
+        let buf = scratch.take(depth * (mc + nc));
+        let (pa_buf, pb_buf) = buf.split_at_mut(mc * depth);
 
         let mut j0 = 0;
         while j0 < shape.n {
-            pack_columns(pb_buf, nr, depth, b, 0, j0, shape.n);
+            let cols = nc.min(shape.n - j0);
+            pack_columns(pb_buf, nr, depth, b, 0, j0, cols, shape.n);
 
             let mut i0 = 0;
             while i0 < shape.m {
-                pack_rows(pa_buf, mr, depth, a, i0, 0, shape.m);
+                let rows = mc.min(shape.m - i0);
+                pack_rows(pa_buf, mr, depth, a, i0, 0, rows, shape.m);
 
                 let pa: &[E] = bytemuck::TransparentWrapper::peel_slice(&*pa_buf);
                 let pb: &[E] = bytemuck::TransparentWrapper::peel_slice(&*pb_buf);
-                spec.mac_tile(depth, pa, pb, &mut tile[..mr * nr]);
 
-                for i in 0..mr.min(shape.m - i0) {
-                    for j in 0..nr.min(shape.n - j0) {
-                        let mut acc = <AccOf<E> as Accumulator>::ZERO;
-                        fold(&mut acc, tile[i * nr + j]);
-                        let prior = if reads_c {
-                            Some(*c.at(i0 + i, j0 + j))
-                        } else {
-                            None
-                        };
-                        *c.at_mut(i0 + i, j0 + j) = epilogue.finish(acc, prior, options.encode);
+                // The column panel is the inner loop's invariant, so it stays in
+                // the nearest cache while the row panels stream past it.
+                let mut jj = 0;
+                while jj < cols {
+                    let bp = &pb[(jj / nr) * nr * depth..][..nr * depth];
+                    let mut ii = 0;
+                    while ii < rows {
+                        let ap = &pa[(ii / mr) * mr * depth..][..mr * depth];
+                        spec.mac_tile(depth, ap, bp, &mut tile[..mr * nr]);
+
+                        for i in 0..mr.min(rows - ii) {
+                            for j in 0..nr.min(cols - jj) {
+                                let mut acc = <AccOf<E> as Accumulator>::ZERO;
+                                fold(&mut acc, tile[i * nr + j]);
+                                let (ci, cj) = (i0 + ii + i, j0 + jj + j);
+                                let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
+                                *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+                            }
+                        }
+                        ii += mr;
                     }
+                    jj += nr;
                 }
-                i0 += mr;
+                i0 += mc;
             }
-            j0 += nr;
+            j0 += nc;
         }
         return;
     }
@@ -364,8 +404,8 @@ fn run<E, Bd, O, Ep, L>(
                 {
                     let buf = scratch.take(per_step * depth);
                     let (pa_buf, pb_buf) = buf.split_at_mut(mr * depth);
-                    pack_rows(pa_buf, mr, depth, a, i0, p0, shape.m);
-                    pack_columns(pb_buf, nr, depth, b, p0, j0, shape.n);
+                    pack_rows(pa_buf, mr, depth, a, i0, p0, mr, shape.m);
+                    pack_columns(pb_buf, nr, depth, b, p0, j0, nr, shape.n);
                 }
 
                 let buf = scratch.take(per_step * depth);
@@ -410,11 +450,12 @@ fn run<E, Bd, O, Ep, L>(
     }
 }
 
-/// Pack `mr` rows of `A`, `k`-major.
+/// Pack `count` rows of `A` into `ceil(count / lanes)` microkernel panels, each
+/// `k`-major.
 ///
 /// Walks each row once rather than indexing per element, and splits the full
-/// tile from the edge so the common case carries no bounds branch. Rows past
-/// the matrix take the alphabet's zero; zero padding is exact, so an unaligned
+/// panel from the edge so the common case carries no bounds branch. Rows past
+/// the block take the alphabet's zero; zero padding is exact, so an unaligned
 /// shape takes this path and not a different one (S8).
 fn pack_rows<E: IntegerElement, Bd: Bound>(
     out: &mut [Alphabet<E, Bd>],
@@ -423,22 +464,32 @@ fn pack_rows<E: IntegerElement, Bd: Bound>(
     a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
     row0: usize,
     col0: usize,
+    count: usize,
     rows: usize,
 ) {
-    let full = lanes.min(rows.saturating_sub(row0));
-    for lane in 0..full {
-        for (p, v) in a.row_walk(row0 + lane, col0, depth).enumerate() {
-            out[p * lanes + lane] = *v;
+    let count = count.min(rows.saturating_sub(row0));
+    let mut base = 0;
+    let mut done = 0;
+    while done < count {
+        let full = lanes.min(count - done);
+        let panel = &mut out[base..base + lanes * depth];
+        for lane in 0..full {
+            for (p, v) in a.row_walk(row0 + done + lane, col0, depth).enumerate() {
+                panel[p * lanes + lane] = *v;
+            }
         }
-    }
-    for lane in full..lanes {
-        for p in 0..depth {
-            out[p * lanes + lane] = Alphabet::ZERO;
+        for lane in full..lanes {
+            for p in 0..depth {
+                panel[p * lanes + lane] = Alphabet::ZERO;
+            }
         }
+        base += lanes * depth;
+        done += lanes;
     }
 }
 
-/// Pack `nr` columns of `B`, `k`-major. See [`pack_rows`].
+/// Pack `count` columns of `B` into `ceil(count / lanes)` panels. See
+/// [`pack_rows`].
 fn pack_columns<E: IntegerElement, Bd: Bound>(
     out: &mut [Alphabet<E, Bd>],
     lanes: usize,
@@ -446,18 +497,27 @@ fn pack_columns<E: IntegerElement, Bd: Bound>(
     b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
     row0: usize,
     col0: usize,
+    count: usize,
     cols: usize,
 ) {
-    let full = lanes.min(cols.saturating_sub(col0));
-    for lane in 0..full {
-        for (p, v) in b.column_walk(row0, col0 + lane, depth).enumerate() {
-            out[p * lanes + lane] = *v;
+    let count = count.min(cols.saturating_sub(col0));
+    let mut base = 0;
+    let mut done = 0;
+    while done < count {
+        let full = lanes.min(count - done);
+        let panel = &mut out[base..base + lanes * depth];
+        for lane in 0..full {
+            for (p, v) in b.column_walk(row0, col0 + done + lane, depth).enumerate() {
+                panel[p * lanes + lane] = *v;
+            }
         }
-    }
-    for lane in full..lanes {
-        for p in 0..depth {
-            out[p * lanes + lane] = Alphabet::ZERO;
+        for lane in full..lanes {
+            for p in 0..depth {
+                panel[p * lanes + lane] = Alphabet::ZERO;
+            }
         }
+        base += lanes * depth;
+        done += lanes;
     }
 }
 
