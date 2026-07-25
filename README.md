@@ -244,10 +244,13 @@ over the *already decoded* weights it is **8.8x ahead at `m = 1`**, **3.6x at
 working version of it was four times *slower* than the kernels. Everything between
 was overhead: a runtime length where a compile-time one belonged, an exact
 accumulator moved a gigabyte per quarter-billion products, and a codebook decoded
-once per tile instead of once per call. `ANALYSIS.md` §"The other constraint that
-is nobody's" has the nine-row table of what each one was worth, the two tuning
-constants that changed sign when the loop around them changed, and the one shape
-that still declines the table and why.
+once per tile instead of once per call. Where the table does not pay --- a shape below its break-even --- a caller
+who offers room for the decoded operand gets the tile kernels instead, at
+**parity with a dense operand handed over free**. Three factorizations of one
+identity, chosen by the offer and the shape, byte-identical under `CD-13`.
+`ANALYSIS.md` §"The other constraint that is nobody's" has the nine-row table of
+what each removal was worth and the two tuning constants that changed sign when
+the loop around them changed.
 
 ## Licence
 

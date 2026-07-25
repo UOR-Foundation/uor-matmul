@@ -374,6 +374,24 @@ impl<'a, E> MatViewMut<'a, E> {
         Self::new(data, rows, cols, Strides::row_major(cols))
     }
 
+    /// The same view, borrowed for shorter.
+    ///
+    /// A mutable view is not [`Copy`], so a driver holding one inside a larger
+    /// value cannot hand it to a constructor that takes ownership without giving
+    /// it up. This is the reborrow that lets it: same origin, same strides, same
+    /// cells, a shorter lifetime. It exists because one traversal is expressed as
+    /// another over the same output --- [`crate::Triple`] over a decoded operand
+    /// --- and there is nothing to copy, allocate or validate in saying so.
+    pub fn reborrow(&mut self) -> MatViewMut<'_, E> {
+        MatViewMut {
+            data: self.data,
+            origin: self.origin,
+            rows: self.rows,
+            cols: self.cols,
+            strides: self.strides,
+        }
+    }
+
     /// Rows.
     pub const fn rows(&self) -> usize {
         self.rows

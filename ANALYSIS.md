@@ -478,26 +478,47 @@ asserts the closed forms behind it --- `adds == table_reads == m*n*(k/Bk)` and
 ### Against the kernels, which is the harder question
 
 Beating the streaming traversal is not the bar. The bar is this library's own
-packed AVX2 tile path over the *decoded* weights --- which is given its operand
+packed AVX2 tile path over the *decoded* weights --- which is handed its operand
 already dense, so the comparison is generous to it. Over `Book<256,8>`, running
-`Traversal::Blocked`, which is the default and therefore what a caller gets:
+`Traversal::Blocked`, which is the default and therefore what a caller gets. The
+`picked` column is read from the census, not recomputed from the predicate.
 
 | `m x k x n` | default | packed | vs packed | picked |
 | --- | --- | --- | --- | --- |
-| `1x1024x4096` | **10.17** | 1.15 | **8.81x** | table |
+| `1x1024x4096` | **9.93** | 1.15 | **8.62x** | table |
 | `8x1024x4096` | **24.95** | 6.99 | **3.57x** | table |
-| `64x1024x4096` | **27.91** | 25.10 | **1.11x** | table |
-| `64x4096x4096` | **27.57** | 16.68 | **1.65x** | table |
-| `256x1024x4096` | 28.02 | 34.01 | 0.82x | table |
-| `64x1024x16384` | **34.65** | 24.63 | **1.41x** | table |
-| `3x1024x4093` | **13.09** | 3.53 | **3.71x** | table |
-| `17x1032x1021` | **13.81** | 13.71 | **1.01x** | table |
-| `1x8192x1` | 0.82 | 21.01 | 0.04x | stream |
-| `1000x512x512` | 4.24 | 39.83 | 0.11x | stream |
+| `64x1024x4096` | **28.04** | 25.10 | **1.12x** | table |
+| `64x4096x4096` | **27.68** | 16.39 | **1.69x** | table |
+| `256x1024x4096` | 27.41 | 34.01 | 0.81x | table |
+| `64x1024x16384` | **35.36** | 24.67 | **1.43x** | table |
+| `1000x512x512` | 39.22 | 39.92 | 0.98x | kernels |
+| `1x8192x1` | 7.87 | 21.01 | 0.37x | kernels |
+| `3x1024x4093` | **12.14** | 3.51 | **3.45x** | table |
+| `17x1032x1021` | **14.07** | 13.70 | **1.03x** | table |
 
-The last four rows divide nothing --- a ragged row tile, a prime column count, a
-degenerate dot product, a shape below the break-even --- and they are in the sweep
+The last four shapes divide nothing --- a shape below the break-even, a degenerate
+dot product, a ragged row tile, a prime column count --- and they are in the sweep
 because a traversal with a cliff at an awkward size would show it there.
+
+### Three factorizations, and the offer decides which
+
+A coded operand has three of them, all computing the same bytes:
+
+- **The table**, when the codec's block is long enough to repay building it. It
+  never materializes the dense weights, which is what the codec is for.
+- **The tile kernels**, when the caller's offer holds the whole decoded operand
+  *and* room for the kernels' own panels. That is the caller declaring it can
+  afford the dense weights, so the route is never taken behind its back: no offer,
+  no route. `1000x512x512` is where it earns its place --- `1.4` Gmac/s streamed,
+  `39.2` through the kernels, against `39.9` for a dense operand handed over free.
+- **The stream**, which needs nothing at all and runs where neither of the above
+  can. It is what makes the traversal total on a target whose RAM cannot hold a
+  decoded row.
+
+`1x8192x1` is the shape that cannot be won: `n*k` decodes for `n*k` products, so
+no method beats one that is given the decode for free. It reaches `0.37x` of a
+dense kernel and the row exists to say what the decode costs, not to claim
+otherwise.
 
 ### Everything between 2.95 and 28 was overhead
 
@@ -562,17 +583,23 @@ the rows actually present is what keeps the table selected there --- where it is
 `model/constants.toml`, both change which traversal produces a byte and never
 which byte, and `CM-04` recomputes every recorded break-even from them.
 
-### What is left
+### What the last gap cost to close
 
-Two rows decline the table and are slower than a dense kernel handed already-dense
-weights. `1x8192x1` is a single dot product: `n*k` decodes for `n*k` products, so
-no method beats one that is given the decode for free, and the row is there to say
-so. `1000x512x512` is below the break-even and is real: a coded operand at large
-`m` and small `n` wants to be decoded once into a panel and handed to the tile
-kernels, which is a third factorization of the same identity and is not built. It
-needs `Kernelized` at the traversal's boundary and a reborrow of the output view
-that `MatViewMut` does not currently expose. It is work, and it is named here
-rather than described as a property of the construction.
+`1000x512x512` ran at `1.4` Gmac/s against the kernels' `39.9` and the reason was
+not the lane. Output-major with a length-512 dot re-reads every row of `A` once
+per column: `m*n*k` element reads, and at that shape the traversal is bound by
+memory, not by arithmetic. No amount of vectorizing the dot changes it --- measured,
+the 32-bit lane and the 64-bit lane are within 5% of each other there, and both
+are within noise of where it started. Blocking is what fixes it, and the library
+already has blocking: it is `gemm_packed`.
+
+Two things were in the way and both are gone. `MatViewMut` is not `Copy`, so a
+driver holding one inside a larger value could not hand it to a constructor that
+takes ownership; it now has `reborrow`, which is nine lines and useful anywhere one
+traversal is expressed as another over the same output. And the traversal's
+boundary now asks for `Kernelized` --- the marker meaning "this element family has
+microkernels" --- which is exactly the right thing to require of a traversal that
+competes with them.
 
 ## Against the oracles## Against the oracles
 

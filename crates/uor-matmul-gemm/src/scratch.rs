@@ -6,6 +6,11 @@
 
 use uor_matmul_core::{AccOf, Accumulator, Alphabet, Bound, IntegerElement, Shape};
 
+/// A panel offer cut in two. Named because the pair is a return type and
+/// `(&mut [Alphabet<E, Bd>], &mut [Alphabet<E, Bd>])` written out says nothing the
+/// name does not.
+pub type PanelSplit<'s, E, Bd> = (&'s mut [Alphabet<E, Bd>], &'s mut [Alphabet<E, Bd>]);
+
 /// Working memory the caller has offered.
 ///
 /// The library never owns this and never grows it. An empty offer is
@@ -137,6 +142,17 @@ impl<'s, E: IntegerElement, Bd: Bound> Scratch<'s, E, Bd> {
     pub fn take(&mut self, n: usize) -> &mut [Alphabet<E, Bd>] {
         let n = n.min(self.buffer.len());
         &mut self.buffer[..n]
+    }
+
+    /// The offer cut in two: the first `at` elements, and the rest.
+    ///
+    /// One traversal expressed as another needs both halves at once --- the first
+    /// for what it materializes, the second handed on as the inner traversal's own
+    /// offer. Clamped like every other response to an amount, so a short offer
+    /// gives a short head and an empty tail rather than a failure.
+    pub fn split_panel(&mut self, at: usize) -> PanelSplit<'_, E, Bd> {
+        let at = at.min(self.buffer.len());
+        self.buffer.split_at_mut(at)
     }
 }
 

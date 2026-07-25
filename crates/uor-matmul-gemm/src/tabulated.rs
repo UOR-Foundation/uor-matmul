@@ -52,13 +52,16 @@ use bytemuck::TransparentWrapper;
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
-    dot_ref, AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, IntegerElement, MatView,
-    MatViewMut, NotAProduct, Shape, Traversal,
+    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, IntegerElement, MatView, MatViewMut,
+    NotAProduct, Shape, Traversal,
 };
+
+use uor_matmul_core::{Strides, Triple};
 
 use crate::coded::self_aliases;
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
+use crate::kernel::{gemm_packed, Kernelized};
 use crate::scratch::Scratch;
 
 // ---------------------------------------------------------------------------
@@ -88,6 +91,12 @@ pub struct Census {
     pub table_reads: u64,
     /// Calls into the codec's decode.
     pub decodes: u64,
+    /// Calls into the dense tile kernels, over a decoded operand.
+    ///
+    /// The three factorizations are told apart by this and by `table_reads`, so
+    /// "which one ran" is something a harness reads rather than something it
+    /// recomputes from the predicate and hopes agrees.
+    pub kernel_calls: u64,
 }
 
 impl Census {
@@ -117,6 +126,8 @@ pub trait Ledger {
     fn read(&mut self, n: u64);
     /// Record `n` codec decodes.
     fn decoded(&mut self, n: u64);
+    /// Record a call into the dense tile kernels.
+    fn kernelled(&mut self);
 }
 
 impl Ledger for () {
@@ -124,6 +135,7 @@ impl Ledger for () {
     fn added(&mut self, _: u64) {}
     fn read(&mut self, _: u64) {}
     fn decoded(&mut self, _: u64) {}
+    fn kernelled(&mut self) {}
 }
 
 impl Ledger for Census {
@@ -138,6 +150,9 @@ impl Ledger for Census {
     }
     fn decoded(&mut self, n: u64) {
         self.decodes = self.decodes.saturating_add(n); // R3-ok: a counter
+    }
+    fn kernelled(&mut self) {
+        self.kernel_calls = self.kernel_calls.saturating_add(1); // R3-ok: a counter
     }
 }
 
@@ -301,6 +316,36 @@ fn add_entry<const R: usize, L: LaneWord>(entry: &[L; R], acc: &mut [L; R]) {
     for i in 0..R {
         acc[i] = acc[i].add(entry[i]);
     }
+}
+
+/// One dot product, in the narrowest lane its depth admits.
+///
+/// The same value [`dot_ref`] computes and, for a quantized alphabet, a very
+/// different number of instructions: `dot_ref` accumulates in the 64-bit lane, and
+/// x86 has no vector multiply that wide, so its inner loop is scalar. The 32-bit
+/// lane holds `capacity` products of the declared alphabet exactly --- 131072 of
+/// them at `(i8, 128)`, which is past every depth a weight row reaches --- and
+/// eight of them fit one register.
+///
+/// `run` is that capacity. The reduction is cut into runs of it and each run is
+/// placed into the exact accumulator once, which is the same chunking
+/// [`uor_matmul_core::fits_narrow`] already licenses for the tile kernels.
+#[inline]
+fn dot_lane<E, Bd, L>(a: &[Alphabet<E, Bd>], w: &[Alphabet<E, Bd>], run: usize) -> AccOf<E>
+where
+    E: IntegerElement,
+    Bd: Bound,
+    L: Lane<E>,
+{
+    let mut acc = <AccOf<E> as Accumulator>::ZERO;
+    for (ra, rw) in a.chunks(run).zip(w.chunks(run)) {
+        let mut lane = L::ZERO;
+        for (&x, &y) in ra.iter().zip(rw) {
+            lane = lane.mac(x.get(), y.get());
+        }
+        acc = lane.place(acc);
+    }
+    acc
 }
 
 /// The accumulation of [`add_entry`] in the narrowest lane at the widest tile,
@@ -590,7 +635,7 @@ pub fn suggested_tabulation_lanes<E: IntegerElement, Bd: Bound>(
     block: usize,
 ) -> usize {
     let lane = LaneChoice::resolve::<E, Bd>(block);
-    if lane.is_exact(core::mem::size_of::<AccOf<E>>()) {
+    if matches!(lane.kind, LaneKind::Exact) {
         return 0;
     }
     let Some(plan) = Plan::choose(code_space, shape, lane, usize::MAX, usize::MAX, block) else {
@@ -617,7 +662,7 @@ pub fn suggested_tabulation<E: IntegerElement, Bd: Bound>(
     block: usize,
 ) -> usize {
     let lane = LaneChoice::resolve::<E, Bd>(block);
-    let exact = lane.is_exact(core::mem::size_of::<AccOf<E>>());
+    let exact = matches!(lane.kind, LaneKind::Exact);
     let Some(plan) = Plan::choose(code_space, shape, lane, usize::MAX, usize::MAX, block) else {
         return 0;
     };
@@ -772,10 +817,26 @@ pub const fn tabulation_depth(
     }
 }
 
-/// A lane's two facts, as the planner needs them: how wide one word is, and how
-/// many products one word holds exactly.
+/// Which register a run of products is accumulated in.
+///
+/// Not a quality ordering. Every kind computes the same integer; a narrower one
+/// holds fewer products before it must be placed and moves fewer bytes while it
+/// does. `CD-13` asserts the bytes across all three.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LaneKind {
+    /// The 32-bit entry of `NARROW_CAPS`. Eight lanes to a 256-bit register.
+    Narrow32,
+    /// The 64-bit entry. Four lanes, and no vector multiply on x86.
+    Narrow64,
+    /// The exact accumulator, which every depth fits by derivation.
+    Exact,
+}
+
+/// A lane's three facts, as the planner needs them: which register it is, how
+/// wide one word is, and how many products one word holds exactly.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct LaneChoice {
+    kind: LaneKind,
     bytes: usize,
     capacity: Option<usize>,
 }
@@ -798,6 +859,7 @@ impl LaneChoice {
             let narrow32 = <i32 as Lane<E>>::capacity(Bd::VALUE);
             if holds(narrow32) {
                 return Self {
+                    kind: LaneKind::Narrow32,
                     bytes: core::mem::size_of::<i32>(),
                     capacity: narrow32,
                 };
@@ -807,20 +869,25 @@ impl LaneChoice {
             let narrow64 = <i64 as Lane<E>>::capacity(Bd::VALUE);
             if holds(narrow64) {
                 return Self {
+                    kind: LaneKind::Narrow64,
                     bytes: core::mem::size_of::<i64>(),
                     capacity: narrow64,
                 };
             }
         }
         Self {
+            kind: LaneKind::Exact,
             bytes: core::mem::size_of::<AccOf<E>>(),
             capacity: None,
         }
     }
 
-    /// Is this the exact accumulator rather than a narrow register?
-    const fn is_exact(&self, acc_bytes: usize) -> bool {
-        self.capacity.is_none() && self.bytes == acc_bytes
+    /// Products one word holds before it must be placed. Never zero.
+    const fn run(&self) -> usize {
+        match self.capacity {
+            Some(0) | None => usize::MAX,
+            Some(c) => c,
+        }
     }
 }
 
@@ -865,6 +932,7 @@ impl Plan {
         let LaneChoice {
             bytes: lane_bytes,
             capacity: cap,
+            ..
         } = lane;
         let row_cap = tabulation_rows(code_space, blocking::L1_BYTES, lane_bytes)
             .min(shape.m)
@@ -901,7 +969,7 @@ pub fn gemm_tabulated<E, Bd, C, O, Ep>(
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
 ) where
-    E: IntegerElement,
+    E: Kernelized,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -923,7 +991,7 @@ pub fn gemm_tabulated_counted<E, Bd, C, O, Ep>(
     lanes: &mut Tabulation<'_>,
     census: &mut Census,
 ) where
-    E: IntegerElement,
+    E: Kernelized,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -940,7 +1008,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
     lanes: &mut Tabulation<'_>,
     ledger: &mut Lg,
 ) where
-    E: IntegerElement,
+    E: Kernelized,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -963,7 +1031,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
     let addressable =
         <C as uor_matmul_codec::Codec<E, Bd>>::IS_FIXED_WIDTH && block >= 1 && space > 0;
     if !addressable || options.traversal == Traversal::OutputMajor {
-        stream(triple, epilogue, options, scratch.take(shape.k), ledger);
+        decline(triple, epilogue, options, scratch, ledger);
         return;
     }
 
@@ -971,26 +1039,25 @@ fn run<E, Bd, C, O, Ep, Lg>(
     // tile kernels run. Every lane computes the same integer; this is a question
     // about register width and traffic, and `CD-13` asserts the bytes across it.
     let lane = LaneChoice::resolve::<E, Bd>(block);
-    let acc_bytes = core::mem::size_of::<AccOf<E>>();
     let exact_offer = scratch.accumulators();
 
-    if lane.is_exact(acc_bytes) {
+    if matches!(lane.kind, LaneKind::Exact) {
         // The exact accumulator as the lane, out of the same offer the tile comes
         // from. Wider words and a shallower stack; the same identity, and for
         // `i64` and complex elements the only lane there is.
         let Some(plan) = Plan::choose(space, shape, lane, exact_offer, exact_offer, block) else {
-            stream(triple, epilogue, options, scratch.take(shape.k), ledger);
+            decline(triple, epilogue, options, scratch, ledger);
             return;
         };
         let tile = plan.rows * plan.cols;
         let want = tile + plan.lane_words(space);
         if want > exact_offer || !admits(options.traversal, space, block, plan, lane.bytes) {
-            stream(triple, epilogue, options, scratch.take(shape.k), ledger);
+            decline(triple, epilogue, options, scratch, ledger);
             return;
         }
         let (panel, accumulators) = scratch.split(suggested_tabulation_panel(space, block), want);
         if !decode_book(triple.w.codec(), panel, ledger) {
-            stream(triple, epilogue, options, scratch.take(shape.k), ledger);
+            decline(triple, epilogue, options, scratch, ledger);
             return;
         }
         let (exact, stack) = accumulators.split_at_mut(tile);
@@ -1006,11 +1073,11 @@ fn run<E, Bd, C, O, Ep, Lg>(
     // of them out of the same bytes.
     let offered = core::mem::size_of_val(lanes.lanes) / lane.bytes;
     let Some(plan) = Plan::choose(space, shape, lane, exact_offer, offered, block) else {
-        stream(triple, epilogue, options, scratch.take(shape.k), ledger);
+        decline(triple, epilogue, options, scratch, ledger);
         return;
     };
     if !admits(options.traversal, space, block, plan, lane.bytes) {
-        stream(triple, epilogue, options, scratch.take(shape.k), ledger);
+        decline(triple, epilogue, options, scratch, ledger);
         return;
     }
     let (panel, exact) = scratch.split(
@@ -1018,11 +1085,11 @@ fn run<E, Bd, C, O, Ep, Lg>(
         plan.rows * plan.cols,
     );
     if !decode_book(triple.w.codec(), panel, ledger) {
-        stream(triple, epilogue, options, scratch.take(shape.k), ledger);
+        decline(triple, epilogue, options, scratch, ledger);
         return;
     }
     let want = plan.lane_words(space);
-    if lane.bytes == core::mem::size_of::<i32>() {
+    if matches!(lane.kind, LaneKind::Narrow32) {
         let words: &mut [i32] = bytemuck::cast_slice_mut(lanes.lanes);
         tabulate::<E, Bd, C, O, Ep, i32, Lg>(
             triple,
@@ -1115,7 +1182,10 @@ where
 {
     let space = C::CODE_SPACE;
     let block = C::MAX_BLOCK;
-    if panel.len() < space * block {
+    // The book *and* the widest activation tile a row tile can pack, because the
+    // build walks both and a panel that held only the book would leave the tile
+    // with nowhere to go.
+    if panel.len() < suggested_tabulation_panel(space, block) {
         return false;
     }
     for index in 0..space {
@@ -1372,6 +1442,109 @@ fn tabulate<E, Bd, C, O, Ep, L, Lg>(
     }
 }
 
+/// What to do when the table is not the answer.
+///
+/// The tile kernels if the caller's offer holds the decoded operand, and the
+/// streaming traversal otherwise. Three factorizations of one identity, ordered by
+/// what the offer admits and by which is fastest at the shape --- not by quality,
+/// because all three produce the same bytes and `CD-13` says so.
+fn decline<E, Bd, C, O, Ep, Lg>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    ledger: &mut Lg,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: Ledger,
+{
+    if options.traversal != Traversal::OutputMajor
+        && packed_route(triple, epilogue, options, scratch, ledger)
+    {
+        return;
+    }
+    let k = triple.shape().k;
+    stream(triple, epilogue, options, scratch.take(k), ledger);
+}
+
+/// The third factorization: decode the whole operand once and hand it to the tile
+/// kernels.
+///
+/// `W` is `n x k` and the kernels want `k x n`, so the decoded buffer is read
+/// through swapped strides --- transposition is a stride, and this is the same
+/// `(A * B)^T` move [`crate::collapse`] uses on the other operand.
+///
+/// Available only when the caller's panel offer holds the whole decoded operand,
+/// which is the caller declaring it can afford the dense weights. That is the
+/// trade the codec exists to avoid, so it is never taken behind the caller's back:
+/// no offer, no route. And it is not a fallback --- the tile kernels compute the
+/// same exact sum, and `CD-13` asserts the bytes against the table and the stream
+/// alike.
+///
+/// `false` when the offer is short, in which case the caller streams.
+fn packed_route<E, Bd, C, O, Ep, Lg>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    ledger: &mut Lg,
+) -> bool
+where
+    E: Kernelized,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: Ledger,
+{
+    let shape = triple.shape();
+    let Some(want) = shape.n.checked_mul(shape.k) else {
+        return false;
+    };
+    let (panel, rest) = scratch.split_panel(want);
+    // The decoded operand, and enough left over for the kernels' own panels. A
+    // caller who offers only the first gets the streaming traversal instead: a
+    // packed traversal with nowhere to pack is not the fast factorization this
+    // route exists to reach, and measured it was twenty times slower than the
+    // kernels it was standing in for.
+    if panel.len() < want || rest.len() < shape.k {
+        return false;
+    }
+    for j in 0..shape.n {
+        triple
+            .w
+            .decode_row_into(j, &mut panel[j * shape.k..(j + 1) * shape.k]);
+    }
+    ledger.decoded(want as u64);
+    ledger.multiplied((shape.m * shape.k * shape.n) as u64);
+
+    // `panel` holds `W` row-major, which is `W^T` read with the strides swapped.
+    let Some(b) = MatView::new(
+        panel,
+        shape.k,
+        shape.n,
+        Strides {
+            rs: 1,
+            cs: shape.k as isize,
+        },
+    ) else {
+        return false;
+    };
+    let Ok(mut dense) = Triple::new(triple.a, b, triple.c.reborrow()) else {
+        // The shapes conformed when the `TabulatedTriple` was built and the output
+        // was checked for aliasing there, so neither failure can arise a second
+        // time. Streaming gives the same bytes, which is why this needs no report.
+        return false;
+    };
+    ledger.kernelled();
+    gemm_packed(&mut dense, epilogue, options, &mut Scratch::new(rest));
+    true
+}
+
 /// The same identity with no table: decode, accumulate exactly, encode once.
 ///
 /// Not a fallback. It is [`Traversal::OutputMajor`] for this operand orientation,
@@ -1396,37 +1569,49 @@ fn stream<E, Bd, C, O, Ep, Lg>(
     let reads_c = epilogue.reads_c();
     // One decoded weight row, if the offer holds one. `W` is `k`-major, so a
     // decoded row is a contiguous run of the reduction and every row of `A` reads
-    // it --- which turns the inner loop into [`dot_ref`]'s narrow-lane dot product
-    // and decodes each weight once instead of once per row of `A`.
+    // it --- which decodes each weight once instead of once per row of `A`, and
+    // leaves two contiguous runs for the lane dot product below.
     let borrowed = panel.len() >= shape.k;
+    // The same narrowest-lane scan the table runs, at a block of one: a plain dot
+    // product is a table of one entry that nobody shares.
+    let lane = LaneChoice::resolve::<E, Bd>(1);
+    let run = lane.run();
     for j in 0..shape.n {
         if borrowed {
             triple.w.decode_row_into(j, panel);
             ledger.decoded(shape.k as u64);
         }
         for i in 0..shape.m {
-            let acc = if borrowed {
-                match triple.a.row_block(i, 0, 1, shape.k) {
-                    // Both operands are runs: the same accumulation, in the
-                    // narrowest lane its depth admits, with nothing to walk.
-                    Some(row) => dot_ref(row, &panel[..shape.k]),
-                    None => {
-                        let mut acc = <AccOf<E> as Accumulator>::ZERO;
+            let row = if borrowed {
+                triple.a.row_block(i, 0, 1, shape.k)
+            } else {
+                None
+            };
+            let acc = match (row, lane.kind) {
+                // Both operands are runs and the alphabet admits a narrow lane:
+                // the whole reduction is a vector loop over two contiguous slices.
+                (Some(a), LaneKind::Narrow32) => dot_lane::<E, Bd, i64>(a, &panel[..shape.k], run),
+                (Some(a), LaneKind::Narrow64) => dot_lane::<E, Bd, i64>(a, &panel[..shape.k], run),
+                (Some(a), LaneKind::Exact) => {
+                    dot_lane::<E, Bd, Wide<AccOf<E>>>(a, &panel[..shape.k], run)
+                }
+                // `A`'s row is not a run, or nothing was offered to decode into.
+                // The same accumulation, walked: this is what makes the traversal
+                // runnable on a target whose RAM cannot hold one row (S13).
+                (None, _) => {
+                    let mut acc = <AccOf<E> as Accumulator>::ZERO;
+                    if borrowed {
                         for (p, w) in panel[..shape.k].iter().enumerate() {
                             E::mac(&mut acc, triple.a.at(i, p).get(), w.get());
                         }
-                        acc
+                    } else {
+                        for p in 0..shape.k {
+                            E::mac(&mut acc, triple.a.at(i, p).get(), triple.w.at(j, p).get());
+                        }
+                        ledger.decoded(shape.k as u64);
                     }
+                    acc
                 }
-            } else {
-                // No offer at all: decode one element at a time, which is what
-                // makes this runnable on a target whose RAM cannot hold a row.
-                let mut acc = <AccOf<E> as Accumulator>::ZERO;
-                for p in 0..shape.k {
-                    E::mac(&mut acc, triple.a.at(i, p).get(), triple.w.at(j, p).get());
-                }
-                ledger.decoded(shape.k as u64);
-                acc
             };
             ledger.multiplied(shape.k as u64);
             let prior = if reads_c {
@@ -1538,7 +1723,12 @@ mod tests {
         };
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; scale(want_acc)];
         let mut lane_words = vec![0i64; scale(want_lanes)];
-        let mut panel = vec![A8::ZERO; scale(suggested_tabulation_panel(C::CODE_SPACE, block))];
+        // At the top of the sweep the panel holds the whole decoded operand, so
+        // the tile-kernel route is exercised too; below it, only the table and the
+        // stream can be reached. All three are asserted against the same bytes.
+        let want_panel = suggested_tabulation_panel(C::CODE_SPACE, block)
+            .max(n * k + crate::suggested_scratch(shape));
+        let mut panel = vec![A8::ZERO; scale(want_panel)];
         let mut c = vec![0i32; m * n];
         let mut census = Census::default();
         {
@@ -1592,8 +1782,9 @@ mod tests {
             }
         }
 
-        // And the comparison is not vacuous: the table really was reached at the
-        // offer sized for it, and really was not at an offer of nothing.
+        // And the comparison is not vacuous: each of the three factorizations is
+        // reached by some offer, and the census says which ran rather than the
+        // predicate being asked to say it again.
         let (_, with) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS);
         let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0);
         assert!(
@@ -1604,6 +1795,11 @@ mod tests {
             without.table_reads, 0,
             "{label} {m}x{k}x{n}: an offer of nothing cannot read a table"
         );
+        // `OutputMajor` names the streaming traversal, and the whole panel offer
+        // does not change that: a caller who asks to stream streams.
+        let (_, streamed) = tabulated(&w, &a, m, n, Traversal::OutputMajor, OFFER_STEPS);
+        assert_eq!(streamed.table_reads, 0);
+        assert_eq!(streamed.multiplies, (m * k * n) as u64);
     }
 
     /// `CD-13`: `Tabulated`, `Blocked` and `OutputMajor` produce byte-identical

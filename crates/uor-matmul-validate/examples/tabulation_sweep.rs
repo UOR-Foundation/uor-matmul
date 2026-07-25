@@ -80,10 +80,10 @@ fn main() {
         // Shapes that divide nothing: a ragged row tile, a prime column count,
         // and a depth that is one block past a round number. A traversal that had
         // a cliff at an awkward size would show it here.
+        (1000, 512, 512),
+        (1, 8192, 1),
         (3, 1024, 4093),
         (17, 1032, 1021),
-        (1, 8192, 1),
-        (1000, 512, 512),
     ] {
         let macs = (m * k * n) as f64;
         let shape = Shape { m, k, n };
@@ -116,8 +116,15 @@ fn main() {
         let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
         let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
-        let mut lanes =
-            vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_tabulation_panel(space, block)];
+        // Enough for the decoded operand, so the tile-kernel route is available
+        // where the table declines. A caller who cannot afford this gets the
+        // streaming traversal instead, and the `forced stream` column is what that
+        // costs.
+        let mut lanes = vec![
+            Alphabet::<i8, Full<i8>>::ZERO;
+            suggested_tabulation_panel(space, block)
+                .max(n * k + suggested_scratch(shape))
+        ];
         let mut c = vec![0i32; m * n];
 
         let t_tab = {
@@ -182,7 +189,13 @@ fn main() {
                 &mut Tabulation::new(&mut words),
                 &mut census,
             );
-            census.table_reads > 0
+            if census.table_reads > 0 {
+                "table"
+            } else if census.kernel_calls > 0 {
+                "kernels"
+            } else {
+                "stream"
+            }
         };
         let t_packed = {
             let (a, b, c, scratch) = (&a, &b, &mut c, &mut scratch);
@@ -212,7 +225,7 @@ fn main() {
             g(t_packed),
             g(t_stream),
             t_packed / t_tab,
-            if picked { "table" } else { "stream" },
+            picked,
         );
     }
 }
