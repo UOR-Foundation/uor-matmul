@@ -167,6 +167,9 @@ pub struct Blocking {
     pub kc: usize,
     /// Columns of B per block.
     pub nc: usize,
+    /// The machine's cache line, in bytes. Sizes the transpose a reduce panel
+    /// needs so that the operand is read once rather than once per column.
+    pub cache_line_bytes: usize,
 }
 
 /// `model/widths.toml`.

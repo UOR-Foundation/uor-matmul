@@ -122,6 +122,8 @@ pub mod blocking {
     pub const KC: usize = 256;
     /// Columns of B per block.
     pub const NC: usize = 1024;
+    /// The machine's cache line, in bytes.
+    pub const CACHE_LINE_BYTES: usize = 64;
 }
 
 // R1: the W8A8 threshold, pinned. This is the one place in the shipped

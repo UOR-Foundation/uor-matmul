@@ -247,6 +247,12 @@ pub fn render(model: &Model) -> String {
         "    pub const NC: usize = {};",
         model.constants.blocking.nc
     );
+    let _ = writeln!(w, "    /// The machine's cache line, in bytes.");
+    let _ = writeln!(
+        w,
+        "    pub const CACHE_LINE_BYTES: usize = {};",
+        model.constants.blocking.cache_line_bytes
+    );
     let _ = writeln!(w, "}}");
 
     // R1's pin. The plan permits `133144` to appear inside a `const _` assert

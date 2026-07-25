@@ -162,3 +162,9 @@ reason = "cache-shaped tuning; CD-01 asserts output is invariant under every val
 mc = 128
 kc = 256
 nc = 1024
+# A packed panel whose lanes are steps of the reduction is a *transpose* of the
+# operand, and a transpose done column by column reads the whole operand once
+# per column. Done in tiles this wide it reads it once. The number is the
+# machine's cache line in bytes; like the three above it can change which
+# traversal produces an output byte and never which byte.
+cache_line_bytes = 64

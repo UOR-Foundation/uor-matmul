@@ -852,6 +852,52 @@ impl Cursor {
     }
 }
 
+/// How many lines of a transpose tile to hold open at once.
+///
+/// A panel whose lanes are steps of the reduction is a *transpose* of the
+/// operand, and a transpose done one column at a time reads the whole operand
+/// once per column: at `8 x 262144 x 8` that was eight passes over two megabytes,
+/// and it cost thirteen times what the microkernel cost. Done in square tiles of
+/// a cache line each way, the operand is read once.
+///
+/// Derived from the declared line width and the element size, so it is a
+/// property of the machine and the type rather than a number chosen here.
+fn transpose_tile<T>() -> usize {
+    (uor_matmul_core::generated::blocking::CACHE_LINE_BYTES / core::mem::size_of::<T>()).max(1)
+}
+
+/// Pack `count` single-lane panels by transposing in tiles.
+///
+/// `line(p, c0, len)` walks `len` elements of the operand at depth `p` starting
+/// at lane `c0`; for a one-lane panel that run is contiguous exactly when the
+/// lanes are the operand's cheap direction, which is when this is worth doing.
+/// Panel `c` receives element `p` at `c * kpad + p`, which is
+/// [`uor_matmul_kernels::packed_slot`] at `lanes = 1`.
+fn transpose_panels<'v, E: IntegerElement, Bd: Bound>(
+    out: &mut [Alphabet<E, Bd>],
+    kpad: usize,
+    depth: usize,
+    count: usize,
+    line: impl Fn(usize, usize, usize) -> uor_matmul_core::Walk<'v, Alphabet<E, Bd>>,
+) {
+    let tile = transpose_tile::<Alphabet<E, Bd>>();
+    let mut p0 = 0;
+    while p0 < depth {
+        let pn = tile.min(depth - p0);
+        let mut c0 = 0;
+        while c0 < count {
+            let cn = tile.min(count - c0);
+            for p in p0..p0 + pn {
+                for (c, v) in line(p, c0, cn).enumerate() {
+                    out[(c0 + c) * kpad + p] = *v;
+                }
+            }
+            c0 += tile;
+        }
+        p0 += pn;
+    }
+}
+
 /// Pack `count` rows of `A` into `ceil(count / lanes)` microkernel panels.
 ///
 /// Walks each row once rather than indexing per element. Rows past the block,
@@ -880,7 +926,21 @@ fn pack_rows<E: IntegerElement, Bd: Bound>(
     // shape whose packing is the same order as its arithmetic is the whole cost.
     // Only worth it when there is more than one lane to put inside: a reduce
     // panel has one, and an inner loop of one element is all overhead.
-    let lanes_inner = lanes > 1 && a.strides().rs.unsigned_abs() < a.strides().cs.unsigned_abs();
+    let cols_are_cheap = a.strides().rs.unsigned_abs() < a.strides().cs.unsigned_abs();
+    if lanes == 1 && cols_are_cheap && count > 1 {
+        // The symmetric case: a column-major `A`, whose rows are the expensive
+        // direction, transposed into one-row panels.
+        transpose_panels(out, kpad, depth, count, |p, c0, cn| {
+            a.column_walk(row0 + c0, col0 + p, cn)
+        });
+        for c in 0..count {
+            for p in depth..kpad {
+                out[c * kpad + p] = Alphabet::ZERO;
+            }
+        }
+        return;
+    }
+    let lanes_inner = lanes > 1 && cols_are_cheap;
     let mut base = 0;
     let mut done = 0;
     while done < count {
@@ -928,7 +988,19 @@ fn pack_columns<E: IntegerElement, Bd: Bound>(
     // A lane is a column here, so the lanes move by `cs` and the depth by `rs`.
     // See [`pack_rows`]: a row-major `B` wants the lanes inside, and walking it
     // the other way round is a cache line per element.
-    let lanes_inner = lanes > 1 && b.strides().cs.unsigned_abs() < b.strides().rs.unsigned_abs();
+    let rows_are_cheap = b.strides().cs.unsigned_abs() < b.strides().rs.unsigned_abs();
+    if lanes == 1 && rows_are_cheap && count > 1 {
+        transpose_panels(out, kpad, depth, count, |p, c0, cn| {
+            b.row_walk(row0 + p, col0 + c0, cn)
+        });
+        for c in 0..count {
+            for p in depth..kpad {
+                out[c * kpad + p] = Alphabet::ZERO;
+            }
+        }
+        return;
+    }
+    let lanes_inner = lanes > 1 && rows_are_cheap;
     let mut base = 0;
     let mut done = 0;
     while done < count {
