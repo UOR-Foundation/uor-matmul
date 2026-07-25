@@ -527,6 +527,63 @@ mod tests {
         assert!(Strides { rs: 0, cs: 1 }.self_aliases(5, 3));
     }
 
+    /// A block is borrowable exactly when the strides already lay it out that
+    /// way, and never otherwise.
+    ///
+    /// The driver hands these slices straight to a microkernel, so a `Some`
+    /// where the layout does not match would feed it the wrong bytes. Every
+    /// stride shape that could tempt a looser check is here: transposed,
+    /// negative, zero, padded, and one row or column where the other stride is
+    /// irrelevant.
+    #[test]
+    fn a_block_is_borrowable_only_when_it_is_already_the_panel() {
+        let data: [i32; 24] = core::array::from_fn(|i| i as i32);
+
+        // Row-major 4x6: rows are contiguous and adjacent at 6.
+        let v = MatView::row_major(&data, 4, 6).unwrap();
+        assert_eq!(v.row_block(0, 0, 4, 6), Some(&data[..24]));
+        assert_eq!(v.row_block(1, 0, 2, 6), Some(&data[6..18]));
+        // One row: the row stride cannot matter.
+        assert_eq!(v.row_block(2, 1, 1, 3), Some(&data[13..16]));
+        // More than one row, but the rows are not adjacent at `len`.
+        assert_eq!(v.row_block(0, 0, 2, 3), None);
+        // Past the view.
+        assert_eq!(v.row_block(3, 0, 2, 6), None);
+        assert_eq!(v.row_block(0, 0, 4, 7), None);
+        // Columns are strided here, so no column block wider than nothing.
+        assert_eq!(v.column_block(0, 0, 1, 4), None);
+
+        // Column-major 4x6: columns are contiguous and adjacent at 4.
+        let v = MatView::new(&data, 4, 6, Strides { rs: 1, cs: 4 }).unwrap();
+        assert_eq!(v.column_block(0, 0, 6, 4), Some(&data[..24]));
+        assert_eq!(v.column_block(0, 2, 2, 4), Some(&data[8..16]));
+        assert_eq!(v.column_block(1, 0, 1, 3), Some(&data[1..4]));
+        assert_eq!(v.column_block(0, 0, 2, 3), None);
+        assert_eq!(v.row_block(0, 0, 1, 6), None);
+
+        // A padded row-major view: rows contiguous, but adjacent at 8, not 6.
+        let v = MatView::new(&data, 3, 6, Strides { rs: 8, cs: 1 }).unwrap();
+        assert_eq!(v.row_block(0, 0, 1, 6), Some(&data[..6]));
+        assert_eq!(v.row_block(0, 0, 2, 6), None);
+        assert_eq!(v.row_block(0, 0, 3, 8), None);
+
+        // A negative row stride is not a panel, however contiguous the rows.
+        let v = MatView::new(&data, 4, 6, Strides { rs: -6, cs: 1 }).unwrap();
+        assert_eq!(v.row_block(0, 0, 2, 6), None);
+        assert_eq!(v.row_block(0, 0, 1, 6), Some(&data[18..24]));
+
+        // A broadcast row: every row is the same memory, so a multi-row block is
+        // not a block of distinct rows.
+        let v = MatView::new(&data, 4, 6, Strides { rs: 0, cs: 1 }).unwrap();
+        assert_eq!(v.row_block(0, 0, 2, 6), None);
+
+        // Degenerate asks answer `None` rather than an empty slice, so a caller
+        // cannot borrow nothing and call a kernel on it.
+        let v = MatView::row_major(&data, 4, 6).unwrap();
+        assert_eq!(v.row_block(0, 0, 0, 6), None);
+        assert_eq!(v.row_block(0, 0, 4, 0), None);
+    }
+
     /// CS-03, CT-05: the two reportable conditions are reported here, and
     /// nowhere else.
     #[test]

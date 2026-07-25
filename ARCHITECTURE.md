@@ -69,6 +69,30 @@ in the fixed-point addition, and then the answer would depend on where in the
 accumulation the infinity arrived. IEEE 754 clause 6 is about the value, not the
 schedule.
 
+## The tile and reduce factorizations
+
+A tile kernel's vector lanes are columns of `C`; a reduce kernel's are steps of
+`k`. A tile kernel produces `nr` columns per call whether the output has them or
+not, so a shape narrower than `nr` pays for the ones that are not there --- at
+`n = 1` that is one useful lane in ninety-six. A reduce kernel has no such
+problem, because there is always more `k`.
+
+Both compute the same integer, and `CB-06` asserts it. Which one runs is decided
+by the shape against the tile, and the shape is a declaration the caller made
+when they constructed the view. Within the reduce family the same rule picks the
+panel *height*: the widest one the rows fill, because a panel wider than the
+output is zero-padded and for a reduce kernel that padding is copied.
+
+## Borrowing instead of packing
+
+A packed panel is a copy, so a copy of something already in the panel's shape is
+pure cost. For a `LaneLayout::Contiguous` kernel the panel *is* a run of rows or
+of columns, so a row-major `A` and a column-major `B` already hold it.
+`MatView::row_block` and `MatView::column_block` hand back the operand's own
+memory when the strides say so, and `None` otherwise --- and when both sides
+borrow, the traversal needs no working memory at all, so a matrix-vector product
+runs blocked on an empty `Scratch`.
+
 ## The narrow/wide factorization
 
 `fits_narrow(b, cap, k)` answers one question: may this tile be accumulated in a
@@ -82,19 +106,46 @@ a fallback: a fallback changes the answer or the guarantee, and this changes
 neither. `CD-09` asserts it, and `CU-02` measures that the narrow path is
 actually taken.
 
+## The declared alphabet
+
+A `KernelSpec` also declares `max_bound`: the widest alphabet bound at which its
+sequence is exact. `lane_cap` bounds the *depth* and the driver answers that by
+chunking; this is the other question, and chunking cannot answer it. A sequence
+with an intermediate narrower than its lane is wrong past some magnitude however
+shallow the chunk --- `_mm256_madd_epi16` sums two products into an `i32`, and
+two full-magnitude `i16` products are one bit past it.
+
+So selection does not consider a sequence outside its declared alphabet. Not
+because it is riskier there: there it computes a different number, so it is not a
+factorization of this identity at all. `CB-07` asserts both halves --- that every
+sequence is exact at the extremes it declares, and that selection never offers
+one outside them.
+
 ## The packed panel format
 
-`KernelSpec` declares `mr`, `nr`, `k_group`, and `lane_cap`. Panels are
-**k-major**:
+`KernelSpec` declares `mr`, `nr`, `k_group`, `lane_layout`, `lane_cap`, and
+`max_bound`. One function gives the layout:
 
 ```text
-pa[p * mr + i] = A[i0 + i][p0 + p]
-pb[p * nr + j] = B[p0 + p][j0 + j]
+packed_slot(p, lane, lanes, group) = (p / group) * (lanes * group)
+                                   + lane * group
+                                   + (p % group)
 ```
 
-Rows past `m` and columns past `n` are packed with the alphabet's zero. Zero
-padding is exact, which is why an unaligned or prime shape takes this path and
-not a different one. `CK-03` asserts that two tiers with equal decodes pack
+with `group = k_group` for `LaneLayout::Interleaved` and `group = kpad` for
+`LaneLayout::Contiguous`. Interleaved is what a kernel wants when its vector
+lanes are output columns: one load brings in the same `k`-group for every lane.
+Contiguous is what a kernel wants when its lanes are steps of the reduction: one
+load brings in a run of `k` for a single lane.
+
+The driver's packer *is* that function, every kernel's index arithmetic is it
+specialized to its own constants, and the parity tests read panels through it ---
+so a kernel that disagrees with the layout disagrees with the reference.
+
+Rows past `m`, columns past `n`, and depth past `k` up to the group multiple are
+packed with the alphabet's zero. Zero padding contributes nothing to the sum and
+nothing to the lane, which is why an unaligned or prime shape takes this path and
+not a different one, and why no kernel has a `k`-tail. `CK-03` asserts that two tiers with equal decodes pack
 byte-identical panels --- stronger than equal products, and the check that would
 catch a codec whose decode is right but whose ordering is not.
 

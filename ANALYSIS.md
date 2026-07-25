@@ -102,18 +102,10 @@ implementation should give --- reported, not asserted.
 
 ## Where the time goes
 
-Measured on a two-core shared runner with AVX2 and no AVX-512, at `i8 x i8 ->
-i32` under `EncodeMode::Wrapping`. Every figure is `open`.
-
-| Path | Gmac/s |
-| --- | --- |
-| generic driver, 256^3 | 0.93 |
-| kernel-driven, 256^3 | 2.09 |
-| coded (`Grid<16>`), 256^3 | 0.67 |
-| `f32`, 128^3 | 0.08 |
-
-Four things dominated, and each was a copy or a traversal rather than
-arithmetic:
+Measured on a two-core shared runner with AVX2 and no AVX-512. Every figure is
+`open`. What follows is what measuring found, in the order it was found, because
+every one of them was a copy or a traversal rather than arithmetic --- and none
+of them was visible by reading.
 
 **The accumulator was passed by value.** `Element::mac` took and returned
 `Self::Acc`. For an `i128` that is free; for `Complete<10>` it is 88 bytes in
@@ -134,24 +126,67 @@ constant factor, a different curve. It showed up as a benchmark that did not
 finish. Fixed-width tiers now index by arithmetic; only a run codec walks, and
 only when a caller uses random access on one.
 
-**The `B` panel was packed once per output block.** The panels are the only
-copies the kernel driver makes, and with the row block outermost `B` was
-repacked `m/mr` times over: `m*n*k/mr` element copies against `m*n*k` of
-arithmetic, about a sixth of the work. Hoisting the `B` pack out of the row loop
---- column block outermost, whole depth in one chunk --- replaced that with
-`n*k` copies and left `A` repacked `m*n*k/nr` times, which is the cheaper way
-round because `nr > mr`. Worth 27%.
+**The packing loop indexed instead of walking.** `origin + i * rs + j * cs` per
+element is two multiplies where a walk is one add, and the panel is a million
+elements. `MatView::row_walk` and `column_walk`, with the full panel split from
+the edge, was worth 1.7x on `i32`.
 
-What remains, and why it is not a defect:
+**Panels were packed at microkernel granularity.** A panel is `mr` rows or `nr`
+columns wide, and packing at that granularity repacks `A` once per column
+*panel*: `m*n*k/nr` element copies against `m*n*k` of arithmetic. At the shipped
+`nr` that is not a rounding error --- it was the same order as the arithmetic,
+and it was the whole distance between this driver and the instruction ceiling of
+its own kernels. Packing in cache-shaped *blocks* instead was worth 2.1x on `i8`
+and 2.3x on `i32`.
 
-- `A` is still repacked per column block, at `m*n*k/nr` ~ 6% of the arithmetic.
-  Removing it needs a `C` accumulator panel of `m x nr` exact accumulators,
-  which is memory the library is not allowed to own (R7). A caller who wants it
-  can partition and reuse.
+**`k_group` was declared and ignored.** Every SIMD kernel rebuilt its `k`-group
+in a stack buffer once per step, because the packed layout did not group. Making
+the layout honour it --- `k`-major in groups, lane-major within one --- lets
+`B`'s group widen straight into the vectors `madd`, `dpwssd`, `sdot` and `dot`
+consume, and `A`'s group be one unaligned load and a broadcast. It also removed
+every kernel's `k`-tail. Worth 1.35x on `i8`.
+
+**The block extents read the blocking as a column count.** `NC` columns of `B`
+at a panel depth of the whole `k` is a `k/KC`-times-oversized panel, which at
+`k = 1024` is the difference between a panel in L2 and a panel in memory. Read
+as a working *set* --- `KC * NC` elements of `B`, `MC * KC` of `A` --- the block
+narrows as the depth grows and what stays resident stays the same size.
+
+**A narrow output paid for columns that were not there.** A tile kernel produces
+`nr` columns per call whether the output has them or not; at `n = 1` that is one
+useful lane in ninety-six. The reduce factorization puts the lanes on `k`, where
+there is always more. Worth 50x on a matrix-vector product.
+
+**A packed panel is a copy, and some panels were already there.** For a
+`LaneLayout::Contiguous` kernel the panel *is* a run of rows or of columns, so a
+row-major `A` and a column-major `B` already hold it --- which is not an exotic
+case, it is a matrix-vector product with the ordinary layout, where the panel
+would otherwise be one element written per multiply-accumulate and double the
+whole product's memory traffic. `MatView::row_block` and `column_block` hand back
+the operand's own memory when the strides already say so. Worth a further 37x on
+a single deep dot product, which then needs no working memory at all.
+
+**The float encode formed the magnitude once per bit.** `magnitude_bit` negated
+the whole register on every call: 10 limbs for `f32`, 67 for `f64`, once per
+significand bit. That is O(P*L) where O(P + L) does. Forming the magnitude once
+and reading a `P`-bit window out of it was worth 2.9x on `f32` at `k = 2`, where
+the encode is nearly the whole cost, and nothing at large `k`, where the
+accumulate loop is.
+
+What remains, and why:
+
+- `A` is still repacked once per column *block*, which at the suggested offer is
+  once. Removing the last of it needs a `C` accumulator panel of exact
+  accumulators, which is memory the library is not allowed to own (R7). A caller
+  who wants it can partition and reuse.
 - The generic and coded drivers walk `k` innermost, so `B` is read with stride
   `n`. Fixing that needs an accumulator row, which is again memory the library
-  cannot own. The kernel-driven path is the one that packs, and it is 2.2x
-  faster for exactly this reason.
+  cannot own. The kernel-driven path is the one that packs.
+- `m = 1` against a wide `n` still fills a `6`-row panel with one real row. The
+  shape is memory-bound either way --- `B` must be read once for `k*n` products
+  --- and the library is ahead of both integer oracles there, so the padding is
+  hidden. It is the one shape where a narrower tile panel would still buy
+  something.
 - `f32` is far slower than the integer paths. The size of that gap is measured
   against the *oracles* below, not against our own integer path, because
   comparing a library to itself says nothing about whether the cost is
@@ -160,100 +195,105 @@ What remains, and why it is not a defect:
 ## Against the oracles
 
 C3 is a hard constraint: scaling is compared against the oracle's scaling. Both
-sides are measured in one process, over one sweep spanning nine orders of
+sides are measured in one process, over one sweep spanning ten orders of
 magnitude in MAC count, with the answer asserted inside the timed region --- a
 speed measured on the wrong bytes is not a measurement.
 
-Two-core shared runner with AVX2 and no AVX-512. Best of N per point; every
-figure is `open`.
+Two-core shared runner with AVX2 and no AVX-512. Best of as many repetitions as
+fit a fixed wall-clock budget, so the large end gets more than two samples.
+Operands are a recorded pseudo-random fill: they used to be all ones, which
+flattered this library twice, because then every `f32` product shares one
+exponent and the complete accumulator's limb window never once has to flush.
+Every figure is `open`.
 
-### Throughput, Gmac/s
+### Throughput on squares, Gmac/s
 
 | `n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` exact | matrixmultiply `f32` |
 | --- | --- | --- | --- | --- | --- | --- |
-| 8 | 1.38 | 1.60 | 1.00 | 1.51 | 0.08 | 4.27 |
-| 32 | 7.42 | 7.82 | 1.72 | 4.13 | 0.20 | 25.4 |
-| 128 | 11.2 | 11.2 | 0.70 | 4.22 | 0.31 | 28.4 |
-| 512 | 12.9 | 13.1 | 0.38 | 3.86 | 0.36 | 35.9 |
-| 1024 | 12.5 | 12.3 | 0.21 | 4.68 | 0.36 | 42.5 |
+| 8 | 0.64 | 0.84 | 1.00 | 1.46 | 0.15 | 4.66 |
+| 32 | 6.10 | 5.54 | 1.75 | 3.88 | 0.21 | 26.8 |
+| 128 | 18.6 | 15.0 | 0.72 | 4.28 | 0.25 | 28.8 |
+| 512 | 36.9 | 28.1 | 0.55 | 4.66 | 0.25 | 43.4 |
+| 1024 | 36.5 | 26.7 | 0.21 | 4.35 | 0.24 | 43.5 |
+| 2048 | 25.0 | 14.8 | 0.15 | 3.95 | 0.24 | 42.8 |
 
-### Latency at `n = 1`, nanoseconds per call
+### Throughput on shapes that are not squares, Gmac/s
 
-| | ns |
-| --- | --- |
-| uor `i8` | 100 |
-| ndarray | 69 |
-| matrixmultiply | 89 |
+A square is one use-case and not the interesting one. Each row below stresses a
+different half of the driver.
 
-### Fitted exponent against MAC count, whole sweep
+| `m x k x n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` | matrixmultiply `f32` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1024x1024x1 | 34.5 | 16.4 | 3.23 | 0.17 | 0.19 | 2.25 |
+| 1x1024x1024 | 0.54 | 0.29 | 0.21 | 0.14 | 0.14 | 1.21 |
+| 8x262144x8 | 6.63 | 5.06 | 1.70 | 1.77 | 0.24 | 16.0 |
+| 1x1048576x1 | 40.2 | 10.2 | 2.43 | 0.40 | 0.15 | 0.31 |
+| 2048x8x2048 | 8.78 | 7.88 | 1.08 | 0.81 | 0.12 | 13.2 |
+| 4096x2x4096 | 1.19 | 2.19 | 0.42 | 0.18 | 0.05 | 0.86 |
+| 509x1021x257 | 26.3 | 23.2 | 1.22 | 5.47 | 0.24 | 41.7 |
+
+### Latency at the smallest shapes, nanoseconds per call
+
+| `n` | uor `i8` | uor `i32` | ndarray | matrixmultiply |
+| --- | --- | --- | --- | --- |
+| 1 | 140 | 80 | 60 | 80 |
+| 4 | 250 | 160 | 130 | 100 |
+
+### Fitted exponent of throughput against MAC count
 
 | | exponent |
 | --- | --- |
-| uor `i8` | 0.68 |
-| uor `i32` | 0.69 |
-| ndarray | 0.92 |
-| nalgebra | 0.77 |
-| uor `f32` | 0.82 |
-| matrixmultiply | 0.64 |
+| uor `i8` | 0.35 |
+| uor `i32` | 0.32 |
+| ndarray | 0.04 |
+| nalgebra | 0.20 |
+| uor `f32` | 0.09 |
+| matrixmultiply | 0.32 |
 
-An exponent below 1 means throughput still improving with size: the small end is
-latency-dominated. `ndarray`'s 0.92 is the opposite story --- it starts fast and
-*degrades*, from 1.9 Gmac/s at `n = 64` to 0.21 at `n = 1024`, which is a cache
-story rather than an arithmetic one.
+A positive exponent means throughput still improving with size: the small end is
+latency-dominated for everyone. `ndarray`'s 0.04 is the opposite story --- it
+starts fast and *degrades*, from 1.9 Gmac/s at `n = 64` to 0.15 at `n = 2048`,
+which is a cache story rather than an arithmetic one. Ours tracks
+`matrixmultiply`'s almost exactly, which is what a driver with the same blocking
+structure should do.
 
 ### What this says
 
-**On integers, this library is ahead of both oracles.** At `n = 1024` it is 59x
-`ndarray` and 2.7x `nalgebra`, and it holds a flat 12--13 Gmac/s from `n = 128`
-upward while `ndarray` falls away. Nothing about that is a compromise on
-exactness: the integer result is the exact sum encoded once, and `CX-01` .. `CX-04`
-and `CX-10` assert it byte for byte against four independent implementations,
-including one outside the Rust ecosystem.
+**On integers, this library is ahead of both oracles at every size that is not
+latency-bound.** At `n = 512` it is 67x `ndarray` and 7.9x `nalgebra`; at
+`n = 1024`, 174x and 8.4x. Nothing about that is a compromise on exactness: the
+integer result is the exact sum encoded once, and `CX-01` .. `CX-04` and `CX-10`
+assert it byte for byte against four independent implementations, including one
+outside the Rust ecosystem.
 
-**Latency at `n = 1` is 100 ns against `ndarray`'s 69.** The difference is the
-view construction and the kernel selection, both of which happen once per call
-and neither of which scales. It is the one place an oracle is ahead and the sweep
-says so.
+**On integer squares it is now within 1.2x of `matrixmultiply`'s `f32`.** That
+comparison is across element types and is not a like-for-like claim; it is here
+because `matrixmultiply` is the fastest thing in the process and it says how much
+of the machine the driver is reaching.
 
-**On floats the library is 120x behind `matrixmultiply`, and that is the trade
-N4 names.** A classical `sgemm` issues one fused multiply-add per element. This
-one decodes two IEEE bit patterns, multiplies their significands as integers,
-and places the exact product into a 619-bit fixed-point register --- and never
-rounds until the end. Counting the scalar operations that requires against one
-FMA over eight lanes on two ports gives a floor near 100x, and the measurement
-sits just above it. The gap is the price of an answer that does not depend on
-the order of the additions, which no figure in the `matrixmultiply` column has.
+**On a matrix-vector product it is 10x ahead of `ndarray` and 15x ahead of
+`matrixmultiply`.** That shape used to be this library's worst, at 0.70 Gmac/s,
+and the reason was structural: the tile kernel produced sixteen columns for a
+product that has one. The reduce factorization and panel borrowing are what
+closed it, and both are the same identity, factored differently.
 
-### What it took to get here
+**Latency at `n = 1` is 140 ns against `ndarray`'s 60.** The difference is view
+construction and kernel selection, both once per call and neither scaling. It is
+one of two places an oracle is ahead, and the sweep says so.
 
-Four structural defects, each found by measuring rather than by reading:
-
-**The SIMD kernels were never selected.** `uor-matmul-validate` depended on
-`uor-matmul` with default features, so `std` was off, runtime detection fell
-back to `cfg!(target_feature = ...)`, and every earlier figure was the portable
-kernel while claiming to be the machine. Enabling `std` was worth 5.8x on `i8`.
-The sweep now prints which kernels a build can run, first, so this cannot recur
-silently. `README.md` says the same thing where a user will see it.
-
-**Only `i8` had kernels.** `i32` went through the generic driver, which is the
-same identity but not the same instructions --- and benchmarking it against
-`nalgebra` was benchmarking the wrong program. Every integer family now has a
-kernel: `i16` and `i32` exact, `i16`, `i32`, and `i64` modular, and `i64` exact
-in an `i128` lane, which is the only width that holds an `i64` product and the
-reason no SIMD reaches it.
-
-**The packing loop indexed instead of walking.** `origin + i * rs + j * cs` per
-element is two multiplies where a walk is one add, and the panel is a million
-elements. Adding `MatView::row_walk` and `column_walk` and splitting the full
-tile from the edge was worth 1.7x on `i32`.
-
-**The accumulator was passed by value.** `Element::mac` took and returned
-`Self::Acc` --- 88 bytes in and out, twice per product for a float. `&mut` was
-worth 4x on `f32` and 1.6x on the packed integer path.
+**On floats the library is roughly 180x behind `matrixmultiply`, and that is the
+trade N4 names.** A classical `sgemm` issues one fused multiply-add per element.
+This one decodes two IEEE bit patterns, multiplies their significands as
+integers, and places the exact product into a 619-bit fixed-point register ---
+and never rounds until the end. The gap is the price of an answer that does not
+depend on the order of the additions, which no figure in the `matrixmultiply`
+column has. It is also the honest figure rather than the earlier one: with
+all-ones operands the limb window never flushed and the same measurement read
+120x.
 
 ### The modular factorization
 
-`i32` reaching 12 Gmac/s is not a `wrapping_mul` shortcut. When the caller asks
+`i32` reaching 27 Gmac/s is not a `wrapping_mul` shortcut. When the caller asks
 to encode by wrapping into a `w`-bit output, reduction modulo `2^w` is a ring
 homomorphism, so accumulating in `Z/2^w` *is* the exact accumulation seen in the
 quotient the caller named. `_mm256_mullo_epi32` then gives eight products per
@@ -264,3 +304,34 @@ Which factorization runs is decided by two *declarations* --- the encode mode
 and the output width --- and never by inspecting the data. `CD-05` asserts that
 both give the value their mode asks for, and that past `i32` they disagree,
 which is what makes the choice observable rather than cosmetic.
+
+### The reduce factorization
+
+A tile kernel's vector lanes are columns of `C`. A reduce kernel's are steps of
+`k`. Both compute the same integer, and `CB-06` asserts it; which one runs is
+decided by the shape against the tile, which is a declaration the caller made
+when they constructed the view.
+
+It needs no second driver. A reduce panel is the *same* layout function at
+`group = kpad`, so `packed_slot` reduces to `lane * kpad + p` and one `usize` in
+the packer covers both. The table carries a reduce sequence for every family on
+every ISA, each at a four-row and a one-row panel, because a panel wider than the
+output is zero-padded and for a reduce kernel that padding is copied at `k`
+elements a row.
+
+### The declared alphabet
+
+`_mm256_madd_epi16` sums two products into an `i32`, and two full-magnitude
+`i16` products are `2 * 2^30` --- one bit past it. So that sequence is exact
+exactly while the alphabet bound is at most `32767`, and at the full `i16`
+alphabet it returned `-2^31` where the exact sum is `+2^31`. A random fill
+reaches that input with probability `2^-64`, which is why the parity tests did
+not find it and now ask for the extremes by name.
+
+The fix is a declaration, not a guard: a `KernelSpec` carries `max_bound`, the
+widest alphabet its sequence is exact on, and selection does not consider a
+sequence outside it. The paired sequence declares `32767` and keeps its
+instruction count; a widening sequence declares every `i16` and issues more.
+Both are exact on what they declare, which is what makes them two factorizations
+rather than a fast one and a safe one --- outside its alphabet the paired
+sequence does not compute this identity at all.
