@@ -106,6 +106,21 @@ pub struct KernelSpec<E, L> {
     /// the sum and nothing to the lane. An arbitrary `k` therefore takes this
     /// path and not a different one, and no kernel has a `k`-tail (S8).
     pub k_group: usize,
+    /// How many products this sequence computes per issued instruction.
+    ///
+    /// The driver has two traversals and no way to compare them without this.
+    /// The packed one pads the shape up to whole panels and copies them; the
+    /// streaming one does exactly the products the shape names and copies
+    /// nothing. Which is cheaper is a comparison of the padded product count
+    /// divided by this against `m * k * n`, and that comparison is meaningless
+    /// unless a sequence says how much a padded product actually costs it.
+    ///
+    /// `_mm256_madd_epi16` on `i8`-derived words is sixteen: eight `i32` lanes,
+    /// each the sum of two products. The reference is one.
+    ///
+    /// It cannot change a value --- it is a claim about instructions, and
+    /// `CD-01` asserts every traversal gives the same bytes whatever it says.
+    pub products_per_step: usize,
     /// The largest magnitude one lane holds.
     ///
     /// Ignored for [`Factorization::Modular`], where the lane wraps by design
@@ -237,6 +252,7 @@ macro_rules! tile_fits {
 }
 
 /// Every `i8 x i8 -> i32` kernel this build can run, portable first.
+#[inline]
 pub fn available_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
     collect![
         true => crate::isa::portable::I8_I32,
@@ -258,6 +274,7 @@ pub fn available_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
 /// `32767`; the widening sequence is exact at every `i16` and issues more
 /// instructions. The paired one is listed last so that a declaration admitting
 /// it gets it.
+#[inline]
 pub fn available_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
     collect![
         true => crate::isa::portable::I16_I64,
@@ -273,6 +290,7 @@ pub fn available_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
 /// The product of two `i32` needs 62 bits, so the lane must be 64.
 /// `_mm256_mul_epi32` is a signed `32x32 -> 64` multiply, which is this
 /// family's whole arithmetic in one instruction.
+#[inline]
 pub fn available_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
     collect![
         true => crate::isa::portable::I32_I64,
@@ -286,6 +304,7 @@ pub fn available_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
 /// The lane is `Z/2^32`. Legitimate exactly when the caller asked to encode by
 /// wrapping into a 32-bit output, because then the lane's own wrap *is* the
 /// encode and nothing is lost that the caller did not ask to lose.
+#[inline]
 pub fn available_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
     collect![
         true => crate::isa::portable::I32_MOD,
@@ -301,6 +320,7 @@ pub fn available_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
 /// the portable kernel is not a placeholder here --- it is the whole of what
 /// the hardware offers, and packing still buys it the locality every other
 /// family gets.
+#[inline]
 pub fn available_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
     collect![
         true => crate::isa::portable::I64_I128,
@@ -312,6 +332,7 @@ pub fn available_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
 /// Twice the lanes of the exact `i16` kernel, because in `Z/2^32` there is
 /// nothing to widen to: `madd` already lands in `i32` and the accumulation
 /// stays there.
+#[inline]
 pub fn available_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
     collect![
         true => crate::isa::portable::I16_MOD,
@@ -326,6 +347,7 @@ pub fn available_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
 /// lane and no SIMD integer multiply that reaches it. In the quotient there is:
 /// `Z/2^64` needs only the low half of each product, which is what a plain
 /// `wrapping_mul` gives.
+#[inline]
 pub fn available_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
     collect![
         true => crate::isa::portable::I64_MOD,
@@ -344,6 +366,7 @@ pub fn available_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
 /// reduction factored across lanes instead of the output. `CB-06` asserts it
 /// agrees with the reference byte for byte, and the driver chooses between the
 /// two by comparing the shape against the tile, which is a declaration.
+#[inline]
 pub fn available_reduce_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
     collect![
         true => crate::isa::portable::R1_I8_I32,
@@ -360,6 +383,7 @@ pub fn available_reduce_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
 }
 
 /// Every exact `i16` reduce sequence. See [`available_reduce_i8`].
+#[inline]
 pub fn available_reduce_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
     collect![
         true => crate::isa::portable::R1_I16_I64,
@@ -370,6 +394,7 @@ pub fn available_reduce_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
 }
 
 /// Every modular `i16` reduce sequence. See [`available_reduce_i8`].
+#[inline]
 pub fn available_reduce_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
     collect![
         true => crate::isa::portable::R1_I16_MOD,
@@ -380,6 +405,7 @@ pub fn available_reduce_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i3
 }
 
 /// Every exact `i32` reduce sequence. See [`available_reduce_i8`].
+#[inline]
 pub fn available_reduce_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
     collect![
         true => crate::isa::portable::R1_I32_I64,
@@ -390,6 +416,7 @@ pub fn available_reduce_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>
 }
 
 /// Every modular `i32` reduce sequence. See [`available_reduce_i8`].
+#[inline]
 pub fn available_reduce_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
     collect![
         true => crate::isa::portable::R1_I32_MOD,
@@ -405,6 +432,7 @@ pub fn available_reduce_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i3
 /// on any supported target, so the reference is the whole of what the hardware
 /// offers --- but the reduce *traversal* still buys this family what it buys
 /// every other: a narrow output stops paying for columns that are not there.
+#[inline]
 pub fn available_reduce_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
     collect![
         true => crate::isa::portable::R1_I64_I128,
@@ -413,6 +441,7 @@ pub fn available_reduce_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128
 }
 
 /// Every modular `i64` reduce sequence. See [`available_reduce_i64_exact`].
+#[inline]
 pub fn available_reduce_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
     collect![
         true => crate::isa::portable::R1_I64_MOD,
@@ -433,6 +462,7 @@ pub fn available_reduce_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i6
 /// The rows are a shape --- a declaration the caller made when they constructed
 /// the view --- so this is selection by declaration, like every other choice in
 /// this crate. Every candidate computes the same integer (`CB-06`).
+#[inline]
 pub fn choose_for_rows<E, L>(
     specs: impl Iterator<Item = KernelSpec<E, L>>,
     requested: Backend,
@@ -489,6 +519,7 @@ pub const fn portable_i8() -> KernelSpec<i8, i32> {
 /// A sequence whose [`KernelSpec::max_bound`] is below `bound` is not considered
 /// at all. It is not slower or riskier: at that alphabet it computes a different
 /// number, so it is not a factorization of this identity.
+#[inline]
 pub fn choose<E, L>(
     specs: impl Iterator<Item = KernelSpec<E, L>>,
     requested: Backend,

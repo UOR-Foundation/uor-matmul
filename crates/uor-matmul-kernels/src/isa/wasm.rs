@@ -32,6 +32,7 @@ pub const SIMD128_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: NR,
     lane_layout: LaneLayout::Interleaved,
     k_group: 2,
+    products_per_step: 8,
     lane_cap: i32::MAX as u128,
     // `i32x4_dot_i16x8` is `madd`: the pair sum is `2 * bound^2`, and an `i8`
     // alphabet cannot reach the bound where that leaves an `i32`.
@@ -108,6 +109,7 @@ pub const SIMD128_R_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: 1,
     lane_layout: LaneLayout::Contiguous,
     k_group: 16,
+    products_per_step: 8,
     lane_cap: i32::MAX as u128,
     max_bound: 32767,
     mac_tile: simd128_r_i8,
@@ -163,6 +165,7 @@ pub const SIMD128_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
     nr: 1,
     lane_layout: LaneLayout::Contiguous,
     k_group: 16,
+    products_per_step: 8,
     lane_cap: i32::MAX as u128,
     max_bound: 32767,
     mac_tile: simd128_r_i8_one,

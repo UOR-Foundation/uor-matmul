@@ -8,8 +8,9 @@
 
 use uor_matmul_core::{as_alphabet_full, dot_ref, Backend};
 use uor_matmul_kernels::{
-    available_i16, available_i32_exact, available_i32_modular, available_i64_modular, available_i8,
-    choose_for_rows, packed_slot, portable_i8, Factorization, KernelSpec,
+    available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
+    available_i64_modular, available_i8, choose_for_rows, packed_slot, portable_i8, Factorization,
+    KernelSpec,
 };
 
 /// Element `p` of lane `l`, read the way the kernel reads it.
@@ -639,5 +640,92 @@ fn every_reduce_sequence_equals_its_reference_cb_06() {
                 );
             }
         }
+    }
+}
+
+/// Every declared number about a sequence is consistent with its own shape.
+///
+/// `products_per_step` is a claim about instructions, so no test can confirm it
+/// by running the kernel --- but it can be bounded: a sequence cannot compute
+/// more products in one instruction than its whole `k`-group of its whole tile,
+/// and it cannot compute fewer than one. A transcription slip in either
+/// direction lands outside that band, and a slip is the failure mode a hand-kept
+/// table has.
+///
+/// The same for the rest: a panel has at least one lane, a group is at least one
+/// step, and an exact sequence's lane holds at least one full-magnitude product
+/// of the alphabet it declares.
+#[test]
+fn every_declaration_is_consistent_with_the_shape_cb_07() {
+    fn check<E, L>(spec: &KernelSpec<E, L>, family: &str) {
+        let name = spec.backend.as_str();
+        assert!(spec.mr >= 1 && spec.nr >= 1, "{family}/{name}: empty panel");
+        assert!(spec.k_group >= 1, "{family}/{name}: empty k-group");
+        assert!(
+            spec.products_per_step >= 1,
+            "{family}/{name}: a sequence computes at least one product per step"
+        );
+        assert!(
+            spec.products_per_step <= spec.mr * spec.nr * spec.k_group,
+            "{family}/{name}: {} products per step is more than the whole tile-step, {}",
+            spec.products_per_step,
+            spec.mr * spec.nr * spec.k_group
+        );
+        assert!(
+            spec.mr * spec.nr <= uor_matmul_kernels::MAX_TILE_LANES,
+            "{family}/{name}: tile exceeds the buffer"
+        );
+        if matches!(spec.factorization, Factorization::Exact) {
+            assert!(
+                spec.lane_cap > 0,
+                "{family}/{name}: an exact lane must hold something"
+            );
+            assert!(
+                spec.max_bound >= 1,
+                "{family}/{name}: an alphabet with no values is not an alphabet"
+            );
+        }
+    }
+    for s in available_i8() {
+        check(&s, "i8");
+    }
+    for s in uor_matmul_kernels::available_reduce_i8() {
+        check(&s, "i8 reduce");
+    }
+    for s in available_i16() {
+        check(&s, "i16");
+    }
+    for s in uor_matmul_kernels::available_reduce_i16() {
+        check(&s, "i16 reduce");
+    }
+    for s in available_i16_modular() {
+        check(&s, "i16 mod");
+    }
+    for s in uor_matmul_kernels::available_reduce_i16_modular() {
+        check(&s, "i16 mod reduce");
+    }
+    for s in available_i32_exact() {
+        check(&s, "i32");
+    }
+    for s in uor_matmul_kernels::available_reduce_i32_exact() {
+        check(&s, "i32 reduce");
+    }
+    for s in available_i32_modular() {
+        check(&s, "i32 mod");
+    }
+    for s in uor_matmul_kernels::available_reduce_i32_modular() {
+        check(&s, "i32 mod reduce");
+    }
+    for s in uor_matmul_kernels::available_i64_exact() {
+        check(&s, "i64");
+    }
+    for s in uor_matmul_kernels::available_reduce_i64_exact() {
+        check(&s, "i64 reduce");
+    }
+    for s in available_i64_modular() {
+        check(&s, "i64 mod");
+    }
+    for s in uor_matmul_kernels::available_reduce_i64_modular() {
+        check(&s, "i64 mod reduce");
     }
 }

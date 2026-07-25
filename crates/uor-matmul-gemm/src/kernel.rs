@@ -354,48 +354,152 @@ pub fn gemm_packed<E, Bd, O, Ep>(
 
     match modular {
         Some(tile) => {
-            // Where the lanes go is a question about the shape against the tile.
-            // A tile kernel produces `nr` columns per call whether the output has
-            // them or not, so an output narrower than `nr` pays for the ones that
-            // are not there --- at `n = 1` that is one useful lane in `mr * nr`.
-            // The reduce sequence puts the lanes on `k`, where there is always
-            // more. Both compute the same integer (`CB-06`), so this is which
-            // factorization fits the declared shape and not which is better.
-            let spec = if shape.n < tile.nr {
-                E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m).unwrap_or(tile)
-            } else {
-                tile
-            };
-            run::<E, Bd, O, Ep, E::Modular>(
-                triple,
-                epilogue,
-                options,
-                scratch,
-                spec,
-                E::add_modular,
-                |acc, lane| *acc = E::modular_as_acc(lane),
-                usize::MAX,
-            )
+            match pick(shape, triple, &tile, || {
+                E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m)
+            }) {
+                Some(spec) => run::<E, Bd, O, Ep, E::Modular>(
+                    triple,
+                    epilogue,
+                    options,
+                    scratch,
+                    spec,
+                    E::add_modular,
+                    |acc, lane| *acc = E::modular_as_acc(lane),
+                    usize::MAX,
+                ),
+                None => crate::gemm(triple, epilogue, options, scratch),
+            }
         }
         None => {
             let tile = E::exact_spec(options.backend, Bd::VALUE, shape.m);
-            let spec = if shape.n < tile.nr {
-                E::exact_reduce(options.backend, Bd::VALUE, shape.m)
-            } else {
-                tile
-            };
-            let depth = spec.lane_depth(Bd::VALUE);
-            run::<E, Bd, O, Ep, E::Exact>(
-                triple,
-                epilogue,
-                options,
-                scratch,
-                spec,
-                |_, lane| lane,
-                E::fold_exact,
-                depth,
-            )
+            match pick(shape, triple, &tile, || {
+                Some(E::exact_reduce(options.backend, Bd::VALUE, shape.m))
+            }) {
+                Some(spec) => {
+                    let depth = spec.lane_depth(Bd::VALUE);
+                    run::<E, Bd, O, Ep, E::Exact>(
+                        triple,
+                        epilogue,
+                        options,
+                        scratch,
+                        spec,
+                        |_, lane| lane,
+                        E::fold_exact,
+                        depth,
+                    )
+                }
+                None => crate::gemm(triple, epilogue, options, scratch),
+            }
         }
+    }
+}
+
+/// What a traversal costs at this shape, scaled by `products_per_step` so that
+/// no division is needed to compare it.
+///
+/// Two things are counted, because two things are all that differ:
+///
+/// - **Element accesses.** The packed traversal reads each panel element from
+///   the operand and writes it into the panel: two accesses per packed element,
+///   and it packs the *padded* extents, because a shape narrower than a panel
+///   still pays for the whole panel. When the operand already holds the panel
+///   there is nothing to pack and the term is zero.
+/// - **Instruction issues.** The packed traversal issues one instruction per
+///   `products_per_step` padded products; the streaming traversal issues one per
+///   product, and reads two operands for each.
+///
+/// So the packed traversal costs `2 * (rows + cols) * kpad + rows * cols * kpad
+/// / pps`, and the streaming one `3 * m * k * n`. Neither is a prediction of
+/// nanoseconds --- they are counts, and `CD-01` asserts that whichever traversal
+/// runs gives the same bytes.
+///
+/// Saturating throughout: at an astronomical shape both sides overflow and the
+/// comparison is decided by the smaller one, which is the right answer for a
+/// shape whose padding is a rounding error.
+fn packed_cost<E, L>(
+    shape: uor_matmul_core::Shape,
+    spec: &KernelSpec<E, L>,
+    borrowed: bool,
+) -> (u64, u64) {
+    let g = spec.k_group.max(1);
+    let kpad = (shape.k.div_ceil(g) * g) as u64;
+    let rows = (shape.m.div_ceil(spec.mr) * spec.mr) as u64;
+    let cols = (shape.n.div_ceil(spec.nr) * spec.nr) as u64;
+    let pps = spec.products_per_step.max(1) as u64;
+    let issues = rows.saturating_mul(cols).saturating_mul(kpad);
+    let accesses = if borrowed {
+        0
+    } else {
+        (rows + cols)
+            .saturating_mul(kpad)
+            .saturating_mul(2)
+            .saturating_mul(pps)
+    };
+    (issues.saturating_add(accesses), pps)
+}
+
+/// Choose the cheaper packed sequence, or `None` for the streaming traversal.
+///
+/// Every candidate computes the same integer --- `CB-01` .. `CB-07` for the
+/// sequences, `CD-01` and `CD-04` for the traversals --- so this decides which
+/// instructions run and nothing else. It reads the declared shape, the declared
+/// strides, and the sequences' own declarations, and never the data (R13).
+fn pick<E, Bd, O, L>(
+    shape: uor_matmul_core::Shape,
+    triple: &Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    tile: &KernelSpec<E, L>,
+    reduce: impl FnOnce() -> Option<KernelSpec<E, L>>,
+) -> Option<KernelSpec<E, L>>
+where
+    E: IntegerElement,
+    Bd: Bound,
+{
+    // A panel the operands already hold costs nothing to make, which is most of
+    // what a reduce sequence costs on a narrow shape.
+    let borrows = |spec: &KernelSpec<E, L>| -> bool {
+        let g = spec.k_group.max(1);
+        let kpad = shape.k.div_ceil(g) * g;
+        matches!(spec.lane_layout, LaneLayout::Contiguous)
+            && kpad == shape.k
+            && shape.m.is_multiple_of(spec.mr)
+            && shape.n.is_multiple_of(spec.nr)
+            && triple
+                .a()
+                .row_block(0, 0, shape.m.min(spec.mr), kpad)
+                .is_some()
+            && triple
+                .b()
+                .column_block(0, 0, shape.n.min(spec.nr), kpad)
+                .is_some()
+    };
+
+    let mut best = *tile;
+    let (mut cost, mut pps) = packed_cost(shape, tile, borrows(tile));
+
+    // A reduce sequence produces one column per call, so past a tile's width the
+    // tile is cheaper by construction and there is nothing to weigh. Asking
+    // anyway would cost a walk of the reduce table on every wide call.
+    if shape.n < tile.nr {
+        if let Some(r) = reduce() {
+            let (rc, rp) = packed_cost(shape, &r, borrows(&r));
+            // `a/p < b/q` without dividing.
+            if rc.saturating_mul(pps) < cost.saturating_mul(rp) {
+                best = r;
+                cost = rc;
+                pps = rp;
+            }
+        }
+    }
+
+    // Two operand reads and one issue per product, and nothing packed.
+    let stream = (shape.m as u64)
+        .saturating_mul(shape.k as u64)
+        .saturating_mul(shape.n as u64)
+        .saturating_mul(3);
+    if cost < stream.saturating_mul(pps) {
+        Some(best)
+    } else {
+        None
     }
 }
 

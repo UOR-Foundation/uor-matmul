@@ -183,12 +183,38 @@ whole product's memory traffic. `MatView::row_block` and `column_block` hand bac
 the operand's own memory when the strides already say so. Worth a further 37x on
 a single deep dot product, which then needs no working memory at all.
 
+**The driver had no way to compare its two traversals.** The packed traversal
+pads the shape up to whole panels and copies them; the streaming reference does
+exactly the products the shape names and copies nothing. Below `n = 13` the
+reference is *faster* --- by 7x at `n = 1` --- and nothing in the kernel table
+said so, because no sequence declared how much a padded product costs it.
+`products_per_step` is that declaration, and the driver now counts both
+traversals: element accesses (two per packed element, and the *padded* extents,
+because a shape narrower than a panel pays for the whole panel) and instruction
+issues (one per `products_per_step` padded products, against one per streaming
+product plus its two operand reads). Worth 2.6x at `n = 1` and 2x at `n = 4`.
+
+The counts are exact; what they omit is the packed traversal's fixed setup, which
+is proportional to nothing. Measured, the model is right at every size except
+`n = 6` and `n = 8`, where it takes the packed traversal and the reference is
+1.2x to 1.8x faster --- a residual of a few hundred nanoseconds, reported rather
+than closed with a tuned constant, because a tuned constant is the thing R8 does
+not permit.
+
 **The float encode formed the magnitude once per bit.** `magnitude_bit` negated
 the whole register on every call: 10 limbs for `f32`, 67 for `f64`, once per
 significand bit. That is O(P*L) where O(P + L) does. Forming the magnitude once
 and reading a `P`-bit window out of it was worth 2.9x on `f32` at `k = 2`, where
 the encode is nearly the whole cost, and nothing at large `k`, where the
 accumulate loop is.
+
+**The float loop asked three questions per product that belonged elsewhere.**
+Whether a code is finite is a fact about the *panel*, settled while its codes are
+walked anyway. Whether a product of two significands fits an `i64` is a fact
+about the *element type* --- `2 * 24 <= 63` for `f32`. And the limb window flushed
+by cutting its `i128` into four 63-bit pieces, where `add_scaled` places a
+magnitude at a scale in one three-limb spread. Together worth 1.35x at
+`n = 1024`, 1.4x at `n = 512`, and 1.4x on the rectangular shapes.
 
 What remains, and why:
 
@@ -227,17 +253,26 @@ Every figure is `open`.
 
 | `n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` exact | matrixmultiply `f32` |
 | --- | --- | --- | --- | --- | --- | --- |
-| 8 | 0.63 | 0.93 | 1.02 | 1.46 | 0.15 | 4.66 |
-| 32 | 6.56 | 6.08 | 1.74 | 4.00 | 0.21 | 26.2 |
-| 128 | 19.8 | 16.8 | 0.73 | 4.41 | 0.25 | 28.8 |
-| 512 | 38.5 | 29.6 | 0.54 | 4.68 | 0.25 | 43.5 |
-| 1024 | 37.5 | 28.7 | 0.21 | 3.89 | 0.23 | 43.5 |
-| 2048 | 23.3 | 21.4 | 0.15 | 4.76 | 0.24 | 40.7 |
+| 1 | 0.007 | 0.010 | 0.017 | 0.014 | 0.017 | 0.013 |
+| 4 | 0.27 | 0.36 | 0.46 | 0.46 | 0.12 | 0.64 |
+| 8 | 0.53 | 1.16 | 1.02 | 1.55 | 0.19 | 4.66 |
+| 16 | 4.09 | 4.01 | 1.50 | 3.15 | 0.26 | 14.6 |
+| 32 | 6.44 | 6.21 | 1.74 | 4.17 | 0.29 | 26.8 |
+| 128 | 19.7 | 17.1 | 0.78 | 4.50 | 0.33 | 28.9 |
+| 512 | 38.5 | 29.9 | 0.53 | 4.71 | 0.32 | 43.2 |
+| 1024 | 37.7 | 29.1 | 0.21 | 4.58 | 0.32 | 43.3 |
+| 2048 | 32.9 | 26.4 | 0.15 | 4.54 | 0.32 | 41.2 |
 
 At `n = 2048` a single one of our repetitions already exceeds the wall-clock
-budget, so that row is a best-of-one and moves by a third between runs on a
+budget, so that row is a best-of-one and moves by up to a third between runs on a
 shared machine. It is reported rather than smoothed, and the row above it is the
 one to read.
+
+The three smallest rows are where an oracle is ahead, and they are the rows where
+a call is a few hundred nanoseconds and dominated by what happens before the
+arithmetic. `ndarray`'s figure there includes a heap allocation and ours includes
+none; what ours includes instead is walking the kernel table and weighing two
+traversals, which is what buys the rest of the table.
 
 ### Throughput on shapes that are not squares, Gmac/s
 
@@ -246,20 +281,22 @@ different half of the driver.
 
 | `m x k x n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` | matrixmultiply `f32` |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1024x1024x1 | 34.8 | 16.1 | 3.25 | 0.18 | 0.19 | 2.25 |
-| 1x1024x1024 | 1.00 | 0.84 | 0.22 | 0.15 | 0.14 | 1.18 |
-| 8x262144x8 | 6.58 | 5.14 | 1.72 | 1.71 | 0.24 | 16.1 |
-| 1x1048576x1 | 40.2 | 10.2 | 2.43 | 0.39 | 0.15 | 0.31 |
-| 2048x8x2048 | 8.67 | 7.68 | 1.09 | 0.82 | 0.12 | 12.5 |
-| 4096x2x4096 | 2.40 | 2.25 | 0.43 | 0.18 | 0.05 | 0.85 |
-| 509x1021x257 | 27.3 | 24.5 | 1.21 | 5.52 | 0.26 | 41.9 |
+| 1024x1024x1 | 37.5 | 16.7 | 3.24 | 0.18 | 0.22 | 2.25 |
+| 1x1024x1024 | 1.09 | 0.94 | 0.20 | 0.14 | 0.16 | 1.18 |
+| 8x262144x8 | 6.64 | 4.52 | 1.70 | 1.82 | 0.29 | 16.0 |
+| 1x1048576x1 | 40.1 | 10.2 | 2.41 | 0.34 | 0.16 | 0.31 |
+| 2048x8x2048 | 9.24 | 8.34 | 1.08 | 0.82 | 0.17 | 13.4 |
+| 4096x2x4096 | 2.57 | 2.51 | 0.41 | 0.17 | 0.07 | 0.86 |
+| 509x1021x257 | 26.8 | 24.5 | 1.18 | 5.54 | 0.32 | 41.6 |
 
 ### Latency at the smallest shapes, nanoseconds per call
 
 | `n` | uor `i8` | uor `i32` | ndarray | matrixmultiply |
 | --- | --- | --- | --- | --- |
-| 1 | 140 | 80 | 60 | 80 |
-| 4 | 250 | 160 | 130 | 100 |
+| 1 | 140 | 100 | 60 | 80 |
+| 2 | 150 | 110 | 69 | 80 |
+| 3 | 180 | 130 | 89 | 89 |
+| 4 | 240 | 180 | 140 | 100 |
 
 ### Fitted exponent of throughput against MAC count
 
@@ -282,8 +319,8 @@ structure should do.
 ### What this says
 
 **On integers, this library is ahead of both oracles at every size that is not
-latency-bound.** At `n = 512` it is 71x `ndarray` and 8.2x `nalgebra`; at
-`n = 1024`, 180x and 9.6x. Nothing about that is a compromise on exactness: the
+latency-bound.** At `n = 512` it is 73x `ndarray` and 8.2x `nalgebra`; at
+`n = 1024`, 184x and 8.2x; at `n = 2048`, 225x and 7.2x. Nothing about that is a compromise on exactness: the
 integer result is the exact sum encoded once, and `CX-01` .. `CX-04` and `CX-10`
 assert it byte for byte against four independent implementations, including one
 outside the Rust ecosystem.
@@ -300,10 +337,12 @@ product that has one. The reduce factorization and panel borrowing are what
 closed it, and both are the same identity, factored differently.
 
 **Latency at `n = 1` is 140 ns against `ndarray`'s 60.** The difference is view
-construction and kernel selection, both once per call and neither scaling. It is
-one of two places an oracle is ahead, and the sweep says so.
+construction, walking the kernel table, and weighing the two traversals --- all
+once per call and none of it scaling. Measured, the table walk is 20 ns per
+family and there are two, which is the largest single piece. It is one of two
+places an oracle is ahead, and the sweep says so.
 
-**On floats the library is roughly 185x behind `matrixmultiply`, and that is the
+**On floats the library is roughly 134x behind `matrixmultiply`, and that is the
 trade N4 names.** A classical `sgemm` issues one fused multiply-add per element.
 This one decodes two IEEE bit patterns, multiplies their significands as
 integers, and places the exact product into a 619-bit fixed-point register ---
@@ -311,7 +350,7 @@ and never rounds until the end. The gap is the price of an answer that does not
 depend on the order of the additions, which no figure in the `matrixmultiply`
 column has. It is also the honest figure rather than the earlier one: with
 all-ones operands the limb window never flushed and the same measurement read
-120x.
+120x, which was a better number about a worse question.
 
 ### The modular factorization
 

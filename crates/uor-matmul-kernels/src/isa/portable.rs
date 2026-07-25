@@ -35,6 +35,9 @@ macro_rules! reference_kernel {
             // The reference needs no grouping at all, which is why it is the
             // one kernel that never has a tail.
             k_group: 1,
+            // The reference is one product per step, which is what makes it the
+            // baseline the traversal comparison is calibrated against.
+            products_per_step: 1,
             lane_cap: $cap,
             // The reference multiplies in the lane's own width, so there is
             // no intermediate to outgrow and no alphabet it is inexact on.
@@ -149,6 +152,9 @@ macro_rules! reduce_reference {
             nr: 1,
             lane_layout: LaneLayout::Contiguous,
             k_group: 1,
+            // The reference is one product per step, which is what makes it the
+            // baseline the traversal comparison is calibrated against.
+            products_per_step: 1,
             lane_cap: $cap,
             max_bound: u128::MAX,
             mac_tile: $fnname,

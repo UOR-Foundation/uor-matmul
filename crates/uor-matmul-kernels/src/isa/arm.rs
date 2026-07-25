@@ -43,6 +43,7 @@ pub const NEON_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     // this kernel consumes one step at a time and wants the plain `k`-major
     // panel. Its eight is the vector's width in columns, which is `nr`.
     k_group: 1,
+    products_per_step: 8,
     lane_cap: i32::MAX as u128,
     // `vmull_s8` widens each product to `i16` and this kernel widens again to
     // `i32` before accumulating, so nothing narrower than the lane is held.
@@ -62,6 +63,7 @@ pub const NEON_DOTPROD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: 12,
     lane_layout: LaneLayout::Interleaved,
     k_group: 4,
+    products_per_step: 16,
     lane_cap: i32::MAX as u128,
     max_bound: u128::MAX,
     mac_tile: neon_dotprod_i8,
@@ -231,6 +233,7 @@ pub const NEON_R_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: 1,
     lane_layout: LaneLayout::Contiguous,
     k_group: 16,
+    products_per_step: 8,
     lane_cap: i32::MAX as u128,
     max_bound: u128::MAX,
     mac_tile: neon_r_i8,
@@ -297,6 +300,7 @@ pub const NEON_DOTPROD_R_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     nr: 1,
     lane_layout: LaneLayout::Contiguous,
     k_group: 16,
+    products_per_step: 16,
     lane_cap: i32::MAX as u128,
     max_bound: u128::MAX,
     mac_tile: neon_dotprod_r_i8,
@@ -355,6 +359,7 @@ pub const NEON_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
     nr: 1,
     lane_layout: LaneLayout::Contiguous,
     k_group: 16,
+    products_per_step: 8,
     lane_cap: i32::MAX as u128,
     max_bound: u128::MAX,
     mac_tile: neon_r_i8_one,
@@ -376,6 +381,7 @@ pub const NEON_DOTPROD_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
     nr: 1,
     lane_layout: LaneLayout::Contiguous,
     k_group: 16,
+    products_per_step: 16,
     lane_cap: i32::MAX as u128,
     max_bound: u128::MAX,
     mac_tile: neon_dotprod_r_i8_one,
