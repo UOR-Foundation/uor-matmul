@@ -635,16 +635,29 @@ fn run<E, Bd, O, Ep, L>(
         let (mc, nc) = if shape.m <= mr && shape.n <= nr {
             (mr, nr)
         } else {
+            // The working set constrains a block only while it *can* be
+            // satisfied. Once one microkernel panel at this depth already
+            // exceeds the set, shrinking the block gains nothing --- the panel
+            // is out of that cache either way --- and it costs the other operand
+            // a repack per block. At `k = 262144` the old form drove `nc` to a
+            // single column and made `A` be read once per column of `B`.
+            let fits = |lanes: usize, set: usize| -> usize {
+                if lanes.saturating_mul(kpad) >= set {
+                    usize::MAX
+                } else {
+                    (set / kpad).max(lanes)
+                }
+            };
             let mc_want = shape
                 .m
                 .min(blocking::MC)
-                .min((blocking::MC * blocking::KC / kpad).max(mr))
+                .min(fits(mr, blocking::MC * blocking::KC))
                 .div_ceil(mr)
                 * mr;
             let nc_want = shape
                 .n
                 .min(blocking::NC)
-                .min((blocking::KC * blocking::NC / kpad).max(nr))
+                .min(fits(nr, blocking::KC * blocking::NC))
                 .div_ceil(nr)
                 * nr;
             let mc = mc_want.min((budget - nr) / mr * mr).max(mr);

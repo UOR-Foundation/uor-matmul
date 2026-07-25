@@ -159,6 +159,12 @@ at a panel depth of the whole `k` is a `k/KC`-times-oversized panel, which at
 as a working *set* --- `KC * NC` elements of `B`, `MC * KC` of `A` --- the block
 narrows as the depth grows and what stays resident stays the same size.
 
+**The working set shrank the blocks past where it could help.** `nc` was capped
+at `KC * NC / kpad`, which at `k = 262144` is one column --- and then `A` is read
+once per column of `B`. But once a single microkernel panel at that depth already
+exceeds the working set, shrinking the block gains nothing, because the panel is
+out of that cache either way. The cap now applies only while it can be satisfied.
+
 **A narrow output paid for columns that were not there.** A tile kernel produces
 `nr` columns per call whether the output has them or not; at `n = 1` that is one
 useful lane in ninety-six. The reduce factorization puts the lanes on `k`, where
