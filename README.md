@@ -208,7 +208,7 @@ two-core runner with AVX2:
 | `i32`, `n = 1024` | 29.1 Gmac/s | nalgebra 4.58 | **6.3x ahead** |
 | `i8`, `1024x1024x1` | 37.5 Gmac/s | ndarray 3.24 | **12x ahead** |
 | `i8`, `1x1048576x1` | 40.1 Gmac/s | ndarray 2.41 | **17x ahead** |
-| `f32`, `n = 1024` | 0.32 Gmac/s | matrixmultiply 43.3 | 134x behind |
+| `f32`, `n = 1024` | 1.12 Gmac/s | matrixmultiply 43.2 | 39x behind |
 | latency at `n = 1` | 140 ns | ndarray 60 ns | 2.3x behind |
 
 The integer paths are ahead of both integer oracles at every size that is not
@@ -219,10 +219,12 @@ one figure that is not a constant factor: the collapse traversal charges per
 distinct row it runs at **715 Gmac/s** --- 17.8x this library's own packed
 traversal and 1350x `ndarray` --- on an answer asserted byte for byte against
 both. An operand with no repeated rows pays 4% for the question and is told so in
-the same table. The float path is two orders of magnitude behind, and that is N4 stated
-as a number rather than as an excuse: one FMA per element against a decode, an
-integer significand multiply, and a placement into a 619-bit register that never
-rounds until the end.
+the same table. The float path is 39x behind, and most of what used to be a 134x gap was not the
+price of exactness: it was a placement done once per product that can be done
+once per reduction. Scaling both panels' significands to a common base turns the
+exact float dot product into an exact *integer* dot product at one known scale
+--- see `ANALYSIS.md` §"The float placement" for the three lanes that follow, the
+bit counts that choose between them, and what is still left on the table.
 
 ## Licence
 

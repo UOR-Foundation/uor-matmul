@@ -92,6 +92,44 @@ pub fn gemm_float_packed<E, O, Ep>(
     // them can leave an `i64`. It is a constant of the type, not of the data.
     let product_fits = 2 * E::SIGNIFICAND_BITS <= 63;
 
+    // Whether both panels can be scaled to a common base is one decision for the
+    // whole call, and it has to be: the scaling is written *into* the panels, so a
+    // block scaled for one row and read unscaled by another would be read wrong.
+    // Deciding it globally costs one walk of each operand's exponents --- `m * k`
+    // and `k * n` against `m * k * n` products --- and makes the two panel
+    // formats impossible to mix.
+    // The walk costs `(m + n) * k` decodes and the scaling saves one placement
+    // from each of `m * n * k` products. A decode and a placement are the same
+    // order of work, so it pays exactly when `m * n > m + n` --- which is false
+    // for a matrix-vector product, where the walk would more than double the
+    // whole call, and true for everything with two real dimensions.
+    let worth_asking = shape.m.saturating_mul(shape.n) > shape.m.saturating_add(shape.n);
+    let prescaled = if !worth_asking {
+        None
+    } else {
+        let mut finite = true;
+        let mut a_span = Span::EMPTY;
+        let mut b_span = Span::EMPTY;
+        for i in 0..shape.m {
+            for v in a.row_walk(i, 0, shape.k) {
+                let code = v.pack();
+                finite &= code.is_finite();
+                a_span.see(code);
+            }
+        }
+        for j in 0..shape.n {
+            for v in b.column_walk(0, j, shape.k) {
+                let code = v.pack();
+                finite &= code.is_finite();
+                b_span.see(code);
+            }
+        }
+        finite
+            .then(|| admits::<E>(shape.k, a_span, b_span))
+            .flatten()
+            .map(|scale| (scale, a_span.base(), b_span.base()))
+    };
+
     let mut j0 = 0;
     while j0 < shape.n {
         let cols = block.min(shape.n - j0);
@@ -103,6 +141,9 @@ pub fn gemm_float_packed<E, O, Ep>(
             for (slot, v) in dst.iter_mut().zip(b.column_walk(0, j, shape.k)) {
                 *slot = v.pack();
                 b_finite &= slot.is_finite();
+            }
+            if let Some((_, _, base_b)) = prescaled {
+                rescale(dst, base_b);
             }
         }
 
@@ -116,9 +157,13 @@ pub fn gemm_float_packed<E, O, Ep>(
                 *slot = v.pack();
                 a_finite &= slot.is_finite();
             }
+            if let Some((_, base_a, _)) = prescaled {
+                rescale(&mut pa[..shape.k], base_a);
+            }
             let panels = PanelFacts {
                 finite: a_finite && b_finite,
                 product_fits,
+                prescaled: prescaled.map(|(scale, _, _)| scale),
             };
             for (jj, j) in (j0..j0 + cols).enumerate() {
                 let mut acc = <AccOf<E> as Accumulator>::ZERO;
@@ -234,6 +279,32 @@ fn accumulate_run<const L: usize, const MIN_EXP: i32>(
     // and the *type*, established once, so this is the same arithmetic asked
     // fewer questions --- not a second method (R13). `CU-04` compares it against
     // the per-product traversal on the same operands.
+    // Both panels scaled to one base: the reduction is an integer dot product
+    // and the register is touched once. The 64-bit lane is the one that
+    // vectorizes; the 128-bit lane is one wide multiply per product. Which is
+    // admissible was decided by the panels' spans, and both are the same sum
+    // (`CU-04`).
+    if let Some(scale) = panels.prescaled {
+        if scale.wide {
+            let mut sum = 0i128;
+            for (a, b) in pa.iter().zip(pb) {
+                sum = sum.wrapping_add(i128::from(a.mantissa) * i128::from(b.mantissa));
+            }
+            window
+                .acc
+                .add_scaled(sum.unsigned_abs(), scale.base, sum < 0);
+        } else {
+            let mut sum = 0i64;
+            for (a, b) in pa.iter().zip(pb) {
+                sum = sum.wrapping_add(a.mantissa.wrapping_mul(b.mantissa));
+            }
+            window
+                .acc
+                .add_scaled(u128::from(sum.unsigned_abs()), scale.base, sum < 0);
+        }
+        return;
+    }
+
     if panels.finite && panels.product_fits {
         for (a, b) in pa.iter().zip(pb) {
             window.place(a.mantissa * b.mantissa, a.exp + b.exp);
@@ -304,6 +375,9 @@ pub struct PanelFacts {
     pub finite: bool,
     /// Every product of two significands of this element type fits an `i64`.
     pub product_fits: bool,
+    /// Both panels hold significands already scaled to a common base, so the
+    /// whole dot product is one integer sum placed once. See [`Prescaled`].
+    pub prescaled: Option<Prescaled>,
 }
 
 impl PanelFacts {
@@ -311,7 +385,143 @@ impl PanelFacts {
     pub const UNKNOWN: Self = Self {
         finite: false,
         product_fits: false,
+        prescaled: None,
     };
+}
+
+/// Both panels' significands scaled to one common base.
+///
+/// This is what removes the placement from the inner loop, and it is the whole
+/// of why the float path costs what it costs. A complete accumulator is exact
+/// because every product lands at *its own* position, and finding that position
+/// is a shift, a limb index, and a carry --- per product. Measured, that
+/// placement is the entire distance between 0.43 ns per product and 2.5.
+///
+/// It does not have to be per product. Write `a * 2^(ea - base_a)` into the
+/// panel instead of `(a, ea)`, and likewise for `b`, and then
+///
+/// ```text
+///   sum_p (a_p 2^(ea_p - base_a)) (b_p 2^(eb_p - base_b))
+///     = 2^-(base_a + base_b) * sum_p a_p b_p 2^(ea_p + eb_p)
+/// ```
+///
+/// so the float dot product *is* an integer dot product, at one known scale,
+/// placed into the register once for the whole reduction. Nothing is
+/// approximated: the scaled significands are exact integers and so is their
+/// sum.
+///
+/// What it costs is width, and that is what makes it a declaration rather than a
+/// mode. A significand of `P` bits scaled across a span of `w` exponents needs
+/// `P + w` bits, a product needs `2P + wa + wb`, and a sum of `k` of them needs
+/// `ceil(log2 k)` more. When that fits a signed 64-bit lane the loop is a plain
+/// integer dot product and vectorizes; when it needs 128 the loop is one wide
+/// multiply per product; when it needs more, the per-product placement is the
+/// only sequence that computes this identity and it runs. All three are the same
+/// sum --- `CU-04` asserts it --- and which one runs is decided by the panels'
+/// exponent span, established while their codes are walked anyway, exactly as
+/// [`PanelFacts::finite`] is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Prescaled {
+    /// The exponent of bit 0 of every scaled product: `base_a + base_b`.
+    pub base: i32,
+    /// The sum needs a 128-bit lane rather than a 64-bit one.
+    pub wide: bool,
+}
+
+/// The exponent span of a panel, and the base its scaling starts from.
+///
+/// Zero significands are not seen: a zero contributes nothing to the sum at any
+/// scale, so it cannot widen the span and must not.
+#[derive(Clone, Copy)]
+struct Span {
+    min: i32,
+    max: i32,
+    any: bool,
+}
+
+impl Span {
+    const EMPTY: Self = Self {
+        min: i32::MAX,
+        max: i32::MIN,
+        any: false,
+    };
+
+    #[inline(always)]
+    fn see(&mut self, code: PackedCode) {
+        if code.mantissa != 0 {
+            self.min = self.min.min(code.exp);
+            self.max = self.max.max(code.exp);
+            self.any = true;
+        }
+    }
+
+    fn base(&self) -> i32 {
+        if self.any {
+            self.min
+        } else {
+            0
+        }
+    }
+
+    /// How many bits a significand of this panel gains from the scaling.
+    fn width(&self) -> u32 {
+        if self.any {
+            self.max.wrapping_sub(self.min) as u32
+        } else {
+            0
+        }
+    }
+}
+
+/// Does scaling both panels to a common base keep every intermediate exact, and
+/// in which lane?
+///
+/// Every term is a count of bits, and every count comes from the element type or
+/// from the panels themselves. There is no tuned constant and no threshold to
+/// choose: the question is whether the widest value that can arise fits the lane,
+/// and it is asked arithmetically.
+fn admits<E: FloatElement>(k: usize, a: Span, b: Span) -> Option<Prescaled> {
+    if !a.any || !b.any {
+        // One panel is all zeros, so the sum is zero at any base. Scaling is
+        // still the cheaper sequence and still exact.
+        return Some(Prescaled {
+            base: a.base().saturating_add(b.base()),
+            wide: false,
+        });
+    }
+    let p = E::SIGNIFICAND_BITS;
+    let (wa, wb) = (a.width(), b.width());
+    // Each scaled significand must itself stay inside a signed 64-bit slot,
+    // because that is what the panel holds.
+    if p.checked_add(wa)? > 62 || p.checked_add(wb)? > 62 {
+        return None;
+    }
+    // `k` terms, so `ceil(log2 k)` carry bits above the widest product.
+    let depth = if k <= 1 { 0 } else { (k - 1).ilog2() + 1 };
+    let need = (2 * p)
+        .checked_add(wa)?
+        .checked_add(wb)?
+        .checked_add(depth)?;
+    let base = a.base().saturating_add(b.base());
+    if need <= 62 {
+        Some(Prescaled { base, wide: false })
+    } else if need <= 126 {
+        Some(Prescaled { base, wide: true })
+    } else {
+        None
+    }
+}
+
+/// Scale a packed panel's significands to `base`, in place.
+///
+/// After this the panel's `exp` fields are spent: every significand carries its
+/// own exponent as magnitude, and the one exponent left is the caller's `base`.
+fn rescale(panel: &mut [PackedCode], base: i32) {
+    for code in panel {
+        if code.mantissa != 0 {
+            code.mantissa <<= code.exp.wrapping_sub(base) as u32;
+        }
+    }
 }
 
 /// What the packed float loop needs from an accumulator.
@@ -602,6 +812,149 @@ mod window_tests {
     /// neither and tests everything. They must agree on every input, including
     /// the ones where the facts are false: a non-finite code anywhere, and `f64`
     /// significands wide enough that a product leaves an `i64`.
+    /// `CU-04`: scaling both panels to a common base cannot change a byte.
+    ///
+    /// Three sequences compute this sum --- the 64-bit scaled lane, the 128-bit
+    /// scaled lane, and the per-product placement --- and which one runs is
+    /// decided by the operands' exponent spans. So the operands below are chosen
+    /// to reach each of the three, and every one of them is compared against the
+    /// streaming traversal, which always places per product.
+    #[test]
+    fn scaling_both_panels_cannot_change_a_byte_cu_04() {
+        // Spans chosen to land on each lane: none, a significand's worth, a
+        // decade, and far too much for any scaling.
+        for (label, span_a, span_b) in [
+            ("one exponent", 0i32, 0i32),
+            ("a few binades", 3, 4),
+            ("a decade each", 19, 23),
+            ("past every lane", 90, 90),
+        ] {
+            for &(m, k, n) in &[
+                (1usize, 1usize, 1usize),
+                (5, 7, 3),
+                (16, 64, 8),
+                (3, 129, 17),
+            ] {
+                let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (span_a as u64) << 8 ^ (k as u64);
+                let mut next = move || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed >> 33) as i64
+                };
+                let gen = |next: &mut dyn FnMut() -> i64, len: usize, span: i32| -> Vec<f32> {
+                    (0..len)
+                        .map(|_| {
+                            let v = next();
+                            let s = if span == 0 {
+                                0
+                            } else {
+                                (v % span as i64) as i32
+                            };
+                            (1 + v % 8_388_607) as f32 * 2.0f32.powi(s - span / 2)
+                        })
+                        .collect()
+                };
+                let av = gen(&mut next, m * k, span_a);
+                let bv = gen(&mut next, k * n, span_b);
+
+                // The reference: the streaming traversal, which places every
+                // product individually and knows nothing about spans.
+                let mut want = vec![0.0f32; m * n];
+                {
+                    let a = MatView::row_major(&av, m, k).unwrap();
+                    let b = MatView::row_major(&bv, k, n).unwrap();
+                    let c = MatViewMut::row_major(&mut want, m, n).unwrap();
+                    let mut t = Triple::new(a, b, c).unwrap();
+                    gemm_float(
+                        &mut t,
+                        &crate::epilogue::Linear::OVERWRITE,
+                        GemmOptions::default(),
+                    );
+                }
+
+                // And every panel offer, because the offer decides the block and
+                // the block must not decide the answer.
+                for offer in [0usize, 1, k, k * n] {
+                    let mut got = vec![0.0f32; m * n];
+                    let mut qa = vec![
+                        PackedCode {
+                            mantissa: 0,
+                            exp: 0
+                        };
+                        k.max(1)
+                    ];
+                    let mut qb = vec![
+                        PackedCode {
+                            mantissa: 0,
+                            exp: 0
+                        };
+                        offer
+                    ];
+                    let a = MatView::row_major(&av, m, k).unwrap();
+                    let b = MatView::row_major(&bv, k, n).unwrap();
+                    let c = MatViewMut::row_major(&mut got, m, n).unwrap();
+                    let mut t = Triple::new(a, b, c).unwrap();
+                    gemm_float_packed(
+                        &mut t,
+                        &crate::epilogue::Linear::OVERWRITE,
+                        GemmOptions::default(),
+                        &mut qa,
+                        &mut qb,
+                    );
+                    assert_eq!(
+                        got.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        want.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        "{label}, {m}x{k}x{n}, offer {offer}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The three lanes are all reached by the test above, and this says which.
+    ///
+    /// A differential test over operands that all take one path is a test of one
+    /// path, so the spans are asserted to select what they were chosen to select.
+    #[test]
+    fn each_scaled_lane_is_reached_cu_04() {
+        let span = |exps: &[i32]| {
+            let mut s = Span::EMPTY;
+            for &e in exps {
+                s.see(PackedCode {
+                    mantissa: 1,
+                    exp: e,
+                });
+            }
+            s
+        };
+        // 24-bit significands, so a 64-bit lane has 62 - 48 = 14 bits to spend on
+        // the two spans and the depth together.
+        let tight = span(&[0]);
+        assert_eq!(
+            admits::<f32>(64, tight, tight),
+            Some(Prescaled {
+                base: 0,
+                wide: false
+            }),
+            "no span and a shallow depth is the 64-bit lane"
+        );
+        let some = span(&[0, 20]);
+        assert!(
+            matches!(
+                admits::<f32>(64, some, some),
+                Some(Prescaled { wide: true, .. })
+            ),
+            "a span past the 64-bit lane is the 128-bit lane"
+        );
+        let huge = span(&[0, 100]);
+        assert_eq!(
+            admits::<f32>(64, huge, huge),
+            None,
+            "a span past every lane is the per-product placement"
+        );
+    }
+
     #[test]
     fn what_a_panel_establishes_cannot_change_it_cu_04() {
         fn both_ways_agree_f32(k: usize, a: &[f32], b: &[f32]) {

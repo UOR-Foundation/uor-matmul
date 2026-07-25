@@ -433,14 +433,14 @@ Every figure is `open`.
 | `n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` exact | matrixmultiply `f32` |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 0.007 | 0.010 | 0.017 | 0.014 | 0.017 | 0.013 |
-| 4 | 0.27 | 0.36 | 0.46 | 0.46 | 0.12 | 0.64 |
-| 8 | 0.53 | 1.16 | 1.02 | 1.55 | 0.19 | 4.66 |
-| 16 | 4.09 | 4.01 | 1.50 | 3.15 | 0.26 | 14.6 |
-| 32 | 6.44 | 6.21 | 1.74 | 4.17 | 0.29 | 26.8 |
-| 128 | 19.7 | 17.1 | 0.78 | 4.50 | 0.33 | 28.9 |
-| 512 | 38.5 | 29.9 | 0.53 | 4.71 | 0.32 | 43.2 |
-| 1024 | 37.7 | 29.1 | 0.21 | 4.58 | 0.32 | 43.3 |
-| 2048 | 32.9 | 26.4 | 0.15 | 4.54 | 0.32 | 41.2 |
+| 4 | 0.27 | 0.36 | 0.46 | 0.46 | 0.110 | 0.64 |
+| 8 | 0.53 | 1.16 | 1.02 | 1.55 | 0.206 | 4.66 |
+| 16 | 4.09 | 4.01 | 1.50 | 3.15 | 0.338 | 14.6 |
+| 32 | 6.44 | 6.21 | 1.74 | 4.17 | 0.532 | 26.8 |
+| 128 | 19.7 | 17.1 | 0.78 | 4.50 | 0.940 | 28.9 |
+| 512 | 38.5 | 29.9 | 0.53 | 4.71 | 1.103 | 43.2 |
+| 1024 | 37.7 | 29.1 | 0.21 | 4.58 | 1.118 | 43.3 |
+| 2048 | 32.9 | 26.4 | 0.15 | 4.54 | 0.873 | 41.2 |
 
 At `n = 2048` a single one of our repetitions already exceeds the wall-clock
 budget, so that row is a best-of-one and moves by up to a third between runs on a
@@ -460,13 +460,13 @@ different half of the driver.
 
 | `m x k x n` | uor `i8` | uor `i32` | ndarray `i32` | nalgebra `i32` | uor `f32` | matrixmultiply `f32` |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1024x1024x1 | 37.5 | 16.7 | 3.24 | 0.18 | 0.22 | 2.25 |
-| 1x1024x1024 | 1.09 | 0.94 | 0.20 | 0.14 | 0.16 | 1.18 |
-| 8x262144x8 | 6.64 | 4.52 | 1.70 | 1.82 | 0.29 | 16.0 |
-| 1x1048576x1 | 40.1 | 10.2 | 2.41 | 0.34 | 0.16 | 0.31 |
-| 2048x8x2048 | 9.24 | 8.34 | 1.08 | 0.82 | 0.17 | 13.4 |
-| 4096x2x4096 | 2.57 | 2.51 | 0.41 | 0.17 | 0.07 | 0.86 |
-| 509x1021x257 | 26.8 | 24.5 | 1.18 | 5.54 | 0.32 | 41.6 |
+| 1024x1024x1 | 37.5 | 16.7 | 3.24 | 0.18 | 0.217 | 2.25 |
+| 1x1024x1024 | 1.09 | 0.94 | 0.20 | 0.14 | 0.153 | 1.18 |
+| 8x262144x8 | 6.64 | 4.52 | 1.70 | 1.82 | 0.471 | 16.0 |
+| 1x1048576x1 | 40.1 | 10.2 | 2.41 | 0.34 | 0.152 | 0.31 |
+| 2048x8x2048 | 9.24 | 8.34 | 1.08 | 0.82 | 0.238 | 13.4 |
+| 4096x2x4096 | 2.57 | 2.51 | 0.41 | 0.17 | 0.068 | 0.86 |
+| 509x1021x257 | 26.8 | 24.5 | 1.18 | 5.54 | 1.113 | 41.6 |
 
 ### Latency at the smallest shapes, nanoseconds per call
 
@@ -485,7 +485,7 @@ different half of the driver.
 | uor `i32` | 0.32 |
 | ndarray | 0.04 |
 | nalgebra | 0.20 |
-| uor `f32` | 0.09 |
+| uor `f32` | 0.28 |
 | matrixmultiply | 0.32 |
 
 A positive exponent means throughput still improving with size: the small end is
@@ -521,15 +521,11 @@ once per call and none of it scaling. Measured, the table walk is 20 ns per
 family and there are two, which is the largest single piece. It is one of two
 places an oracle is ahead, and the sweep says so.
 
-**On floats the library is roughly 134x behind `matrixmultiply`, and that is the
-trade N4 names.** A classical `sgemm` issues one fused multiply-add per element.
-This one decodes two IEEE bit patterns, multiplies their significands as
-integers, and places the exact product into a 619-bit fixed-point register ---
-and never rounds until the end. The gap is the price of an answer that does not
-depend on the order of the additions, which no figure in the `matrixmultiply`
-column has. It is also the honest figure rather than the earlier one: with
-all-ones operands the limb window never flushed and the same measurement read
-120x, which was a better number about a worse question.
+**On floats the library is roughly 39x behind `matrixmultiply`.** It was 134x,
+and calling that the trade N4 names was wrong: most of it was not the price of
+exactness, it was a placement done once per product that can be done once per
+reduction. See "The float placement" below. What remains is a real gap and it is
+still the largest one in this document.
 
 ### The modular factorization
 
@@ -604,6 +600,92 @@ cheaper than the streaming reference while it ran three and a half times slower.
 Costing the traversal the offer actually buys fixed it, and it is the count that
 was wrong rather than a constant that needed tuning: `calls * (mr + nr) * kpad`
 against `(rows + cols) * kpad`.
+
+### The float placement
+
+A complete accumulator is exact because every product lands at *its own*
+position in the register, and finding that position is a shift, a limb index and
+a carry --- per product. Measured on a `4096`-deep panel, that placement was the
+entire distance between what the arithmetic costs and what the loop cost:
+
+| | ns per product |
+| --- | --- |
+| the mantissa product alone, into one `i64` | 0.43 |
+| the shipped window, exponents inside one binade | 1.98 |
+| the shipped window, exponents over ~60 binades | 2.49 |
+| ten `i128` buckets with the carry deferred | 2.33 |
+
+The bucket form is the natural alternative --- one accumulator per limb, nothing
+ever flushed --- and it is worth 6%. Two independent scalar designs landing
+within 6% of each other is what a structural ceiling looks like: the cost is the
+placement itself, not the way the placement is organised.
+
+So the placement has to leave the loop. Write `a * 2^(ea - base_a)` into the
+panel instead of `(a, ea)`, and likewise for `b`, and
+
+```text
+  sum_p (a_p 2^(ea_p - base_a))(b_p 2^(eb_p - base_b))
+    = 2^-(base_a + base_b) * sum_p a_p b_p 2^(ea_p + eb_p)
+```
+
+--- the float dot product *is* an integer dot product, at one known scale,
+placed into the register once for the whole reduction. Nothing is approximated:
+the scaled significands are exact integers and so is their sum. This is the same
+move the modular factorization makes for integers, and it is legitimate for the
+same kind of reason: an identity, not an approximation.
+
+What it costs is width, which is what makes it a declaration rather than a mode.
+A significand of `P` bits scaled across a span of `w` exponents needs `P + w`
+bits; a product needs `2P + wa + wb`; a sum of `k` of them needs `ceil(log2 k)`
+more. Three lanes follow, and every term in the choice is a count of bits taken
+from the element type and the panels:
+
+| when | the reduction is | measured |
+| --- | --- | --- |
+| `2P + wa + wb + ceil(log2 k) <= 62` | an `i64` dot product, which vectorizes | 0.50 ns |
+| `... <= 126` | one wide multiply per product | 0.89 ns |
+| otherwise | the per-product placement | 2.5 ns |
+
+`CU-04` asserts all three byte-identical to the streaming traversal, over
+operands chosen to reach each one, at every panel offer; a second test asserts
+that the spans do select the lane they were chosen to select, because a
+differential test over operands that all take one path is a test of one path.
+Planting a one-exponent error in either scaled lane fails it.
+
+Measured end to end, at `f32`:
+
+| `m x k x n` | before | after | |
+| --- | --- | --- | --- |
+| `512` cubed | 0.325 | **1.103** | 3.4x |
+| `1024` cubed | 0.341 | **1.118** | 3.3x |
+| `509x1021x257` | 0.313 | **1.113** | 3.6x |
+| `256` cubed | 0.346 | 1.043 | 3.0x |
+| `32` cubed | 0.288 | 0.532 | 1.8x |
+| `8x262144x8` | 0.307 | 0.471 | 1.5x |
+| one exponent throughout, `512` cubed | 0.33 | **2.02** | 6.1x |
+
+Two things about the shape of that.
+
+**The spans are settled for the whole call, not per panel.** They have to be: the
+scaling is written *into* the panels, so a block scaled for one row and read
+unscaled by another would be read wrong --- which is what the first version did.
+Deciding once costs one walk of each operand's exponents.
+
+**That walk is not always worth taking.** It reads `(m + n) * k` codes and saves
+one placement from each of `m * n * k` products, and a decode and a placement are
+the same order of work, so it pays exactly when `m * n > m + n`. That is false
+for a matrix-vector product, where it would more than double the whole call ---
+`1x1048576x1` lost a third before the question was asked --- and true for
+everything with two real dimensions. It is a comparison of counts, like the one
+`pick` makes, and not a threshold.
+
+What is left is the `39x`. The scaled lanes are scalar; the `i64` lane's inner
+loop is a plain integer dot product, which is exactly what the AVX2 `i32` tile
+kernel already computes at an order of magnitude more throughput. Reaching it
+means expressing the scaled panels as an integer alphabet and handing them to the
+kernel table, and that is not done: it wants an epilogue that can place a raw
+`i128` accumulator at a scale, which the integer driver's epilogue contract does
+not currently express.
 
 ### The declared alphabet
 
