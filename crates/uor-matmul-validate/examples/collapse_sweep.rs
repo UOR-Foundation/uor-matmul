@@ -21,7 +21,7 @@
 use std::time::Instant;
 
 use uor_matmul::prelude::*;
-use uor_matmul_core::{EncodeMode, Full, Shape};
+use uor_matmul_core::{EncodeMode, Full, Shape, Strides};
 use uor_matmul_gemm::{
     gemm_collapsed, suggested_collapse_index, suggested_collapse_rows, Collapse,
 };
@@ -184,6 +184,126 @@ fn main() {
                 t_packed / t_collapsed,
             );
         }
+    }
+
+    columns(false);
+    columns(true);
+}
+
+/// The same traversal on the transposed triple: equal *columns* of `B`.
+///
+/// No second pass and no second driver --- `(A * B)^T = B^T * A^T`, and
+/// transposition is a stride. What differs is the expansion, which walks the
+/// output's columns; for a row-major `C` those are not runs, and the table says
+/// what that costs.
+fn columns(col_major_b: bool) {
+    let (m, k, n) = (512usize, 512usize, 4096usize);
+    let macs = (m * k * n) as f64;
+    let shape = Shape { m, k, n };
+    let a: Vec<i8> = fill(m * k, 0xa11, |x| (x % 255 - 127) as i8);
+
+    let mut scratch = vec![Alphabet::<i8, Full<i8>>::ZERO; uor_matmul::suggested_scratch(shape)];
+    let mut index = vec![0usize; suggested_collapse_index(n)];
+    let mut rows = vec![Alphabet::<i8, Full<i8>>::ZERO; n * k];
+
+    println!();
+    let layout = if col_major_b {
+        "column-major"
+    } else {
+        "row-major"
+    };
+    println!("## `{m} x {k} x {n}`, collapsing columns of a {layout} `B`");
+    println!();
+    println!("| `d` | degeneracy | uor collapsed | uor packed | speedup |");
+    println!("| --- | --- | --- | --- | --- |");
+
+    let mut degrees: Vec<usize> = Vec::new();
+    let mut d = 1;
+    while d < n {
+        degrees.push(d);
+        d *= 8;
+    }
+    degrees.push(n);
+
+    for &meanings in &degrees {
+        // `B` with `meanings` distinct columns, laid out row-major as usual.
+        let base: Vec<i8> = fill(meanings * k, 0xc01, |x| (x % 255 - 127) as i8);
+        // The same matrix in both layouts: element `(p, j)` is
+        // `base[(j % meanings) * k + p]`.
+        let b: Vec<i8> = if col_major_b {
+            (0..k * n)
+                .map(|x| base[(x / k % meanings) * k + x % k])
+                .collect()
+        } else {
+            (0..k * n)
+                .map(|x| base[(x % n % meanings) * k + x / n])
+                .collect()
+        };
+        let strides = if col_major_b {
+            Strides::col_major(k)
+        } else {
+            Strides::row_major(n)
+        };
+        fn bview<'v>(
+            b: &'v [i8],
+            k: usize,
+            n: usize,
+            strides: Strides,
+        ) -> MatView<'v, Alphabet<i8, Full<i8>>> {
+            MatView::new(as_alphabet_full(b), k, n, strides).unwrap()
+        }
+
+        let mut c = vec![0i32; m * n];
+        let options = GemmOptions {
+            encode: EncodeMode::Wrapping,
+            ..Default::default()
+        };
+
+        let t_collapsed = best(|| {
+            let s = Instant::now();
+            {
+                let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+                let bv = bview(&b, k, n, strides);
+                let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+                let mut tr = Triple::new(av, bv, cv).unwrap();
+                gemm_collapsed(
+                    &mut tr.transposed(),
+                    &Linear::OVERWRITE,
+                    options,
+                    &mut Scratch::new(&mut scratch),
+                    &mut Collapse::new(&mut index, &mut rows),
+                );
+            }
+            s.elapsed().as_secs_f64()
+        });
+        let collapsed = c.clone();
+
+        let t_packed = best(|| {
+            let s = Instant::now();
+            {
+                let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+                let bv = bview(&b, k, n, strides);
+                let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+                let mut tr = Triple::new(av, bv, cv).unwrap();
+                uor_matmul::gemm_packed(
+                    &mut tr,
+                    &Linear::OVERWRITE,
+                    options,
+                    &mut Scratch::new(&mut scratch),
+                );
+            }
+            s.elapsed().as_secs_f64()
+        });
+        assert_eq!(collapsed, c, "the two traversals must agree byte for byte");
+
+        let g = |t: f64| macs / t / 1e9;
+        println!(
+            "| {meanings} | {:.0}x | {:.1} | {:.1} | {:.1}x |",
+            n as f64 / meanings as f64,
+            g(t_collapsed),
+            g(t_packed),
+            t_packed / t_collapsed,
+        );
     }
 }
 

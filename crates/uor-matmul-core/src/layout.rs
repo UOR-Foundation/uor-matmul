@@ -235,6 +235,25 @@ impl<'a, E> MatView<'a, E> {
         self.origin.wrapping_add_signed(off)
     }
 
+    /// This view with its axes exchanged.
+    ///
+    /// Transposition is a stride and not a mode (S7), so this copies nothing,
+    /// re-places nothing, and reaches exactly the cells this view reaches: the
+    /// transposed view's `(i, j)` is this one's `(j, i)`, which is what swapping
+    /// the two strides means.
+    pub const fn transposed(&self) -> MatView<'a, E> {
+        MatView {
+            data: self.data,
+            origin: self.origin,
+            rows: self.cols,
+            cols: self.rows,
+            strides: Strides {
+                rs: self.strides.cs,
+                cs: self.strides.rs,
+            },
+        }
+    }
+
     /// A `rows`-long walk down column `j`, starting at row `i`.
     ///
     /// The packing loop's inner step. Computing `origin + i * rs + j * cs` per
@@ -381,6 +400,20 @@ impl<'a, E> MatViewMut<'a, E> {
         &mut self.data[idx]
     }
 
+    /// This output with its axes exchanged. See [`MatView::transposed`].
+    pub fn transposed(&mut self) -> MatViewMut<'_, E> {
+        MatViewMut {
+            data: self.data,
+            origin: self.origin,
+            rows: self.cols,
+            cols: self.rows,
+            strides: Strides {
+                rs: self.strides.cs,
+                cs: self.strides.rs,
+            },
+        }
+    }
+
     /// The first `rows` rows of this output, as an output in their own right.
     ///
     /// The same buffer, the same origin, and the same strides --- only fewer
@@ -484,6 +517,28 @@ impl<'a, 'b, 'c, E, O> Triple<'a, 'b, 'c, E, O> {
             });
         }
         Ok(Self { a, b, c })
+    }
+
+    /// The same product, named from the other side: `B^T * A^T` into `C^T`.
+    ///
+    /// `(A * B)^T = B^T * A^T`, and transposition is a stride, so this is the
+    /// same three buffers with their axes exchanged and nothing copied. It is
+    /// conformant because this one is --- `B^T` is `n x k`, `A^T` is `k x m`,
+    /// `C^T` is `n x m` --- and `C^T` self-aliases exactly when `C` does, the
+    /// predicate being symmetric in its two axes. So it is infallible where
+    /// [`Triple::new`] is fallible: nothing is being asserted that was not
+    /// already established.
+    ///
+    /// It exists so that a traversal expressed over *rows* is available over
+    /// columns without a second traversal to keep in step (R13). The collapse
+    /// traversal is the one that wants it: collapsing equal columns of `B` is
+    /// collapsing equal rows of `B^T`.
+    pub fn transposed(&mut self) -> Triple<'_, '_, '_, E, O> {
+        Triple {
+            a: self.b.transposed(),
+            b: self.a.transposed(),
+            c: self.c.transposed(),
+        }
     }
 
     /// The shape of the product, which exists because this value does.

@@ -377,15 +377,42 @@ is a function of its *shape* --- and for a batch over a vocabulary, a one-hot or
 gather product, a padded batch, or a low-bit quantised operand, the shape and the
 content say very different things.
 
-Two things it does not yet do, stated rather than implied:
+One thing it does not do, decided by a declaration rather than by the data: an
+epilogue that reads `C` gets the packed traversal, because two rows with equal
+rows of `A` still have different outputs when the `C` they read differs.
 
-- Columns of `B` are not collapsed. The pass is a function of a view, and `B`
-  transposed is a view, so it is the same routine against a column-major
-  compaction --- but it is not written, and a product whose sharing is on the
-  `B` side gets none of this.
-- An epilogue that reads `C` gets the packed traversal, because two rows with
-  equal rows of `A` still have different outputs when the `C` they read differs.
-  That is decided by the epilogue's own declaration and never by the data.
+### Columns, and why the layout decides what they cost
+
+Sharing is not always on the `A` side, and the other side needs no second
+traversal. `(A * B)^T = B^T * A^T`, transposition is a stride, and equal columns
+of `B` are equal rows of `B^T` --- so [`Triple::transposed`] is the whole of it,
+and `gemm_collapsed` on that triple runs the same pass, the same compaction, and
+the same expansion. `CD-12` asserts that too.
+
+What it costs is not the same, and the reason is worth stating because it is the
+one thing about this traversal that the *caller's* declaration decides. The pass
+has to read the axis it is collapsing. At `512 x 512 x 4096`, one distinct
+column:
+
+| `B`'s layout | `d = 1` | `d = n/8` | `d = n` | uor packed |
+| --- | --- | --- | --- | --- |
+| column-major | 194 | 118 | 34.0 | 37.1 |
+| row-major | 54.2 | 44.6 | 29.7 | 38.0 |
+
+A column of a column-major `B` is a run, so the pass reads it the way
+[`MatView::row_block`] hands it over and compares it with one `memcmp`. A column
+of a row-major `B` is `k` reads on `k` different cache lines, and there are `n`
+of them --- `Theta(k * n)` cache misses, which is `1/m` of the product's work at
+thirty times the cost per access. That is the whole distance between 5.2x and
+1.4x. Nothing about the answer differs, and `CD-12` covers both.
+
+The expansion has the same shape and the same answer: which loop is inner is
+decided by the output's strides and not by the order the rows were written in.
+Every column of the expansion is independent, so the descending walk that makes
+it safe is preserved either way, and the inner loop is free to be whichever axis
+is the near one. Getting that wrong is expensive and was: walking the rows of
+`C^T` outermost over a row-major `C` reads a cache line per cell, and it held the
+column figure at parity until the loops were exchanged.
 
 ## Against the oracles
 

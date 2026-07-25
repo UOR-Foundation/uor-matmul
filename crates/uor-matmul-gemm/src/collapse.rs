@@ -23,6 +23,15 @@
 //! products, so equal operands give equal sums by definition rather than by
 //! accident.
 //!
+//! # Columns
+//!
+//! Sharing is not always on the `A` side. It does not need a second traversal:
+//! `(A * B)^T = B^T * A^T`, transposition is a stride, and equal columns of `B`
+//! are equal rows of `B^T` --- so collapsing them is this traversal applied to
+//! [`Triple::transposed`], with the same pass, the same compaction, and the same
+//! expansion. One walks the output's rows and the other its columns, which is
+//! the only difference and is entirely a question of the output's strides.
+//!
 //! # An offer, never a requirement
 //!
 //! Like [`crate::Scratch`], collapse is memory the caller offers. Offering none
@@ -215,15 +224,46 @@ pub fn gemm_collapsed<E, Bd, O, Ep>(
     // in order of first occurrence, so `index[i] <= i` for every `i` --- and a
     // descending walk therefore reads each compacted row before the step that
     // overwrites it. No copy of `C` is needed and none is made.
+    // Which loop is inner is decided by the output's own strides, not by the
+    // order the rows are written in. Every column is independent --- the
+    // descending walk is what matters and it is preserved either way --- so the
+    // inner loop is free to be whichever axis is the near one. It matters: the
+    // *transposed* triple names the rows of `C^T`, which for a row-major `C` are
+    // its columns, and walking them outermost reads a cache line per cell.
     let c = triple.c_mut();
-    for i in (0..shape.m).rev() {
-        let from = collapse.index[i];
-        if from == i {
-            continue;
+    let strides = c.strides();
+    let index = &collapse.index[..shape.m];
+    if strides.cs == 1 {
+        // A row is a run, so replicating one is a move of that run. Called for
+        // its effect and not inside an assertion: `debug_assert!` does not
+        // evaluate its argument in a release build, which is a way to write a
+        // move that only happens in the tests.
+        for i in (0..shape.m).rev() {
+            let from = index[i];
+            if from != i && !c.copy_row(from, i) {
+                for j in 0..shape.n {
+                    let value = *c.at(from, j);
+                    *c.at_mut(i, j) = value;
+                }
+            }
         }
-        // A run when the output's strides say it is a run, which for a row-major
-        // `C` is always, and cell by cell when they do not.
-        if !c.copy_row(from, i) {
+    } else if strides.rs.unsigned_abs() < strides.cs.unsigned_abs() {
+        // The row axis is the near one: walk it innermost.
+        for j in 0..shape.n {
+            for i in (0..shape.m).rev() {
+                let from = index[i];
+                if from != i {
+                    let value = *c.at(from, j);
+                    *c.at_mut(i, j) = value;
+                }
+            }
+        }
+    } else {
+        for i in (0..shape.m).rev() {
+            let from = index[i];
+            if from == i {
+                continue;
+            }
             for j in 0..shape.n {
                 let value = *c.at(from, j);
                 *c.at_mut(i, j) = value;
@@ -587,6 +627,56 @@ mod tests {
             // safe to walk backwards.
             for (i, &at) in index[..m].iter().enumerate() {
                 assert!(at <= i, "row {i} resolves forwards");
+            }
+        }
+    }
+
+    /// Equal *columns* of `B`, collapsed by the same traversal on the
+    /// transposed triple. No second pass, no second compaction, no second
+    /// expansion --- a stride (R13, S7).
+    #[test]
+    fn collapsing_equal_columns_is_the_same_traversal_transposed_cd_12() {
+        for &(m, k, n) in &[(7, 5, 3), (33, 17, 64), (4, 3, 100), (64, 8, 8)] {
+            for &meanings in &[1usize, 2, n / 2 + 1, n] {
+                // `B` with `meanings` distinct columns.
+                let a: Vec<i8> = (0..m * k).map(|x| ((x * 41) % 251) as i8).collect();
+                let b: Vec<i8> = (0..k * n)
+                    .map(|x| {
+                        let (row, col) = (x / n, x % n);
+                        (((col % meanings) * 29 + row * 13) % 251) as i8
+                    })
+                    .collect();
+
+                let want = {
+                    let mut c = vec![0i32; m * n];
+                    let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+                    let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+                    let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+                    let mut t = Triple::new(av, bv, cv).unwrap();
+                    gemm_packed(
+                        &mut t,
+                        &Linear::OVERWRITE,
+                        GemmOptions::default(),
+                        &mut Scratch::none(),
+                    );
+                    c
+                };
+
+                let mut c = vec![0i32; m * n];
+                let mut index = vec![0usize; suggested_collapse_index(n)];
+                let mut rows = vec![Alphabet::<i8, Full<i8>>::ZERO; n * k];
+                let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+                let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+                let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+                let mut t = Triple::new(av, bv, cv).unwrap();
+                gemm_collapsed(
+                    &mut t.transposed(),
+                    &Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut Scratch::none(),
+                    &mut Collapse::new(&mut index, &mut rows),
+                );
+                assert_eq!(c, want, "{m}x{k}x{n}, {meanings} distinct columns");
             }
         }
     }
