@@ -41,3 +41,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-06
     Then the claim holds byte for byte
+
+  @CK-08 @build
+  Scenario: The canonical manifest is byte-stable, a short buffer reports the need, and a malformed digest is rejected
+    Given the standing corpus
+    When the suite exercises CK-08
+    Then the claim holds byte for byte

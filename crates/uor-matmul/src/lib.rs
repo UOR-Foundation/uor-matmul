@@ -99,8 +99,9 @@ pub use uor_matmul_core::{
     Strides, Traversal, Triple,
 };
 pub use uor_matmul_gemm::{
-    coded_gemm, gemm, gemm_float, gemm_float_packed, gemm_packed, suggested_scratch, Bias,
-    CodedTriple, Epilogue, GemmOptions, Kernelized, Linear, Partition, Scratch, SignedPlace, Tile,
+    coded_gemm, gemm, gemm_float, gemm_float_packed, gemm_packed, suggested_accumulators,
+    suggested_scratch, Bias, CodedTriple, Epilogue, GemmOptions, Kernelized, Linear, Partition,
+    Scratch, SignedPlace, Tile,
 };
 pub use uor_matmul_kernels as kernels;
 

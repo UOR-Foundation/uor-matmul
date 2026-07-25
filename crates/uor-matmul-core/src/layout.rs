@@ -527,6 +527,60 @@ mod tests {
         assert!(Strides { rs: 0, cs: 1 }.self_aliases(5, 3));
     }
 
+    /// `CT-05`: the two reportable conditions are the only two, and both are
+    /// decided before any arithmetic is named.
+    ///
+    /// The whole error surface of the library is `NotAProduct`, it has exactly
+    /// two variants, and both are non-existence of the requested object rather
+    /// than a failure to compute it. This asserts each one is reachable, that
+    /// neither is reachable by the *values* in a buffer, and that a product which
+    /// exists is never refused --- which is what makes `gemm` able to return `()`.
+    #[test]
+    fn the_two_reportable_conditions_are_the_only_two_ct_05() {
+        // One: the shapes do not conform.
+        let a = [0i32; 6];
+        let b = [0i32; 6];
+        let mut c = [0i32; 6];
+        let av = MatView::row_major(&a, 2, 3).unwrap();
+        let bv = MatView::row_major(&b, 2, 3).unwrap();
+        let cv = MatViewMut::row_major(&mut c, 2, 3).unwrap();
+        assert!(matches!(
+            Triple::new(av, bv, cv),
+            Err(NotAProduct::Nonconformant { .. })
+        ));
+
+        // Two: the output's strides map two coordinates onto one cell, so there
+        // is no matrix to write into.
+        let av = MatView::row_major(&a, 2, 3).unwrap();
+        let bv = MatView::row_major(&b, 3, 2).unwrap();
+        let cv = MatViewMut::new(&mut c, 2, 2, Strides { rs: 0, cs: 1 }).unwrap();
+        assert!(matches!(
+            Triple::new(av, bv, cv),
+            Err(NotAProduct::OutputAliasesItself { .. })
+        ));
+
+        // Neither depends on a value. The same shapes with every extreme the
+        // element type holds construct fine, and the *data* cannot make a
+        // product stop existing.
+        for fill in [0i32, 1, -1, i32::MIN, i32::MAX] {
+            let a = [fill; 6];
+            let b = [fill; 6];
+            let mut c = [fill; 4];
+            let av = MatView::row_major(&a, 2, 3).unwrap();
+            let bv = MatView::row_major(&b, 3, 2).unwrap();
+            let cv = MatViewMut::row_major(&mut c, 2, 2).unwrap();
+            assert!(Triple::new(av, bv, cv).is_ok(), "fill {fill}");
+        }
+
+        // And a degenerate output is a product, not an error: an empty matrix has
+        // no two distinct coordinates, so nothing can alias.
+        let mut empty: [i32; 0] = [];
+        let av = MatView::row_major(&a, 0, 3).unwrap();
+        let bv = MatView::row_major(&b, 3, 0).unwrap();
+        let cv = MatViewMut::row_major(&mut empty, 0, 0).unwrap();
+        assert!(Triple::new(av, bv, cv).is_ok());
+    }
+
     /// A block is borrowable exactly when the strides already lay it out that
     /// way, and never otherwise.
     ///
@@ -584,8 +638,8 @@ mod tests {
         assert_eq!(v.row_block(0, 0, 4, 0), None);
     }
 
-    /// CS-03, CT-05: the two reportable conditions are reported here, and
-    /// nowhere else.
+    /// `CS-03`, and the first half of `CT-05`: a non-conformant shape is
+    /// reported here and nowhere else.
     #[test]
     fn nonconformant_shapes_are_reported_at_construction_cs_03() {
         let a = [0i32; 6];

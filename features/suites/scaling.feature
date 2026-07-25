@@ -54,3 +54,9 @@ Feature: Scaling
     When the harness measures CG-07
     Then the figure is reported with its confidence interval
     And nothing asserts it as established
+
+  @CG-08 @open
+  Scenario: Sustained throughput on super-massive input, reported per pass, against every oracle that finishes
+    Given the standing corpus
+    When the suite exercises CG-08
+    Then the figure is reported and not asserted

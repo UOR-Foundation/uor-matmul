@@ -40,6 +40,9 @@ returns an error the model does not sanction.
 | `CT-01` | `build` | No representable input errors or panics: fuzzed shapes, strides, magnitudes, and depths, under a checked-arithmetic build |
 | `CT-02` | `build` | No accumulation overflows: the whole corpus under checked arithmetic, zero overflow events |
 | `CT-03` | `build` | Non-finite float codes propagate by the IEEE rules and never error |
+| `CT-04` | `build` | Zero, one, and prime dimensions take the same path as any other, and a zero-extent view constructs rather than erroring |
+| `CT-05` | `build` | The two reportable conditions --- a non-conformant shape and an output whose strides map two coordinates onto one cell --- are the only ones, and both are decided at view construction before any arithmetic is named |
+| `CT-06` | `build` | A super-massive product --- operands past the last level of cache, a depth past every lane's capacity, and an extent past every block --- is exact, on every traversal the offer admits |
 
 ## `CD-*` --- Determinism: same inputs, same bytes
 
@@ -89,6 +92,7 @@ returns an error the model does not sanction.
 | `CK-04` | `build` | A transcoded stream equals the composite codec |
 | `CK-05` | `build` | Two `CodedMatrix` values with different kappa labels and equal decodes give equal output bytes |
 | `CK-06` | `build` | A run codec's returned counts sum to the declared row width on every row |
+| `CK-08` | `build` | The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected |
 
 ## `CX-*` --- Cross-library agreement against an external library
 
@@ -129,6 +133,7 @@ returns an error the model does not sanction.
 | `CG-04` | `open` | Working-set scaling, `suggested_scratch` against each oracle's measured internal allocation |
 | `CG-05` | `open` | Allocation count and peak bytes: zero here, whatever the oracle does there |
 | `CG-06` | `open` | Parallel speedup against tile count, with byte-equality asserted inside the timed harness |
+| `CG-08` | `open` | Sustained throughput on super-massive input, reported per pass, against every oracle that finishes |
 | `CG-07` | `open` | Small-shape latency, where a heavyweight prologue costs more than an asymptote |
 
 ## `CM-*` --- Model integrity: the model is the single source of every constant

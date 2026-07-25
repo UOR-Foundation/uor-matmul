@@ -86,6 +86,13 @@ pub trait Kernelized: IntegerElement {
 
     /// The modular lane, as the value the encode step would have produced.
     fn modular_as_acc(lane: Self::Modular) -> Self::Acc;
+
+    /// The inverse: an accumulator that came from a modular lane, back as one.
+    ///
+    /// Exact because both are the same ring. A partial sum kept across depth
+    /// chunks passes through the accumulator, and this is what lets it come back
+    /// out as the lane the next chunk adds to.
+    fn acc_as_modular(acc: Self::Acc) -> Self::Modular;
 }
 
 impl Kernelized for i8 {
@@ -153,6 +160,10 @@ impl Kernelized for i8 {
     fn modular_as_acc(lane: i32) -> Self::Acc {
         i128::from(lane)
     }
+
+    fn acc_as_modular(acc: Self::Acc) -> i32 {
+        acc as i32
+    }
 }
 
 impl Kernelized for i16 {
@@ -207,6 +218,10 @@ impl Kernelized for i16 {
     fn modular_as_acc(lane: i32) -> Self::Acc {
         i128::from(lane)
     }
+
+    fn acc_as_modular(acc: Self::Acc) -> i32 {
+        acc as i32
+    }
 }
 
 impl Kernelized for i32 {
@@ -257,6 +272,10 @@ impl Kernelized for i32 {
 
     fn modular_as_acc(lane: i32) -> Self::Acc {
         i128::from(lane)
+    }
+
+    fn acc_as_modular(acc: Self::Acc) -> i32 {
+        acc as i32
     }
 }
 
@@ -314,6 +333,11 @@ impl Kernelized for i64 {
     fn modular_as_acc(lane: i64) -> Self::Acc {
         <Self::Acc as Accumulator>::ZERO.add_i128(i128::from(lane))
     }
+
+    fn acc_as_modular(acc: Self::Acc) -> i64 {
+        // The low limb *is* the value in `Z/2^64`.
+        acc.limbs()[0] as i64
+    }
 }
 
 /// The tile buffer, sized by the kernels rather than by a number chosen here.
@@ -357,16 +381,24 @@ pub fn gemm_packed<E, Bd, O, Ep>(
             match pick(shape, triple, &tile, || {
                 E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m)
             }) {
-                Some(spec) => run::<E, Bd, O, Ep, E::Modular>(
-                    triple,
-                    epilogue,
-                    options,
-                    scratch,
-                    spec,
-                    E::add_modular,
-                    |acc, lane| *acc = E::modular_as_acc(lane),
-                    usize::MAX,
-                ),
+                Some(spec) => {
+                    // In the quotient the caller asked for, a running partial sum
+                    // kept in the accumulator and a lane are the same value, so
+                    // accumulating one into the other is the ring's own addition.
+                    let accumulate = |acc: &mut AccOf<E>, lane: E::Modular| {
+                        *acc = E::modular_as_acc(E::add_modular(E::acc_as_modular(*acc), lane));
+                    };
+                    run::<E, Bd, O, Ep, E::Modular>(
+                        triple,
+                        epilogue,
+                        options,
+                        scratch,
+                        spec,
+                        E::add_modular,
+                        &accumulate,
+                        usize::MAX,
+                    )
+                }
                 None => crate::gemm(triple, epilogue, options, scratch),
             }
         }
@@ -377,6 +409,7 @@ pub fn gemm_packed<E, Bd, O, Ep>(
             }) {
                 Some(spec) => {
                     let depth = spec.lane_depth(Bd::VALUE);
+                    let accumulate = E::fold_exact;
                     run::<E, Bd, O, Ep, E::Exact>(
                         triple,
                         epilogue,
@@ -384,7 +417,7 @@ pub fn gemm_packed<E, Bd, O, Ep>(
                         scratch,
                         spec,
                         |_, lane| lane,
-                        E::fold_exact,
+                        &accumulate,
                         depth,
                     )
                 }
@@ -516,7 +549,7 @@ fn run<E, Bd, O, Ep, L>(
     scratch: &mut Scratch<'_, E, Bd>,
     spec: KernelSpec<E, L>,
     combine_lane: impl Fn(L, L) -> L,
-    fold: impl Fn(&mut AccOf<E>, L),
+    fold: &impl Fn(&mut AccOf<E>, L),
     lane_depth: usize,
 ) where
     E: Kernelized,
@@ -575,6 +608,21 @@ fn run<E, Bd, O, Ep, L>(
     // assert the bytes are the same either way.
     let mut tile = [L::default(); MAX_TILE];
     let (a, b, c) = triple.parts();
+    // The depth-chunked traversal, when the caller offered somewhere to keep the
+    // exact partial sums.
+    //
+    // A classical GEMM chunks the reduction so its panels fit cache and adds the
+    // chunks into `C`. This library cannot: `C` is the *encoded* output and a
+    // partial sum encoded is a partial sum rounded. So without an accumulator
+    // block the panels must hold the whole of `k`, and at `k = 400000` a panel is
+    // megabytes and nothing is resident --- measured, that shape ran at a sixth
+    // of the microkernel's own rate.
+    //
+    // With one, the reduction is chunked to `KC` and every partial sum stays
+    // exact and full width. That is the property the exact accumulator buys and a
+    // classical library cannot have: the sum is order-independent, so it may be
+    // split any way the machine prefers and recombined with no consequence ---
+    // which is exactly what `CD-01` and `CD-04` assert, at every chunk depth.
     let kpad = shape.k.div_ceil(pad_to) * pad_to;
     // A [`LaneLayout::Contiguous`] kernel reads one lane's whole depth as a run,
     // which is the same layout function at `group = kpad`: `packed_slot` then
@@ -612,7 +660,28 @@ fn run<E, Bd, O, Ep, L>(
         scratch.len().checked_div(kpad).unwrap_or(0)
     };
 
-    if shape.k <= lane_depth && (borrow_all || (shape.k <= kc && budget >= per_step)) {
+    let full_depth = shape.k <= lane_depth && (borrow_all || (shape.k <= kc && budget >= per_step));
+
+    // When the full-depth traversal cannot run --- the offer does not cover a
+    // panel that deep, or the lane does not reach that far --- the depth is
+    // chunked instead, provided the caller offered somewhere to keep the exact
+    // partial sums. That is the case a classical library handles by adding
+    // partial sums into `C`, which it can do because its accumulator is its
+    // output width; this library cannot, because `C` is the encoded output and a
+    // partial sum encoded is a partial sum rounded. An accumulator block is the
+    // somewhere, and with one the offer stops growing with `k` (`CD-10`).
+    if !full_depth
+        && scratch.accumulators() >= mr * nr
+        && scratch.len() >= per_step * pad_to
+        && shape.k > pad_to
+    {
+        run_chunked_depth(
+            triple, epilogue, options, scratch, spec, fold, lane_depth, pad_to,
+        );
+        return;
+    }
+
+    if full_depth {
         use uor_matmul_core::generated::blocking;
 
         // The declared blocking is a working *set*, not a column count: `KC * NC`
@@ -852,6 +921,163 @@ impl Cursor {
     }
 }
 
+/// `C := epilogue(A * B, C)` with the reduction chunked to what the cache holds.
+///
+/// The loop order is the classical one --- column block, depth chunk, row block,
+/// then the microkernel tiles --- and the difference is where the partial sums
+/// live. A classical library puts them in `C`, at the output's width, and pays
+/// for it with an answer that depends on the chunking. This one puts them in the
+/// caller's accumulator block, at a width that cannot overflow, and the chunking
+/// is invisible in the result.
+///
+/// Every panel is `kc` deep rather than `k` deep, so the offer does not grow with
+/// the depth and an astronomical `k` is blocked exactly as a modest one is.
+#[allow(clippy::too_many_arguments)]
+fn run_chunked_depth<E, Bd, O, Ep, L>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    spec: KernelSpec<E, L>,
+    accumulate: &impl Fn(&mut AccOf<E>, L),
+    lane_depth: usize,
+    pad_to: usize,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    L: Copy + Default + 'static,
+{
+    use uor_matmul_core::generated::blocking;
+
+    let shape = triple.shape();
+    let (mr, nr) = (spec.mr, spec.nr);
+    let per_step = mr + nr;
+    let reads_c = epilogue.reads_c();
+
+    // The chunk depth: as deep as the declared blocking, the lane admits, and the
+    // panel offer pays for --- and a whole number of `k`-groups, so a chunk's
+    // padded depth never outgrows what was reserved for it.
+    let kc = blocking::KC
+        .min(lane_depth)
+        .min(scratch.len() / per_step)
+        .max(1)
+        / pad_to
+        * pad_to;
+    if kc == 0 {
+        // Not even one group of panel room. The full-depth traversals handle it.
+        // Not even one group of panel room; the streaming traversal runs.
+        crate::gemm(triple, epilogue, options, scratch);
+        return;
+    }
+
+    // The output block, in whole microkernel tiles, fitted to *both* offers: the
+    // accumulators must cover its tiles and the panel room must cover one chunk
+    // of it.
+    let tiles = scratch.accumulators() / (mr * nr);
+    let room = scratch.len() / kc;
+    let mut mc = shape.m.min(blocking::MC).div_ceil(mr) * mr;
+    let mut nc = shape.n.min(blocking::NC).div_ceil(nr) * nr;
+    while (mc / mr) * (nc / nr) > tiles || mc + nc > room {
+        if nc / nr > 1 && nc >= mc {
+            nc -= nr;
+        } else if mc / mr > 1 {
+            mc -= mr;
+        } else {
+            break;
+        }
+    }
+    if mc + nc > room || (mc / mr) * (nc / nr) > tiles {
+        // One tile of accumulators and one panel step is the least this needs,
+        // and the guard at the call site established both; if the arithmetic
+        // above still cannot fit, the streaming traversal runs.
+        crate::gemm(triple, epilogue, options, scratch);
+        return;
+    }
+    // Spread the extents evenly over the blocks they imply, so no block is a
+    // sliver.
+    let mc = shape.m.div_ceil(shape.m.div_ceil(mc)).div_ceil(mr) * mr;
+    let nc = shape.n.div_ceil(shape.n.div_ceil(nc)).div_ceil(nr) * nr;
+
+    let mut tile = [L::default(); MAX_TILE];
+    let mut j0 = 0;
+    while j0 < shape.n {
+        let cols = nc.min(shape.n - j0);
+        let mut i0 = 0;
+        while i0 < shape.m {
+            let rows = mc.min(shape.m - i0);
+            let block_tiles = rows.div_ceil(mr) * cols.div_ceil(nr);
+            // Zeroed here, so a block starts from nothing however the previous one
+            // ended.
+            let mut p0 = 0;
+            while p0 < shape.k {
+                let depth = kc.min(shape.k - p0);
+                let pad = depth.div_ceil(pad_to) * pad_to;
+                let group = match spec.lane_layout {
+                    LaneLayout::Interleaved => pad_to,
+                    LaneLayout::Contiguous => pad,
+                };
+                {
+                    let (a, b, _) = triple.parts();
+                    let buf = scratch.take(pad * (mc + nc));
+                    let (pa_buf, pb_buf) = buf.split_at_mut(mc * pad);
+                    pack_rows(pa_buf, mr, group, depth, pad, a, i0, p0, rows, shape.m);
+                    pack_columns(pb_buf, nr, group, depth, pad, b, p0, j0, cols, shape.n);
+                }
+                if p0 == 0 {
+                    // A block starts from nothing, however the previous one ended.
+                    scratch.take_accumulators(block_tiles * mr * nr);
+                }
+
+                let (buf, accs) = scratch.split(pad * (mc + nc), block_tiles * mr * nr);
+                let raw: &[E] = bytemuck::TransparentWrapper::peel_slice(&*buf);
+                let (pa, pb) = raw.split_at(mc * pad);
+
+                let mut ii = 0;
+                while ii < rows {
+                    let ap = &pa[(ii / mr) * mr * pad..][..mr * pad];
+                    let mut jj = 0;
+                    while jj < cols {
+                        let bp = &pb[(jj / nr) * nr * pad..][..nr * pad];
+                        spec.mac_tile(pad, ap, bp, &mut tile[..mr * nr]);
+                        let at = ((ii / mr) * cols.div_ceil(nr) + jj / nr) * mr * nr;
+                        let slot = &mut accs[at..at + mr * nr];
+                        for (acc, lane) in slot.iter_mut().zip(&tile[..mr * nr]) {
+                            accumulate(acc, *lane);
+                        }
+                        jj += nr;
+                    }
+                    ii += mr;
+                }
+                p0 += depth;
+            }
+
+            // One encode per output element, after the whole reduction --- which
+            // is the point: the chunking is invisible because nothing was encoded
+            // until every chunk had been added.
+            let per_row = cols.div_ceil(nr);
+            let accs = scratch.keep_accumulators(block_tiles * mr * nr);
+            let (_, _, c) = triple.parts();
+            for ii in (0..rows).step_by(mr) {
+                for jj in (0..cols).step_by(nr) {
+                    let at = ((ii / mr) * per_row + jj / nr) * mr * nr;
+                    for i in 0..mr.min(rows - ii) {
+                        for j in 0..nr.min(cols - jj) {
+                            let acc = accs[at + i * nr + j];
+                            let (ci, cj) = (i0 + ii + i, j0 + jj + j);
+                            let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
+                            *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+                        }
+                    }
+                }
+            }
+            i0 += mc;
+        }
+        j0 += nc;
+    }
+}
+
 /// How many lines of a transpose tile to hold open at once.
 ///
 /// A panel whose lanes are steps of the reduction is a *transpose* of the
@@ -1068,6 +1294,72 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, Full, MatView, MatViewMut};
+
+    /// `CD-01`, `CD-10`: chunking the depth cannot change a byte.
+    ///
+    /// The depth-chunked traversal keeps exact partial sums in the caller's
+    /// accumulator block and adds the chunks in whatever order the blocking
+    /// implies. That is legitimate precisely because the sum is exact and
+    /// therefore order-independent --- so this asserts it, against the full-depth
+    /// traversal and against the streaming reference, over depths that straddle
+    /// the chunk boundary and shapes that straddle every block.
+    #[test]
+    fn chunking_the_depth_cannot_change_a_byte_cd_10() {
+        use uor_matmul_core::generated::blocking;
+        let kc = blocking::KC;
+        for (m, n) in [(1usize, 1usize), (3, 5), (8, 8), (13, 17), (7, 40)] {
+            for k in [1usize, 2, kc - 1, kc, kc + 1, 2 * kc + 3, 5 * kc] {
+                let a: Vec<i8> = (0..m * k).map(|i| ((i * 37) % 251) as i8).collect();
+                let b: Vec<i8> = (0..k * n).map(|i| ((i * 53) % 241) as i8).collect();
+
+                let mut want = vec![0i32; m * n];
+                let mut chunked = vec![0i32; m * n];
+                let mut full = vec![0i32; m * n];
+                let mut panels = vec![Alphabet::<i8, Full<i8>>::ZERO; 64 * (k + 1) + 4096];
+                let mut accs =
+                    vec![
+                        <AccOf<i8> as Accumulator>::ZERO;
+                        crate::suggested_accumulators(uor_matmul_core::Shape { m, k, n })
+                            .max(m * n + 128)
+                    ];
+
+                for mode in [EncodeMode::Wrapping, EncodeMode::Nearest] {
+                    for (out, which) in [(&mut want, 0u8), (&mut full, 1), (&mut chunked, 2)] {
+                        let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+                        let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+                        let cv = MatViewMut::row_major(out.as_mut_slice(), m, n).unwrap();
+                        let mut t = Triple::new(av, bv, cv).unwrap();
+                        let options = GemmOptions {
+                            encode: mode,
+                            ..Default::default()
+                        };
+                        match which {
+                            0 => crate::gemm(
+                                &mut t,
+                                &Linear::OVERWRITE,
+                                options,
+                                &mut Scratch::none(),
+                            ),
+                            1 => gemm_packed(
+                                &mut t,
+                                &Linear::OVERWRITE,
+                                options,
+                                &mut Scratch::new(&mut panels),
+                            ),
+                            _ => gemm_packed(
+                                &mut t,
+                                &Linear::OVERWRITE,
+                                options,
+                                &mut Scratch::with_accumulators(&mut panels, &mut accs),
+                            ),
+                        }
+                    }
+                    assert_eq!(full, want, "full-depth, {m}x{k}x{n} {mode:?}");
+                    assert_eq!(chunked, want, "depth-chunked, {m}x{k}x{n} {mode:?}");
+                }
+            }
+        }
+    }
 
     /// `CD-01`, `CB-06`: a shape narrower than the tile takes the reduce
     /// factorization and produces the same bytes.

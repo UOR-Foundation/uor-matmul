@@ -78,6 +78,24 @@ suite = "totality"
 statement = """Non-finite float codes propagate by the IEEE rules and never error"""
 
 [[id]]
+id = "CT-04"
+level = "build"
+suite = "totality"
+statement = """Zero, one, and prime dimensions take the same path as any other, and a zero-extent view constructs rather than erroring"""
+
+[[id]]
+id = "CT-05"
+level = "build"
+suite = "totality"
+statement = """The two reportable conditions --- a non-conformant shape and an output whose strides map two coordinates onto one cell --- are the only ones, and both are decided at view construction before any arithmetic is named"""
+
+[[id]]
+id = "CT-06"
+level = "build"
+suite = "totality"
+statement = """A super-massive product --- operands past the last level of cache, a depth past every lane's capacity, and an extent past every block --- is exact, on every traversal the offer admits"""
+
+[[id]]
 id = "CD-01"
 level = "build"
 suite = "determinism"
@@ -336,6 +354,12 @@ suite = "property"
 statement = """The randomized differential suite at the sample size derived in `ANALYSIS.md`, seeds recorded"""
 
 [[id]]
+id = "CK-08"
+level = "build"
+suite = "codec"
+statement = """The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected"""
+
+[[id]]
 id = "CG-01"
 level = "open"
 suite = "scaling"
@@ -370,6 +394,12 @@ id = "CG-06"
 level = "open"
 suite = "scaling"
 statement = """Parallel speedup against tile count, with byte-equality asserted inside the timed harness"""
+
+[[id]]
+id = "CG-08"
+level = "open"
+suite = "scaling"
+statement = """Sustained throughput on super-massive input, reported per pass, against every oracle that finishes"""
 
 [[id]]
 id = "CG-07"

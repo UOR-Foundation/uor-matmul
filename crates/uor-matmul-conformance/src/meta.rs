@@ -120,6 +120,46 @@ pub fn check_honesty(root: &Path, tests: &BTreeSet<String>) -> std::io::Result<H
         }
     }
 
+    // CM-02, the third direction: every ID a *test* names is registered.
+    //
+    // Without this the register can be a subset of what the suite claims: a test
+    // called `..._ct_04` looks like it discharges `CT-04`, but if `CT-04` is not
+    // a row then nothing checks it has a scenario and `CONFORMANCE.md` does not
+    // list it. Three IDs were in exactly that state --- `CK-08`, `CT-04`, and
+    // `CT-05` --- with passing tests and no register rows, which is a claim made
+    // by a name and by nothing else.
+    //
+    // Only prefixes the register already uses are checked, so a test whose name
+    // merely happens to end in two letters and two digits is not a claim.
+    let prefixes: BTreeSet<String> = model
+        .ids
+        .id
+        .iter()
+        .filter_map(|r| r.id.split('-').next().map(str::to_lowercase))
+        .collect();
+    for name in tests {
+        let Some(tail) = name.rsplit("::").next() else {
+            continue;
+        };
+        let parts: Vec<&str> = tail.rsplitn(3, '_').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let (digits, letters) = (parts[0], parts[1]);
+        if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if letters.len() != 2 || !prefixes.contains(letters) {
+            continue;
+        }
+        let id = format!("{}-{digits}", letters.to_uppercase());
+        if model.ids.get(&id).is_none() {
+            report.violations.push(format!(
+                "CM-02: test `{name}` names `{id}`, which is not in the register. An ID                  that exists only in a test name has no scenario and no row in                  CONFORMANCE.md."
+            ));
+        }
+    }
+
     // R4: an `open` claim must not be asserted as established, anywhere.
     let open_ids: Vec<&str> = model
         .ids

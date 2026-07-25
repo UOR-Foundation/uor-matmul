@@ -57,9 +57,19 @@ cross: no-alloc
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a
 # fitted exponent with a confidence interval, against the same fit for the
 # oracle. Every figure it prints is `open`.
+# `--release` is not optional here. `cargo test` builds at `opt-level = 0`, and a
+# throughput figure from an unoptimised build is not a figure --- measured, the
+# same shapes read two hundred times slower. The timed tests say so themselves if
+# they are run without it.
 scaling:
-    cargo test -p uor-matmul-validate --test scaling_report -- --nocapture
+    cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
     cargo bench -p uor-matmul-validate
+
+# CT-06, CG-08: super-massive input. Minutes, and gigabytes of operands, so it is
+# its own recipe rather than part of `vv`.
+massive:
+    cargo test --release -p uor-matmul-validate --test massive -- \
+        --ignored --nocapture --test-threads=1
 
 # R4's meta-gate: no `open` claim is asserted as established, and no cited
 # authority is presented as this repository's own result.

@@ -222,6 +222,35 @@ by cutting its `i128` into four 63-bit pieces, where `add_scaled` places a
 magnitude at a scale in one three-limb spread. Together worth 1.35x at
 `n = 1024`, 1.4x at `n = 512`, and 1.4x on the rectangular shapes.
 
+## The constraint that is not ours
+
+A classical GEMM chunks the reduction so its panels fit cache, and adds the
+chunks into `C` as it goes. It can do that because its accumulator and its output
+are the same width --- and it pays for it with an answer that depends on the
+chunking, which is why no two classical `sgemm` implementations agree bit for bit.
+
+This library cannot write partial sums into `C`, because `C` is the *encoded*
+output and a partial sum encoded is a partial sum rounded. So without somewhere to
+keep exact partial sums, the panels must hold the whole of `k` --- and then the
+offer grows with the depth, and a caller with an astronomical `k` either supplies
+an astronomical buffer or gets an unblocked traversal.
+
+[`Scratch::with_accumulators`] is that somewhere. With a block of exact
+accumulators the reduction is chunked to whatever the cache holds while every
+partial sum stays full width, and neither offer grows with `k`:
+`KC * (MC + NC)` of panel room and `MC * NC` of accumulators, for any depth at
+all. The chunking is invisible in the result, and that is not a hope --- it is
+what an exact sum *means*: the sum is order-independent, so it may be split any
+way the machine prefers and recombined with no consequence. `CD-10` asserts the
+depth-chunked traversal byte-identical to the full-depth one and to the streaming
+reference, over depths straddling the chunk boundary.
+
+Measured, the full-depth traversal is still the faster of the two wherever a
+caller can afford its offer, so that is what `suggested_scratch` suggests. The
+accumulator offer is not a faster traversal; it is the removal of a ceiling ---
+the one place where the amount of memory a caller had to find scaled with the
+problem.
+
 What remains, and why:
 
 - `A` is still repacked once per column *block*, which at the suggested offer is
@@ -236,6 +265,14 @@ What remains, and why:
   with `matrixmultiply` and 4.6x ahead of `ndarray` on that shape, because the
   packing rather than the arithmetic was the cost; a narrower tile panel is the
   one thing left that would buy something there.
+- A deep, thin shape --- `16 x 400000 x 16` --- sustains 5.8 Gmac/s where the
+  microkernel alone runs at 38. With full-depth panels nothing is resident: the
+  `A` block is 1.6 MB and the `B` block 6.4 MB. The depth-chunked traversal makes
+  them resident but produces one kernel call per output column at that shape, and
+  measured the two land within 30% of each other. Closing it needs the traversal
+  choice to know the chunk depth before it picks the panel shape, which is a
+  circularity this driver does not yet break. It is reported, not hidden: `CG-08`
+  prints it per pass.
 - `f32` is far slower than the integer paths. The size of that gap is measured
   against the *oracles* below, not against our own integer path, because
   comparing a library to itself says nothing about whether the cost is
