@@ -4,6 +4,14 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# RUSTSEC-2024-0436: `paste` is unmaintained. It is not a vulnerability and it is
+# not reachable from anything this repository ships: it arrives through
+# `faer`/`gemm`/`nalgebra`, which are dev-dependencies of `uor-matmul-validate`
+# and exist only to be compared against (R11). cargo-deny reports "No safe upgrade
+# is available", because the fix would have to land in those crates. The shipped
+# crates depend on none of them, which `just no-alloc` witnesses by building them
+# for a target with no allocator at all.
+ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
 version = 2

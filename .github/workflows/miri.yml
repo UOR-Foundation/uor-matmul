@@ -19,6 +19,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: miri }
       - uses: Swatinem/rust-cache@v2
+      # `RUSTUP_TOOLCHAIN` because `rust-toolchain.toml` pins a stable channel and
+      # a pin outranks the toolchain this job just installed --- so `cargo miri`
+      # resolved to stable and reported that the `miri` component "is not
+      # available for the '1.97.1-x86_64-unknown-linux-gnu' toolchain". The pin is
+      # right for every other job; this is the one that needs nightly, and it says
+      # so here rather than by removing the pin. `Justfile`'s `fuzz` recipe has
+      # always spelled the same thing `cargo +nightly`.
       - run: cargo miri test -p uor-matmul-core -p uor-matmul-codec -p uor-matmul-gemm
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
+          RUSTUP_TOOLCHAIN: nightly

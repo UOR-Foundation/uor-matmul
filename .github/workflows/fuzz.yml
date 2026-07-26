@@ -21,4 +21,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - uses: taiki-e/install-action@cargo-fuzz
       - uses: Swatinem/rust-cache@v2
+      # As `miri.yml`: the stable pin in `rust-toolchain.toml` outranks the nightly
+      # installed above, and `cargo fuzz` reported "no such command: `fuzz`"
+      # because it resolved to the pinned stable toolchain, which has no
+      # `cargo-fuzz`. `cargo fuzz` also requires nightly to build a target at all.
       - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ github.event_name == 'schedule' && 900 || 60 }}
+        env:
+          RUSTUP_TOOLCHAIN: nightly

@@ -8,17 +8,20 @@ vv = "run --package xtask -- validate"
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
 
-# `just cross-run` executes the ISAs this host has no register for. Both are
-# emulators, and both run the real test binaries rather than a transcription of
-# them, so `CB-04` and `CB-05` are asserted by a run and not by a compile.
+# `just cross-run` runs the real test binaries for the ISAs this host has no
+# register for, so `CB-04` and `CB-05` are asserted by a run and not by a compile.
 #
-# A missing emulator fails loudly here --- cargo cannot find the linker or the
-# runner and says so. That is deliberate: a cross gate that skipped when its
-# tooling was absent would pass on every machine that could not run it, which is
-# the exact shape of the hole that let a broken NEON sequence ship.
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
-runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
-
+# The aarch64 linker and runner are *not* configured here, and that is the whole
+# point of this comment. `[target.aarch64-unknown-linux-gnu]` applies whenever
+# that is the target --- including on a machine where it is also the *host*, which
+# is what `cross.yml`'s `ubuntu-24.04-arm` runner is. Putting a `runner` here sent
+# every native ARM test binary through a `qemu-aarch64` that is not installed
+# there, and the job that exists to exercise NEON natively could not run at all.
+# Cargo has no way to say "only when cross-compiling", so the two settings live in
+# `just cross-run` as environment variables, where they apply to that invocation
+# and to nothing else.
+#
+# `wasm32-wasip1` is safe to configure, because no host is ever `wasip1`: a
+# `runner` for it can only ever apply to a deliberate cross-run.
 [target.wasm32-wasip1]
 runner = "wasmtime"

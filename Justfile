@@ -69,8 +69,16 @@ cross_crates := "-p uor-matmul-core -p uor-matmul-codec -p uor-matmul-kernels -p
 #
 # `--release` because a debug NEON build takes minutes under emulation and
 # proves the same thing.
+#
+# The linker and runner are set here rather than in `.cargo/config.toml` because
+# `[target.aarch64-unknown-linux-gnu]` there would also apply on a machine where
+# aarch64 is the *host* --- `cross.yml` has one, and a `runner` in the config sent
+# its native test binaries through a `qemu-aarch64` it does not have. Set per
+# invocation, they reach this cross-run and nothing else.
 cross-run:
-    cargo test --release --target aarch64-unknown-linux-gnu {{cross_crates}}
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu" \
+        cargo test --release --target aarch64-unknown-linux-gnu {{cross_crates}}
     # CB-05 is the claim that the two wasm configurations agree, so both are
     # *run*. Neither is implied: with SIMD128 off the selector offers only the
     # portable sequence, and the comparison the parity tests make is a different
@@ -78,6 +86,18 @@ cross-run:
     cargo test --release --target wasm32-wasip1 {{cross_crates}}
     RUSTFLAGS="-C target-feature=+simd128" \
         cargo test --release --target wasm32-wasip1 {{cross_crates}}
+
+# R11: the oracle crates are dev-dependencies and nothing shipped depends on
+# them. `cargo deny` is what says so about the *graph* rather than about the
+# source, and it also refuses a wildcard version requirement and an advisory
+# against anything in the tree.
+#
+# A recipe because it was only ever run in CI, and three wildcard requirements and
+# an unmaintained advisory sat in `main` unseen: `advisories FAILED, bans FAILED`
+# on every push. Needs `cargo install cargo-deny`, which is why it is not in
+# `just vv`.
+deny:
+    cargo deny --all-features check
 
 # CA-02: the corpus digest is the same on every target.
 cross: no-alloc cross-run
