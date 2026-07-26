@@ -163,11 +163,12 @@ library's own packed AVX2 tile path handed the weights *already decoded*:
 
 | `m x k x n` | table | packed | |
 | --- | --- | --- | --- |
-| `64x4096x4096` | **54.4** | 15.5 | 3.5x |
-| `64x1024x4096` | **52.2** | 25.1 | 2.1x |
-| `64x1024x16384` | **50.0** | 24.2 | 2.1x |
-| `256x1024x4096` | **47.6** | 33.5 | 1.4x |
-| `17x1032x1021` | **24.2** | 13.0 | 1.9x |
+| `64x1024x4096` | **63.0** | 25.1 | 2.5x |
+| `64x1024x16384` | **54.6** | 24.6 | 2.2x |
+| `64x4096x4096` | **48.9** | 16.9 | 2.9x |
+| `256x1024x4096` | **49.2** | 34.0 | 1.4x |
+| `17x1032x1021` | **29.5** | 13.7 | 2.2x |
+| `1x1024x4096` | **6.2** | 1.1 | 5.4x |
 
 Gmac/s. Every figure is `open`. Where the kernels win the library hands them the
 work — `1000x512x512` is 39.1 against 39.9, and `1x8192x1` is `n*k` decodes for

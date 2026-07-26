@@ -485,16 +485,16 @@ already dense, so the comparison is generous to it. Over `Book<256,8>`, running
 
 | `m x k x n` | default | packed | vs packed | picked |
 | --- | --- | --- | --- | --- |
-| `1x1024x4096` | **3.37** | 1.15 | **2.93x** | table |
-| `8x1024x4096` | **31.83** | 6.94 | **4.59x** | table |
-| `64x1024x4096` | **52.24** | 25.11 | **2.08x** | table |
-| `64x4096x4096` | **54.39** | 15.51 | **3.51x** | table |
-| `256x1024x4096` | **47.58** | 33.50 | **1.42x** | table |
-| `64x1024x16384` | **49.99** | 24.16 | **2.07x** | table |
-| `1000x512x512` | 39.14 | 39.90 | 0.98x | kernels |
-| `1x8192x1` | 7.51 | 21.01 | 0.36x | kernels |
-| `3x1024x4093` | **4.15** | 3.45 | **1.20x** | table |
-| `17x1032x1021` | **24.16** | 12.96 | **1.86x** | table |
+| `1x1024x4096` | **6.20** | 1.14 | **5.42x** | table |
+| `8x1024x4096` | **35.14** | 6.93 | **5.07x** | table |
+| `64x1024x4096` | **62.99** | 25.13 | **2.51x** | table |
+| `64x4096x4096` | **48.87** | 16.88 | **2.89x** | table |
+| `256x1024x4096` | **49.20** | 33.98 | **1.45x** | table |
+| `64x1024x16384` | **54.64** | 24.61 | **2.22x** | table |
+| `1000x512x512` | 39.31 | 40.14 | 0.98x | kernels |
+| `1x8192x1` | 7.43 | 20.48 | 0.36x | kernels |
+| `3x1024x4093` | **7.65** | 3.46 | **2.21x** | table |
+| `17x1032x1021` | **29.49** | 13.73 | **2.15x** | table |
 
 The last four shapes divide nothing --- a shape below the break-even, a degenerate
 dot product, a ragged row tile, a prime column count --- and they are in the sweep
@@ -518,6 +518,13 @@ that the two halves can be read apart:
 | --- | --- | --- | --- |
 | column loop | 17.6 Gmac/s | **86.7** | 4.9x |
 | table build | 2.1 Gprod/s | **25.1** | 11.7x |
+
+Every SIMD target this workspace supports now has both: AVX2 for the 32-bit and
+the 64-bit lane, NEON through `vmlal_s16`, and SIMD128 through
+`i32x4_extmul_*_i16x8`. The last two are compile-checked against their targets
+here and pinned to the reference by `CB-08` when the `cross` job runs them
+natively --- the same standing the NEON dense kernels have always had, and stated
+rather than left to be discovered.
 
 The column-loop figure is two eliminations, not one, and they are independent:
 
@@ -557,39 +564,57 @@ is instruction-cheap and bandwidth-expensive, and the crossover moves with the
 codec's block --- a block of sixteen halves the traffic per product and leaves the
 instruction count alone.
 
-#### What it cost at a one-row tile, and this is a regression
+#### What the kernel boundary cost, and what it took to stop paying it
 
-Two shapes are *slower* than before this refactor, and no amount of the above
-excuses it:
+The first version of this cost a factor of three at a one-row tile ---
+`1x1024x4096` fell from 9.93 to 3.37 --- and the cause was not the vectors. It
+was three things the boundary made explicit that had been implicit before, and
+each had to be taken back:
+
+**The gather took an index stream, so the driver built one.** One `u32` per code
+is `4 / (rows * block)` bytes per product: a thirty-second of the entry traffic
+at the widest tile, and exactly as wide as the entry it addresses at a one-row
+tile. The answer is that there was nothing to build. `Enumerable::as_index_stream`
+is the codec saying its stored codes already address its enumeration ---
+`index_of(c) == c & (CODE_SPACE - 1)`, which holds when the space is a power of
+two and the enumeration is the code type's own order --- and then the operand's
+own memory *is* the stream. That is the rule `MatView::row_block` already follows
+on the dense side: borrow when the layout holds what is wanted, copy otherwise.
+`Packed` still copies, because its index is a mixed-radix decomposition of its
+byte and not the byte.
+
+**Both reference sequences took a runtime row count.** With `rows` runtime the
+entry is a slice of unknown length and its accumulation is a chunked iterator
+around what should be `rows` registers; the compiler also re-derives each lane's
+address as a multiply. Const-generic in the tile height, as the gather already
+was, the reference build went from half the traversal at a one-row tile to a
+fraction of it: `1x1024x4096` moved 3.57 to 6.19 on that change alone.
+
+**The frame size was bounding the reduction.** `GATHER_SLOTS` sizes the buffer an
+index run is built in, and it was also capping the stack depth. At a one-row tile
+the depth that pays is 128 and it was capped at 32. A chunk deeper than the buffer
+is now walked in windows of it, so a frame size bounds a frame and nothing else
+(R8).
+
+One thing was tried and *removed* by measurement. Padding a narrow tile up to the
+narrowest vector sequence --- exact, because the alphabet's zero contributes
+nothing --- was worth 1.86x at `17x1032x1021` against a traversal whose narrow
+tiles were framing-bound. Against one whose are not, it loses everywhere it used
+to win: 25.0 against 29.6 there, 5.9 against 6.2 at `m = 1`. It was compensating
+for a defect, and when the defect went it went with it. A knob that stops paying
+is a knob that goes.
+
+What is left is two shapes still short of where they were:
 
 | `m x k x n` | before | after | |
 | --- | --- | --- | --- |
-| `1x1024x4096` | 9.93 | 3.37 | **0.34x** |
-| `3x1024x4093` | 12.14 | 4.15 | **0.34x** |
+| `1x1024x4096` | 9.93 | 6.20 | 0.62x |
+| `3x1024x4093` | 12.14 | 7.65 | 0.63x |
 
-The cause is the kernel boundary. The gather sequence takes an offset stream, so
-the driver materializes one `u32` per code --- and a `u32` per code is
-`4 / (rows * block)` bytes per product. At the widest tile that is a thirty-second
-of the entry traffic and invisible; at a one-row tile the offset is exactly as
-wide as the entry it addresses, and there is no vector width to win it back,
-because eight products per add is eight products per add whether the add is one
-lane or sixteen.
-
-Two things were tried and measured. Padding the tile up to the narrowest vector
-sequence --- which is exact, because the alphabet's zero contributes nothing ---
-gives `3.37` against `3.20` unpadded: a wash at `m = 1`, and worth **1.86x** at
-`17x1032x1021`, so it is kept. Widening the column group to keep sixteen lanes in
-flight whatever the tile height recovers nothing at `m = 1`, and is kept because
-it is free and it is what the narrow tiles want in principle.
-
-What would close it is a gather that reads the code stream directly instead of an
-offset stream, which needs `Enumerable::index_of` on the far side of the boundary
---- the sequence would have to be generic over the codec, not just over the
-element and the lane. That is a real design question and not a tuning constant,
-and it is written down here rather than left for the next reader to rediscover
-from a benchmark.
-
-The library is still 2.9x its own dense path at `m = 1`. It used to be 8.6x.
+Both are a one- or two-row tile, where the sequence is an indirect call and five
+length assertions around 128 adds and there is no vector width to amortize them:
+eight products per add is eight products per add whether the add is one lane or
+sixteen. The library is still 5.4x its own dense path at `m = 1`. It was 8.6x.
 
 ### Three factorizations, and the offer decides which
 

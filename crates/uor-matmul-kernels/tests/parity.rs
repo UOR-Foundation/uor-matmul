@@ -899,3 +899,137 @@ fn every_table_sequence_equals_the_reference_cb_08() {
          reference this gate would pass vacuously"
     );
 }
+
+/// The same, for the family whose lane is 64 bits wide.
+///
+/// A separate test because the element and the lane are both different, and the
+/// bound is: `madd` sums its pair into an `i32`, which the full `i16` alphabet
+/// leaves, so the vector sequence declares 32767 and the alphabet is held at it
+/// here. A sequence offered outside its declared alphabet is `CB-07`'s business
+/// and not this one's.
+#[test]
+fn every_i16_table_sequence_equals_the_reference_cb_08() {
+    use uor_matmul_kernels::{available_table_i16, packed_slot, TableSpec};
+
+    fn fill(len: usize, salt: u64) -> Vec<i16> {
+        let mut s = 0x243F_6A88_85A3_08D3u64 ^ salt;
+        (0..len)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                // The extremes of the declared alphabet, which is where a
+                // sequence with a narrow intermediate fails first.
+                (((s >> 33) % 65535) as i64 - 32767) as i16
+            })
+            .collect()
+    }
+
+    fn pack(flat: &[i16], rows: usize, block: usize, spec: &TableSpec<i16, i64>) -> Vec<i16> {
+        let mut out = vec![0i16; rows * block];
+        for t in 0..block {
+            for i in 0..rows {
+                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
+            }
+        }
+        out
+    }
+
+    let mut compared = 0usize;
+    for &space in &[16usize, 200, 256] {
+        for &block in &[2usize, 8] {
+            let book = fill(space * block, 0x16b0 ^ space as u64);
+            for &rows in &[1usize, 8, 16] {
+                let flat = fill(rows * block, 0x16ac ^ rows as u64);
+                for &group in &[1usize, 2] {
+                    let specs: Vec<_> = available_table_i16(rows, group).collect();
+                    let reference = specs[0];
+
+                    let mut want = vec![0i64; space * rows];
+                    reference.build(
+                        space,
+                        block,
+                        &book,
+                        &pack(&flat, rows, block, &reference),
+                        &mut want,
+                    );
+                    for spec in &specs[1..] {
+                        let mut got = vec![0i64; space * rows];
+                        spec.build(
+                            space,
+                            block,
+                            &book,
+                            &pack(&flat, rows, block, spec),
+                            &mut got,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "{:?} i16 build disagrees at space {space}, block {block}, rows {rows}",
+                            spec.backend
+                        );
+                        compared += 1;
+                    }
+
+                    let codes = space.next_power_of_two();
+                    let slab = codes * rows;
+                    let depth = 5usize;
+                    let mut stack = vec![0i64; depth * slab];
+                    for slot in 0..depth {
+                        let at = slot * slab;
+                        for (i, cell) in stack[at..at + space * rows].iter_mut().enumerate() {
+                            *cell = ((i as i64 + slot as i64 * 7) % 4096) - 2048;
+                        }
+                    }
+                    let off: Vec<u32> = (0..depth * group)
+                        .map(|i| ((i * 37 % space) * rows) as u32)
+                        .collect();
+                    let mut want = vec![11i64; group * rows];
+                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
+                    for spec in &specs[1..] {
+                        let mut got = vec![11i64; group * rows];
+                        spec.gather(depth, slab as u32, &stack, &off, &mut got);
+                        assert_eq!(
+                            got, want,
+                            "{:?} i16 gather disagrees at space {space}, rows {rows}",
+                            spec.backend
+                        );
+                        compared += 1;
+                    }
+
+                    if codes == space {
+                        let stride = depth + 3;
+                        let stream: Vec<u16> = (0..(group - 1) * stride + depth)
+                            .map(|i| ((i * 37) % space) as u16)
+                            .collect();
+                        let by_off: Vec<u32> = (0..depth * group)
+                            .map(|i| {
+                                let (slot, u) = (i / group, i % group);
+                                (stream[u * stride + slot] as usize % space * rows) as u32
+                            })
+                            .collect();
+                        let mut want = vec![-5i64; group * rows];
+                        reference.gather(depth, slab as u32, &stack, &by_off, &mut want);
+                        for spec in &specs {
+                            let mut got = vec![-5i64; group * rows];
+                            spec.gather_codes(
+                                depth,
+                                slab as u32,
+                                &stack,
+                                &stream,
+                                stride,
+                                &mut got,
+                            );
+                            assert_eq!(
+                                got, want,
+                                "{:?} i16 gather_codes disagrees at space {space}, rows {rows}",
+                                spec.backend
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 0, "CB-08 compared nothing for the 64-bit lane");
+}

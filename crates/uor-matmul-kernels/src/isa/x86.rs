@@ -1631,9 +1631,285 @@ pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
     })
 }
 
-/// The `i16` table sequence. Absent: see [`crate::available_table_i16`].
-pub fn avx2_table_i16_i64(_rows: usize, _group: usize) -> Option<TableSpec<i16, i64>> {
-    None
+/// Lane words one 256-bit add covers, at a 64-bit lane.
+const A2_TABLE_LANES_64: usize = 4;
+
+/// The `i16` table sequence at `rows` rows and `group` columns.
+///
+/// The lane is `i64`: two full `i16` products already need 31 bits, so no
+/// 32-bit lane holds an entry of any block longer than one. Four to a register
+/// rather than eight, which is the whole of the difference.
+pub fn avx2_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i64>> {
+    type Trio16 = (
+        TableBuild<i16, i64>,
+        TableGather<i64>,
+        TableGatherCodes<i64>,
+    );
+    let (build, gather, gather_codes): Trio16 = match (rows, group) {
+        (16, 1) => (a2_build16_v4, a2_gather64_v4_u1, a2_codes64_v4_u1),
+        (16, 2) => (a2_build16_v4, a2_gather64_v4_u2, a2_codes64_v4_u2),
+        (8, 1) => (a2_build16_v2, a2_gather64_v2_u1, a2_codes64_v2_u1),
+        (8, 2) => (a2_build16_v2, a2_gather64_v2_u2, a2_codes64_v2_u2),
+        _ => return None,
+    };
+    Some(TableSpec {
+        backend: Backend::Avx2,
+        rows,
+        group,
+        k_group: 2,
+        lanes_per_add: A2_TABLE_LANES_64,
+        build_products_per_step: A2_TABLE_LANES_64,
+        lane_cap: i64::MAX as u128,
+        // `madd`'s pair sum is `2 * bound^2`, which leaves an `i32` at the full
+        // `i16` alphabet and no depth makes it fit. So this sequence declares
+        // the alphabet it is exact on, and `choose_table` respects the
+        // declaration --- the same rule `AVX2_I16_I64` follows, and the reason
+        // the reference carries a full `i16` bound rather than this.
+        max_bound: 32767,
+        build,
+        gather,
+        gather_codes,
+    })
+}
+
+/// One slot of the table in the 64-bit lane, at `V` registers.
+///
+/// `madd` folds a pair of block steps into an `i32`, and each pair is widened
+/// to the lane before it is accumulated --- so the only width the sequence holds
+/// below its lane is `madd`'s own, which [`avx2_table_i16_i64`] declares.
+///
+/// # Safety
+///
+/// [`TableBuild`]'s contract, with `rows == V * 4`, `V` even, and `block` even.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_build16<const V: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i16,
+    acts: *const i16,
+    out: *mut i64,
+) {
+    debug_assert_eq!(rows, V * A2_TABLE_LANES_64);
+    debug_assert!(V.is_multiple_of(2) && block.is_multiple_of(2));
+    // SAFETY: the caller established every extent.
+    unsafe {
+        for c in 0..space {
+            let d = book.add(c * block);
+            let mut entry = [_mm256_setzero_si256(); V];
+            for pair in 0..block / 2 {
+                // The pair of block steps, as one 32-bit pattern in every lane.
+                let w =
+                    (*d.add(pair * 2) as u16 as u32) | ((*d.add(pair * 2 + 1) as u16 as u32) << 16);
+                let wv = _mm256_set1_epi32(w as i32);
+                let a = acts.add(pair * rows * 2);
+                // Eight lanes per `madd`, which is two registers of the lane.
+                for half in 0..V / 2 {
+                    let x = _mm256_loadu_si256(a.add(half * 16) as *const __m256i);
+                    let p = _mm256_madd_epi16(x, wv);
+                    entry[half * 2] = _mm256_add_epi64(
+                        entry[half * 2],
+                        _mm256_cvtepi32_epi64(_mm256_castsi256_si128(p)),
+                    );
+                    entry[half * 2 + 1] = _mm256_add_epi64(
+                        entry[half * 2 + 1],
+                        _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(p)),
+                    );
+                }
+            }
+            let o = out.add(c * rows);
+            for (v, cell) in entry.iter().enumerate() {
+                _mm256_storeu_si256(o.add(v * A2_TABLE_LANES_64) as *mut __m256i, *cell);
+            }
+        }
+    }
+}
+
+/// One column group over a run of slots, in the 64-bit lane.
+///
+/// # Safety
+///
+/// [`TableGather`]'s contract, with `rows == V * 4` and `group == U`.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_gather64<const V: usize, const U: usize>(
+    rows: usize,
+    _group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const i64,
+    off: *const u32,
+    lane: *mut i64,
+) {
+    debug_assert_eq!(rows, V * A2_TABLE_LANES_64);
+    debug_assert_eq!(_group, U);
+    let mask = (slab - 1) as u32;
+    // SAFETY: the caller established every extent.
+    unsafe {
+        let mut acc = [[_mm256_setzero_si256(); V]; U];
+        for (u, cols) in acc.iter_mut().enumerate() {
+            for (v, cell) in cols.iter_mut().enumerate() {
+                *cell = _mm256_loadu_si256(
+                    lane.add(u * rows + v * A2_TABLE_LANES_64) as *const __m256i
+                );
+            }
+        }
+        let mut words = stack;
+        for slot in 0..depth {
+            for (u, cols) in acc.iter_mut().enumerate() {
+                let entry = words.add((*off.add(slot * U + u) & mask) as usize);
+                for (v, cell) in cols.iter_mut().enumerate() {
+                    *cell = _mm256_add_epi64(
+                        *cell,
+                        _mm256_loadu_si256(entry.add(v * A2_TABLE_LANES_64) as *const __m256i),
+                    );
+                }
+            }
+            words = words.add(slab);
+        }
+        for (u, cols) in acc.iter().enumerate() {
+            for (v, cell) in cols.iter().enumerate() {
+                _mm256_storeu_si256(
+                    lane.add(u * rows + v * A2_TABLE_LANES_64) as *mut __m256i,
+                    *cell,
+                );
+            }
+        }
+    }
+}
+
+/// The same, over the coded operand's own memory.
+///
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract, with `rows == V * 4` and `group == U`.
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes64<const V: usize, const U: usize>(
+    rows: usize,
+    _group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i64,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut i64,
+) {
+    debug_assert_eq!(rows, V * A2_TABLE_LANES_64);
+    debug_assert_eq!(_group, U);
+    let mask = (slab >> shift) - 1;
+    // SAFETY: the caller established every extent.
+    unsafe {
+        let mut acc = [[_mm256_setzero_si256(); V]; U];
+        for (u, cols) in acc.iter_mut().enumerate() {
+            for (v, cell) in cols.iter_mut().enumerate() {
+                *cell = _mm256_loadu_si256(
+                    lane.add(u * rows + v * A2_TABLE_LANES_64) as *const __m256i
+                );
+            }
+        }
+        let mut cursor = [codes; U];
+        for u in 1..U {
+            cursor[u] = cursor[u - 1].add(stride);
+        }
+        let mut words = stack;
+        for _ in 0..depth {
+            for (u, cols) in acc.iter_mut().enumerate() {
+                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                cursor[u] = cursor[u].add(1);
+                for (v, cell) in cols.iter_mut().enumerate() {
+                    *cell = _mm256_add_epi64(
+                        *cell,
+                        _mm256_loadu_si256(entry.add(v * A2_TABLE_LANES_64) as *const __m256i),
+                    );
+                }
+            }
+            words = words.add(slab);
+        }
+        for (u, cols) in acc.iter().enumerate() {
+            for (v, cell) in cols.iter().enumerate() {
+                _mm256_storeu_si256(
+                    lane.add(u * rows + v * A2_TABLE_LANES_64) as *mut __m256i,
+                    *cell,
+                );
+            }
+        }
+    }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`, in the 64-bit lane.
+unsafe fn a2_build16_v4(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i16,
+    acts: *const i16,
+    out: *mut i64,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_build16::<4>(rows, space, block, book, acts, out) }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 8`, in the 64-bit lane.
+unsafe fn a2_build16_v2(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i16,
+    acts: *const i16,
+    out: *mut i64,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_build16::<2>(rows, space, block, book, acts, out) }
+}
+
+/// Generate the four `(rows, group)` entry points for the 64-bit lane.
+macro_rules! avx2_gathers64 {
+    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+        #[doc = concat!("# Safety\n\n[`TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        unsafe fn $g(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            stack: *const i64,
+            off: *const u32,
+            lane: *mut i64,
+        ) {
+            // SAFETY: the caller established `avx2` and forwarded the extents.
+            unsafe { avx2_gather64::<$v, $u>(rows, group, depth, slab, stack, off, lane) }
+        }
+
+        #[doc = concat!("# Safety\n\n[`TableGatherCodes`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const i64,
+            codes: *const u16,
+            stride: usize,
+            lane: *mut i64,
+        ) {
+            // SAFETY: the caller established `avx2` and forwarded the extents.
+            unsafe {
+                avx2_codes64::<$v, $u>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+            }
+        }
+    )*};
+}
+
+avx2_gathers64! {
+    a2_gather64_v4_u1, a2_codes64_v4_u1, 4, 1, 16;
+    a2_gather64_v4_u2, a2_codes64_v4_u2, 4, 2, 16;
+    a2_gather64_v2_u1, a2_codes64_v2_u1, 2, 1, 8;
+    a2_gather64_v2_u2, a2_codes64_v2_u2, 2, 2, 8;
 }
 
 /// One column group over a run of slots, at `V` registers of `i32` per column.
