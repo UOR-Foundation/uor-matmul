@@ -134,7 +134,7 @@ The reference is generic over the element *and* the lane, including the lane tha
 is the exact accumulator, so there is one traversal in `gemm` and not one per
 family. `CB-08` pins every other sequence to it lane for lane.
 
-Two facts the loop rests on, both stated where they are relied upon:
+Three facts the loop rests on, all stated where they are relied upon:
 
 - **The slab is a power of two and the read is masked.** `index_of` is total below
   `CODE_SPACE` --- `Enumerable`'s law, asserted by `CK-09` --- so masking changes no
@@ -146,6 +146,16 @@ Two facts the loop rests on, both stated where they are relied upon:
   and one fused load-add per code and no multiply of any kind. That is the same
   discipline the packed panel follows on the dense side: the layout carries the
   address, so the inner loop walks and never indexes.
+- **The codec reaches the column step as one exponent, and it is enumerated.** A
+  slab is `slab_codes(CODE_SPACE) * rows` lane words and is asserted a power of
+  two at the boundary, so the only thing a codec contributes to the step is
+  `log2` of its rounded code space --- at most sixteen, because a code is a
+  `u16`. `dispatch_slab!` matches it to a constant inside the `(rows, group)`
+  dispatch that was already there, which turns every slot's base into a constant
+  displacement; the wildcard arm binds zero and the runs take the slab from their
+  argument instead, so it is one body at two bindings rather than two sequences
+  (R13) and an unlisted code space is computed rather than refused (R8). Measured
+  on a one-row tile, that binding is the difference between 3.8 and 9.4 Gmac/s.
 
 ### The lane, and where the exact accumulator is
 

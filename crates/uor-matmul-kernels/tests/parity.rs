@@ -840,8 +840,33 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                     let off: Vec<u32> = (0..depth * group)
                         .map(|i| ((i * 37 % space) * rows) as u32)
                         .collect();
+                    // The oracle is the contract transcribed, not the reference's
+                    // own run. `gather` binds the slab's code count to a
+                    // compile-time constant, and at the tile heights no ISA
+                    // offers a sequence for --- which is every height below
+                    // eight --- the reference is the only party to the
+                    // comparison, so reading `want` off it would compare the
+                    // dispatch against itself and pass whatever it did.
+                    let model = {
+                        let mut out = vec![7i32; group * rows];
+                        for slot in 0..depth {
+                            for u in 0..group {
+                                let at = off[slot * group + u] as usize & (slab - 1);
+                                for i in 0..rows {
+                                    out[u * rows + i] += stack[slot * slab + at + i];
+                                }
+                            }
+                        }
+                        out
+                    };
                     let mut want = vec![7i32; group * rows];
                     reference.gather(depth, slab as u32, &stack, &off, &mut want);
+                    assert_eq!(
+                        want, model,
+                        "the reference gather disagrees with the model at space {space}, \
+                         rows {rows}, group {group}"
+                    );
+                    compared += 1;
                     for spec in &specs[1..] {
                         let mut got = vec![7i32; group * rows];
                         spec.gather(depth, slab as u32, &stack, &off, &mut got);
@@ -868,8 +893,31 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                                 (stream[u * stride + slot] as usize % space * rows) as u32
                             })
                             .collect();
+                        // The same, read from the code stream: the shift the
+                        // boundary derives is `rows.trailing_zeros()`, so the
+                        // entry's address is the masked code scaled by the tile
+                        // height and nothing else.
+                        let model = {
+                            let mut out = vec![-3i32; group * rows];
+                            for slot in 0..depth {
+                                for u in 0..group {
+                                    let at =
+                                        (stream[u * stride + slot] as usize & (codes - 1)) * rows;
+                                    for i in 0..rows {
+                                        out[u * rows + i] += stack[slot * slab + at + i];
+                                    }
+                                }
+                            }
+                            out
+                        };
                         let mut want = vec![-3i32; group * rows];
                         reference.gather(depth, slab as u32, &stack, &by_off, &mut want);
+                        assert_eq!(
+                            want, model,
+                            "the reference gather disagrees with the model read by code at \
+                             space {space}, rows {rows}, group {group}"
+                        );
+                        compared += 1;
                         for spec in &specs {
                             let mut got = vec![-3i32; group * rows];
                             spec.gather_codes(
@@ -983,8 +1031,30 @@ fn every_i16_table_sequence_equals_the_reference_cb_08() {
                     let off: Vec<u32> = (0..depth * group)
                         .map(|i| ((i * 37 % space) * rows) as u32)
                         .collect();
+                    // The contract transcribed, for the same reason it is
+                    // transcribed at the 32-bit lane: below eight rows the
+                    // reference is the only sequence there is, so it has to be
+                    // read against the model rather than against itself.
+                    let model = {
+                        let mut out = vec![11i64; group * rows];
+                        for slot in 0..depth {
+                            for u in 0..group {
+                                let at = off[slot * group + u] as usize & (slab - 1);
+                                for i in 0..rows {
+                                    out[u * rows + i] += stack[slot * slab + at + i];
+                                }
+                            }
+                        }
+                        out
+                    };
                     let mut want = vec![11i64; group * rows];
                     reference.gather(depth, slab as u32, &stack, &off, &mut want);
+                    assert_eq!(
+                        want, model,
+                        "the reference i16 gather disagrees with the model at space {space}, \
+                         rows {rows}, group {group}"
+                    );
+                    compared += 1;
                     for spec in &specs[1..] {
                         let mut got = vec![11i64; group * rows];
                         spec.gather(depth, slab as u32, &stack, &off, &mut got);
@@ -1007,8 +1077,27 @@ fn every_i16_table_sequence_equals_the_reference_cb_08() {
                                 (stream[u * stride + slot] as usize % space * rows) as u32
                             })
                             .collect();
+                        let model = {
+                            let mut out = vec![-5i64; group * rows];
+                            for slot in 0..depth {
+                                for u in 0..group {
+                                    let at =
+                                        (stream[u * stride + slot] as usize & (codes - 1)) * rows;
+                                    for i in 0..rows {
+                                        out[u * rows + i] += stack[slot * slab + at + i];
+                                    }
+                                }
+                            }
+                            out
+                        };
                         let mut want = vec![-5i64; group * rows];
                         reference.gather(depth, slab as u32, &stack, &by_off, &mut want);
+                        assert_eq!(
+                            want, model,
+                            "the reference i16 gather disagrees with the model read by code at \
+                             space {space}, rows {rows}, group {group}"
+                        );
+                        compared += 1;
                         for spec in &specs {
                             let mut got = vec![-5i64; group * rows];
                             spec.gather_codes(

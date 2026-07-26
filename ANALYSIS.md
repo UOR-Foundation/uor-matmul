@@ -485,16 +485,17 @@ already dense, so the comparison is generous to it. Over `Book<256,8>`, running
 
 | `m x k x n` | default | packed | vs packed | picked |
 | --- | --- | --- | --- | --- |
-| `1x1024x4096` | **6.20** | 1.14 | **5.42x** | table |
-| `8x1024x4096` | **35.14** | 6.93 | **5.07x** | table |
-| `64x1024x4096` | **62.99** | 25.13 | **2.51x** | table |
-| `64x4096x4096` | **48.87** | 16.88 | **2.89x** | table |
-| `256x1024x4096` | **49.20** | 33.98 | **1.45x** | table |
-| `64x1024x16384` | **54.64** | 24.61 | **2.22x** | table |
-| `1000x512x512` | 39.31 | 40.14 | 0.98x | kernels |
-| `1x8192x1` | 7.43 | 20.48 | 0.36x | kernels |
-| `3x1024x4093` | **7.65** | 3.46 | **2.21x** | table |
-| `17x1032x1021` | **29.49** | 13.73 | **2.15x** | table |
+| `1x1024x4096` | **8.35** | 1.15 | **7.24x** | table |
+| `1x1024x8192` | **9.27** | 1.15 | **8.08x** | table |
+| `8x1024x4096` | **35.94** | 6.95 | **5.18x** | table |
+| `64x1024x4096` | **63.85** | 24.94 | **2.56x** | table |
+| `64x4096x4096` | **48.93** | 14.38 | **3.41x** | table |
+| `256x1024x4096` | **51.96** | 33.60 | **1.55x** | table |
+| `64x1024x16384` | **57.26** | 24.01 | **2.39x** | table |
+| `1000x512x512` | 38.99 | 39.81 | 0.98x | kernels |
+| `1x8192x1` | 7.24 | 21.01 | 0.34x | kernels |
+| `3x1024x4093` | **11.79** | 3.49 | **3.38x** | table |
+| `17x1032x1021` | **30.96** | 13.79 | **2.25x** | table |
 
 The last four shapes divide nothing --- a shape below the break-even, a degenerate
 dot product, a ragged row tile, a prime column count --- and they are in the sweep
@@ -604,15 +605,16 @@ to win: 25.0 against 29.6 there, 5.9 against 6.2 at `m = 1`. It was compensating
 for a defect, and when the defect went it went with it. A knob that stops paying
 is a knob that goes.
 
-What is left is one shape still short of where it was, and it has been taken
-apart rather than left as a number:
+### The narrow tiles, and the exponent that was hiding in a register
 
-| `m x k x n` | before | after | |
-| --- | --- | --- | --- |
-| `1x1024x4096` | 8.9 | 5.35 | 0.60x |
-| `3x1024x4093` | 12.1 | 8.02 | 0.66x |
+Two shapes came out of the refactor short of where they started:
 
-Three measurements say where it is not.
+| `m x k x n` | before | after | closed | |
+| --- | --- | --- | --- | --- |
+| `1x1024x4096` | 8.9 | 5.35 | **8.35** | 0.60x -> 0.94x |
+| `3x1024x4093` | 12.1 | 8.02 | **11.79** | 0.66x -> 0.97x |
+
+Three measurements said where it was not.
 
 **Not the column loop.** Isolated --- one row, 4096 columns, 128 slots, the same
 128 KiB stack and 1 MiB code stream the traversal walks --- the shipped shape
@@ -629,21 +631,59 @@ move with `n`, so the two times solve for both terms. They give an
 **Not the collapse.** Disabling the column-collapse pass entirely leaves
 `1x1024x4096` at 5.35, unchanged to two figures.
 
-So the per-column path in the traversal runs at about **3.3 cycles per code-step
-where the same loop in isolation runs at 1.3**, and the difference is framing the
-isolated form folds and the shipped one cannot: in the probe the slab and its
-mask are compile-time constants, and across the `TableSpec` boundary they are
-runtime values, because the slab is `CODE_SPACE.next_power_of_two() * rows` and
-the specs are selected by `(rows, group)` alone. At a sixteen-row tile that
-framing is amortized over sixteen adds and invisible --- 63 Gmac/s against an
-isolated 87. At a one-row tile there is nothing to amortize it over.
+So the per-column path in the traversal ran at about **3.3 cycles per code-step
+where the same loop in isolation ran at 1.3**, and what was left to explain was
+framing the isolated form folded and the shipped one did not.
 
-Closing it means carrying the code space into the sequence selection, which
-multiplies the monomorphizations by the number of codecs. That is a real design
-question about where the boundary goes and it is not a tuning constant, so it is
-written here rather than guessed at. The library is 4.6x its own dense path at
-`m = 1` and the selection is right; what is short is a constant factor on one
-shape, located and unhidden.
+**It is the slab, and the probe says so.** The isolated loop was rewritten with
+the slab and the depth as runtime values --- what actually crosses the
+`TableSpec` boundary --- and measured against the same loop with them as
+literals, on the same data:
+
+| binding | group 1 | group 4 | group 16 |
+| --- | --- | --- | --- |
+| slab and depth runtime | 3.84 | 5.72 | 6.92 |
+| slab a literal, depth runtime | 9.40 | 6.96 | 7.89 |
+| both literal | 14.92 | 10.62 | 9.54 |
+
+The shipped traversal sat at 5.35, inside the runtime band. Depth can stay a
+register; the slab cannot. And the difference is not the mask --- a literal slab
+makes every slot's base a constant displacement, so the slot loop unrolls and
+the cursor disappears.
+
+**The ceiling was a sentence, not a boundary.** What stood here before said
+closing it meant carrying the code space into the sequence selection, which
+would multiply the monomorphizations by the number of codecs. That was wrong on
+its face, and it is worth saying why, because the shape of the error is the
+usual one. The codec never reaches the column step. It contributes exactly one
+thing: the slab, which is `slab_codes(CODE_SPACE) * rows`, which the boundary
+has *already asserted* is a power of two, and which is *already an argument* of
+the sequence call. So there was no plumbing to add and no boundary to move. The
+free value was never a codec --- it was a single exponent, bounded by sixteen
+because a code is a `u16` and `2^16` codes is every code there can be.
+
+Enumerating it is one `match` (`dispatch_slab!`), nested inside the `(rows,
+group)` dispatch that was already there. The wildcard arm binds the constant to
+zero, and the runs read zero as "the caller did not know it" and take the slab
+from their argument --- the same body at a different binding, so this is one
+sequence and not two (R13), and a code space the list does not name is computed
+rather than refused (R8). `shift` fell out entirely: the boundary derives it as
+`rows.trailing_zeros()`, so at a compile-time tile height it is the tile
+height's.
+
+That closed both shapes: `1x1024x4096` from 5.35 to 8.35 and `3x1024x4093` from
+8.02 to 11.79, with no other shape moved outside run-to-run noise.
+
+**What is still short, stated as what it is.** Both shapes are a few percent
+under their pre-refactor peak, and the isolated loop still runs faster than the
+traversal reaches. Some of that is the table itself and is not recoverable: the
+build costs `CODE_SPACE * k * rows` products whatever `n` is, which at `S = 256`,
+`k = 1024` and one row is 262144 products against 4.19M of useful work. That is
+the `n`-independent 0.086 ms measured above, and it is now seventeen percent of a
+much smaller total rather than eleven percent of a larger one. It amortizes with
+`n` exactly as the algebra says it should, which is why `1x1024x8192` reads 9.3
+where `1x1024x4096` reads 8.4. The remainder is unattributed and is not claimed
+as anything.
 
 ### Three factorizations, and the offer decides which
 
@@ -770,7 +810,7 @@ they are written for, because a break-even without one is a number about nothing
 
 One term was tried in the honest direction and put back. Reading the *chosen
 tile's* `mr` for the dense row count says a one-row kernel wastes no lanes, which
-is true --- and it declined the table at `1x1024x4096`, where the table is 5.2x
+is true --- and it declined the table at `1x1024x4096`, where the table is 7.2x
 the dense path. The reason the dense path is weak at small `m` is not lane waste:
 it packs `n * k` elements to compute `m * n * k` products, so at `m = 1` the copy
 is the same order as the arithmetic. The blocking row count stands for that, and

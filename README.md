@@ -163,17 +163,17 @@ library's own packed AVX2 tile path handed the weights *already decoded*:
 
 | `m x k x n` | table | packed | |
 | --- | --- | --- | --- |
-| `64x1024x4096` | **63.0** | 25.1 | 2.5x |
-| `64x1024x16384` | **54.6** | 24.6 | 2.2x |
-| `64x4096x4096` | **48.9** | 16.9 | 2.9x |
-| `256x1024x4096` | **49.2** | 34.0 | 1.4x |
-| `17x1032x1021` | **29.5** | 13.7 | 2.2x |
-| `1x1024x4096` | **6.2** | 1.1 | 5.4x |
+| `64x1024x4096` | **63.9** | 24.9 | 2.6x |
+| `64x1024x16384` | **57.3** | 24.0 | 2.4x |
+| `64x4096x4096` | **48.9** | 14.4 | 3.4x |
+| `256x1024x4096` | **52.0** | 33.6 | 1.6x |
+| `17x1032x1021` | **31.0** | 13.8 | 2.3x |
+| `1x1024x4096` | **8.4** | 1.1 | 7.2x |
 
 Gmac/s. Every figure is `open`. Where the kernels win the library hands them the
-work — `1000x512x512` is 39.1 against 39.9, and `1x8192x1` is `n*k` decodes for
-`n*k` products, which no method beats. `ANALYSIS.md` carries every shape,
-including the two the current construction is **slower** on than it was, and why.
+work — `1000x512x512` is 39.0 against 39.8, and `1x8192x1` is `n*k` decodes for
+`n*k` products, which no method beats. `ANALYSIS.md` carries every shape, and
+carries what is still short and what has not been attributed.
 
 ## Non-goals
 

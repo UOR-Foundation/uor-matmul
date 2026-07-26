@@ -115,6 +115,118 @@ macro_rules! dispatch_run {
     };
 }
 
+/// The slab's code count, bound at whichever point the caller knows it.
+///
+/// A slab is `slab_codes(code_space) * rows` lane words and the boundary has
+/// already asserted it is a power of two, so the only thing the codec
+/// contributes to the column step is *one exponent* --- not a type, not a
+/// traversal, and not a second sequence. Sixteen is the whole of it, because a
+/// code is a `u16` and `2^16` codes is every code there can be.
+///
+/// The wildcard arm binds zero, which the runs read as "the caller did not know
+/// it" and take from their argument. That is the same body at a different
+/// binding, not a fallback (R13), and it is what keeps the enumeration from
+/// being a ceiling: a code space this list does not name is computed by the
+/// identical loop over a register instead of a literal (R8).
+///
+/// Measured on `1x1024x4096`, a one-row tile: with the count a literal the
+/// column step runs at 9.4--14.9 Gmac/s and with it a register at 3.8--6.9, and
+/// the shipped traversal sat at 5.35 inside the second band. The difference is
+/// not the mask --- it is that a literal makes every slot's base a constant
+/// displacement, so the slot loop unrolls and the slab cursor disappears.
+macro_rules! dispatch_slab {
+    ($codes:expr, |$c:ident| $body:expr) => {
+        match $codes {
+            1 => {
+                const $c: usize = 1;
+                $body
+            }
+            2 => {
+                const $c: usize = 2;
+                $body
+            }
+            4 => {
+                const $c: usize = 4;
+                $body
+            }
+            8 => {
+                const $c: usize = 8;
+                $body
+            }
+            16 => {
+                const $c: usize = 16;
+                $body
+            }
+            32 => {
+                const $c: usize = 32;
+                $body
+            }
+            64 => {
+                const $c: usize = 64;
+                $body
+            }
+            128 => {
+                const $c: usize = 128;
+                $body
+            }
+            256 => {
+                const $c: usize = 256;
+                $body
+            }
+            512 => {
+                const $c: usize = 512;
+                $body
+            }
+            1024 => {
+                const $c: usize = 1024;
+                $body
+            }
+            2048 => {
+                const $c: usize = 2048;
+                $body
+            }
+            4096 => {
+                const $c: usize = 4096;
+                $body
+            }
+            8192 => {
+                const $c: usize = 8192;
+                $body
+            }
+            16384 => {
+                const $c: usize = 16384;
+                $body
+            }
+            32768 => {
+                const $c: usize = 32768;
+                $body
+            }
+            65536 => {
+                const $c: usize = 65536;
+                $body
+            }
+            _ => {
+                const $c: usize = 0;
+                $body
+            }
+        }
+    };
+}
+
+/// The codes one slab addresses, or zero when this slab is not `rows` copies of
+/// them.
+///
+/// Zero is [`dispatch_slab`]'s wildcard, so a slab that does not factor is
+/// computed by the same run over a runtime value rather than refused.
+#[inline(always)]
+const fn code_words(slab: usize, rows: usize) -> usize {
+    if rows != 0 && slab.is_multiple_of(rows) {
+        slab / rows
+    } else {
+        0
+    }
+}
+
 /// A lane word: something a table entry's row can be added into.
 ///
 /// The narrow/wide factorization at the place the table needs it. A table entry
@@ -573,7 +685,9 @@ unsafe fn portable_gather<L: LaneWord>(
         rows,
         group,
         gather_any(rows, group, slab, stack, off, lane),
-        |R, G| gather_run::<R, G, L>(slab, stack, off, lane)
+        |R, G| dispatch_slab!(code_words(slab, R), |C| gather_run::<C, R, G, L>(
+            slab, stack, off, lane
+        ))
     )
 }
 
@@ -604,7 +718,9 @@ unsafe fn portable_gather_codes<L: LaneWord>(
         rows,
         group,
         codes_any(rows, depth, slab, shift, stack, codes, stride, lane),
-        |R, G| codes_run::<R, G, L>(depth, slab, shift, stack, codes, stride, lane)
+        |R, G| dispatch_slab!(code_words(slab, R), |C| codes_run::<C, R, G, L>(
+            depth, slab, shift, stack, codes, stride, lane
+        ))
     )
 }
 
@@ -650,13 +766,20 @@ fn codes_any<L: LaneWord>(
 /// once for the whole run. Measured at a one-row tile and a group of sixteen,
 /// that is 32 memory operations per slot that do not happen, and it is the
 /// difference between 5.9 and 9.6 Gmac/s on `1x1024x4096`.
+///
+/// `C` is the slab's code count when the caller knew it and zero when it did
+/// not, and it is the only place the codec reaches this loop. At a nonzero `C`
+/// the slab is `C * R` and every slot's base is a constant displacement, so the
+/// cursor below folds away entirely; at zero it is the argument. One body, one
+/// identity, the value bound wherever it is known --- not two sequences (R13).
 #[inline(always)]
-fn gather_run<const R: usize, const G: usize, L: LaneWord>(
-    slab: usize,
+fn gather_run<const C: usize, const R: usize, const G: usize, L: LaneWord>(
+    slab_arg: usize,
     stack: &[L],
     off: &[u32],
     lane: &mut [L],
 ) {
+    let slab = if C == 0 { slab_arg } else { C * R };
     // Derived here, not passed. `words.len()` is `slab` because `split_at` says
     // so, and `at & (slab - 1) <= slab - 1`, so the compiler discharges both
     // slice bounds below instead of checking them.
@@ -718,16 +841,26 @@ fn gather_any<L: LaneWord>(
 ///
 /// One shift more than [`gather_run`] and one memory round trip fewer: there is
 /// no index stream to write and none to read back.
+///
+/// `C` binds as it does in [`gather_run`]. The shift is not a second unknown:
+/// [`TableSpec::gather_codes`] derives it as `rows.trailing_zeros()`, so at a
+/// compile-time `R` it is `R`'s and the entry's address is `(code & (C - 1)) *
+/// R` with both factors literal.
 #[inline(always)]
-fn codes_run<const R: usize, const G: usize, L: LaneWord>(
+fn codes_run<const C: usize, const R: usize, const G: usize, L: LaneWord>(
     depth: usize,
-    slab: usize,
-    shift: u32,
+    slab_arg: usize,
+    shift_arg: u32,
     stack: &[L],
     codes: &[u16],
     stride: usize,
     lane: &mut [L],
 ) {
+    let (slab, shift) = if C == 0 {
+        (slab_arg, shift_arg)
+    } else {
+        (C * R, R.trailing_zeros())
+    };
     let mask = (slab >> shift) - 1;
     let mut acc = [[L::ZERO; R]; G];
     for (cols, held) in acc.iter_mut().zip(lane.chunks_exact(R)) {
@@ -758,9 +891,16 @@ fn codes_run<const R: usize, const G: usize, L: LaneWord>(
 /// reference gather is, named once at an instantiation the traversal reaches ---
 /// a generic function emits no code until something instantiates it, and a gate
 /// cannot read instructions that were never emitted.
+///
+/// Instantiated at a *runtime* slab, which is the binding the gate has to read:
+/// with the code count a literal every address is a constant displacement and
+/// the absence of a multiply is trivial, so the claim would pass on the easy
+/// case while the hard one shipped unread. At `C = 0` the slot's base is a
+/// cursor and the entry's is a mask, and that it is still an add is the whole
+/// content of `CU-06`.
 #[inline(never)]
 pub fn gather_reference_i32(slab: usize, stack: &[i32], off: &[u32], lane: &mut [i32]) {
-    gather_run::<16, 1, i32>(slab, stack, off, lane);
+    gather_run::<0, 16, 1, i32>(slab, stack, off, lane);
 }
 
 /// The same, in the exact lane, for the element families that have no narrow
@@ -772,7 +912,7 @@ pub fn gather_reference_wide(
     off: &[u32],
     lane: &mut [Wide<i128>],
 ) {
-    gather_run::<16, 1, Wide<i128>>(slab, stack, off, lane);
+    gather_run::<0, 16, 1, Wide<i128>>(slab, stack, off, lane);
 }
 
 impl<E, L> TableSpec<E, L> {
