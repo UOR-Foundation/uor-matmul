@@ -867,7 +867,69 @@ boundary now asks for `Kernelized` --- the marker meaning "this element family h
 microkernels" --- which is exactly the right thing to require of a traversal that
 competes with them.
 
-## Against the oracles## Against the oracles
+### What an adversarial review found
+
+The construction above was reviewed against its own claims rather than its own
+output: for each subsystem, what would still pass if the code were wrong. Eight
+defects survived checking, and every one of them is reachable from documented
+public API. They are recorded because the pattern is more useful than the list.
+
+| where | what | how it showed |
+| --- | --- | --- |
+| NEON `i16` build | rows 8--15 read the wrong activations; rows 12--15 never read | `cargo test` under `qemu-aarch64` |
+| tabulated driver | a narrowed column block skipped repeated columns and never filled them | 896 of 1024 cells wrong |
+| table selection | a named backend, or an odd codeword width, panicked inside `gemm` | 246 of 250 selections returned `None` |
+| `gemm_packed` | did not terminate at a bound that shrinks the lane below `k_group` | `timeout` killed it |
+| `gemm_float` | divided by zero at `k == 0` | panic on every build |
+| `admits` | shifted a panel past its slot when the other panel was all zeros | panic in the checked profile |
+| `MatView::new` | accepted a view whose cells are outside the buffer | `wrapping_mul` in the reach |
+| every `gather` | masked the entry's base and not the `rows` lanes read from it | safe method, unsafe read |
+
+**Six of the eight were invisible to a gate that claimed the ground.** That is
+the part worth keeping:
+
+- `CD-13` swept the scratch offers with *one* shared fraction, so the pair that
+  breaks the traversal --- an index long enough to collapse against an
+  accumulator offer too small for the whole output width --- was unreachable by
+  construction.
+- `CD-01` checked that selection cannot fail for every backend, for the *dense*
+  kernels only. The table half did not exist.
+- `uor-matmul-gemm` did not enable `uor-matmul-kernels/std`, so its harness
+  linked the kernels with runtime detection off and every table sequence resolved
+  to the portable one. `k_group` was always one, no vector layout was ever
+  packed, and the driver's own suite asserted against a sequence no consumer on
+  the host will run. `uor-matmul-kernels` had already learned this for `CB-02`
+  and left the note; the driver never applied it.
+- `CB-05` --- "the two wasm configurations agree" --- was asserted by a `cargo
+  build`. The CI job that names it ran neither `uor-matmul-kernels` nor
+  `uor-matmul-gemm`, which is every line of SIMD128 and every driver claim, and
+  enabled SIMD128 only for the build steps. The `no-alloc` recipe's "with and
+  without SIMD128" pair compiled the same configuration twice, because
+  `target.<triple>.rustflags` in `.cargo/config.toml` outranks the
+  `build.rustflags` the second arm passed.
+- `CU-01` reused `target/cu01-asm`. `--emit asm` writes a `.s` only when the
+  crate actually compiles, so a warm directory made `cargo rustc` answer
+  "Finished" and leave nothing: it reported three objects on a run where two
+  files existed, and the absent one was `uor-matmul-gemm`.
+- R3's note requirement exempted every path containing `gemm` --- the whole
+  driver, which is where the accumulation lives and therefore the only crate the
+  rule is about. Fifty sites were behind it.
+
+Every gate above now asserts what it names, and each fix was checked by putting
+the defect back and watching the gate fail.
+
+**Two things are recorded and not fixed.** `audit-purity`'s R2 half misses a bare
+float add between two float-typed variables: verified, it prints "no float
+arithmetic" with `t = t + b` on `f32` in a shipped crate, because it matches float
+*literals* and a token list. The file already calls this half "deliberately
+crude" and names `CU-01` as definitive, and `CU-01` is now hermetic --- but a
+source grep cannot type-check, and saying so is better than a rule that looks
+enforced. And the vector table sequences exist only at eight and sixteen rows; at
+four, two and one the reference carries the tile. Four `i32` is exactly one
+128-bit register, so that is unwritten work rather than an impossibility, and it
+is the next thing to measure.
+
+## Against the oracles
 
 C3 is a hard constraint: scaling is compared against the oracle's scaling. Both
 sides are measured in one process, over one sweep spanning ten orders of

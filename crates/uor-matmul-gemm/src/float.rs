@@ -487,14 +487,17 @@ impl Span {
 /// choose: the question is whether the widest value that can arise fits the lane,
 /// and it is asked arithmetically.
 fn admits<E: FloatElement>(k: usize, a: Span, b: Span) -> Option<Prescaled> {
-    if !a.any || !b.any {
-        // One panel is all zeros, so the sum is zero at any base. Scaling is
-        // still the cheaper sequence and still exact.
-        return Some(Prescaled {
-            base: a.base().saturating_add(b.base()), // R3-ok: an exponent base, not an accumulation
-            wide: false,
-        });
-    }
+    // An all-zero panel used to return here, on the argument that the sum is
+    // zero at any base and the scaling is therefore exact. The sum is --- but the
+    // *other* panel is still rescaled, and returning before the width guard below
+    // meant its significands were shifted by however wide its exponent span
+    // happened to be. Measured: a zero `A` against a `B` holding `1e-30` and
+    // `1e30` panicked with "attempt to shift left with overflow", and in release
+    // the shift is masked and the answer silently wrong.
+    //
+    // No special case is needed to fix it. `Span::base` and `Span::width` are
+    // already zero for an empty span, so falling through gives the empty side a
+    // width of zero and asks the guard about the side that has one.
     let p = E::SIGNIFICAND_BITS;
     let (wa, wb) = (a.width(), b.width());
     // Each scaled significand must itself stay inside a signed 64-bit slot,
@@ -575,6 +578,60 @@ mod tests {
             gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
         }
         c
+    }
+
+    /// The same product with panels offered, which is the only way the prescaling
+    /// path is reached: [`gemm_float`] offers none and therefore always streams.
+    fn product_packed(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Vec<f32> {
+        let mut c = vec![0.0f32; m * n];
+        let mut pa = vec![PackedCode::default(); k];
+        let mut pb = vec![PackedCode::default(); k * n];
+        {
+            let av = MatView::row_major(a, m, k).unwrap();
+            let bv = MatView::row_major(b, k, n).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            gemm_float_packed(
+                &mut t,
+                &Linear::OVERWRITE,
+                GemmOptions::default(),
+                &mut pa,
+                &mut pb,
+            );
+        }
+        c
+    }
+
+    /// `CS-05`, R14: an all-zero panel against one with a wide exponent span.
+    ///
+    /// `admits` returned early for an empty span, on the argument that the sum is
+    /// zero at any base --- which is true of the sum and false of the *rescale*:
+    /// the other panel's significands were still shifted by its whole exponent
+    /// width, before the guard that keeps a scaled significand inside its slot.
+    /// `1e-30` against `1e30` panicked with "attempt to shift left with
+    /// overflow".
+    ///
+    /// It is a panic and not a wrong answer, and the difference is worth stating:
+    /// the early return fires only when a whole panel is zero, and then every
+    /// product is zero however the other panel's significands were mangled, so
+    /// release --- where the shift is masked rather than checked --- returns the
+    /// right bytes. A panic inside an operation that returns `()` is still a
+    /// failure it has no way to report (R14), and this test runs in the profile
+    /// `just vv` uses, which is the one that checks the shift.
+    #[test]
+    fn a_zero_panel_against_a_wide_span_is_exact_cs_05() {
+        let wide = [1e-30f32, 1e30, 1.0, 1e-20, 1e20, 2.0, 1e-10, 1e10, 3.0];
+        let zeros = [0.0f32; 9];
+        assert_eq!(product_packed(3, 3, 3, &zeros, &wide), vec![0.0; 9]);
+        assert_eq!(product_packed(3, 3, 3, &wide, &zeros), vec![0.0; 9]);
+        // And a wide span on both sides, where no scaling can be admitted at all:
+        // the traversal has to fall back to placing each product, not to a shift
+        // that does not fit.
+        assert_eq!(
+            product_packed(3, 3, 3, &wide, &wide),
+            product(3, 3, 3, &wide, &wide),
+            "the packed and streaming traversals must agree on a wide span"
+        );
     }
 
     /// `CT-04`: the degenerate shapes are shapes, not error conditions.

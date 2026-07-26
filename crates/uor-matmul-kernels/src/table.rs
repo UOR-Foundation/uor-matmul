@@ -967,6 +967,12 @@ impl<E, L> TableSpec<E, L> {
         // asserted here rather than assumed --- as `gather_codes` already does.
         assert!(self.rows.is_power_of_two(), "the tile height is 2^j");
         let slab = slab as usize;
+        // A slab holds a whole number of entries and an entry is `rows` lane
+        // words, so a slab below `rows` holds none --- and every sequence then
+        // reads `rows` words from a base the mask has pinned to zero. Measured at
+        // `slab = 1, rows = 16`: a slice-bounds panic in the reference and a read
+        // past the stack in each ISA sequence, from a safe method.
+        assert!(self.rows <= slab, "one slot holds at least one entry");
         assert_eq!(stack.len(), depth * slab, "the stack is depth * slab");
         assert_eq!(off.len(), depth * self.group, "the run is depth * group");
         assert_eq!(
@@ -1010,6 +1016,12 @@ impl<E, L> TableSpec<E, L> {
         assert!(slab.is_power_of_two(), "one slot is 2^j lane words");
         assert!(self.rows.is_power_of_two(), "the tile height is 2^j");
         let slab = slab as usize;
+        // A slab holds a whole number of entries and an entry is `rows` lane
+        // words, so a slab below `rows` holds none --- and every sequence then
+        // reads `rows` words from a base the mask has pinned to zero. Measured at
+        // `slab = 1, rows = 16`: a slice-bounds panic in the reference and a read
+        // past the stack in each ISA sequence, from a safe method.
+        assert!(self.rows <= slab, "one slot holds at least one entry");
         assert_eq!(stack.len(), depth * slab, "the stack is depth * slab");
         assert_eq!(
             codes.len(),
