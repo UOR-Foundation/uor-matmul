@@ -36,6 +36,12 @@ Feature: Structural
     When the suite exercises CS-05
     Then the claim holds byte for byte
 
+  @CS-08 @build
+  Scenario: The slice entry points take `(m, k, n)`, leading dimensions, `alpha` and `beta` like any GEMM, and give the same bytes as the view API on the same operands
+    Given the standing corpus
+    When the suite exercises CS-08
+    Then the claim holds byte for byte
+
   @CS-06 @build
   Scenario: `m`, `n`, `k` that are not multiples of `MR`, `NR`, or `K_GROUP` take the same path and give the same result
     Given the standing corpus

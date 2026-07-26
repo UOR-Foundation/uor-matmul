@@ -32,6 +32,7 @@ returns an error the model does not sanction.
 | `CS-05` | `build` | The raw-pointer entry points are signature-identical to `matrixmultiply` and produce the same bytes as the safe API on the same inputs |
 | `CS-06` | `build` | `m`, `n`, `k` that are not multiples of `MR`, `NR`, or `K_GROUP` take the same path and give the same result |
 | `CS-07` | `build` | The generated `133144` pin equals `k_max(127, i32::MAX)` recomputed at test time |
+| `CS-08` | `build` | The slice entry points take `(m, k, n)`, leading dimensions, `alpha` and `beta` like any GEMM, and give the same bytes as the view API on the same operands |
 
 ## `CT-*` --- Totality: the operation is infallible on everything it can represent
 

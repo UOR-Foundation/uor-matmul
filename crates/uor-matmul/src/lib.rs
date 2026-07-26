@@ -84,6 +84,7 @@
 #![deny(missing_docs)]
 
 pub mod raw;
+pub mod slice;
 
 pub use uor_matmul_codec as codec;
 pub use uor_matmul_core as core_types;

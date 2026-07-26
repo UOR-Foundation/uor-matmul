@@ -15,6 +15,33 @@ scalar fallback. Every entry point is that sentence at a different
 instantiation, and the library holds nothing in reserve for cases it finds hard,
 because the exact accumulation has no hard cases.
 
+In the shape every GEMM is spelled --- `(m, k, n)`, leading dimensions, `alpha`
+and `beta`:
+
+```rust
+use uor_matmul::{slice, suggested_scratch, Shape};
+
+let a = [1i8, 2, 3, 4];
+let b = [5i8, 6, 7, 8];
+let mut c = [0i32; 4];
+
+// The panel buffer is the caller's, because the library never allocates.
+// `&mut []` is valid and gives the same bytes, more slowly.
+let mut scratch = vec![0i8; suggested_scratch(Shape { m: 2, k: 2, n: 2 })];
+
+slice::gemm(2, 2, 2, &a, &b, &mut c, &mut scratch).unwrap();
+assert_eq!(c, [19, 22, 43, 50]);
+
+// `C := alpha*A*B + beta*C`, with leading dimensions, when you want them.
+slice::gemm_ex(2, 2, 2, 3, &a, 2, &b, 2, -1, &mut c, 2, &mut scratch).unwrap();
+```
+
+`slice::gemm_float` and `slice::gemm_float_ex` are the same call over `f32` and
+`f64`. `raw::sgemm` and `raw::dgemm` are signature-identical to
+`matrixmultiply`, for code that already has a call site. And the view API
+underneath takes arbitrary strides --- negative, zero, transposed --- because
+transposition is a stride and not a mode:
+
 ```rust
 use uor_matmul::prelude::*;
 

@@ -7,7 +7,7 @@
 //! one.
 
 use uor_matmul::prelude::*;
-use uor_matmul_core::{dot_ref, dot_wide, EncodeMode, Shape};
+use uor_matmul_core::{dot_ref, dot_wide, EncodeMode, PackedCode, Shape};
 use uor_matmul_gemm::Partition;
 use uor_matmul_validate::{counting, Case, Corpus};
 
@@ -239,6 +239,201 @@ fn the_raw_pointer_face_agrees_with_the_safe_api_cs_05() {
         }
         assert_eq!(raw, safe, "{m}x{k}x{n}");
     }
+}
+
+/// `CS-08`: the slice face gives the same bytes as the view API on the same
+/// operands, at every leading dimension, `alpha`, `beta`, and offer.
+///
+/// The point of the face is that it is *not* a second path, so the comparison is
+/// against the views rather than against a recomputed expectation: a slice call
+/// that agreed with arithmetic but disagreed with `gemm` would be a second
+/// method (R13).
+#[test]
+fn the_slice_face_agrees_with_the_view_api_cs_08() {
+    use uor_matmul::slice;
+    let mut compared = 0usize;
+    for &(m, k, n) in &[
+        (1usize, 1usize, 1usize),
+        (2, 2, 2),
+        (3, 7, 5),
+        (8, 64, 8),
+        (13, 17, 19),
+        (1, 32, 40),
+        (5, 1, 3),
+    ] {
+        // Padding past the row, so a leading dimension that is not the column
+        // count is exercised and not just the contiguous case.
+        for pad in [0usize, 1, 4] {
+            let (lda, ldb, ldc) = (k + pad, n + pad, n + pad);
+            let a: Vec<i8> = (0..m * lda)
+                .map(|i| ((i * 13 % 255) as i64 - 127) as i8)
+                .collect();
+            let b: Vec<i8> = (0..k * ldb)
+                .map(|i| ((i * 7 % 255) as i64 - 127) as i8)
+                .collect();
+            for &(alpha, beta) in &[(1i64, 0i64), (1, 1), (3, -2), (0, 1)] {
+                // The view API, on views built with exactly these strides.
+                let mut want = vec![5i32; m * ldc];
+                {
+                    let av = MatView::new(
+                        as_alphabet_full(&a),
+                        m,
+                        k,
+                        Strides {
+                            rs: lda as isize,
+                            cs: 1,
+                        },
+                    )
+                    .expect("a fits");
+                    let bv = MatView::new(
+                        as_alphabet_full(&b),
+                        k,
+                        n,
+                        Strides {
+                            rs: ldb as isize,
+                            cs: 1,
+                        },
+                    )
+                    .expect("b fits");
+                    let cv = MatViewMut::new(
+                        &mut want,
+                        m,
+                        n,
+                        Strides {
+                            rs: ldc as isize,
+                            cs: 1,
+                        },
+                    )
+                    .expect("c fits");
+                    let mut t = Triple::new(av, bv, cv).expect("a product");
+                    let mut buf =
+                        vec![Default::default(); uor_matmul::suggested_scratch(Shape { m, k, n })];
+                    uor_matmul::gemm(
+                        &mut t,
+                        &Linear { alpha, beta },
+                        GemmOptions::default(),
+                        &mut Scratch::new(&mut buf),
+                    );
+                }
+
+                // The slice face, at every offer: none, and the suggested amount.
+                for offer in [0usize, uor_matmul::suggested_scratch(Shape { m, k, n })] {
+                    let mut got = vec![5i32; m * ldc];
+                    let mut scratch = vec![0i8; offer];
+                    slice::gemm_ex(
+                        m,
+                        k,
+                        n,
+                        alpha,
+                        &a,
+                        lda,
+                        &b,
+                        ldb,
+                        beta,
+                        &mut got,
+                        ldc,
+                        &mut scratch,
+                    )
+                    .expect("the operands name a product");
+                    assert_eq!(
+                        got, want,
+                        "{m}x{k}x{n} pad={pad} alpha={alpha} beta={beta} offer={offer}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        // The contiguous convenience form is the same call at the implied
+        // dimensions, so it must agree with itself spelled the long way.
+        let a: Vec<i8> = (0..m * k)
+            .map(|i| ((i * 13 % 255) as i64 - 127) as i8)
+            .collect();
+        let b: Vec<i8> = (0..k * n)
+            .map(|i| ((i * 7 % 255) as i64 - 127) as i8)
+            .collect();
+        let mut short = vec![0i32; m * n];
+        let mut long = vec![0i32; m * n];
+        slice::gemm(m, k, n, &a, &b, &mut short, &mut []).expect("a product");
+        slice::gemm_ex(m, k, n, 1, &a, k, &b, n, 0, &mut long, n, &mut []).expect("a product");
+        assert_eq!(
+            short, long,
+            "{m}x{k}x{n} the convenience form is the long one"
+        );
+        compared += 1;
+
+        // Floats take the same shape, and agree with `gemm_float` on views.
+        let fa: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.5 - 3.0).collect();
+        let fb: Vec<f32> = (0..k * n).map(|i| (i as f32) * -0.25 + 1.5).collect();
+        let mut fwant = vec![0.0f32; m * n];
+        {
+            let av = MatView::row_major(&fa, m, k).expect("a fits");
+            let bv = MatView::row_major(&fb, k, n).expect("b fits");
+            let cv = MatViewMut::row_major(&mut fwant, m, n).expect("c fits");
+            let mut t = Triple::new(av, bv, cv).expect("a product");
+            uor_matmul::gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
+        }
+        for (pa_len, pb_len) in [(0usize, 0usize), (k, k * n)] {
+            let mut fgot = vec![0.0f32; m * n];
+            let mut pa = vec![PackedCode::default(); pa_len];
+            let mut pb = vec![PackedCode::default(); pb_len];
+            slice::gemm_float(m, k, n, &fa, &fb, &mut fgot, &mut pa, &mut pb).expect("a product");
+            assert_eq!(fgot, fwant, "{m}x{k}x{n} float, panels {pa_len}/{pb_len}");
+            compared += 1;
+        }
+    }
+
+    // The error surface is the view API's and no wider: an output whose rows land
+    // on each other is a product that does not exist, and it is *reported*.
+    let aliased = slice::gemm_ex::<i8, i32>(
+        2,
+        2,
+        2,
+        1,
+        &[1, 2, 3, 4],
+        2,
+        &[1, 2, 3, 4],
+        2,
+        0,
+        &mut [0; 4],
+        0,
+        &mut [],
+    );
+    assert!(
+        matches!(
+            aliased,
+            Err(uor_matmul::NotAProduct::OutputAliasesItself { .. })
+        ),
+        "an output whose rows land on each other is reported: {aliased:?}"
+    );
+    // A non-conformant shape cannot be spelled through this face --- `k` is one
+    // argument used for both operands --- so that condition is reachable only
+    // through the views, where `CT-05` asserts it.
+
+    assert!(compared > 0, "CS-08 compared nothing");
+    eprintln!("CS-08: {compared} slice calls agreed with the view API");
+}
+
+/// `CS-08`: a slice that does not hold the matrix its caller described is a
+/// programming error at the boundary, not a condition of the data.
+///
+/// The library's reportable conditions are the two in `NotAProduct` (`CT-05`). A
+/// buffer shorter than the dimensions passed beside it is a disagreement between
+/// two of the caller's own arguments, which is the same class as handing a kernel
+/// a panel of the wrong length --- and that has always been a panic at the
+/// boundary here, never an error return.
+#[test]
+#[should_panic(expected = "leading dimension")]
+fn a_slice_that_does_not_hold_its_matrix_panics_cs_08() {
+    // `a` is declared 2x2 and has three elements.
+    let _ = uor_matmul::slice::gemm::<i8, i32>(
+        2,
+        2,
+        2,
+        &[1i8, 2, 3],
+        &[1i8, 2, 3, 4],
+        &mut [0i32; 4],
+        &mut [],
+    );
 }
 
 /// `CP-01`: the randomized differential suite, at the sample size derived in

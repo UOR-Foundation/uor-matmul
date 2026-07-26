@@ -60,6 +60,12 @@ suite = "structural"
 statement = """The generated `133144` pin equals `k_max(127, i32::MAX)` recomputed at test time"""
 
 [[id]]
+id = "CS-08"
+level = "build"
+suite = "structural"
+statement = """The slice entry points take `(m, k, n)`, leading dimensions, `alpha` and `beta` like any GEMM, and give the same bytes as the view API on the same operands"""
+
+[[id]]
 id = "CT-01"
 level = "build"
 suite = "totality"
