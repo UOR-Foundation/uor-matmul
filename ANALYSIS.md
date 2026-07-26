@@ -941,31 +941,75 @@ and `vpgatherdd` on this microarchitecture is slower per element than the scalar
 load it replaces. The reference is not carrying those tiles as a stopgap; it is
 carrying them because there is nothing to win.
 
-**Two things are recorded and not fixed, and both are stated rather than
-smoothed over.**
+The same question at *eight* rows answers the one remaining registration gap.
+AVX-512 registers `(16, 1)` and `(16, 2)`; AVX2 registers those and the two
+eight-row pairs, so an eight-row tile on an AVX-512 host runs a 256-bit sequence.
+Whether a 512-bit one would beat it cannot be timed on this host, but the ceiling
+can be:
 
-`audit-purity`'s R2 half misses a bare float add between two float-typed
-variables: verified, it prints "no float arithmetic" with `t = t + b` on `f32` in
-a shipped crate, because it matches float *literals* and a token list. The file
-already calls this half "deliberately crude" and names `CU-01` as definitive, and
-`CU-01` is now hermetic and per-crate accountable --- but a source grep cannot
-type-check, and saying so is better than a rule that looks enforced.
+| rows 8 | Gmac/s |
+| --- | --- |
+| scalar, group 1 | 54.86 |
+| 256-bit, group 1 | 57.82 |
+| scalar, group 2 | 39.20 |
+| 256-bit, group 2 | 57.73 |
 
-`Alphabet` derives `bytemuck::TransparentWrapper`, which the library needs for
-the *peeling* direction --- `Alphabet<E, Bd>` back to `E`, which every kernel does
-and which cannot be wrong. The derive also gives the wrapping direction, so
-`Alphabet::<i8, Bnd<1>>::wrap(100)` compiles and runs: measured, it returns 100
-under a declared bound of 1. Nothing is unsound --- there is no UB, and every
-accumulation is still integer arithmetic --- but the narrow run lengths are
-derived from `Bd::VALUE`, so a violated declaration can overflow a narrow lane
-and give a wrong integer, which the checked profile would catch as a panic.
+The vector form reaches 57.8 at *both* groups. Group two issues twice the adds
+per slot, so if the adder were the limit it would be the slower of the two; it is
+not, which places the limit on the entry loads. A 512-bit step issues the same
+loads from the same addresses, so it cannot pass a ceiling the 256-bit step
+already reaches. The eight-row pairs are absent from the AVX-512 table for the
+same reason the narrow rows are absent from all of them.
 
-`as_alphabet` is the checked constructor and returns `None` on exactly this; the
-bound is a declaration the caller makes, and `wrap` asserts it instead of
-checking it. Splitting the two directions means replacing the derive with
-inherent peel methods across three crates, which is a contract change worth doing
-deliberately rather than at the end of a release pass. It is written here so that
-the sharp edge is named and the consequence is exact.
+**Both of the things that were once recorded as unfixed are now fixed, and the
+first of them is worth keeping because of what it says about gates.**
+
+`audit-purity`'s R2 half matched a token list and a float *literal*. So
+`let mut t = a; t = t + b;` on two `f32` parameters --- the most direct violation
+the rule has --- passed it, and it described itself as "deliberately crude" and
+pointed at `CU-01` as definitive.
+
+`CU-01` is definitive for what it can see, and that was measured rather than
+assumed: a `black_box`-guarded float add placed inside a function that is
+certainly emitted is caught, `addss` and all. But it sees only what was
+*codegen'd*, and an uncalled `pub fn` is not in the rlib at all --- measured, the
+symbol is absent from a 1.9 MB rlib and from every `.s` file the gate reads. Such
+a function is codegen'd in a *downstream* build, where this repository's gates do
+not run. Neither half covered the other, and the source half was the one with the
+gap.
+
+It now tracks which values are floats rather than matching tokens: parameters and
+`let` bindings whose declared type mentions `f32` or `f64`, float literals, `as`
+casts, aliasing chains, and the elements of a float slice bound by a `for`. Eight
+plants, each caught:
+
+| plant | |
+| --- | --- |
+| `let mut t = a; t = t + b;` on two `f32` params | caught |
+| `a * b` on two `f64` params | caught |
+| `let y: f32 = x; y - x` | caught |
+| `for x in v { s = s + *x }` over `&[f32]` | caught |
+| `a.mul_add(b, b)` | caught |
+| `let z = n as f32; z / 2.0` | caught |
+| `*p + *q` on two `*const f64` | caught |
+| `let b = a; let c = b; c + c` | caught |
+
+and the shipped crates are clean under it.
+
+The second was the declared alphabet bound. `Alphabet::new` checks it,
+`as_alphabet` checks it, and `Alphabet::of` exists only for `Full<E>`, which
+admits everything --- so every constructor the library offers establishes it. What
+does not is `bytemuck::TransparentWrapper::wrap`, and that derive is not
+removable: `uor-matmul-core` is `#![forbid(unsafe_code)]`, and the trait is how it
+wraps a slice zero-copy at all. Removing it would remove the checked zero-copy
+tight-bound path with it.
+
+The bound reaches an answer in exactly one place --- the narrow run length in
+`dot_ref` --- so that is where it is now verified. Free in release, and a panic
+under the checked profile, which `CT-02` runs over the whole corpus. `CD-03`
+asserts both profiles by name, so the test cannot pass by not running:
+`Alphabet::wrap(100)` under a declared bound of one is loud where it used to be a
+quietly wrong integer.
 
 ## Against the oracles
 

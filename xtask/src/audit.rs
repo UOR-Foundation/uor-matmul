@@ -218,12 +218,17 @@ pub fn audit_purity(root: &Path) -> Result<(), Fail> {
     // element types being decoded and as the target of the encode step; what is
     // forbidden is adding, subtracting, multiplying, or fusing two floats.
     //
-    // This is the static half of the rule and it is deliberately crude. The
-    // definitive gate is `CU-01`, which disassembles every shipped kernel and
-    // looks for the opcodes themselves --- a source grep cannot see what the
-    // optimizer emitted, and a rule this important should not rest on one.
+    // This half reads the source and `CU-01` reads the emitted instructions, and
+    // both are needed, because neither covers the other. `CU-01` sees only what
+    // was codegen'd: measured, an uncalled `pub fn` is not in the rlib at all, so
+    // a float add sitting in one is invisible to it here --- and codegen'd in a
+    // *downstream* build, where this repository's gates do not run. This half is
+    // what closes that, so it tracks which values are floats rather than matching
+    // a token list: `let mut t = a; t = t + b;` on two `f32` parameters passed
+    // both halves until it did.
     let mut violations = Vec::new();
     for src in &sources {
+        let mut floats = FloatScope::default();
         for (line_no, line) in effective_lines(&src.text) {
             for tok in FLOAT_ARITHMETIC {
                 if line.contains(tok) {
@@ -237,6 +242,15 @@ pub fn audit_purity(root: &Path) -> Result<(), Fail> {
             if let Some(op) = float_literal_arithmetic(line) {
                 violations.push(format!(
                     "R2: {}:{line_no}: `{op}` applied to a float literal\n    {}",
+                    src.rel,
+                    line.trim()
+                ));
+            }
+            // A binding whose type is a float, and an operator next to it.
+            floats.observe(line);
+            if let Some(name) = floats.arithmetic_on_a_float(line) {
+                violations.push(format!(
+                    "R2: {}:{line_no}: arithmetic on `{name}`, which is a float\n    {}",
                     src.rel,
                     line.trim()
                 ));
@@ -311,6 +325,213 @@ const FLOAT_ARITHMETIC: &[&str] = &[
     "to_degrees",
     "to_radians",
 ];
+
+/// Which names in the function being read are floats.
+///
+/// The R2 half of `audit-purity` used to match a token list and a float
+/// *literal*, so `let mut t = a; t = t + b;` on two `f32` parameters --- the most
+/// direct violation the rule has --- passed it. A grep cannot type-check, but it
+/// can follow the declarations that are written down, and in these crates every
+/// float that reaches an operator is written down: as a parameter, as a `let`
+/// with a type, as a float literal, or as an `as f32`.
+///
+/// Scoped per function, because that is where a name means one thing. Anything
+/// this misses `CU-01` still catches once it is codegen'd; anything `CU-01`
+/// misses --- an uncalled `pub fn`, which is codegen'd only in a downstream build
+/// --- this catches here.
+#[derive(Default)]
+struct FloatScope {
+    names: Vec<String>,
+}
+
+impl FloatScope {
+    /// Read one line for float declarations, and reset at a function boundary.
+    fn observe(&mut self, line: &str) {
+        let t = line.trim();
+        if t.starts_with("fn ")
+            || t.starts_with("pub fn ")
+            || t.starts_with("unsafe fn ")
+            || t.starts_with("pub unsafe fn ")
+            || t.starts_with("pub(crate) fn ")
+            || t.starts_with("const fn ")
+            || t.starts_with("pub const fn ")
+        {
+            self.names.clear();
+        }
+        // Any binding whose declared type *mentions* a float: `x: f32`,
+        // `v: &[f32]`, `p: *const f64`. Over-approximating on purpose --- a
+        // `&[f32]` cannot itself be added, but an element of one can, and a name
+        // that carries floats is the thing worth watching. Several may appear on
+        // a line, as a signature does.
+        for (at, _) in line.match_indices(':') {
+            if line[at..].starts_with("::") || (at > 0 && line.as_bytes()[at - 1] == b':') {
+                continue;
+            }
+            let ty_end = line[at + 1..]
+                .find([',', ')', '=', '{', ';'])
+                .map_or(line.len(), |e| at + 1 + e);
+            let ty = &line[at + 1..ty_end];
+            if ty.contains("f32") || ty.contains("f64") {
+                if let Some(name) = ident_before(&line[..at]) {
+                    self.push(name);
+                }
+            }
+        }
+        // `let name = <float literal>`, `let name = ... as f32`, anywhere on the
+        // line --- a one-line function body puts the `let` in the middle of it.
+        for (at, _) in line.match_indices("let ") {
+            let after = &line[at + 4..];
+            let after = after.strip_prefix("mut ").unwrap_or(after);
+            let Some(eq) = after.find('=') else { continue };
+            let name = after[..eq]
+                .trim()
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let stop = after[eq + 1..]
+                .find(';')
+                .map_or(after.len(), |e| eq + 1 + e);
+            let rhs = &after[eq + 1..stop];
+            let is_float = rhs.contains("as f32")
+                || rhs.contains("as f64")
+                || rhs.contains("f32::")
+                || rhs.contains("f64::")
+                || has_float_literal(rhs)
+                || self.names.iter().any(|n| rhs.contains(n.as_str()));
+            if is_float && is_ident(&name) {
+                self.push(name);
+            }
+        }
+        // `for x in v`, where `v` already carries floats: the element does too.
+        for (at, _) in line.match_indices("for ") {
+            let after = &line[at + 4..];
+            let Some(in_at) = after.find(" in ") else {
+                continue;
+            };
+            let name = after[..in_at].trim().trim_start_matches("&").to_string();
+            let src = &after[in_at + 4..];
+            if self.names.iter().any(|n| src.contains(n.as_str())) {
+                self.push(name);
+            }
+        }
+    }
+
+    fn push(&mut self, name: String) {
+        if is_ident(&name) && !self.names.contains(&name) {
+            self.names.push(name);
+        }
+    }
+
+    /// An arithmetic operator with one of this scope's floats beside it.
+    fn arithmetic_on_a_float(&self, line: &str) -> Option<String> {
+        for name in &self.names {
+            for (i, _) in line.match_indices(name.as_str()) {
+                // Whole word only: `t` must not match inside `tile`.
+                let before = line[..i].chars().next_back();
+                let after = line[i + name.len()..].chars().next();
+                if before.is_some_and(is_ident_char) || after.is_some_and(is_ident_char) {
+                    continue;
+                }
+                if operator_beside(line, i, i + name.len()) {
+                    return Some(name.clone());
+                }
+            }
+        }
+        None
+    }
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn is_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().all(is_ident_char)
+        && !s.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// The identifier immediately before a `:` type annotation.
+fn ident_before(head: &str) -> Option<String> {
+    let name: String = head
+        .chars()
+        .rev()
+        .take_while(|&c| is_ident_char(c))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    is_ident(&name).then_some(name)
+}
+
+/// A float literal: digits with a point, or an `f32`/`f64` suffix.
+fn has_float_literal(s: &str) -> bool {
+    let b: Vec<char> = s.chars().collect();
+    for i in 0..b.len() {
+        if !b[i].is_ascii_digit() {
+            continue;
+        }
+        if i > 0 && is_ident_char(b[i - 1]) {
+            continue;
+        }
+        let mut j = i;
+        while j < b.len() && (b[j].is_ascii_digit() || b[j] == '_') {
+            j += 1;
+        }
+        if j < b.len() && b[j] == '.' && b.get(j + 1).is_some_and(|c| c.is_ascii_digit()) {
+            return true;
+        }
+        if s[..]
+            .get(j..j + 3)
+            .is_some_and(|t| t == "f32" || t == "f64")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Is `+`, `-`, `*` or `/` immediately beside the span `[lo, hi)`?
+///
+/// `->` is a return type, `*const`/`*mut` is a pointer type, and `//` was already
+/// stripped, so none of those counts.
+fn operator_beside(line: &str, lo: usize, hi: usize) -> bool {
+    let b = line.as_bytes();
+    let mut i = lo;
+    while i > 0 && b[i - 1] == b' ' {
+        i -= 1;
+    }
+    if i > 0 {
+        let c = b[i - 1];
+        let prev = if i > 1 { b[i - 2] } else { b' ' };
+        if (c == b'+' || c == b'*' || c == b'/') && prev != b'*' && prev != b'/' {
+            return true;
+        }
+        if c == b'-' && prev != b'-' && prev != b'<' {
+            return true;
+        }
+    }
+    let mut j = hi;
+    while j < b.len() && b[j] == b' ' {
+        j += 1;
+    }
+    if j < b.len() {
+        let c = b[j];
+        let next = b.get(j + 1).copied().unwrap_or(b' ');
+        if (c == b'+' || c == b'/') && next != b'/' {
+            return true;
+        }
+        if c == b'*' && next != b'c' && next != b'm' {
+            return true;
+        }
+        if c == b'-' && next != b'>' && next != b'-' {
+            return true;
+        }
+    }
+    false
+}
 
 /// An arithmetic operator adjacent to a float literal.
 ///

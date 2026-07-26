@@ -112,9 +112,11 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
     /// The half-open range of codes belonging to row `r`.
     ///
     /// Arithmetic for a fixed-width tier, which is every tier but a run codec.
-    /// That matters more than it looks: a walk would make random access
-    /// O(row length), and a driver reading one element at a time would then run
-    /// in O(k^2 n) instead of O(m k n).
+    /// That matters more than it looks: for a run codec this walks rows `0..r`,
+    /// so a driver reading one element at a time runs in O(k^2 n) instead of
+    /// O(m k n). [`CodedMatrix::column_walk`] is what a driver uses instead ---
+    /// it carries the cursor from row to row, so a column is one pass over the
+    /// codes whatever the tier.
     pub fn row_code_range(&self, r: usize) -> Range<usize> {
         if C::IS_FIXED_WIDTH {
             let per_row = self.codes_per_row();

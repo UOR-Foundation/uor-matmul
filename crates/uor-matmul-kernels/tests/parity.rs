@@ -854,7 +854,7 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                     // build sequence --- so `specs[1..]` is empty there and reading
                     // `want` off the reference compared it with itself. The gather
                     // half of this test was given a model oracle for exactly this
-                    // reason; the build half was left as it was.
+                    // reason, and this is the same oracle for the build.
                     let model = {
                         let mut out = vec![0i32; space * rows];
                         for c in 0..space {

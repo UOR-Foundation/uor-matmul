@@ -8,13 +8,29 @@ Which axis of `just vv` discharges which class of claim.
 | `just model` | R1, R8, R10, R11, R13, R15 | `CM-01`, and the absence of `CN-*` |
 | `just lint` | clippy at `-D warnings`, including the unsafe-documentation lints | --- |
 | `just test` | the whole suite | `CS-*`, `CT-*`, `CD-*`, `CB-*`, `CK-*`, `CX-*`, `CA-01`, `CP-01`, `CU-02` .. `CU-05`, `CG-*` |
-| `just purity` | R2, R3, R13 by grep, and `CU-01` by disassembly | `CU-01` |
+| `just purity` | R2 by scope-tracking the source, R3 and R13 by grep, and `CU-01` by disassembly | `CU-01` |
 | `just no-alloc` | R7, C1 | `CA-03` |
 | `just bdd` | R9 and R4's behavioural half | `CM-02`, `CM-03` |
 | `just checked` | every accumulator operation checked, no overflow | `CT-02` |
 | `just cross` | the corpus digest off the host | `CA-02` |
 | `just scaling` | fitted exponents, reported never asserted | `CG-01` .. `CG-07` |
 | `just fuzz` | totality over unstructured input | `CT-01`, `CT-03`, `CK-06` |
+
+## The two halves of R2, and why both are needed
+
+`audit-purity` reads the source and `CU-01` reads the emitted instructions.
+Neither covers the other, and that was measured rather than assumed:
+
+- `CU-01` sees only what was codegen'd. An uncalled `pub fn` is not in the rlib
+  at all --- the symbol is absent from a 1.9 MB rlib and from every `.s` the gate
+  reads --- so a float add sitting in one is invisible here, and codegen'd in a
+  *downstream* build where these gates do not run.
+- `audit-purity` cannot see what the optimizer emitted, and cannot type-check.
+  It tracks which names carry floats: parameters and `let` bindings whose
+  declared type mentions `f32` or `f64`, float literals, `as` casts, the elements
+  of a float slice bound by a `for`, and aliasing chains between them.
+
+Both are run by `just purity`, and both are on the falsifiable list below.
 
 ## Every gate is falsifiable
 
@@ -25,8 +41,8 @@ of these has been checked by planting the defect it exists to catch:
 | --- | --- | --- |
 | `check-constants` (R1) | a model numeral restated in a shipped crate | yes |
 | `audit-limits` (R8) | a `Result` over an unsanctioned error | yes |
-| `audit-purity` (R2) | `x + 1.0` in a shipped crate | yes |
-| `audit-disassembly` (`CU-01`) | a float accumulation the optimizer keeps | yes |
+| `audit-purity` (R2) | eight float-arithmetic plants: two typed params added, a `f64` multiply, a typed `let`, a `for` over `&[f32]`, `mul_add`, an `as f32` cast, two `*const f64` derefs, and a two-step aliasing chain | yes |
+| `audit-disassembly` (`CU-01`) | a `black_box`-guarded float add inside an emitted function, reported as `addss` | yes |
 | `audit-deferral` (R15) | a `TODO` in a shipped crate | yes |
 | the honesty meta-gate (R4) | an ID with no test | yes |
 | the differential comparator | a one-element difference | yes |

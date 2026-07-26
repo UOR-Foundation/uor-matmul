@@ -968,7 +968,7 @@ impl Plan {
                                                                 // so a `depth` already past the lane has overflowed it before the first
                                                                 // placement can happen --- the guard cannot rescue the first chunk. For
                                                                 // every family this library ships the ratio is enormous (16643 blocks at
-                                                                // `(i8, i32)` and `Bk = 8`, against a depth of at most `GATHER_SLOTS`),
+                                                                // `(i8, i32)` and `Bk = 8`, against a depth the caches and the offer allow),
                                                                 // so this binds on nothing shipped and costs nothing; it is here because
                                                                 // a bound that only holds by arithmetic nobody checked is not a bound.
         let by_cache = tabulation_depth(

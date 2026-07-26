@@ -53,6 +53,28 @@ pub fn dot_ref<E: IntegerElement, Bd: Bound>(
         let end = k.min(i.saturating_add(run)); // R3-ok: cursor, clamped by `min`
         let mut narrow = 0i64;
         for j in i..end {
+            // The run length above was derived from `Bd::VALUE`, so this is the
+            // one place in the library where a *declaration* is load-bearing for
+            // an answer: a value past the declared bound makes the run too long
+            // and the narrow register wraps.
+            //
+            // `Alphabet::new` and `as_alphabet` both check the declaration, and
+            // `Alphabet::of` exists only for `Full<E>`, which admits everything ---
+            // so every constructor the library offers establishes it. What does not
+            // is `bytemuck::TransparentWrapper::wrap`, which the derive on
+            // `Alphabet` publishes and which cannot check anything. The derive is
+            // not removable: `uor-matmul-core` is `#![forbid(unsafe_code)]`, and
+            // that trait is how it wraps a slice zero-copy at all.
+            //
+            // So the reliance is verified where it is relied upon. It costs
+            // nothing in release and turns a violated declaration into a loud
+            // failure under the checked profile, which `CT-02` runs over the whole
+            // corpus --- instead of a quietly wrong integer.
+            debug_assert!(
+                a[j].get().magnitude() <= Bd::VALUE && w[j].get().magnitude() <= Bd::VALUE,
+                "a value past the declared bound: the narrow run length was derived \
+                 from that declaration"
+            );
             narrow = E::mac_narrow(narrow, a[j].get(), w[j].get());
         }
         acc = E::combine_narrow(acc, narrow);
@@ -163,6 +185,46 @@ mod tests {
     use super::*;
     use crate::alphabet::{as_alphabet_full, Bnd, Full};
     use std::vec::Vec;
+
+    /// `CD-03`: a declaration the data does not satisfy is loud, not silent.
+    ///
+    /// The narrow run length is derived from `Bd::VALUE`, so it is the one place
+    /// a declaration reaches an answer. Every constructor the library offers
+    /// establishes it --- `Alphabet::new` checks, `as_alphabet` checks, and
+    /// `Alphabet::of` exists only for `Full<E>`, which admits everything --- but
+    /// `bytemuck::TransparentWrapper::wrap` cannot check, and the derive that
+    /// publishes it is how a `#![forbid(unsafe_code)]` crate wraps a slice
+    /// zero-copy at all.
+    ///
+    /// So the reliance is asserted where it is relied upon: free in release,
+    /// and a panic under the checked profile, which `CT-02` runs over the whole
+    /// corpus. Both profiles are named here rather than one of them being
+    /// skipped, so this cannot pass by not running.
+    #[test]
+    fn a_violated_declaration_does_not_pass_silently_cd_03() {
+        use bytemuck::TransparentWrapper;
+        // A hundred is a hundred times the declared bound, and the run length
+        // derived from `Bnd<1>` is long enough to wrap an `i64` at that
+        // magnitude.
+        let a: Vec<Alphabet<i8, Bnd<1>>> = (0..64).map(|_| Alphabet::wrap(100)).collect();
+        let w: Vec<Alphabet<i8, Bnd<1>>> = (0..64).map(|_| Alphabet::wrap(100)).collect();
+        let outcome = std::panic::catch_unwind(|| dot_ref(&a, &w));
+        if cfg!(debug_assertions) {
+            assert!(
+                outcome.is_err(),
+                "a value past the declared bound must not reach the narrow run quietly"
+            );
+        } else {
+            // Compiled out by design. The value is still whatever the wrapped
+            // declaration implies, and the point of the debug build is that the
+            // corpus is run there too.
+            assert!(outcome.is_ok(), "the assertion is a debug one");
+        }
+        // The declaration the data *does* satisfy is the ordinary path, and it
+        // agrees with the wide accumulation as `CD-03` says.
+        let ones: Vec<Alphabet<i8, Bnd<1>>> = (0..64).map(|_| Alphabet::wrap(1)).collect();
+        assert_eq!(dot_ref(&ones, &ones), dot_wide(&ones, &ones));
+    }
 
     /// CD-03: the narrow factorization is invisible. Whatever the bound, the
     /// two functions agree, so `fits_narrow` never reaches the answer.
