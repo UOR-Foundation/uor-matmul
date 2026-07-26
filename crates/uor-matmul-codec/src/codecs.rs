@@ -118,6 +118,14 @@ impl<E: IntegerElement, Bd: Bound, const N: usize> Enumerable<E, Bd> for Grid<'_
         // equal decodes are the same relation.
         (code as usize) % Self::CODE_SPACE.max(1)
     }
+
+    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+        // `index_of` is `% CODE_SPACE`, which is `& (CODE_SPACE - 1)` exactly
+        // when the space is a power of two --- and then the stored `u16` is the
+        // index, masked. At any other entry count the two differ and the
+        // traversal builds the stream, at the same bytes.
+        Self::CODE_SPACE.is_power_of_two().then_some(codes)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +304,14 @@ impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Enumerable<
     fn index_of(code: Self::Code) -> usize {
         (code as usize) % Self::CODE_SPACE.max(1)
     }
+
+    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+        // `index_of` is `% CODE_SPACE`, which is `& (CODE_SPACE - 1)` exactly
+        // when the space is a power of two --- and then the stored `u16` is the
+        // index, masked. At any other entry count the two differ and the
+        // traversal builds the stream, at the same bytes.
+        Self::CODE_SPACE.is_power_of_two().then_some(codes)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +401,12 @@ where
 
     fn index_of(code: Self::Code) -> usize {
         C::index_of(code)
+    }
+
+    fn as_index_stream(codes: &[Self::Code]) -> Option<&[u16]> {
+        // A zero point relabels the image, never the code space, so whether the
+        // code addresses the enumeration is the inner codec's answer unchanged.
+        C::as_index_stream(codes)
     }
 }
 

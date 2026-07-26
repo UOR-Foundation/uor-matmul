@@ -5,7 +5,7 @@ use core::arch::x86_64::*;
 use uor_matmul_core::Backend;
 
 use crate::spec::{Factorization, KernelSpec, LaneLayout};
-use crate::table::{TableBuild, TableGather, TableSpec};
+use crate::table::{TableBuild, TableGather, TableGatherCodes, TableSpec};
 
 crate::tile_fits!(6, 16);
 crate::tile_fits!(1, 16);
@@ -1585,11 +1585,28 @@ const A2_TABLE_LANES: usize = 8;
 /// the driver walks are `16, 8, 4, 2, 1`, so the top two take this and the rest
 /// take the reference at a tile too narrow for a register to help.
 pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    let (build, gather): (TableBuild<i8, i32>, TableGather<i32>) = match (rows, group) {
-        (16, 1) => (avx2_table_build_i8_v2, avx2_table_gather_i32_v2_u1),
-        (16, 2) => (avx2_table_build_i8_v2, avx2_table_gather_i32_v2_u2),
-        (8, 1) => (avx2_table_build_i8_v1, avx2_table_gather_i32_v1_u1),
-        (8, 2) => (avx2_table_build_i8_v1, avx2_table_gather_i32_v1_u2),
+    type Trio = (TableBuild<i8, i32>, TableGather<i32>, TableGatherCodes<i32>);
+    let (build, gather, gather_codes): Trio = match (rows, group) {
+        (16, 1) => (
+            avx2_table_build_i8_v2,
+            avx2_table_gather_i32_v2_u1,
+            avx2_codes_v2_u1,
+        ),
+        (16, 2) => (
+            avx2_table_build_i8_v2,
+            avx2_table_gather_i32_v2_u2,
+            avx2_codes_v2_u2,
+        ),
+        (8, 1) => (
+            avx2_table_build_i8_v1,
+            avx2_table_gather_i32_v1_u1,
+            avx2_codes_v1_u1,
+        ),
+        (8, 2) => (
+            avx2_table_build_i8_v1,
+            avx2_table_gather_i32_v1_u2,
+            avx2_codes_v1_u2,
+        ),
         _ => return None,
     };
     Some(TableSpec {
@@ -1610,6 +1627,7 @@ pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         max_bound: 32767,
         build,
         gather,
+        gather_codes,
     })
 }
 
@@ -1815,4 +1833,154 @@ unsafe fn avx2_table_build_i8_v1(
 ) {
     // SAFETY: the caller established `avx2` and forwarded every extent.
     unsafe { avx2_table_build::<1>(rows, space, block, book, acts, out) }
+}
+
+/// The same reduction, over the coded operand's own memory.
+///
+/// One shift more than [`avx2_table_gather`] and one memory round trip fewer:
+/// there is no index stream to write and none to read back. The tile heights are
+/// powers of two, so the code scales into an offset by shifting and the loop
+/// still has no multiply in it.
+///
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract, with `rows == V * 8` and `group == U`.
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_table_gather_codes<const V: usize, const U: usize>(
+    rows: usize,
+    _group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut i32,
+) {
+    debug_assert_eq!(rows, V * A2_TABLE_LANES);
+    debug_assert_eq!(_group, U);
+    let mask = (slab >> shift) - 1;
+    // SAFETY: the caller established every extent.
+    unsafe {
+        let mut acc = [[_mm256_setzero_si256(); V]; U];
+        for (u, cols) in acc.iter_mut().enumerate() {
+            for (v, cell) in cols.iter_mut().enumerate() {
+                *cell =
+                    _mm256_loadu_si256(lane.add(u * rows + v * A2_TABLE_LANES) as *const __m256i);
+            }
+        }
+        // One cursor per column, each advancing by one code per slot, and one
+        // cursor for the stack. Every address in the loop is an add or a shift.
+        let mut cursor = [codes; U];
+        for u in 1..U {
+            cursor[u] = cursor[u - 1].add(stride);
+        }
+        let mut words = stack;
+        for _ in 0..depth {
+            for (u, cols) in acc.iter_mut().enumerate() {
+                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                cursor[u] = cursor[u].add(1);
+                for (v, cell) in cols.iter_mut().enumerate() {
+                    *cell = _mm256_add_epi32(
+                        *cell,
+                        _mm256_loadu_si256(entry.add(v * A2_TABLE_LANES) as *const __m256i),
+                    );
+                }
+            }
+            words = words.add(slab);
+        }
+        for (u, cols) in acc.iter().enumerate() {
+            for (v, cell) in cols.iter().enumerate() {
+                _mm256_storeu_si256(
+                    lane.add(u * rows + v * A2_TABLE_LANES) as *mut __m256i,
+                    *cell,
+                );
+            }
+        }
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract at `rows == 16`, `group == 1`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v2_u1(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<2, 1>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract at `rows == 16`, `group == 2`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v2_u2(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<2, 2>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract at `rows == 8`, `group == 1`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v1_u1(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<1, 1>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract at `rows == 8`, `group == 2`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v1_u2(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<1, 2>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+    }
 }

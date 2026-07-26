@@ -266,6 +266,53 @@ pub type TableGather<L> = unsafe fn(
     lane: *mut L,
 );
 
+/// The same reduction, reading the coded operand's own memory.
+///
+/// `lane[u * rows + i] += sum_{slot < depth} stack[slot * slab + ((codes[u *
+/// stride + slot] & mask) << shift) + i]`.
+///
+/// # Why there are two of these and not one
+///
+/// [`TableGather`] takes an index stream the driver builds. Building one costs
+/// `4 / (rows * block)` bytes per product, which at the widest tile is a
+/// thirty-second of the entry traffic and invisible, and at a one-row tile is
+/// exactly as wide as the entry it addresses --- measured, two thirds of the
+/// work. When the codec answers
+/// [`uor_matmul_codec::Enumerable::as_index_stream`], the operand's own memory
+/// *is* that stream and there is nothing to build.
+///
+/// That is the same rule [`uor_matmul_core::MatView::row_block`] follows on the
+/// dense side --- borrow when the layout already holds what is wanted, copy
+/// otherwise --- and the two produce the same lane words, which is half of what
+/// `CB-08` asserts.
+///
+/// `shift` rather than a multiply: the tile heights are powers of two, so the
+/// index scales into an offset by shifting. `CU-06` reads a column loop with no
+/// multiply in it, and this is why it can.
+///
+/// # Safety
+///
+/// - `stack` has `depth * slab` readable lanes, and `slab == (mask + 1) << shift`
+///   is a power of two.
+/// - `codes` has `(group - 1) * stride + depth` readable words.
+/// - `lane` has `group * rows` readable and writable lanes.
+/// - Masking discharges the bound: every read is in-slab whatever the code
+///   holds, with no branch. That the entry is the *right* one is
+///   `Enumerable::as_index_stream`'s claim, which `CK-09` asserts.
+/// - `rows == 1 << shift` and `group` are this spec's, and the host has the
+///   features its backend names.
+pub type TableGatherCodes<L> = unsafe fn(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const L,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut L,
+);
+
 /// One backend's table sequences for one element family, and the shape they
 /// want their operands in.
 ///
@@ -303,8 +350,10 @@ pub struct TableSpec<E, L> {
     pub max_bound: u128,
     /// Fill one slot.
     pub build: TableBuild<E, L>,
-    /// Reduce one column group.
+    /// Reduce one column group from an index stream the driver built.
     pub gather: TableGather<L>,
+    /// Reduce one column group from the operand's own code stream.
+    pub gather_codes: TableGatherCodes<L>,
 }
 
 impl<E, L> Clone for TableSpec<E, L> {
@@ -353,6 +402,7 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
         max_bound: u128::MAX,
         build: portable_build::<E, L>,
         gather: portable_gather::<L>,
+        gather_codes: portable_gather_codes::<L>,
     }
 }
 
@@ -377,13 +427,53 @@ unsafe fn portable_build<E: Element, L: Lane<E>>(
             core::slice::from_raw_parts_mut(out, space * rows),
         )
     };
-    // Walked, not indexed. The code space is the outer loop and the block the
-    // inner, so one entry's `rows` words are live for its whole codeword and are
-    // written once; the other order reads and writes every entry once per
-    // element of the block, which is `block` times the traffic. And every base
-    // advances by an add: `c * rows`, `c * block` and `t * rows` are three
-    // multiplies per codeword, and measured that framing was a third of the
-    // traversal at a one-row tile.
+    // The tile heights the traversal walks, each a compile-time constant, for
+    // the same reason the gather's are: with `rows` runtime the entry is a slice
+    // of unknown length and its accumulation is a chunked iterator around what
+    // should be `rows` registers. Measured at a one-row tile that framing was
+    // half the traversal.
+    match rows {
+        1 => build_run::<1, E, L>(block, book, acts, out),
+        2 => build_run::<2, E, L>(block, book, acts, out),
+        4 => build_run::<4, E, L>(block, book, acts, out),
+        8 => build_run::<8, E, L>(block, book, acts, out),
+        16 => build_run::<16, E, L>(block, book, acts, out),
+        _ => build_any(rows, block, book, acts, out),
+    }
+}
+
+/// The reference build at a compile-time tile height.
+///
+/// The code space outer and the block inner, so one entry's `R` words are live
+/// in registers for its whole codeword and are written **once**. The other order
+/// reads and writes every entry once per element of the block, which is `block`
+/// times the traffic and measured half the traversal.
+#[inline(always)]
+fn build_run<const R: usize, E: Element, L: Lane<E>>(
+    block: usize,
+    book: &[E],
+    acts: &[E],
+    out: &mut [L],
+) {
+    for (entry, word) in out.chunks_exact_mut(R).zip(book.chunks_exact(block)) {
+        let mut acc = [L::ZERO; R];
+        for (&w, col) in word.iter().zip(acts.chunks_exact(R)) {
+            for (cell, &a) in acc.iter_mut().zip(&col[..R]) {
+                *cell = cell.mac(a, w);
+            }
+        }
+        entry.copy_from_slice(&acc);
+    }
+}
+
+/// The same, at a row count no shipped tile uses.
+fn build_any<E: Element, L: Lane<E>>(
+    rows: usize,
+    block: usize,
+    book: &[E],
+    acts: &[E],
+    out: &mut [L],
+) {
     for (entry, word) in out.chunks_exact_mut(rows).zip(book.chunks_exact(block)) {
         entry.fill(L::ZERO);
         for (&w, col) in word.iter().zip(acts.chunks_exact(rows)) {
@@ -424,6 +514,100 @@ unsafe fn portable_gather<L: LaneWord>(
         8 => gather_run::<8, L>(group, slab, stack, off, lane),
         16 => gather_run::<16, L>(group, slab, stack, off, lane),
         _ => gather_any(rows, group, slab, stack, off, lane),
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract.
+#[allow(clippy::too_many_arguments)]
+unsafe fn portable_gather_codes<L: LaneWord>(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const L,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut L,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (stack, codes, lane) = unsafe {
+        (
+            core::slice::from_raw_parts(stack, depth * slab),
+            core::slice::from_raw_parts(codes, (group - 1) * stride + depth),
+            core::slice::from_raw_parts_mut(lane, group * rows),
+        )
+    };
+    match rows {
+        1 => codes_run::<1, L>(depth, slab, shift, stack, codes, stride, lane),
+        2 => codes_run::<2, L>(depth, slab, shift, stack, codes, stride, lane),
+        4 => codes_run::<4, L>(depth, slab, shift, stack, codes, stride, lane),
+        8 => codes_run::<8, L>(depth, slab, shift, stack, codes, stride, lane),
+        16 => codes_run::<16, L>(depth, slab, shift, stack, codes, stride, lane),
+        _ => codes_any(rows, depth, slab, shift, stack, codes, stride, lane),
+    }
+    let _ = group;
+}
+
+/// The reference column step over the operand's own code stream.
+///
+/// Walked exactly as [`gather_run`] is, with one more shift and one fewer
+/// memory round trip: there is no index stream to write and none to read back.
+#[inline(always)]
+fn codes_run<const R: usize, L: LaneWord>(
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: &[L],
+    codes: &[u16],
+    stride: usize,
+    lane: &mut [L],
+) {
+    // `words.len()` is `slab`, and `(c & mask) << shift <= slab - R`, so the
+    // compiler discharges both slice bounds below rather than checking them.
+    let mask = (slab >> shift) - 1;
+    let mut rest = stack;
+    for slot in 0..depth {
+        let (words, tail) = rest.split_at(slab);
+        rest = tail;
+        let mut at = slot;
+        for cols in lane.chunks_exact_mut(R) {
+            let entry = &words[(codes[at] as usize & mask) << shift..];
+            for (cell, &e) in cols.iter_mut().zip(&entry[..R]) {
+                *cell = cell.add(e);
+            }
+            at += stride;
+        }
+    }
+}
+
+/// The same, at a row count no shipped tile uses.
+#[allow(clippy::too_many_arguments)]
+fn codes_any<L: LaneWord>(
+    rows: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: &[L],
+    codes: &[u16],
+    stride: usize,
+    lane: &mut [L],
+) {
+    let mask = (slab >> shift) - 1;
+    let mut rest = stack;
+    for slot in 0..depth {
+        let (words, tail) = rest.split_at(slab);
+        rest = tail;
+        let mut at = slot;
+        for cols in lane.chunks_exact_mut(rows) {
+            let entry = &words[(codes[at] as usize & mask) << shift..];
+            for (cell, &e) in cols.iter_mut().zip(&entry[..rows]) {
+                *cell = cell.add(e);
+            }
+            at += stride;
+        }
     }
 }
 
@@ -586,6 +770,54 @@ impl<E, L> TableSpec<E, L> {
                 slab,
                 stack.as_ptr(),
                 off.as_ptr(),
+                lane.as_mut_ptr(),
+            )
+        }
+    }
+
+    /// The safe entry point for [`Self::gather_codes`].
+    ///
+    /// `codes` is the coded operand's own memory, starting at the first code of
+    /// the first column of the group, with `stride` codes between columns. The
+    /// codec has claimed this stream addresses its enumeration
+    /// ([`uor_matmul_codec::Enumerable::as_index_stream`]); every code is masked
+    /// into the slab, so this checks lengths and nothing per code.
+    pub fn gather_codes(
+        &self,
+        depth: usize,
+        slab: u32,
+        stack: &[L],
+        codes: &[u16],
+        stride: usize,
+        lane: &mut [L],
+    ) {
+        assert!(slab.is_power_of_two(), "one slot is 2^j lane words");
+        assert!(self.rows.is_power_of_two(), "the tile height is 2^j");
+        let slab = slab as usize;
+        assert_eq!(stack.len(), depth * slab, "the stack is depth * slab");
+        assert_eq!(
+            codes.len(),
+            (self.group - 1) * stride + depth,
+            "the run spans the group's columns"
+        );
+        assert_eq!(
+            lane.len(),
+            self.group * self.rows,
+            "the lane is group * rows"
+        );
+        // SAFETY: the lengths are what `TableGatherCodes` requires, `slab` is a
+        // power of two so the mask below it makes every read in-slab, and this
+        // spec came from a `*_table` selector.
+        unsafe {
+            (self.gather_codes)(
+                self.rows,
+                self.group,
+                depth,
+                slab,
+                self.rows.trailing_zeros(),
+                stack.as_ptr(),
+                codes.as_ptr(),
+                stride,
                 lane.as_mut_ptr(),
             )
         }

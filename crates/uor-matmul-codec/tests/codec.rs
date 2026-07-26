@@ -420,6 +420,34 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
                 );
             }
         });
+
+        // Law 3: a codec that says its stored stream *is* the index stream has
+        // to mean it. The tabulated traversal reads that stream straight into
+        // the table's address, so a codec that answered `Some` wrongly would
+        // read a live entry belonging to another code and report a wrong sum
+        // with nothing to catch it.
+        let sample: Vec<C::Code> = (0..C::CODE_SPACE.min(64)).map(C::code_at).collect();
+        if let Some(stream) = C::as_index_stream(&sample) {
+            assert!(
+                C::CODE_SPACE.is_power_of_two(),
+                "{name}: a code addresses the enumeration only if the space is 2^j"
+            );
+            assert_eq!(
+                stream.len(),
+                sample.len(),
+                "{name}: the index stream is the code stream, not a copy of part of it"
+            );
+            let mask = C::CODE_SPACE - 1;
+            every_code(&mut |code| {
+                let word = C::as_index_stream(core::slice::from_ref(&code))
+                    .expect("the answer does not depend on the slice")[0];
+                assert_eq!(
+                    word as usize & mask,
+                    C::index_of(code),
+                    "{name}: the stored code does not address the enumeration"
+                );
+            });
+        }
     }
 
     let table = i4_table();

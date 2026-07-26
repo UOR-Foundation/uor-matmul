@@ -1134,15 +1134,6 @@ fn admits(
 /// every `m`.
 const ROW_TILES: [usize; 5] = [16, 8, 4, 2, 1];
 
-/// The narrowest tile the traversal runs unpadded.
-///
-/// Below this the entry is smaller than the offset that addresses it, and the
-/// adds are one instruction each rather than one for the whole tile. Padding to
-/// here computes rows that are not there --- which is exact, because the
-/// alphabet's zero contributes nothing --- and measured it is the faster of the
-/// two at every `m` under it.
-const PADDED_TILE: usize = 8;
-
 /// Decode the whole codebook once, transposed, into the caller's panel offer.
 ///
 /// `book[index * block + t]` is element `t` of the `index`-th codeword, so one
@@ -1190,15 +1181,13 @@ pub const fn suggested_tabulation_panel(code_space: usize, block: usize) -> usiz
 }
 
 /// Output columns reduced together in one pass over the stack.
-/// Slots one [`TableSpec::gather`] call reduces at once.
+/// Slots one index run covers, when there is an index run to build.
 ///
-/// The call's index run is a fixed window on the stack, so the traversal's own
-/// depth --- which [`tabulation_depth`] derives from L2 --- is capped by this.
-/// That is a blocking parameter and not a ceiling on anything a caller supplies:
-/// a deeper reduction takes more windows, and `R8` is about limits on the input.
-///
-/// Measured, the depth that pays is between four and thirty-two, so this is
-/// above every value the derivation asks for and costs nothing.
+/// A frame size, and only that: a chunk deeper than this is walked in windows of
+/// it, so the traversal's own depth --- which [`tabulation_depth`] derives from
+/// L2 --- is not constrained by it and neither is any caller's `k` (R8). A codec
+/// whose stream already addresses the enumeration builds no run at all and never
+/// reaches this.
 const GATHER_SLOTS: usize = 32;
 
 /// Lane words one gather call keeps in flight.
@@ -1440,6 +1429,7 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         wide: *spec,
         single: E::table_spec(options.backend, Bd::VALUE, rows, 1),
         codes,
+        stream: C::as_index_stream(codes),
         codes_per_row,
         index,
         rows,
@@ -1476,16 +1466,10 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
                 // of block steps into one instruction finds the pair adjacent and
                 // needs no shuffle and no tail.
                 let base = (p0 + slot) * block;
-                let live = rows.min(shape.m - row0);
                 for t in 0..block {
-                    for i in 0..live {
+                    for i in 0..rows {
                         acts[packed_slot(t, i, rows, spec.k_group)] =
                             triple.a.at(row0 + i, base + t).get();
-                    }
-                    // The rows that are not there. Zero, which contributes
-                    // nothing to any entry and therefore nothing to any sum.
-                    for i in live..rows {
-                        acts[packed_slot(t, i, rows, spec.k_group)] = E::ZERO;
                     }
                 }
                 table.build(spec, block, book, &acts[..block * rows], slot, ledger);
@@ -1528,9 +1512,8 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
             }
         }
 
-        // The single encode step, exactly once per output element. The padded
-        // rows are not output elements and are never written.
-        for i in 0..rows.min(shape.m - row0) {
+        // The single encode step, exactly once per output element.
+        for i in 0..rows {
             for j in 0..cols {
                 let (r, c) = (row0 + i, col0 + j);
                 let prior = if reads_c {
@@ -1550,6 +1533,10 @@ struct Sweep<'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, L> {
     wide: TableSpec<E, L>,
     single: TableSpec<E, L>,
     codes: &'c [C::Code],
+    /// The operand's own memory, when the codec says it already addresses the
+    /// enumeration. Then there is no index stream to build --- the same rule
+    /// [`uor_matmul_core::MatView::row_block`] follows on the dense side.
+    stream: Option<&'c [u16]>,
     codes_per_row: usize,
     index: Option<&'c [usize]>,
     rows: usize,
@@ -1599,37 +1586,52 @@ where
             continue;
         }
         let whole = G > 1 && j + G <= cols && (1..G).all(present);
+        let (run, one) = if whole {
+            (G, &arg.wide)
+        } else {
+            (1, &arg.single)
+        };
         let base = (col0 + j) * cpr + p0;
-        if whole {
-            for slot in 0..depth {
-                for u in 0..G {
-                    off[slot * G + u] =
-                        (C::index_of(arg.codes[base + u * cpr + slot]) * rows) as u32;
+        let lane = &mut carried[j * rows..(j + run) * rows];
+        // One branch per group of columns, covering `depth * run * rows` adds,
+        // and it is the operand's layout that decides it --- not the data, and
+        // not a heuristic. Both arms compute the same lane words, which is what
+        // `CB-08` asserts.
+        match arg.stream {
+            Some(stream) => one.gather_codes(
+                depth,
+                arg.slab as u32,
+                stack,
+                &stream[base..base + (run - 1) * cpr + depth],
+                cpr,
+                lane,
+            ),
+            None => {
+                // In windows of the run buffer, so its size bounds a stack
+                // frame and never a reduction. The gather reads and writes the
+                // lane, so a window is the same accumulation continued.
+                let mut w = 0usize;
+                while w < depth {
+                    let take = GATHER_SLOTS.min(depth - w);
+                    for slot in 0..take {
+                        for u in 0..run {
+                            off[slot * run + u] =
+                                (C::index_of(arg.codes[base + u * cpr + w + slot]) * rows) as u32;
+                        }
+                    }
+                    one.gather(
+                        take,
+                        arg.slab as u32,
+                        &stack[w * arg.slab..(w + take) * arg.slab],
+                        &off[..take * run],
+                        lane,
+                    );
+                    w += take;
                 }
             }
-            arg.wide.gather(
-                depth,
-                arg.slab as u32,
-                stack,
-                &off[..depth * G],
-                &mut carried[j * rows..(j + G) * rows],
-            );
-            computed += G;
-            j += G;
-        } else {
-            for (slot, cell) in off[..depth].iter_mut().enumerate() {
-                *cell = (C::index_of(arg.codes[base + slot]) * rows) as u32;
-            }
-            arg.single.gather(
-                depth,
-                arg.slab as u32,
-                stack,
-                &off[..depth],
-                &mut carried[j * rows..(j + 1) * rows],
-            );
-            computed += 1;
-            j += 1;
         }
+        computed += run;
+        j += run;
     }
     computed
 }
@@ -1674,16 +1676,9 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
         // The widest tile the plan and the remaining rows admit. A shape that
         // does not divide walks down the list; it does not take a different path,
         // and `CD-13` asserts the bytes at every `m`.
-        // Zero padding is exact (S8), so a remainder narrower than the
-        // narrowest vector sequence is *padded up* to one rather than run
-        // without instructions. At a one-row tile the offset the gather reads
-        // is as wide as the entry it addresses; at eight it is an eighth of it,
-        // and the adds are one instruction instead of eight. The padded rows
-        // contribute zero and are never written.
-        let want = (shape.m - row0).next_power_of_two().max(PADDED_TILE);
         let rows = ROW_TILES
             .into_iter()
-            .find(|&r| r <= plan.rows && r <= want)
+            .find(|&r| r <= plan.rows && r <= shape.m - row0)
             .unwrap_or(1);
         // The sequence for *this* tile height. A narrower tile is a narrower
         // register file, not a different function, and the reference carries

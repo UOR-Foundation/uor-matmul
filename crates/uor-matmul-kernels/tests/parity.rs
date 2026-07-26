@@ -852,6 +852,43 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                         );
                         compared += 1;
                     }
+
+                    // The same reduction read from a code stream instead of an
+                    // index stream. Only where a codec could claim it: the
+                    // enumeration has to be addressed by the code, which needs a
+                    // power-of-two space.
+                    if codes == space {
+                        let stride = depth + 3;
+                        let stream: Vec<u16> = (0..(group - 1) * stride + depth)
+                            .map(|i| ((i * 37) % space) as u16)
+                            .collect();
+                        let by_off: Vec<u32> = (0..depth * group)
+                            .map(|i| {
+                                let (slot, u) = (i / group, i % group);
+                                (stream[u * stride + slot] as usize % space * rows) as u32
+                            })
+                            .collect();
+                        let mut want = vec![-3i32; group * rows];
+                        reference.gather(depth, slab as u32, &stack, &by_off, &mut want);
+                        for spec in &specs {
+                            let mut got = vec![-3i32; group * rows];
+                            spec.gather_codes(
+                                depth,
+                                slab as u32,
+                                &stack,
+                                &stream,
+                                stride,
+                                &mut got,
+                            );
+                            assert_eq!(
+                                got, want,
+                                "{:?} gather_codes disagrees at space {space}, rows {rows}, \
+                                 group {group}",
+                                spec.backend
+                            );
+                            compared += 1;
+                        }
+                    }
                 }
             }
         }

@@ -149,6 +149,30 @@ pub trait Enumerable<E: IntegerElement, Bd: Bound>: Codec<E, Bd> {
     /// mask that makes it *safe* holds unconditionally, and this is what makes
     /// the entry it lands on the right one.
     fn index_of(code: Self::Code) -> usize;
+
+    /// The stored code stream, read as the index stream it already is.
+    ///
+    /// `Some` when the code *addresses* the enumeration: when
+    /// `index_of(c) == (c as usize) & (CODE_SPACE - 1)` for every `c`, which
+    /// needs `CODE_SPACE` to be a power of two and the enumeration to be the
+    /// code type's own order. `None` otherwise --- a [`crate::Packed`] byte, for
+    /// one, whose index is a mixed-radix decomposition of it and not the byte.
+    ///
+    /// This is the same rule [`uor_matmul_core::MatView::row_block`] follows on
+    /// the dense side: *borrow when the layout already holds what is wanted,
+    /// copy otherwise*. A tabulated traversal addresses its table from an index
+    /// stream, and when the operand's own memory is one there is nothing to
+    /// build. Measured at a one-row tile, where the index a traversal would
+    /// materialize is as wide as the table entry it addresses, that pass was
+    /// two thirds of the work.
+    ///
+    /// The default is `None`, so a codec says nothing by saying nothing and the
+    /// traversal builds the stream. `CK-09` asserts the claim of any codec that
+    /// does answer `Some`.
+    fn as_index_stream(codes: &[Self::Code]) -> Option<&[u16]> {
+        let _ = codes;
+        None
+    }
 }
 
 /// Which tier a codec is.
