@@ -918,16 +918,54 @@ the part worth keeping:
 Every gate above now asserts what it names, and each fix was checked by putting
 the defect back and watching the gate fail.
 
-**Two things are recorded and not fixed.** `audit-purity`'s R2 half misses a bare
-float add between two float-typed variables: verified, it prints "no float
-arithmetic" with `t = t + b` on `f32` in a shipped crate, because it matches float
-*literals* and a token list. The file already calls this half "deliberately
-crude" and names `CU-01` as definitive, and `CU-01` is now hermetic --- but a
-source grep cannot type-check, and saying so is better than a rule that looks
-enforced. And the vector table sequences exist only at eight and sixteen rows; at
-four, two and one the reference carries the tile. Four `i32` is exactly one
-128-bit register, so that is unwritten work rather than an impossibility, and it
-is the next thing to measure.
+**The narrow rows do not want a vector sequence, and that is measured now rather
+than assumed.** The vector table sequences exist only at eight and sixteen rows;
+at four, two and one the reference carries the tile. What stood here said four
+`i32` is exactly one 128-bit register, so the absence was "unwritten work rather
+than an impossibility, and the next thing to measure". It has been measured. A
+128-bit column step at four rows --- the entry as one `__m128i`, four column
+accumulators as four more, the whole step four `paddd` instead of sixteen scalar
+adds --- runs at **46.9 Gmac/s against the scalar 46.4**, three times in a row:
+
+| | Gmac/s |
+| --- | --- |
+| scalar, rows 4, group 4 | 46.42 / 46.49 / 46.67 |
+| 128-bit vector, same shape | 46.86 / 46.66 / 46.91 |
+
+1.01x, which is nothing. The reason is worth keeping: at four rows the stack is
+`256 * 4 * 4` bytes per slot and 512 KiB over the run, so the column step is
+bound by the entry loads and not by the adds it issues. Vectorizing an add
+cannot speed up a loop that is waiting for memory. At one row the same argument
+is stronger --- the entry is four bytes, so a vector step would need a gather,
+and `vpgatherdd` on this microarchitecture is slower per element than the scalar
+load it replaces. The reference is not carrying those tiles as a stopgap; it is
+carrying them because there is nothing to win.
+
+**Two things are recorded and not fixed, and both are stated rather than
+smoothed over.**
+
+`audit-purity`'s R2 half misses a bare float add between two float-typed
+variables: verified, it prints "no float arithmetic" with `t = t + b` on `f32` in
+a shipped crate, because it matches float *literals* and a token list. The file
+already calls this half "deliberately crude" and names `CU-01` as definitive, and
+`CU-01` is now hermetic and per-crate accountable --- but a source grep cannot
+type-check, and saying so is better than a rule that looks enforced.
+
+`Alphabet` derives `bytemuck::TransparentWrapper`, which the library needs for
+the *peeling* direction --- `Alphabet<E, Bd>` back to `E`, which every kernel does
+and which cannot be wrong. The derive also gives the wrapping direction, so
+`Alphabet::<i8, Bnd<1>>::wrap(100)` compiles and runs: measured, it returns 100
+under a declared bound of 1. Nothing is unsound --- there is no UB, and every
+accumulation is still integer arithmetic --- but the narrow run lengths are
+derived from `Bd::VALUE`, so a violated declaration can overflow a narrow lane
+and give a wrong integer, which the checked profile would catch as a panic.
+
+`as_alphabet` is the checked constructor and returns `None` on exactly this; the
+bound is a declaration the caller makes, and `wrap` asserts it instead of
+checking it. Splitting the two directions means replacing the derive with
+inherent peel methods across three crates, which is a contract change worth doing
+deliberately rather than at the end of a release pass. It is written here so that
+the sharp edge is named and the consequence is exact.
 
 ## Against the oracles
 

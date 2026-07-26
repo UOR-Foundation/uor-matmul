@@ -5,7 +5,7 @@
 //! `133144` anywhere, and neither does a user who instantiates `(i8, 127)` with
 //! `k = 10^9` (R1, R8).
 
-use crate::alphabet::Element;
+use crate::alphabet::IntegerElement;
 
 /// Bits sufficient for any accumulation *any addressable machine* can express:
 ///
@@ -29,6 +29,14 @@ use crate::alphabet::Element;
 /// overflow it. There is no ladder, no policy, no promotion, and no `k_max` in
 /// the public API (§3.2).
 ///
+/// Over [`IntegerElement`], and only that. The formula is `2 * (BITS - 1)` for
+/// the two magnitudes, which is a statement about *magnitudes* --- a float has an
+/// exponent range instead, and its accumulator is a `Complete` spanning that
+/// range, whose width is `generated::complete_width`. Bounded on `Element`, this
+/// answered `127` for `f32`, whose accumulator is in fact 704 bits, while its own
+/// doc said the width is "this and nothing else": a public function giving a
+/// wrong answer about the one thing the library promises cannot overflow.
+///
 /// [`MAX_K_BITS`]: crate::generated::MAX_K_BITS
 ///
 /// # Examples
@@ -40,7 +48,7 @@ use crate::alphabet::Element;
 /// assert_eq!(acc_bits::<i8>(), 79);
 /// assert!(acc_bits::<i8>() <= 128);
 /// ```
-pub const fn acc_bits<E: Element>() -> u32 {
+pub const fn acc_bits<E: IntegerElement>() -> u32 {
     1 + crate::generated::MAX_K_BITS + 2 * (E::BITS - 1) + E::PRODUCT_TERMS.ilog2()
 }
 

@@ -756,9 +756,24 @@ fn run<E, Bd, O, Ep, L>(
     // still holds and the borrowed and copied traversals are asserted equal on
     // every narrow shape.
     let borrowable = matches!(spec.lane_layout, LaneLayout::Contiguous) && kpad == shape.k;
+    // The probe asks the question the loop asks, over the whole extent.
+    //
+    // It used to probe one *panel* --- `shape.m.min(mr)` rows --- and
+    // `MatView::row_block` skips its `rs == len` check when `rows == 1`, which it
+    // is whenever `mr == 1`, as it is for every reduce sequence. So a strided `A`
+    // passed a probe that never looked at its stride, `borrow_all` came out true,
+    // the panel buffers were reserved as empty on the strength of it, and the
+    // loop's own ask --- `mc` rows, where `mc` can be the whole of `m` --- then
+    // failed the check the probe had skipped and handed `pack_rows` a zero-length
+    // buffer. Measured: `2x64x1` with `lda = 65` panicked inside `gemm_packed`,
+    // through the safe view API and through `slice::gemm_ex`.
+    //
+    // Probing the whole extent is the honest form of the claim, and it implies
+    // every smaller ask: a narrower block at any offset needs the same
+    // `rs == kpad` and lies inside the window this one proved.
     let borrow_all = borrowable
-        && a.row_block(0, 0, shape.m.min(mr), kpad).is_some()
-        && b.column_block(0, 0, shape.n.min(nr), kpad).is_some()
+        && a.row_block(0, 0, shape.m, kpad).is_some()
+        && b.column_block(0, 0, shape.n, kpad).is_some()
         && shape.m.is_multiple_of(mr)
         && shape.n.is_multiple_of(nr);
 
@@ -1412,6 +1427,79 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, Full, MatView, MatViewMut};
+
+    /// `CS-02`, R14: a strided `A` takes the packed path and gives the same bytes.
+    ///
+    /// The borrow probe asked whether *one panel* of `A` was already a panel, and
+    /// `MatView::row_block` skips its `rs == len` check when `rows == 1` --- which
+    /// it is whenever `mr == 1`, as it is for every reduce sequence. So a strided
+    /// `A` passed a probe that never looked at its stride, the panel buffers were
+    /// reserved as empty on the strength of it, and the loop's own ask then failed
+    /// the skipped check and handed `pack_rows` a zero-length buffer. `2x64x1`
+    /// with `lda = 65` panicked inside `gemm_packed`, through the safe view API
+    /// and through `slice::gemm_ex`.
+    ///
+    /// A leading dimension larger than `k` is the most ordinary strided view
+    /// there is --- a sub-matrix of a wider buffer --- so this sweeps it against
+    /// the offer-free traversal, which borrows nothing and cannot be wrong about
+    /// what it borrowed.
+    #[test]
+    fn a_strided_a_takes_the_packed_path_cs_02() {
+        use uor_matmul_core::Strides;
+        for &(m, k, n) in &[
+            (2usize, 64usize, 1usize),
+            (2, 1024, 1),
+            (4, 64, 1),
+            (8, 128, 1),
+            (2, 32, 2),
+            (4, 96, 3),
+            (16, 64, 1),
+            (64, 64, 1),
+            (6, 48, 16),
+        ] {
+            for pad in [1usize, 4] {
+                let lda = k + pad;
+                let a: Vec<i8> = (0..m * lda)
+                    .map(|i| ((i * 13 % 255) as i64 - 127) as i8)
+                    .collect();
+                let b: Vec<i8> = (0..k * n)
+                    .map(|i| ((i * 7 % 255) as i64 - 127) as i8)
+                    .collect();
+                let strided = Strides {
+                    rs: lda as isize,
+                    cs: 1,
+                };
+                let mut want = vec![0i32; m * n];
+                {
+                    let av = MatView::new(as_alphabet_full(&a), m, k, strided).unwrap();
+                    let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+                    let cv = MatViewMut::row_major(&mut want, m, n).unwrap();
+                    let mut t = Triple::new(av, bv, cv).unwrap();
+                    crate::gemm(
+                        &mut t,
+                        &Linear::OVERWRITE,
+                        GemmOptions::default(),
+                        &mut Scratch::none(),
+                    );
+                }
+                let mut got = vec![0i32; m * n];
+                {
+                    let av = MatView::new(as_alphabet_full(&a), m, k, strided).unwrap();
+                    let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+                    let cv = MatViewMut::row_major(&mut got, m, n).unwrap();
+                    let mut t = Triple::new(av, bv, cv).unwrap();
+                    let mut buf = vec![Default::default(); 1 << 16];
+                    crate::gemm_packed(
+                        &mut t,
+                        &Linear::OVERWRITE,
+                        GemmOptions::default(),
+                        &mut Scratch::new(&mut buf),
+                    );
+                }
+                assert_eq!(got, want, "{m}x{k}x{n} at lda={lda}");
+            }
+        }
+    }
 
     /// `CT-01`, R14: a declared bound that shrinks the lane below a sequence's
     /// `k_group` still terminates, and still computes the sum.
