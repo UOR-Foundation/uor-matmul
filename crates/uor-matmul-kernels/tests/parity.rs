@@ -848,7 +848,27 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                         "the reference is listed first"
                     );
 
-                    // The build.
+                    // The build, against the model rather than against the
+                    // reference's own run. `T[c][i] = sum_t A[i][t] * D[c][t]` is
+                    // the whole definition, and below eight rows no ISA offers a
+                    // build sequence --- so `specs[1..]` is empty there and reading
+                    // `want` off the reference compared it with itself. The gather
+                    // half of this test was given a model oracle for exactly this
+                    // reason; the build half was left as it was.
+                    let model = {
+                        let mut out = vec![0i32; space * rows];
+                        for c in 0..space {
+                            for i in 0..rows {
+                                let mut acc = 0i32;
+                                for t in 0..block {
+                                    acc += i32::from(flat[t * rows + i])
+                                        * i32::from(book[c * block + t]);
+                                }
+                                out[c * rows + i] = acc;
+                            }
+                        }
+                        out
+                    };
                     let mut want = vec![0i32; space * rows];
                     reference.build(
                         space,
@@ -857,6 +877,12 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                         &pack(&flat, rows, block, &reference),
                         &mut want,
                     );
+                    assert_eq!(
+                        want, model,
+                        "the reference build disagrees with the model at space {space}, \
+                         block {block}, rows {rows}"
+                    );
+                    compared += 1;
                     for spec in &specs[1..] {
                         let mut got = vec![0i32; space * rows];
                         spec.build(
@@ -1029,6 +1055,42 @@ fn every_table_sequence_equals_the_reference_cb_08() {
             }
         }
     }
+    // `dispatch_slab!`'s wildcard, which is what keeps the enumeration from being
+    // a ceiling (R8). Sixteen exponents cover every code space a `u16` can name,
+    // and no shipped codec exceeds them --- but `slab` is a `u32` the caller
+    // passes, so a slab of `2^17` lane words at one row asks for a code count the
+    // list does not have, and that arm binds the constant to zero and reads the
+    // slab from its argument instead. Untested, that arm was the one line standing
+    // between the enumeration and a limit.
+    for shift in [17u32, 18, 20] {
+        let codes = 1usize << shift;
+        let (rows, group, depth) = (1usize, 1usize, 3usize);
+        let slab = codes * rows;
+        let stack: Vec<i32> = (0..depth * slab)
+            .map(|i| (i % 4096) as i32 - 2048)
+            .collect();
+        let off: Vec<u32> = (0..depth * group)
+            .map(|i| ((i * 37 * 101) % codes) as u32)
+            .collect();
+        let mut model = vec![0i32; group * rows];
+        for slot in 0..depth {
+            for u in 0..group {
+                let at = off[slot * group + u] as usize & (slab - 1);
+                model[u * rows] += stack[slot * slab + at];
+            }
+        }
+        for spec in available_table_i8(rows, group) {
+            let mut got = vec![0i32; group * rows];
+            spec.gather(depth, slab as u32, &stack, &off, &mut got);
+            assert_eq!(
+                got, model,
+                "{:?} disagrees on a code count past the dispatch list, 2^{shift}",
+                spec.backend
+            );
+            compared += 1;
+        }
+    }
+
     assert!(
         compared > 0,
         "CB-08 compared nothing; on a host with no table sequence beyond the \
@@ -1081,6 +1143,22 @@ fn every_i16_table_sequence_equals_the_reference_cb_08() {
                     let specs: Vec<_> = available_table_i16(rows, group).collect();
                     let reference = specs[0];
 
+                    // The model, for the reason the 32-bit lane has one: below
+                    // eight rows no ISA offers an `i16` build either.
+                    let model = {
+                        let mut out = vec![0i64; space * rows];
+                        for c in 0..space {
+                            for i in 0..rows {
+                                let mut acc = 0i64;
+                                for t in 0..block {
+                                    acc += i64::from(flat[t * rows + i])
+                                        * i64::from(book[c * block + t]);
+                                }
+                                out[c * rows + i] = acc;
+                            }
+                        }
+                        out
+                    };
                     let mut want = vec![0i64; space * rows];
                     reference.build(
                         space,
@@ -1089,6 +1167,12 @@ fn every_i16_table_sequence_equals_the_reference_cb_08() {
                         &pack(&flat, rows, block, &reference),
                         &mut want,
                     );
+                    assert_eq!(
+                        want, model,
+                        "the reference i16 build disagrees with the model at space {space}, \
+                         block {block}, rows {rows}"
+                    );
+                    compared += 1;
                     for spec in &specs[1..] {
                         let mut got = vec![0i64; space * rows];
                         spec.build(

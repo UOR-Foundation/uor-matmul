@@ -507,8 +507,16 @@ simd_gathers64! {
 ///
 /// # Safety
 ///
-/// [`crate::table::TableBuild`]'s contract, with `rows == V * 4` and
-/// `V` in `{2, 4}`.
+/// [`crate::table::TableBuild`]'s contract, with `rows == V * 4` and `V` even.
+///
+/// Parametric in `V`, as [`simd_build16`] is. It was hand-unrolled for `V` in
+/// `{2, 4}` behind two `if V == 4` branches, with the real precondition stated
+/// only in this comment: a third instantiation would have passed the one
+/// assertion, written `entry[0..2]`, and left the rest of the table zeroed ---
+/// silently, and in release. Sixteen activations is a whole register and four
+/// registers of the lane, so the loop below walks them; eight is a half-load that
+/// zeroes the rest, which is how a tile of eight never reads past its own row
+/// (S13, and the reason `v128_load64_zero` is here).
 unsafe fn simd_build<const V: usize>(
     rows: usize,
     space: usize,
@@ -518,6 +526,7 @@ unsafe fn simd_build<const V: usize>(
     out: *mut i32,
 ) {
     debug_assert_eq!(rows, V * SIMD_TABLE_LANES);
+    debug_assert!(V.is_multiple_of(2), "a register pair is the smallest step");
     // SAFETY: the caller established every extent.
     unsafe {
         for c in 0..space {
@@ -526,21 +535,25 @@ unsafe fn simd_build<const V: usize>(
             for t in 0..block {
                 let w = i16x8_splat(*d.add(t) as i16);
                 let a = acts.add(t * rows);
-                // Sixteen activations is a whole register; eight is a half-load
-                // that zeroes the rest, so a tile of eight never reads past its
-                // own row (S13, and the reason there is no `v128_load` here).
-                let x = if V == 4 {
-                    v128_load(a as *const v128)
-                } else {
-                    v128_load64_zero(a as *const u64)
-                };
-                let lo = i16x8_extend_low_i8x16(x);
-                entry[0] = i32x4_add(entry[0], i32x4_extmul_low_i16x8(lo, w));
-                entry[1] = i32x4_add(entry[1], i32x4_extmul_high_i16x8(lo, w));
-                if V == 4 {
+                // The whole registers: sixteen activations, four lanes' worth.
+                for quad in 0..V / 4 {
+                    let reg = quad * 4;
+                    let x = v128_load(a.add(quad * 16) as *const v128);
+                    let lo = i16x8_extend_low_i8x16(x);
+                    entry[reg] = i32x4_add(entry[reg], i32x4_extmul_low_i16x8(lo, w));
+                    entry[reg + 1] = i32x4_add(entry[reg + 1], i32x4_extmul_high_i16x8(lo, w));
                     let hi = i16x8_extend_high_i8x16(x);
-                    entry[2] = i32x4_add(entry[2], i32x4_extmul_low_i16x8(hi, w));
-                    entry[3] = i32x4_add(entry[3], i32x4_extmul_high_i16x8(hi, w));
+                    entry[reg + 2] = i32x4_add(entry[reg + 2], i32x4_extmul_low_i16x8(hi, w));
+                    entry[reg + 3] = i32x4_add(entry[reg + 3], i32x4_extmul_high_i16x8(hi, w));
+                }
+                // An even `V` that is not a multiple of four leaves one pair, and
+                // a half-load is what reads it without touching the next row.
+                if !V.is_multiple_of(4) {
+                    let reg = (V / 4) * 4;
+                    let x = v128_load64_zero(a.add((V / 4) * 16) as *const u64);
+                    let lo = i16x8_extend_low_i8x16(x);
+                    entry[reg] = i32x4_add(entry[reg], i32x4_extmul_low_i16x8(lo, w));
+                    entry[reg + 1] = i32x4_add(entry[reg + 1], i32x4_extmul_high_i16x8(lo, w));
                 }
             }
             let o = out.add(c * rows);

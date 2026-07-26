@@ -68,7 +68,18 @@ pub const fn limbs_for(bits: u32) -> usize {
 pub const fn fits_narrow(b: u128, cap: u128, k: usize) -> bool {
     // `b * b` is the worst-case magnitude of one product. A zero bound means an
     // alphabet with only zero in it, for which every k fits.
-    let per_step = b * b;
+    //
+    // Checked, because `b` is the caller's declaration and `Bnd<{1 << 64}>` is a
+    // legitimate one --- every `i8` is below it, so `as_alphabet` admits it. Its
+    // square is not a `u128`, and unchecked this panicked with "attempt to
+    // multiply with overflow" under the checked profile and wrapped to zero in
+    // release, where zero means "every depth fits a 32-bit lane" --- the answer
+    // that is not merely wrong but maximally so. A bound whose square is not
+    // representable does not fit any narrow register, which is what `None` here
+    // says, and the wide accumulator carries it as it carries everything else.
+    let Some(per_step) = b.checked_mul(b) else {
+        return false;
+    };
     if per_step == 0 {
         return true;
     }
@@ -160,6 +171,18 @@ mod tests {
         // honest answer on those targets is `Some`, not `None`. Reaching the
         // `None` by way of the bound instead of the depth asks the same question
         // of a 32-bit and a 64-bit host.
+        // A declaration whose *square* is not representable. `Bnd<{1 << 64}>` is
+        // a legitimate bound for any integer element --- every `i8` is below it,
+        // so `as_alphabet` admits it --- and `b * b` is then not a `u128`.
+        // Unchecked, this panicked under the checked profile and wrapped to zero
+        // in release, where zero per step reads as "a 32-bit lane holds every
+        // depth": not merely the wrong answer but the most wrong one available.
+        // No narrow register holds it, the wide accumulator does, and the sum is
+        // the same integer the full alphabet gives.
+        assert_eq!(narrow_cap_for(1u128 << 64, 1), None);
+        assert_eq!(narrow_cap_for(u128::MAX, 1), None);
+        assert!(!fits_narrow(1u128 << 64, i64::MAX as u128, 1));
+
         let wide = 1u128 << 31;
         assert!(
             wide * wide * 4 > i64::MAX as u128,

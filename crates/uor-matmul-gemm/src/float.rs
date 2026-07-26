@@ -730,51 +730,79 @@ mod tests {
     }
 
     /// `CD-05`: the encode mode is the only thing that changes the bytes for a
-    /// fixed accumulation. `Nearest` rounds half to even; `TowardZero`
-    /// truncates.
+    /// fixed accumulation. `Nearest` rounds half to even; `TowardZero` truncates.
+    ///
+    /// The discriminating case has to be a sum that is *not* a tie and *not*
+    /// representable, and this test had neither: it compared the two modes on a
+    /// sum exactly half an ulp past 1.0, where nearest-even and truncation both
+    /// keep 1.0 --- its own comment says so --- and then ran a second case that
+    /// was a whole ulp, hence exact, hence unrounded, and ran it under `Nearest`
+    /// only. Nothing here could fail on the encode mode, which is the one thing
+    /// the ID names.
+    ///
+    /// Three quarters of an ulp is the case that separates them.
     #[test]
     fn the_encode_mode_is_the_only_variable_cd_05() {
-        // A sum that needs rounding: 2^-24 past 1.0 is exactly half an ulp.
-        let a = [1.0f32, 1.0];
-        let b = [1.0f32, f32::from_bits(0x3380_0000)]; // 2^-24
-        let nearest = {
+        fn at_mode(a: &[f32], b: &[f32], encode: EncodeMode) -> f32 {
+            let k = b.len();
             let mut c = [0.0f32];
-            let av = MatView::row_major(&a, 1, 2).unwrap();
-            let bv = MatView::row_major(&b, 2, 1).unwrap();
-            let cv = MatViewMut::row_major(&mut c, 1, 1).unwrap();
-            let mut t = Triple::new(av, bv, cv).unwrap();
-            gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
-            c[0]
-        };
-        let toward_zero = {
-            let mut c = [0.0f32];
-            let av = MatView::row_major(&a, 1, 2).unwrap();
-            let bv = MatView::row_major(&b, 2, 1).unwrap();
+            let av = MatView::row_major(a, 1, k).unwrap();
+            let bv = MatView::row_major(b, k, 1).unwrap();
             let cv = MatViewMut::row_major(&mut c, 1, 1).unwrap();
             let mut t = Triple::new(av, bv, cv).unwrap();
             gemm_float(
                 &mut t,
                 &Linear::OVERWRITE,
                 GemmOptions {
-                    encode: EncodeMode::TowardZero,
+                    encode,
                     ..Default::default()
                 },
             );
             c[0]
-        };
-        // Exactly halfway: nearest-even keeps 1.0, truncation also keeps 1.0.
-        assert_eq!(nearest, 1.0);
-        assert_eq!(toward_zero, 1.0);
+        }
 
-        // Just past halfway: nearest rounds up, truncation does not.
-        let b2 = [1.0f32, f32::from_bits(0x3400_0000)]; // 2^-23, a full ulp
-        let mut c = [0.0f32];
-        let av = MatView::row_major(&a, 1, 2).unwrap();
-        let bv = MatView::row_major(&b2, 2, 1).unwrap();
-        let cv = MatViewMut::row_major(&mut c, 1, 1).unwrap();
-        let mut t = Triple::new(av, bv, cv).unwrap();
-        gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
-        assert_eq!(c[0], 1.0 + f32::EPSILON);
+        const HALF_ULP: f32 = f32::from_bits(0x3380_0000); // 2^-24
+        const QUARTER_ULP: f32 = f32::from_bits(0x3300_0000); // 2^-25
+
+        // `1 + 3/4 ulp`: above the midpoint, below the next value, and not a tie.
+        // Nearest goes up, truncation stays. This is the assertion the ID is about.
+        let ones = [1.0f32, 1.0, 1.0];
+        let three_quarters = [1.0f32, HALF_ULP, QUARTER_ULP];
+        let nearest = at_mode(&ones, &three_quarters, EncodeMode::Nearest);
+        let toward_zero = at_mode(&ones, &three_quarters, EncodeMode::TowardZero);
+        assert_eq!(
+            nearest,
+            1.0 + f32::EPSILON,
+            "nearest rounds up past halfway"
+        );
+        assert_eq!(toward_zero, 1.0, "truncation keeps the smaller neighbour");
+        assert_ne!(
+            nearest, toward_zero,
+            "the encode mode has to be able to change the bytes, or this ID \
+             asserts nothing"
+        );
+
+        // And the tie, where they agree: half to even keeps the even mantissa and
+        // truncation keeps the same value for its own reason. Recorded because it
+        // is the case that *cannot* discriminate, which is what made this test
+        // vacuous when it was the only case.
+        let pair = [1.0f32, 1.0];
+        let tie = [1.0f32, HALF_ULP];
+        assert_eq!(at_mode(&pair, &tie, EncodeMode::Nearest), 1.0);
+        assert_eq!(at_mode(&pair, &tie, EncodeMode::TowardZero), 1.0);
+
+        // A sum that is exactly representable is unrounded, so both modes give it
+        // back unchanged --- the third case, and the reason a full ulp could not
+        // discriminate either.
+        let exact = [1.0f32, f32::EPSILON];
+        assert_eq!(
+            at_mode(&pair, &exact, EncodeMode::Nearest),
+            1.0 + f32::EPSILON
+        );
+        assert_eq!(
+            at_mode(&pair, &exact, EncodeMode::TowardZero),
+            1.0 + f32::EPSILON
+        );
     }
 
     /// Subnormals are not a special case: gradual underflow falls out of the
