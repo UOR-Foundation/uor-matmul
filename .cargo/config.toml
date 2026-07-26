@@ -7,3 +7,18 @@ vv = "run --package xtask -- validate"
 
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
+
+# `just cross-run` executes the ISAs this host has no register for. Both are
+# emulators, and both run the real test binaries rather than a transcription of
+# them, so `CB-04` and `CB-05` are asserted by a run and not by a compile.
+#
+# A missing emulator fails loudly here --- cargo cannot find the linker or the
+# runner and says so. That is deliberate: a cross gate that skipped when its
+# tooling was absent would pass on every machine that could not run it, which is
+# the exact shape of the hole that let a broken NEON sequence ship.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+runner = "qemu-aarch64 -L /usr/aarch64-linux-gnu"
+
+[target.wasm32-wasip1]
+runner = "wasmtime"

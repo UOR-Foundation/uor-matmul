@@ -44,14 +44,35 @@ no-alloc:
     cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
     cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown \
         --config 'build.rustflags=["-C","target-feature=+simd128"]'
-    # The NEON kernels compile on no host that can run them, so a break in them
-    # would otherwise reach CI before it reached the author. Building here does
-    # not exercise them --- the `cross` job does that, natively --- but it does
-    # mean the ISA the canonical instantiation cares about most cannot rot.
     cargo check -p uor-matmul --target aarch64-unknown-linux-gnu
 
+# The crates that carry an ISA sequence or a width that a 32-bit `usize` can
+# change. `uor-matmul-conformance` and `-validate` are absent because their tests
+# read the repository's own files, which a WASI sandbox does not hand them.
+cross_crates := "-p uor-matmul-core -p uor-matmul-codec -p uor-matmul-kernels -p uor-matmul-gemm"
+
+# CB-04, CB-05: execute the sequences no register here can run.
+#
+# This exists because the alternative was believing them. A NEON `i16` build that
+# re-read four rows and never read the last four compiled cleanly, passed every
+# gate, and was wrong on every ARM host; one `cargo test` under `qemu-aarch64`
+# found it in a quarter of a second. Two tests that asserted a 64-bit `usize`
+# went the same way under `wasmtime`.
+#
+# `--release` because a debug NEON build takes minutes under emulation and
+# proves the same thing.
+cross-run:
+    cargo test --release --target aarch64-unknown-linux-gnu {{cross_crates}}
+    # CB-05 is the claim that the two wasm configurations agree, so both are
+    # *run*. Neither is implied: with SIMD128 off the selector offers only the
+    # portable sequence, and the comparison the parity tests make is a different
+    # one --- measured, 525 sequence comparisons against 657.
+    cargo test --release --target wasm32-wasip1 {{cross_crates}}
+    RUSTFLAGS="-C target-feature=+simd128" \
+        cargo test --release --target wasm32-wasip1 {{cross_crates}}
+
 # CA-02: the corpus digest is the same on every target.
-cross: no-alloc
+cross: no-alloc cross-run
     cargo test -p uor-matmul-conformance --test environment
 
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a

@@ -19,3 +19,15 @@ bytemuck = { workspace = true }
 
 [lints]
 workspace = true
+
+# The driver's tests need the *kernels* crate's runtime feature detection, for
+# the same reason `uor-matmul-kernels` needs its own: without it the harness
+# links the kernels with `std` off, every `available_*` predicate answers from
+# the build's target features, and every table sequence resolves to the portable
+# one. Then `k_group` is always one, no vector layout is ever packed, and
+# `CD-13`, `CU-06` and `CM-04` assert the driver against a sequence no consumer
+# on this host will run. `uor-matmul-kernels` learned this and this crate did
+# not: measured, an odd `MAX_BLOCK` panicked inside `gemm` for any consumer with
+# runtime detection on, and the driver's own suite could not see it.
+[dev-dependencies]
+uor-matmul-kernels = { workspace = true, features = ["std"] }

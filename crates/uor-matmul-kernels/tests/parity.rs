@@ -342,6 +342,59 @@ fn backend_selection_cannot_fail_cd_01() {
         assert!(choose_for_rows(available_i64_modular(), backend, 1 << 63, usize::MAX).is_some());
     }
     assert!(choose_for_rows(available_i8(), Backend::Auto, 128, usize::MAX).is_some());
+
+    // The *table* sequences answer for every backend at every tile the driver
+    // walks, for the same reason and with no weaker a claim. This half was
+    // absent, and `choose_table` filtered the reference out on a named backend
+    // rather than falling through to it: measured here before the fix, 246 of
+    // these 250 selections were `None`, and every one of them was a panic inside
+    // `gemm` -- including `Backend::Avx2` on an AVX2 host at every tile below
+    // eight rows, which is every `m` under eight.
+    // `block` is swept too, and the odd widths are the point: a sequence that
+    // folds `k_group` block steps into one instruction cannot pack a block that
+    // is not a whole number of them, so it is inadmissible there. The reference
+    // declares `k_group: 1`, which divides every block, so something is always
+    // left to choose --- and whatever is chosen must be able to pack what it was
+    // chosen for.
+    let mut selections = 0usize;
+    for backend in Backend::ALL.iter().copied().chain([Backend::Auto]) {
+        for rows in [16usize, 8, 4, 2, 1] {
+            for group in [16usize, 8, 4, 2, 1] {
+                for block in [1usize, 2, 3, 5, 8] {
+                    let i8_spec = uor_matmul_kernels::choose_table(
+                        uor_matmul_kernels::available_table_i8(rows, group),
+                        backend,
+                        128,
+                        block,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!("i8 table selection failed at {backend:?} {rows}x{group} b={block}")
+                    });
+                    assert!(
+                        block.is_multiple_of(i8_spec.k_group),
+                        "i8 {backend:?} {rows}x{group} b={block} chose k_group={} it cannot pack",
+                        i8_spec.k_group
+                    );
+                    let i16_spec = uor_matmul_kernels::choose_table(
+                        uor_matmul_kernels::available_table_i16(rows, group),
+                        backend,
+                        32768,
+                        block,
+                    )
+                    .unwrap_or_else(|| {
+                        panic!("i16 table selection failed at {backend:?} {rows}x{group} b={block}")
+                    });
+                    assert!(
+                        block.is_multiple_of(i16_spec.k_group),
+                        "i16 {backend:?} {rows}x{group} b={block} chose k_group={} it cannot pack",
+                        i16_spec.k_group
+                    );
+                    selections += 2;
+                }
+            }
+        }
+    }
+    assert!(selections > 0, "CD-01's table half compared nothing");
 }
 
 /// `CU-02`: a modular lane has no depth limit, because the wrap is the encode

@@ -1096,13 +1096,53 @@ impl<E, L> IntoSpec<E, L> for Option<TableSpec<E, L>> {
 /// Last, not first, because the list is written reference-first and every entry
 /// after it issues fewer instructions for the same integer. `Backend::Portable`
 /// pins the reference, which is what the parity tests compare against.
+///
+/// **Selection cannot fail**, exactly as [`crate::choose`] cannot, and for the
+/// same reason: a named backend this host has no sequence for yields the first
+/// admissible entry --- the reference --- which computes the same integer. That
+/// is not a fallback, because no answer is given up (R13).
+///
+/// `block` is the codec's codeword width, and a sequence whose `k_group` does
+/// not divide it is inadmissible for the same reason a too-narrow `max_bound`
+/// is. Without that term an odd `MAX_BLOCK` --- `Book<_, _, N, 3>` is ordinary
+/// public API --- selected a `k_group: 2` sequence and panicked in the driver's
+/// packer, for every consumer with runtime detection on.
+///
+/// This filtered on the backend and returned `None` instead, and the caller's
+/// `.expect("the reference sequence is always present")` then panicked. The
+/// reference *is* always present; it was the filter that removed it. Measured
+/// over `Backend::ALL` at every `(rows, group)` the driver walks, 246 of 250
+/// selections came back `None` --- including `Backend::Avx2` on an AVX2 host at
+/// every tile below eight rows, which is every `m` under eight. `gemm` returns
+/// `()` and has no failure to report (R14), so this could only ever have been a
+/// crash.
 pub fn choose_table<E, L>(
     specs: impl Iterator<Item = TableSpec<E, L>>,
     backend: Backend,
     bound: u128,
+    block: usize,
 ) -> Option<TableSpec<E, L>> {
-    specs
-        .filter(|s| bound <= s.max_bound)
-        .filter(|s| backend == Backend::Auto || s.backend == backend)
-        .last()
+    let mut first = None;
+    let mut widest = None;
+    let mut named = None;
+    // A sequence that folds `k_group` block steps into one instruction has no
+    // way to express a block that is not a whole number of them --- it is not
+    // slower on such a block, it cannot pack it at all, which is what
+    // [`TableSpec::build`] asserts. So it is not a factorization of *this*
+    // identity and is not considered, exactly as an inadmissible `max_bound` is
+    // not. The reference declares `k_group: 1`, which divides every block, so
+    // there is always something left to choose (R13).
+    for spec in specs.filter(|s| bound <= s.max_bound && block.is_multiple_of(s.k_group)) {
+        if first.is_none() {
+            first = Some(spec);
+        }
+        if spec.backend == backend {
+            named = Some(spec);
+        }
+        widest = Some(spec);
+    }
+    match backend {
+        Backend::Auto => widest.or(first),
+        _ => named.or(first),
+    }
 }

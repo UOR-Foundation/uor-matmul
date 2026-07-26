@@ -523,6 +523,7 @@ pub fn suggested_tabulation_lanes<E: Tabulated, Bd: Bound>(
         usize::MAX,
         usize::MAX,
         block,
+        <E::Lane as Lane<E>>::capacity(Bd::VALUE),
     ) else {
         return 0;
     };
@@ -554,6 +555,7 @@ pub fn suggested_tabulation<E: Tabulated, Bd: Bound>(
         usize::MAX,
         usize::MAX,
         block,
+        <E::Lane as Lane<E>>::capacity(Bd::VALUE),
     ) else {
         return 0;
     };
@@ -775,6 +777,7 @@ pub trait Tabulated: Kernelized {
         bound: u128,
         rows: usize,
         group: usize,
+        block: usize,
     ) -> TableSpec<Self, Self::Lane>;
 
     /// Borrow `want` lane words out of whichever offer this family's lane lives
@@ -800,8 +803,14 @@ impl Tabulated for i8 {
     type Lane = i32;
     const LANE_IS_EXACT: bool = false;
 
-    fn table_spec(backend: Backend, bound: u128, rows: usize, group: usize) -> TableSpec<i8, i32> {
-        choose_table(available_table_i8(rows, group), backend, bound)
+    fn table_spec(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i8, i32> {
+        choose_table(available_table_i8(rows, group), backend, bound, block)
             .expect("the reference sequence is always present")
     }
 
@@ -820,8 +829,14 @@ impl Tabulated for i16 {
     type Lane = i64;
     const LANE_IS_EXACT: bool = false;
 
-    fn table_spec(backend: Backend, bound: u128, rows: usize, group: usize) -> TableSpec<i16, i64> {
-        choose_table(available_table_i16(rows, group), backend, bound)
+    fn table_spec(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i16, i64> {
+        choose_table(available_table_i16(rows, group), backend, bound, block)
             .expect("the reference sequence is always present")
     }
 
@@ -847,8 +862,11 @@ impl Tabulated for i32 {
         bound: u128,
         rows: usize,
         group: usize,
+        block: usize,
     ) -> TableSpec<i32, Wide<AccOf<i32>>> {
-        let _ = (backend, bound);
+        // The reference is the only sequence for this family, and its `k_group`
+        // is one, which divides every block.
+        let _ = (backend, bound, block);
         portable_table::<i32, Wide<AccOf<i32>>>(rows, group)
     }
 
@@ -871,8 +889,11 @@ impl Tabulated for i64 {
         bound: u128,
         rows: usize,
         group: usize,
+        block: usize,
     ) -> TableSpec<i64, Wide<AccOf<i64>>> {
-        let _ = (backend, bound);
+        // The reference is the only sequence for this family, and its `k_group`
+        // is one, which divides every block.
+        let _ = (backend, bound, block);
         portable_table::<i64, Wide<AccOf<i64>>>(rows, group)
     }
 
@@ -923,6 +944,7 @@ impl Plan {
         exact_offer: usize,
         lane_offer: usize,
         block: usize,
+        lane_capacity: Option<usize>,
     ) -> Option<Self> {
         if code_space == 0 || block == 0 || shape.m == 0 || shape.n == 0 {
             return None;
@@ -943,11 +965,19 @@ impl Plan {
         // `rows * cols` words and is claimed first because the reduction cannot
         // proceed without it.
         let for_stack = lane_offer.saturating_sub(rows * cols);
+        // The lane's own capacity is a term here, not an afterthought handled
+        // downstream. `row_tile` places a run when *another* chunk would not fit,
+        // so a `depth` already past the lane has overflowed it before the first
+        // placement can happen --- the guard cannot rescue the first chunk. For
+        // every family this library ships the ratio is enormous (16643 blocks at
+        // `(i8, i32)` and `Bk = 8`, against a depth of at most `GATHER_SLOTS`),
+        // so this binds on nothing shipped and costs nothing; it is here because
+        // a bound that only holds by arithmetic nobody checked is not a bound.
         let by_cache = tabulation_depth(
             code_space,
             rows,
             block,
-            None,
+            lane_capacity,
             blocking::L2_BYTES,
             lane_bytes,
         );
@@ -1066,7 +1096,15 @@ fn run<E, Bd, C, O, Ep, Lg>(
     } else {
         core::mem::size_of_val(&*words) / lane_bytes
     };
-    let Some(plan) = Plan::choose(space, shape, lane_bytes, exact_offer, offered, block) else {
+    let Some(plan) = Plan::choose(
+        space,
+        shape,
+        lane_bytes,
+        exact_offer,
+        offered,
+        block,
+        <E::Lane as Lane<E>>::capacity(Bd::VALUE),
+    ) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
@@ -1077,6 +1115,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
         Bd::VALUE,
         plan.rows,
         column_group(plan.rows),
+        block,
     );
     let dense = E::exact_spec(options.backend, Bd::VALUE, plan.rows);
     let steps = Steps {
@@ -1457,7 +1496,7 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     // The two widths this tile reduces at, resolved once. `wide` is the group
     // the tile height asks for; `single` is the one column an operand's repeats
     // or a shape that does not divide leaves over.
-    let arg = Sweep {
+    let mut arg = Sweep {
         wide: *spec,
         // The same sequence when the group is one, which is every widest tile.
         // Looking it up twice would be asking a question whose answer is in the
@@ -1465,12 +1504,17 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         single: if group == 1 {
             *spec
         } else {
-            E::table_spec(options.backend, Bd::VALUE, rows, 1)
+            E::table_spec(options.backend, Bd::VALUE, rows, 1, block)
         },
         codes,
         stream: C::as_index_stream(codes),
         codes_per_row,
-        index,
+        // Set per column block, from `collapsed` rather than from `index`. The
+        // sweep *skips* a repeated column and the expansion below *fills* it,
+        // and the two have to be reading the same decision: a sweep that skips
+        // on `index` while the expansion fills on `collapsed` leaves every
+        // repeat of a narrowed block holding whatever was in the accumulator.
+        index: None,
         rows,
         slab,
     };
@@ -1497,6 +1541,9 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         } else {
             None
         };
+        // One decision, read in both places. `sweep` consults this to skip a
+        // repeat; the expansion below consults it to fill one.
+        arg.index = collapsed;
 
         let mut p0 = 0usize;
         let mut in_run = 0usize;
@@ -1736,7 +1783,7 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
         // register file, not a different function, and the reference carries
         // every height no vector sequence has (R13).
         let group = column_group(rows);
-        let spec = E::table_spec(options.backend, Bd::VALUE, rows, group);
+        let spec = E::table_spec(options.backend, Bd::VALUE, rows, group, block);
         let Some(mut table) = Table::new(stack, space, rows, plan.depth) else {
             // `Plan::choose` sized the offer for the widest tile it admits and
             // `rows` is never wider, so this cannot be reached. It is written as
@@ -1948,7 +1995,7 @@ mod tests {
     use crate::epilogue::Linear;
     use std::vec;
     use std::vec::Vec;
-    use uor_matmul_codec::{e8_codec, e8_table, Grid, Packed};
+    use uor_matmul_codec::{e8_codec, e8_table, Book, Grid, Packed};
     use uor_matmul_core::{as_alphabet_full, EncodeMode, Full, Triple};
 
     type A8 = Alphabet<i8, Full<i8>>;
@@ -2008,15 +2055,21 @@ mod tests {
 
     /// One tabulated product at one traversal and one pair of offers.
     ///
-    /// The offers scale together, because a caller who halves one halves the
-    /// other; `CD-13` sweeps the fraction rather than the two independently.
+    /// The two offers move *independently*, and they have to: nothing obliges a
+    /// caller who halves the accumulators to halve the lane and index buffers
+    /// too, and the documented contract on [`suggested_tabulation`] invites
+    /// exactly that ("offering less narrows the column block"). A sweep that
+    /// scaled them together left the disagreeing case unreachable, and a
+    /// narrowed column block that skipped a repeated column without filling it
+    /// lived there --- silently, at 896 wrong cells out of 1024.
     fn tabulated<C: Enumerable<i8, Full<i8>> + Copy>(
         w: &CodedMatrix<'_, i8, Full<i8>, C>,
         a: &[i8],
         m: usize,
         n: usize,
         traversal: Traversal,
-        offer: usize,
+        acc_offer: usize,
+        aux_offer: usize,
     ) -> (Vec<i32>, Census) {
         let k = w.cols();
         let shape = Shape { m, k, n };
@@ -2027,22 +2080,22 @@ mod tests {
         // `offer` is a numerator over the suggested amount, so one knob sweeps
         // both buffers and the extremes -- nothing, one word, exactly enough --
         // are all reachable.
-        let scale = |want: usize| -> usize {
+        let scale = |want: usize, offer: usize| -> usize {
             if offer >= OFFER_STEPS {
                 want.saturating_mul(offer - OFFER_STEPS + 1)
             } else {
                 want * offer / OFFER_STEPS
             }
         };
-        let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; scale(want_acc)];
-        let mut lane_words = vec![0i64; scale(want_lanes)];
-        let mut ids = vec![0usize; scale(suggested_tabulation_index(shape))];
+        let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; scale(want_acc, acc_offer)];
+        let mut lane_words = vec![0i64; scale(want_lanes, aux_offer)];
+        let mut ids = vec![0usize; scale(suggested_tabulation_index(shape), aux_offer)];
         // At the top of the sweep the panel holds the whole decoded operand, so
         // the tile-kernel route is exercised too; below it, only the table and the
         // stream can be reached. All three are asserted against the same bytes.
         let want_panel = suggested_tabulation_panel(C::CODE_SPACE, block)
             .max(n * k + crate::suggested_scratch(shape));
-        let mut panel = vec![A8::ZERO; scale(want_panel)];
+        let mut panel = vec![A8::ZERO; scale(want_panel, aux_offer)];
         let mut c = vec![0i32; m * n];
         let mut census = Census::default();
         {
@@ -2087,7 +2140,7 @@ mod tests {
             Traversal::OutputMajor,
         ] {
             for offer in offers {
-                let (got, census) = tabulated(&w, &a, m, n, traversal, offer);
+                let (got, census) = tabulated(&w, &a, m, n, traversal, offer, offer);
                 assert_eq!(
                     got, want,
                     "{label} {m}x{k}x{n}: {traversal:?} at an offer of {offer} \
@@ -2096,18 +2149,42 @@ mod tests {
             }
         }
 
+        // The two offers, disagreeing. Every combination has to give the dense
+        // driver's bytes, because each one is a legitimate call: `CD-13`'s claim
+        // is that an offer changes the *traversal* and never the answer.
+        //
+        // This is the pair the single knob could not reach. An accumulator offer
+        // below the suggested one narrows the column block, and a narrowed block
+        // cannot collapse repeated columns --- a repeat's first occurrence has to
+        // be inside the block to be copied from. The sweep read that decision
+        // from the index it was handed and the expansion read it from the block
+        // width, so with the index buffer full and the accumulators short, every
+        // repeat was skipped and never filled.
+        for acc_offer in 1..=OFFER_STEPS {
+            for aux_offer in 1..=OFFER_STEPS {
+                let (got, census) =
+                    tabulated(&w, &a, m, n, Traversal::Tabulated, acc_offer, aux_offer);
+                assert_eq!(
+                    got, want,
+                    "{label} {m}x{k}x{n}: accumulators at {acc_offer}/{OFFER_STEPS} and \
+                     lanes at {aux_offer}/{OFFER_STEPS} must give the dense driver's \
+                     bytes ({census:?})"
+                );
+            }
+        }
+
         // The collapse is reached and is not vacuous: an operand whose columns
         // repeat is charged for the ones it has.
         if C::CODE_SPACE > 0 {
-            let (_, full) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS);
+            let (_, full) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
             assert!(full.table_reads > 0 || full.kernel_calls > 0);
         }
 
         // And the comparison is not vacuous: each of the three factorizations is
         // reached by some offer, and the census says which ran rather than the
         // predicate being asked to say it again.
-        let (_, with) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS);
-        let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0);
+        let (_, with) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
+        let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0, 0);
         assert!(
             with.table_reads > 0,
             "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
@@ -2118,7 +2195,15 @@ mod tests {
         );
         // `OutputMajor` names the streaming traversal, and the whole panel offer
         // does not change that: a caller who asks to stream streams.
-        let (_, streamed) = tabulated(&w, &a, m, n, Traversal::OutputMajor, OFFER_STEPS);
+        let (_, streamed) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::OutputMajor,
+            OFFER_STEPS,
+            OFFER_STEPS,
+        );
         assert_eq!(streamed.table_reads, 0);
         assert_eq!(streamed.multiplies, (m * k * n) as u64);
     }
@@ -2160,6 +2245,24 @@ mod tests {
             }
         }
 
+        // An *odd* codeword width. `Book<_, _, N, 3>` is ordinary public API, and
+        // no vector table sequence can pack it: they fold `k_group == 2` block
+        // steps into one instruction, and three is not a whole number of pairs.
+        // Selection has to decline them and leave the reference, which declares
+        // `k_group: 1`. It did not, and the driver's packer indexed past the
+        // activation tile and panicked --- for every consumer with runtime CPU
+        // detection on, which is every consumer of `uor-matmul` with default
+        // features. This crate's own tests could not see it until they linked the
+        // kernels with `std`.
+        let odd: [[A8; 3]; 64] = core::array::from_fn(|c| {
+            core::array::from_fn(|t| Alphabet::of(((c * 7 + t * 13) % 200) as i64 as i8))
+        });
+        let odd_book = Book::<i8, Full<i8>, 64, 3>::new(&odd);
+        for &(m, k, n) in &[(1usize, 3usize, 1usize), (16, 24, 32), (5, 9, 37)] {
+            let stream: Vec<u16> = fill(n * (k / 3), 0x0dd, |x| (x % 64) as u16);
+            every_traversal_agrees("Book<64,3>", odd_book, &stream, m, k, n);
+        }
+
         let i4: [A8; 16] = core::array::from_fn(|i| Alphabet::of((i as i8) - 8));
         let grid = Grid::<i8, Full<i8>, 16>::new(&i4);
         let packed = Packed::<_, 2>::new(grid).expect("2 divides 8");
@@ -2185,7 +2288,7 @@ mod tests {
         let w = CodedMatrix::new(book, n, k, &stream).expect("65536 rows of one code");
         let a: Vec<i8> = fill(k, 0xfeed, |x| ((x % 255) as i64 - 127) as i8);
 
-        let (got, census) = tabulated(&w, &a, 1, n, Traversal::Tabulated, OFFER_STEPS);
+        let (got, census) = tabulated(&w, &a, 1, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
         assert!(census.table_reads > 0, "the table must have been read");
         assert_eq!(got, reference(&w, &a, 1, k, n));
 
@@ -2236,7 +2339,7 @@ mod tests {
         let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
         let a: Vec<i8> = fill(m * k, activation_salt(), |x| ((x % 255) as i64 - 127) as i8);
 
-        let (got, census) = tabulated(&w, &a, m, n, Traversal::Blocked, OFFER_STEPS);
+        let (got, census) = tabulated(&w, &a, m, n, Traversal::Blocked, OFFER_STEPS, OFFER_STEPS);
         assert_eq!(
             got,
             reference(&w, &a, m, k, n),
@@ -2280,7 +2383,15 @@ mod tests {
 
         // The streaming traversal is the same identity and issues the products
         // themselves, which is what makes the comparison above mean anything.
-        let (streamed, plain) = tabulated(&w, &a, m, n, Traversal::OutputMajor, OFFER_STEPS);
+        let (streamed, plain) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::OutputMajor,
+            OFFER_STEPS,
+            OFFER_STEPS,
+        );
         assert_eq!(streamed, got);
         assert_eq!(plain.multiplies, dense);
         assert_eq!(plain.table_reads, 0);
