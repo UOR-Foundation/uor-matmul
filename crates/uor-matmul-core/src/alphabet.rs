@@ -819,11 +819,25 @@ mod float_tests {
             else {
                 panic!("{x} is finite");
             };
-            // Reconstruct without float arithmetic: compare against the
-            // magnitude the bits describe.
-            let reconstructed = (mantissa as f64) * (2f64).powi(exp);
+            // Reconstruct exactly, and the two words matter. `powi` is an
+            // *approximation* of a power --- Miri models that by perturbing it,
+            // which is how this read `1.0000000000000004` against `1.0` the first
+            // time the job ever ran. The scale here is a power of two, so it is
+            // built from its own bits, and an `f32` mantissa times it is exact in
+            // an `f64`: at most 24 significant bits against 53, and `exp` for
+            // every finite `f32` lies in `[-149, 104]`, well inside `f64`'s
+            // normal range.
+            let reconstructed = if mantissa == 0 {
+                0.0
+            } else {
+                (mantissa as f64) * f64::from_bits(((exp + 1023) as u64) << 52)
+            };
             let expected = x as f64;
-            assert_eq!(reconstructed, if sign { -expected } else { expected }.abs());
+            // Two assertions, not one. `if sign { -expected } else { expected }
+            // .abs()` takes the magnitude of the whole expression, so the decoded
+            // sign never entered it and no negative decode was ever checked.
+            assert_eq!(sign, x.is_sign_negative(), "sign of {x}");
+            assert_eq!(reconstructed, expected.abs(), "magnitude of {x}");
         }
         // The smallest subnormal is the unit in the last place of the format.
         let tiny = f32::from_bits(1);

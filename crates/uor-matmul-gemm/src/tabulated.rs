@@ -2338,7 +2338,17 @@ mod tests {
         let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
         let a: Vec<i8> = fill(m * k, activation_salt(), |x| ((x % 255) as i64 - 127) as i8);
 
-        let (got, census) = tabulated(&w, &a, m, n, Traversal::Blocked, OFFER_STEPS, OFFER_STEPS);
+        // `Tabulated`, not `Blocked`. These are closed forms *of the tabulated
+        // column loop*, so the loop has to run for them to be counted --- and
+        // whether `Blocked` selects it is a question about the host, not about the
+        // loop. On a VNNI runner the dense tile is four times denser per
+        // instruction while the table is not, so `tabulation_pays` correctly
+        // declines at this shape and the census came back
+        // `adds: 0, table_reads: 0, kernel_calls: 1`. That is the predicate being
+        // right, and it made this test fail on whichever CI runner happened to
+        // have VNNI while passing on the ones that did not. The predicate's own
+        // claim is `CM-04`'s, and it asserts that VNNI case directly.
+        let (got, census) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
         assert_eq!(
             got,
             reference(&w, &a, m, k, n),
