@@ -90,6 +90,15 @@ honesty = "build"
 # it selected tabulation at `1000x512x512`, where the kernels were four times
 # faster per product.
 #
+# The block is also the *density* knob, and that is the claim worth reading twice.
+# One 256-bit add covers `8 * block` products at a 32-bit lane: eight output rows,
+# each carrying a whole codeword. At `Book<256, 8>` that is 64 products per
+# arithmetic instruction, against 32 for `vpdpbusd` --- the densest integer
+# instruction x86 has --- which cannot be told to cover more. A codec that names a
+# longer block is a denser instruction, with no change to the hardware and none to
+# the traversal. What it pays is `lane_bytes / block` bytes per product, so a
+# longer block buys traffic as well.
+#
 # `break_even_n` is the first `n` at which the table wins, and it is absent when no
 # `n` does --- either because `block = 1` names one element per code, or because
 # `block * rows` does not even reach what one dense instruction covers.

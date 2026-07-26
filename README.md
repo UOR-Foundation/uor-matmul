@@ -128,6 +128,52 @@ Consequences, stated plainly:
 - Non-finite inputs are codes too. NaN and infinity propagate by the IEEE rules;
   they are not an error condition.
 
+## When the operand is a code, the product is a table read
+
+The weights arrive as codes. Decoding them and multiplying issues the same
+`m*k*n` products a dense GEMM does, plus a decode. Indexing a table *by* the code
+issues far fewer:
+
+```text
+T[i][p][c] = sum over t < Bk of  A[i, p*Bk + t] * decode(c, t)
+C[i][j]    = sum over p       of  T[i][p][ index_of(w[p][j]) ]
+```
+
+The column loop under that is one table read and one add per code, covering a
+whole codeword, with **no multiply in it at all** — asserted by the operation
+census and by reading the emitted instructions (`CU-06`).
+
+This is exact for the same reason tiling is: a sum is a function of the multiset
+of its products, so regrouping them changes nothing, and `CD-13` asserts the
+bytes. A classical `sgemm` cannot do it at all — its `T[c]` would carry its own
+rounding error and reusing it across `n` columns would propagate that error `n`
+times. **Tabulation is available only to an exact library.**
+
+### The density, which is the claim
+
+One 256-bit add covers `8 * block` products at a 32-bit lane: eight output rows,
+each carrying a whole codeword. At `Book<256,8>` that is **64 products per
+arithmetic instruction**. `vpdpbusd`, the densest integer instruction x86 has, is
+32 and cannot be told to cover more. The table's density is a property of the
+*codec*: a codebook naming a longer block is a denser instruction, with no change
+to the hardware.
+
+Measured on one AVX2 core (AMD EPYC 7763, no VNNI), `Book<256,8>`, against this
+library's own packed AVX2 tile path handed the weights *already decoded*:
+
+| `m x k x n` | table | packed | |
+| --- | --- | --- | --- |
+| `64x4096x4096` | **54.4** | 15.5 | 3.5x |
+| `64x1024x4096` | **52.2** | 25.1 | 2.1x |
+| `64x1024x16384` | **50.0** | 24.2 | 2.1x |
+| `256x1024x4096` | **47.6** | 33.5 | 1.4x |
+| `17x1032x1021` | **24.2** | 13.0 | 1.9x |
+
+Gmac/s. Every figure is `open`. Where the kernels win the library hands them the
+work — `1000x512x512` is 39.1 against 39.9, and `1x8192x1` is `n*k` decodes for
+`n*k` products, which no method beats. `ANALYSIS.md` carries every shape,
+including the two the current construction is **slower** on than it was, and why.
+
 ## Non-goals
 
 | # | Non-goal | Kind | Reason |
@@ -177,7 +223,7 @@ the documentation.
 | `oracles/` | committed external artifacts, with provenance and checksums |
 | `crates/uor-matmul-core` | alphabet, accumulator, reference accumulation, views. `no_std`, no `alloc`, `forbid(unsafe_code)`, no float arithmetic |
 | `crates/uor-matmul-codec` | the `Codec` trait, every tier, and the E8 codebook |
-| `crates/uor-matmul-kernels` | one module per ISA. The only crate with `unsafe` |
+| `crates/uor-matmul-kernels` | one module per ISA: the dense tile sequences and the table sequences. The only crate with `unsafe`, and therefore the only one that can write `#[target_feature]` |
 | `crates/uor-matmul-gemm` | the driver: traversal, scratch, epilogue, tile partition |
 | `crates/uor-matmul` | the facade, and the raw-pointer face |
 | `crates/uor-matmul-model` | build-time: parses `model/*.toml`, generates the Rust consts and `CONFORMANCE.md` |

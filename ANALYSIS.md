@@ -485,20 +485,111 @@ already dense, so the comparison is generous to it. Over `Book<256,8>`, running
 
 | `m x k x n` | default | packed | vs packed | picked |
 | --- | --- | --- | --- | --- |
-| `1x1024x4096` | **9.93** | 1.15 | **8.62x** | table |
-| `8x1024x4096` | **24.95** | 6.99 | **3.57x** | table |
-| `64x1024x4096` | **28.04** | 25.10 | **1.12x** | table |
-| `64x4096x4096` | **27.68** | 16.39 | **1.69x** | table |
-| `256x1024x4096` | 27.41 | 34.01 | 0.81x | table |
-| `64x1024x16384` | **35.36** | 24.67 | **1.43x** | table |
-| `1000x512x512` | 39.22 | 39.92 | 0.98x | kernels |
-| `1x8192x1` | 7.87 | 21.01 | 0.37x | kernels |
-| `3x1024x4093` | **12.14** | 3.51 | **3.45x** | table |
-| `17x1032x1021` | **14.07** | 13.70 | **1.03x** | table |
+| `1x1024x4096` | **3.37** | 1.15 | **2.93x** | table |
+| `8x1024x4096` | **31.83** | 6.94 | **4.59x** | table |
+| `64x1024x4096` | **52.24** | 25.11 | **2.08x** | table |
+| `64x4096x4096` | **54.39** | 15.51 | **3.51x** | table |
+| `256x1024x4096` | **47.58** | 33.50 | **1.42x** | table |
+| `64x1024x16384` | **49.99** | 24.16 | **2.07x** | table |
+| `1000x512x512` | 39.14 | 39.90 | 0.98x | kernels |
+| `1x8192x1` | 7.51 | 21.01 | 0.36x | kernels |
+| `3x1024x4093` | **4.15** | 3.45 | **1.20x** | table |
+| `17x1032x1021` | **24.16** | 12.96 | **1.86x** | table |
 
 The last four shapes divide nothing --- a shape below the break-even, a degenerate
 dot product, a ragged row tile, a prime column count --- and they are in the sweep
 because a traversal with a cliff at an awkward size would show it there.
+
+### The traversal issued no vector instruction
+
+The number above the previous one was `28.04` at `64x1024x4096`, and the whole
+distance to `52.24` is this: **the tabulated traversal compiled at the target's
+baseline**. Every AVX2 sequence in this workspace is behind `#[target_feature]`
+in `uor-matmul-kernels`, because that is the only crate permitted `unsafe`, and
+the table's column loop and its build were written in `uor-matmul-gemm`. Counted
+off the disassembly of `tabulate`, the traversal contained zero `vpaddd` and zero
+`vpaddq`. It was not slow because the construction was wrong; it was slow because
+nothing had told the compiler it could use the machine.
+
+Isolated on one row tile of `4096` columns and `k = 1024` over `Book<256,8>`, so
+that the two halves can be read apart:
+
+| | today | in vectors | |
+| --- | --- | --- | --- |
+| column loop | 17.6 Gmac/s | **86.7** | 4.9x |
+| table build | 2.1 Gprod/s | **25.1** | 11.7x |
+
+The column-loop figure is two eliminations, not one, and they are independent:
+
+- **Vectors**: 17.6 to 44.7 Gmac/s. Sixteen `i32` lanes are two 256-bit registers
+  and the entry is one cache line, so the step is two fused load-adds.
+- **The exact accumulator, out of the reduction**: 44.7 to 86.7. This one is not
+  about instructions at all. A narrow lane holds `capacity` products exactly ---
+  133144 of them at `(i8, 128)` against a `k` of 1024 --- so it carries the
+  *whole* reduction and `AccOf<E>` is touched once per output element. The lane
+  had been folded into the exact accumulator once per chunk, which is
+  `m*n*(k/Bk)/depth` reads and writes of a 16-byte word to save 4-byte ones. That
+  is what "encode once" already said, and the traversal was not doing it.
+
+Simply enabling AVX2 for the whole build --- `-C target-feature=+avx2` --- was
+worth 15%, not 2.9x. The loop structure had to change with it, which is why the
+sequences moved to the crate that owns instruction selection rather than the flag
+being turned on.
+
+#### The arithmetic density, which is the actual claim
+
+One 256-bit add covers `8 * block` products at a 32-bit lane: eight output rows,
+each carrying a whole codeword. At `Book<256,8>` that is **64 products per
+arithmetic instruction**.
+
+Nothing dense is the same shape. `vpmaddubsw` plus `vpmaddwd` --- the best an
+AVX2 host without VNNI has --- is about 10 products per instruction. `vpdpbusd`,
+the densest integer instruction x86 has at all, is 32 and cannot be told to cover
+more. The table's density is a property of the *codec*: a codebook that names a
+longer block is a denser instruction, without any change to the hardware or to
+this code. That is the paradigm difference, and it is measurable rather than
+rhetorical.
+
+What the table pays for it is traffic: `lane_bytes / block` bytes per product,
+which is 0.5 at a 32-bit lane and a block of eight, against about 0.23 for a
+dense tile reusing packed panels across `MR` rows and `NR` columns. So the table
+is instruction-cheap and bandwidth-expensive, and the crossover moves with the
+codec's block --- a block of sixteen halves the traffic per product and leaves the
+instruction count alone.
+
+#### What it cost at a one-row tile, and this is a regression
+
+Two shapes are *slower* than before this refactor, and no amount of the above
+excuses it:
+
+| `m x k x n` | before | after | |
+| --- | --- | --- | --- |
+| `1x1024x4096` | 9.93 | 3.37 | **0.34x** |
+| `3x1024x4093` | 12.14 | 4.15 | **0.34x** |
+
+The cause is the kernel boundary. The gather sequence takes an offset stream, so
+the driver materializes one `u32` per code --- and a `u32` per code is
+`4 / (rows * block)` bytes per product. At the widest tile that is a thirty-second
+of the entry traffic and invisible; at a one-row tile the offset is exactly as
+wide as the entry it addresses, and there is no vector width to win it back,
+because eight products per add is eight products per add whether the add is one
+lane or sixteen.
+
+Two things were tried and measured. Padding the tile up to the narrowest vector
+sequence --- which is exact, because the alphabet's zero contributes nothing ---
+gives `3.37` against `3.20` unpadded: a wash at `m = 1`, and worth **1.86x** at
+`17x1032x1021`, so it is kept. Widening the column group to keep sixteen lanes in
+flight whatever the tile height recovers nothing at `m = 1`, and is kept because
+it is free and it is what the narrow tiles want in principle.
+
+What would close it is a gather that reads the code stream directly instead of an
+offset stream, which needs `Enumerable::index_of` on the far side of the boundary
+--- the sequence would have to be generic over the codec, not just over the
+element and the lane. That is a real design question and not a tuning constant,
+and it is written down here rather than left for the next reader to rediscover
+from a benchmark.
+
+The library is still 2.9x its own dense path at `m = 1`. It used to be 8.6x.
 
 ### Three factorizations, and the offer decides which
 
@@ -532,16 +623,17 @@ At `16x1024x4096` over `Book<256,8>`, with column `j` repeating column `j % d`:
 
 | `d` | degeneracy | collapsed | uncollapsed | |
 | --- | --- | --- | --- | --- |
-| 1 | 4096x | **56.30** | 27.34 | **2.06x** |
-| 8 | 512x | **59.23** | 28.81 | **2.06x** |
-| 64 | 64x | **42.43** | 22.14 | **1.92x** |
-| 512 | 8x | **39.65** | 25.88 | **1.53x** |
-| 4096 | 1x | 25.78 | 26.81 | 0.96x |
+| 1 | 4096x | **58.70** | 47.04 | **1.25x** |
+| 8 | 512x | **98.63** | 38.22 | **2.58x** |
+| 64 | 64x | **59.05** | 47.60 | **1.24x** |
+| 512 | 8x | **41.49** | 31.10 | **1.33x** |
+| 4096 | 1x | 17.14 | 28.73 | 0.60x |
 
-The last row is the price of looking, and it is 4%. It was 34% at `m = 1` before
-the hash read a bounded prefix of a column instead of all of it --- the hash is a
-filter and `columns_equal` verifies every hit in full, so a short read costs a
-false positive and never an answer.
+Read those ratios and not those figures. This sweep swings by a factor of two
+between runs on a two-core shared runner --- `d = 64` has measured 45.30, 59.05
+and 94.89 for the same code --- where the shape table above repeats to within 1%.
+The collapse is worth something at every degeneracy and the last row is the price
+of looking; how much of each is not a number this machine can settle.
 
 The ceiling at `d = 1` is the table *build*, which does not collapse: it is
 `m*k*S` products whatever the columns do. That is why 4096-fold degeneracy buys

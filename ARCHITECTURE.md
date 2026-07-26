@@ -121,6 +121,45 @@ different algorithm:
   the product is `C := A * W^T`. `coded.rs`'s `k x n` orientation is the streaming
   one and needs no offer at all.
 
+### The sequences live with the other sequences
+
+`TableSpec` is `KernelSpec`'s shape for the two things a table needs --- fill one
+slot, reduce one column group --- and it lives in `uor-matmul-kernels` for the same
+reason every other sequence does: that is the only crate permitted `unsafe`, and
+therefore the only one that can write `#[target_feature]`. A sequence written
+anywhere else compiles at the target's baseline. Measured, that was the whole
+difference between 17.6 and 86.7 Gmac/s on the column loop.
+
+The reference is generic over the element *and* the lane, including the lane that
+is the exact accumulator, so there is one traversal in `gemm` and not one per
+family. `CB-08` pins every other sequence to it lane for lane.
+
+Two facts the loop rests on, both stated where they are relied upon:
+
+- **The slab is a power of two and the read is masked.** `index_of` is total below
+  `CODE_SPACE` --- `Enumerable`'s law, asserted by `CK-09` --- so masking changes no
+  value the traversal can reach. What it changes is that every read is in-slab
+  *whatever* the index holds, so the step needs no comparison and no branch. Safety
+  holds unconditionally; correctness is the law.
+- **The offsets arrive pre-scaled.** The driver multiplies the index by the tile
+  height while it walks the code stream anyway, so the column loop has one `and`
+  and one fused load-add per code and no multiply of any kind. That is the same
+  discipline the packed panel follows on the dense side: the layout carries the
+  address, so the inner loop walks and never indexes.
+
+### The lane, and where the exact accumulator is
+
+Once, at the end. `Lane::capacity` says how many products one narrow word holds
+exactly --- 133144 at `(i8, 128)` --- so the lane carries the *whole* reduction and
+`AccOf<E>` is touched once per output element rather than once per chunk. A `k`
+past the capacity is cut into runs and each run is placed once, which is the same
+chunking `fits_narrow` already licenses for the tile kernels, and never a limit on
+`k`.
+
+Which lane a family uses is `Tabulated::Lane`, an associated type: which register
+holds a run of products is a property of the element type, like `AccOf<E>`. It was
+a per-shape search, which was a mechanism with one answer.
+
 ## Borrowing instead of packing
 
 A packed panel is a copy, so a copy of something already in the panel's shape is
