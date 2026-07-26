@@ -129,7 +129,7 @@ pub mod blocking {
     /// The cache a per-column read can afford: what a tabulation stack must fit.
     pub const L2_BYTES: usize = 524288;
     /// Products one instruction of a dense tile kernel issues.
-    pub const KERNEL_PRODUCTS_PER_STEP: usize = 32;
+    pub const KERNEL_PRODUCTS_PER_STEP: usize = 16;
     /// Rows of the output a dense tile kernel produces per call.
     pub const KERNEL_ROWS: usize = 6;
 }

@@ -81,14 +81,24 @@ honesty = "build"
 # sum is a function of the multiset of its products, so regrouping them changes
 # nothing, and CD-13 asserts it byte for byte.
 #
-#   tabulated instructions = m*k*S/rows + m*n*(k/block)/rows
+#   tabulated instructions = m*k*S/table_step + m*n*k/table_step
 #   dense instructions     = m*k*n/kernel_products_per_step
 #
-# Instructions, not operations. A tabulated lane operation covers `block * rows`
-# products; one instruction of a dense tile kernel covers `kernel_products_per_step`
-# of them. Counting both as one apiece over-sells the table, and measured it did:
-# it selected tabulation at `1000x512x512`, where the kernels were four times
-# faster per product.
+# Instructions, not operations, and both sides are declarations a *sequence*
+# makes about itself. `table_step` is `block * lanes_per_add`: one register of
+# lanes, each carrying a whole codeword. It is not `block * rows` --- a tile of
+# `rows` is `rows / lanes_per_add` instructions --- and it was, which over-stated
+# the table by the register count. That error cancelled against a
+# `kernel_products_per_step` naming `vpdpbusd` on hosts that have no `vpdpbusd`,
+# and two errors that cancel are not a derivation. The shipped predicate reads
+# both numbers off the two specs at run time; the rows below are the same
+# derivation for one named pair.
+#
+# `lanes_per_add` is the register width the row is written for: 8 is a 256-bit
+# register of `i32`, which is `AVX2_TABLE`'s and the widest this workspace ships.
+# The reference sequence is 1, and the break-even against a dense tile is then
+# far larger --- which is the honest statement that a table without vector adds
+# is not worth building.
 #
 # The block is also the *density* knob, and that is the claim worth reading twice.
 # One 256-bit add covers `8 * block` products at a 32-bit lane: eight output rows,
@@ -103,9 +113,9 @@ honesty = "build"
 # `n` does --- either because `block = 1` names one element per code, or because
 # `block * rows` does not even reach what one dense instruction covers.
 #
-# CM-04 recomputes every `break_even_n` here from `code_space`, `block`, `rows` and
-# the model's `kernel_products_per_step`, and checks the first three against the
-# codec's own `Enumerable` and `Codec` consts.
+# CM-04 recomputes every `break_even_n` here from `code_space`, `block`, `rows`,
+# `lanes_per_add` and the model's dense-tile declarations, and checks the first
+# three against the codec's own `Enumerable` and `Codec` consts.
 # --------------------------------------------------------------------------
 
 [[tabulation]]
@@ -113,6 +123,7 @@ codec = "Grid<16>"
 code_space = 16
 block = 1
 rows = 16
+lanes_per_add = 8
 note = "the i4 grid. One code, one element: the table saves the multiply and no adds, so no n makes it pay and `tabulation_pays` refuses it."
 honesty = "build"
 
@@ -121,7 +132,8 @@ codec = "Packed<Grid<16>, 2>"
 code_space = 256
 block = 2
 rows = 16
-note = "a nibble pair covers 32 products per lane operation, which is exactly what one dense instruction covers, so the build is never repaid and no n makes it pay. A codec has to name a longer block than this before a table is worth building."
+lanes_per_add = 8
+note = "a nibble pair covers 16 products per issued instruction, which is exactly what one dense instruction covers, so the build is never repaid and no n makes it pay. A codec has to name a longer block than this before a table is worth building."
 honesty = "build"
 
 [[tabulation]]
@@ -129,6 +141,7 @@ codec = "Packed<Grid<4>, 4>"
 code_space = 256
 block = 4
 rows = 16
+lanes_per_add = 8
 break_even_n = 1025
 honesty = "build"
 
@@ -137,6 +150,7 @@ codec = "Book<256, 8>"
 code_space = 256
 block = 8
 rows = 16
+lanes_per_add = 8
 break_even_n = 683
 note = "E8. The row to read first: 683 is below every transformer layer width in practical use, and the amortization is over n, so it holds for a single decoded token as much as for a prefill."
 honesty = "build"
@@ -146,6 +160,7 @@ codec = "Offset<Grid<16>>"
 code_space = 16
 block = 1
 rows = 16
+lanes_per_add = 8
 note = "a zero point relabels the image, never the code space, so an asymmetric quantization tabulates exactly as its inner codec does."
 honesty = "build"
 

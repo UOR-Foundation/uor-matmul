@@ -285,6 +285,9 @@ pub struct Tabulation {
     /// Rows of `A` one table entry covers at the canonical lane: the row tile
     /// `tabulation_rows` resolves to for this code space.
     pub rows: usize,
+    /// Lane words one issued add covers: the register width the recorded
+    /// break-even is written for.
+    pub lanes_per_add: usize,
     /// The first `n` at which tabulation issues fewer operations than blocking.
     ///
     /// Absent when `block == 1`, where no such `n` exists: one code names one

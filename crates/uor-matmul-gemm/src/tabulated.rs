@@ -101,18 +101,6 @@ pub struct Census {
     pub kernel_calls: u64,
 }
 
-impl Census {
-    /// Multiplies per operation, which is the ratio the whole construction is
-    /// about. `None` when nothing was issued at all.
-    pub fn multiply_share(&self) -> Option<(u64, u64)> {
-        let total = self
-            .multiplies
-            .saturating_add(self.adds)
-            .saturating_add(self.table_reads);
-        (total > 0).then_some((self.multiplies, total))
-    }
-}
-
 /// Somewhere to put the census, or nowhere.
 ///
 /// One traversal, two instantiations. `()` implements this with empty bodies, so
@@ -256,24 +244,28 @@ pub struct Table<'s, L> {
     depth: usize,
 }
 
+/// Codes one slab addresses: [`Enumerable::CODE_SPACE`] rounded up to a power of
+/// two, so the index needs a mask and never a comparison.
+///
+/// A free function, not an associated one, because it is a fact about the
+/// enumeration and not about the lane it is tabulated in --- naming a lane to
+/// ask it would be naming something the answer does not depend on.
+pub const fn slab_codes(code_space: usize) -> usize {
+    code_space.next_power_of_two()
+}
+
+/// How many lane words a stack of `depth` tables over `rows` rows of a
+/// `code_space`-wide enumeration occupies.
+///
+/// A query, so an embedded caller can size a static and know the answer before
+/// it calls anything.
+pub const fn table_words(code_space: usize, rows: usize, depth: usize) -> usize {
+    slab_codes(code_space)
+        .saturating_mul(rows)
+        .saturating_mul(depth)
+}
+
 impl<'s, L: LaneWord> Table<'s, L> {
-    /// Codes one slab addresses: [`Enumerable::CODE_SPACE`] rounded up to a
-    /// power of two, so the index needs a mask and never a comparison.
-    pub const fn codes(code_space: usize) -> usize {
-        code_space.next_power_of_two()
-    }
-
-    /// How many lane words a stack of `depth` tables over `rows` rows of a
-    /// `code_space`-wide enumeration occupies.
-    ///
-    /// A query, so an embedded caller can size a static and know the answer
-    /// before it calls anything.
-    pub const fn words(code_space: usize, rows: usize, depth: usize) -> usize {
-        Self::codes(code_space)
-            .saturating_mul(rows)
-            .saturating_mul(depth)
-    }
-
     /// Borrow `words` as a stack of `depth` tables, with the padding zeroed.
     ///
     /// `None` when the borrow is shorter than the table it is asked to be, which
@@ -281,11 +273,11 @@ impl<'s, L: LaneWord> Table<'s, L> {
     /// arithmetic, and answered by the caller taking the streaming traversal
     /// instead --- not by an error reaching anyone (C6).
     pub fn new(words: &'s mut [L], code_space: usize, rows: usize, depth: usize) -> Option<Self> {
-        let want = Self::words(code_space, rows, depth);
+        let want = table_words(code_space, rows, depth);
         if code_space == 0 || rows == 0 || depth == 0 || words.len() < want {
             return None;
         }
-        let codes = Self::codes(code_space);
+        let codes = slab_codes(code_space);
         let table = Self {
             words: &mut words[..want],
             code_space,
@@ -367,19 +359,6 @@ impl<'s, L: LaneWord> Table<'s, L> {
     /// The stack itself, one slab per block held.
     pub fn stack(&self) -> &[L] {
         self.words
-    }
-
-    /// One code's entry in one slot of the stack: the partial sum for each of
-    /// the tile's rows.
-    ///
-    /// The masked read the column loop performs, exposed so that `CT-07` can
-    /// assert that every code of the enumeration reaches a live entry.
-    pub fn entry(&self, slot: usize, code_index: usize) -> Option<&[L]> {
-        if slot >= self.depth {
-            return None;
-        }
-        let at = slot * self.slab() + (code_index & (self.codes - 1)) * self.rows;
-        self.words.get(at..at + self.rows)
     }
 }
 
@@ -612,55 +591,86 @@ pub const fn tabulation_fits(
             <= l1_bytes
 }
 
-/// Does tabulation issue fewer operations than blocking, and does its table fit?
+/// What one issued instruction of each traversal covers.
+///
+/// Both are *declarations a sequence makes about itself*, read from the
+/// [`TableSpec`] and the [`uor_matmul_kernels::KernelSpec`] that will actually
+/// run. That is the whole point of the type: the predicate used to price the
+/// table at `MAX_BLOCK * rows` products per instruction and the dense tile at a
+/// model constant, and neither described any sequence that has ever shipped.
+///
+/// A table's step is `MAX_BLOCK * lanes_per_add` --- one register of lanes, each
+/// carrying a whole codeword --- and *not* `MAX_BLOCK * rows`, which is a whole
+/// tile and therefore `rows / lanes_per_add` instructions. The two agree only
+/// when a tile is one register.
+///
+/// Measured against the shipped pair on an AVX2 host the old form gave the right
+/// answer, because it over-stated the table by the register count and the model
+/// constant over-stated the dense tile by the same factor --- `vpdpbusd`'s
+/// density on a host that has no `vpdpbusd`. Two errors that cancel are not a
+/// derivation. On a host that does have VNNI they do not cancel: the dense tile
+/// is four times denser per instruction and the table is not, and the old form
+/// would take the table from `n = 683` where no `n` pays at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Steps {
+    /// Products one issued table instruction covers: `MAX_BLOCK * lanes_per_add`.
+    pub table: usize,
+    /// Products one issued dense tile instruction covers.
+    pub dense: usize,
+    /// Rows of the output one dense tile call produces.
+    ///
+    /// The dense traversal issues [`Self::dense`] products per instruction only
+    /// when it has this many rows to amortize against. With fewer it pays twice:
+    /// for lanes the tile does not fill, and for a packed panel of `n * k`
+    /// elements copied to compute `m * n * k` products --- which at `m = 1` is
+    /// the same order as the arithmetic. That second cost is the larger one and
+    /// is why this is the *blocking* row count and not the chosen tile's `mr`.
+    pub dense_rows: usize,
+}
+
+/// Does tabulation issue fewer instructions than the dense tile, and does its
+/// table fit?
 ///
 /// `cols` is the width of the column block the caller's offer supports, which is
-/// `n` when the offer holds the whole output width. The build is repeated once per
-/// column block, so it is the block and not the shape that the op count turns on.
-///
-/// Instructions, not operations. One tabulated lane operation covers
-/// `block * rows` products --- `rows` outputs at once, each against a whole
-/// codeword --- and one instruction of a dense tile kernel covers
-/// [`blocking::KERNEL_PRODUCTS_PER_STEP`] of them. Counting both as one apiece
-/// over-sells the table, and measured it did: at `1000x512x512` the operation
-/// count said the table won and the kernels were four times faster per product.
+/// `n` when the offer holds the whole output width. The build is repeated once
+/// per column block, so it is the block and not the shape that the count turns
+/// on.
 ///
 /// ```text
-/// tabulated = m*k*S/rows + m*n*(k/block)/rows      dense = m*k*n/kernel_step
+/// tabulated = m*k*S/steps.table + m*n*k/steps.table
+/// dense     = m*k*n/steps.dense
 /// ```
 ///
 /// so the table is cheaper exactly when
-/// `cols * (block*rows - kernel_step) > code_space * kernel_step * block`.
+/// `cols * (steps.table - effective) > code_space * effective * block`, where
+/// `effective` is the dense step scaled by the rows actually present.
 ///
-/// Two cases have no such `cols` and are refused outright: `block == 1`, where one
-/// code names one element; and `block * rows <= kernel_step`, where one lane
-/// operation does not even cover what one dense instruction does, so nothing
+/// Two cases have no such `cols` and are refused outright: `block == 1`, where
+/// one code names one element; and `steps.table <= effective`, where one table
+/// instruction does not even cover what one dense instruction does, so nothing
 /// repays the build.
 pub const fn tabulation_pays(
     code_space: usize,
     block: usize,
     cols: usize,
     rows: usize,
+    steps: Steps,
     l1_bytes: usize,
     lane_bytes: usize,
 ) -> bool {
-    // A dense tile issues its products per instruction only when it has
-    // `KERNEL_ROWS` rows to fill; with fewer it pays for the lanes that are not
-    // there. That term is what makes this right at `m = 1`, where a tile kernel
-    // has one useful row in six and a table has none to waste --- measured, the
-    // table was three times faster there and the predicate without it said no.
-    let present = if rows < blocking::KERNEL_ROWS {
+    if steps.dense_rows == 0 {
+        return false;
+    }
+    let present = if rows < steps.dense_rows {
         rows
     } else {
-        blocking::KERNEL_ROWS
+        steps.dense_rows
     };
-    let effective =
-        blocking::KERNEL_PRODUCTS_PER_STEP.saturating_mul(present) / blocking::KERNEL_ROWS;
-    let per_lane = block.saturating_mul(rows);
+    let effective = steps.dense.saturating_mul(present) / steps.dense_rows;
     block > 1
         && effective > 0
-        && per_lane > effective
-        && cols.saturating_mul(per_lane - effective)
+        && steps.table > effective
+        && cols.saturating_mul(steps.table - effective)
             > code_space.saturating_mul(effective).saturating_mul(block)
         && tabulation_fits(code_space, rows, l1_bytes, lane_bytes)
 }
@@ -896,7 +906,7 @@ impl Plan {
     const fn lane_words(&self, code_space: usize) -> usize {
         self.rows
             .saturating_mul(self.cols)
-            .saturating_add(Table::<i32>::words(code_space, self.rows, self.depth))
+            .saturating_add(table_words(code_space, self.rows, self.depth))
     }
 
     /// The largest plan the two offers support.
@@ -920,7 +930,7 @@ impl Plan {
         let row_cap = tabulation_rows(code_space, blocking::L1_BYTES, lane_bytes)
             .min(shape.m)
             .min(exact_offer);
-        let slab = Table::<i32>::codes(code_space);
+        let slab = slab_codes(code_space);
         let rows = ROW_TILES
             .into_iter()
             .find(|&r| r <= row_cap && slab.saturating_mul(r) < lane_offer)?;
@@ -1060,7 +1070,27 @@ fn run<E, Bd, C, O, Ep, Lg>(
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
-    if !admits(options.traversal, space, block, plan, lane_bytes) {
+    // Both declarations come from the sequences that will run, at the tile the
+    // plan resolved to --- never from a constant standing in for them.
+    let table = E::table_spec(
+        options.backend,
+        Bd::VALUE,
+        plan.rows,
+        column_group(plan.rows),
+    );
+    let dense = E::exact_spec(options.backend, Bd::VALUE, plan.rows);
+    let steps = Steps {
+        table: block.saturating_mul(table.lanes_per_add),
+        dense: dense.products_per_step,
+        // The *blocking* row count, not the chosen tile's `mr`. Reading `mr`
+        // says a one-row kernel wastes no lanes, which is true and is not why
+        // the dense path is weak at small `m`: it packs `n * k` elements of the
+        // operand to compute `m * n * k` products, so at `m = 1` the copy is the
+        // same order as the arithmetic. Measured, `mr` here declined the table
+        // at `1x1024x4096` where it is 5.4x the dense path.
+        dense_rows: blocking::KERNEL_ROWS,
+    };
+    if !admits(options.traversal, space, block, plan, steps, lane_bytes) {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     }
@@ -1099,6 +1129,7 @@ fn admits(
     code_space: usize,
     block: usize,
     plan: Plan,
+    steps: Steps,
     lane_bytes: usize,
 ) -> bool {
     match traversal {
@@ -1108,6 +1139,7 @@ fn admits(
             block,
             plan.cols,
             plan.rows,
+            steps,
             blocking::L1_BYTES,
             lane_bytes,
         ),
@@ -1427,7 +1459,14 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     // or a shape that does not divide leaves over.
     let arg = Sweep {
         wide: *spec,
-        single: E::table_spec(options.backend, Bd::VALUE, rows, 1),
+        // The same sequence when the group is one, which is every widest tile.
+        // Looking it up twice would be asking a question whose answer is in the
+        // argument.
+        single: if group == 1 {
+            *spec
+        } else {
+            E::table_spec(options.backend, Bd::VALUE, rows, 1)
+        },
         codes,
         stream: C::as_index_stream(codes),
         codes_per_row,
@@ -1440,9 +1479,14 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     while col0 < shape.n {
         let cols = plan.cols.min(shape.n - col0);
         let acc = &mut exact[..rows * cols];
-        acc.fill(<AccOf<E> as Accumulator>::ZERO);
         let carried = &mut lane[..rows * cols];
         carried.fill(L::ZERO);
+        // `acc` is not zeroed. The first placement *sets* it and every later one
+        // combines, so the pass that zeroed it was a whole write of the output
+        // tile --- 1 MiB at the shipped tile and column block --- for a value
+        // that is overwritten before it is read. Every cell is written: a
+        // computed column by `place`, a repeated one by the expansion below.
+        let mut placed = false;
 
         // The collapse applies when this block is the whole output width, because
         // a repeat's first occurrence has to be inside the block to be copied
@@ -1495,11 +1539,12 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
             // every `k` a narrow lane covers whole, which is every `k` under
             // 133144 at `(i8, 128)`.
             if in_run + plan.depth > run_blocks {
-                place(carried, acc);
+                place(carried, acc, placed);
+                placed = true;
                 in_run = 0;
             }
         }
-        place(carried, acc);
+        place(carried, acc, placed);
 
         // The expansion: every repeated column takes the accumulation of the one
         // it repeats. Ascending, and a repeat always names an earlier column, so
@@ -1640,9 +1685,16 @@ where
 ///
 /// The only place the exact accumulator appears in the reduction, and for a
 /// narrow lane that holds the whole depth it runs once per output element.
-fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc]) {
+fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc], onto: bool) {
     for (cell, word) in acc.iter_mut().zip(lane.iter_mut()) {
-        *cell = word.place(*cell);
+        // The first run sets, the rest combine. Placing onto a zero the caller
+        // wrote is the same value and one more pass over the output tile.
+        let prior = if onto {
+            *cell
+        } else {
+            <E::Acc as Accumulator>::ZERO
+        };
+        *cell = word.place(prior);
         *word = L::ZERO;
     }
 }
@@ -2255,24 +2307,83 @@ mod tests {
             .into_iter()
             .find(|&r| r <= tabulation_rows(256, l1, lane))
             .expect("a 256-entry table fits L1 at some tile");
-        let step = blocking::KERNEL_PRODUCTS_PER_STEP;
+        // The declarations the recorded break-evens are written for: a 256-bit
+        // register of `i32` on the table's side, and what `AVX2_I8_I32` declares
+        // on the dense side. `CM-04`'s model half recomputes the same numbers
+        // from the same two, so a change to either fails on both sides at once.
+        let steps = |block: usize| Steps {
+            table: block * (256 / 8 / core::mem::size_of::<i32>()),
+            dense: blocking::KERNEL_PRODUCTS_PER_STEP,
+            dense_rows: blocking::KERNEL_ROWS,
+        };
 
         // E8 at the shipped tile: the first `n` that pays is 683, and 682 does
-        // not. The model records the same numeral and `CM-04`'s model half
-        // recomputes it from the same three inputs.
-        assert!(tabulation_pays(256, 8, 683, rows, l1, lane));
-        assert!(!tabulation_pays(256, 8, 682, rows, l1, lane));
-        // A nibble pair covers `2 * rows` products per lane operation, which is
-        // exactly what one dense instruction covers, so nothing repays the build
-        // and no `n` makes it pay.
-        assert_eq!(2 * rows, step);
-        assert!(!tabulation_pays(256, 2, usize::MAX, rows, l1, lane));
+        // not.
+        assert!(tabulation_pays(256, 8, 683, rows, steps(8), l1, lane));
+        assert!(!tabulation_pays(256, 8, 682, rows, steps(8), l1, lane));
+        // A nibble pair covers `2 * lanes_per_add` products per issued
+        // instruction, which is exactly what one dense instruction covers, so
+        // nothing repays the build and no `n` makes it pay.
+        assert_eq!(steps(2).table, blocking::KERNEL_PRODUCTS_PER_STEP);
+        assert!(!tabulation_pays(
+            256,
+            2,
+            usize::MAX,
+            rows,
+            steps(2),
+            l1,
+            lane
+        ));
         // One element per code: likewise, and for the same reason at `block = 1`.
-        assert!(!tabulation_pays(16, 1, usize::MAX, rows, l1, lane));
+        assert!(!tabulation_pays(
+            16,
+            1,
+            usize::MAX,
+            rows,
+            steps(1),
+            l1,
+            lane
+        ));
         // A table nobody can hold is refused whatever the instruction count says.
-        assert!(!tabulation_pays(1 << 16, 8, usize::MAX, 1, l1, lane));
+        assert!(!tabulation_pays(
+            1 << 16,
+            8,
+            usize::MAX,
+            1,
+            steps(8),
+            l1,
+            lane
+        ));
         assert_eq!(tabulation_rows(1 << 16, l1, lane), 0);
         // And an enumeration of nothing has no table.
         assert!(!tabulation_fits(0, 1, l1, lane));
+
+        // The register width is not decoration. A sequence with no vector add
+        // covers one lane per instruction, and then no `n` repays the build ---
+        // which is the honest statement that a table is worth building only
+        // where the adds are vectors.
+        let reference = Steps {
+            table: 8,
+            dense: blocking::KERNEL_PRODUCTS_PER_STEP,
+            dense_rows: blocking::KERNEL_ROWS,
+        };
+        assert!(!tabulation_pays(
+            256,
+            8,
+            usize::MAX,
+            rows,
+            reference,
+            l1,
+            lane
+        ));
+        // And a dense tile four times denser per instruction --- VNNI --- is not
+        // beaten by an AVX2 table at any `n`. The old form, which priced the
+        // table at `block * rows` and the tile at a constant, took it from 683.
+        let vnni = Steps {
+            table: 8 * 8,
+            dense: 4 * blocking::KERNEL_PRODUCTS_PER_STEP,
+            dense_rows: blocking::KERNEL_ROWS,
+        };
+        assert!(!tabulation_pays(256, 8, usize::MAX, rows, vnni, l1, lane));
     }
 }

@@ -250,6 +250,7 @@ impl Model {
                 t.code_space,
                 t.block,
                 t.rows,
+                t.block.saturating_mul(t.lanes_per_add),
                 self.constants.blocking.kernel_products_per_step,
                 self.constants.blocking.kernel_rows,
             );

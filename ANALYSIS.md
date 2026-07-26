@@ -715,6 +715,38 @@ eight-row tile while the build re-read every entry, and won once it did not.
 Neither is a fact about caches; both are facts about what else the loop was doing,
 and neither would have been found without re-running the sweep after each change.
 
+### Both sides of that comparison were describing something else
+
+The predicate above compares instruction counts, and until this was measured
+neither of its two terms described a sequence that has ever shipped.
+
+The table's side was `MAX_BLOCK * rows` products per instruction. A tile of
+`rows` is `rows / lanes_per_add` instructions, so pricing it as one over-states
+the table by the register count --- a factor of two at a sixteen-row tile and a
+32-bit lane. The dense side was a model constant of 32, which is `vpdpbusd`'s
+density; the AVX2 `i8` tile this workspace ships declares 16, and the host these
+figures come from has no `vpdpbusd` at all.
+
+Two errors, both a factor of two, in opposite directions. They cancel exactly,
+and every recorded `break_even_n` is the same number under the corrected form ---
+which is how the mistake survived. **Two errors that cancel are not a
+derivation.** Where they stop cancelling is a host with VNNI, whose dense tile is
+four times denser per instruction while the table is not: the old form takes the
+table from `n = 683` where the corrected one says no `n` pays at all. `CM-04`
+asserts that case now, so the claim is falsifiable on a machine nobody here has.
+
+Both numbers are read off the two specs at run time, so a host is priced at its
+own sequences. The recorded rows in `model/tiers.toml` carry the register width
+they are written for, because a break-even without one is a number about nothing.
+
+One term was tried in the honest direction and put back. Reading the *chosen
+tile's* `mr` for the dense row count says a one-row kernel wastes no lanes, which
+is true --- and it declined the table at `1x1024x4096`, where the table is 5.2x
+the dense path. The reason the dense path is weak at small `m` is not lane waste:
+it packs `n * k` elements to compute `m * n * k` products, so at `m = 1` the copy
+is the same order as the arithmetic. The blocking row count stands for that, and
+now says so.
+
 ### The predicate is a comparison of instructions, not of operations
 
 The op-count model in the previous section --- `S + n/Bk` against `n` --- prices a

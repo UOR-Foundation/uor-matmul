@@ -55,51 +55,60 @@ pub const fn threshold(cap: u128, per_step: u128) -> u128 {
 }
 
 /// The first `n` at which tabulating a `code_space`-wide enumeration of `block`
-/// elements issues fewer *instructions* than the blocked traversal.
+/// elements issues fewer *instructions* than the dense tile.
 ///
-/// Instructions, not operations. A tabulated lane operation covers `block * rows`
-/// products --- `rows` outputs at once, each covering a whole codeword --- and one
-/// instruction of a dense tile kernel covers `kernel_step` of them. Counting both
-/// as one apiece over-sells the table: measured, it selected tabulation at
-/// `1000x512x512` where the kernels were four times faster.
+/// Instructions, not operations, and both sides are declarations the sequences
+/// make about themselves. `table_step` is `block * lanes_per_add`: one register
+/// of lanes, each carrying a whole codeword. `kernel_step` is what one dense
+/// tile instruction covers, and `kernel_rows` how many rows it needs to issue
+/// that many.
+///
+/// It is not `block * rows`. A tile of `rows` is `rows / lanes_per_add`
+/// instructions, so pricing it as one over-states the table by the register
+/// count. On an AVX2 host that error cancelled against a `kernel_step` naming
+/// `vpdpbusd`, which that host does not have; the two together gave the right
+/// number for no reason. Written as two declarations it gives the same number
+/// here and a different, correct one wherever the two sides do not scale
+/// together.
 ///
 /// ```text
-/// tabulated instructions = m*k*S/rows + m*n*(k/block)/rows
+/// tabulated instructions = m*k*S/table_step + m*n*k/table_step
 /// dense instructions     = m*k*n/kernel_step
 /// ```
 ///
-/// so the table is cheaper when `n > S * kernel_step * block / (block*rows - kernel_step)`.
+/// so the table is cheaper when `n > S * effective * block / (table_step - effective)`.
 ///
 /// `None` when no `n` satisfies it: `block == 1` names one element per code, and
-/// `block * rows <= kernel_step` means one lane operation does not even cover what
-/// one dense instruction does, so the build is never repaid.
+/// `table_step <= effective` means one table instruction does not cover what one
+/// dense instruction does, so the build is never repaid.
 pub const fn tabulation_break_even(
     code_space: usize,
     block: usize,
     rows: usize,
+    table_step: usize,
     kernel_step: usize,
     kernel_rows: usize,
 ) -> Option<usize> {
-    if block <= 1 || rows == 0 || kernel_step == 0 || kernel_rows == 0 {
+    if block <= 1 || rows == 0 || kernel_step == 0 || kernel_rows == 0 || table_step == 0 {
         return None;
     }
-    // A dense tile issues `kernel_step` products per instruction only when it has
-    // `kernel_rows` rows to fill; with fewer it pays for the lanes that are not
-    // there. Without this term the predicate declined the table at `m = 1`, where
-    // the table was three times faster and the tile had one useful row in six.
+    // A dense tile issues `kernel_step` products per instruction only when it
+    // has `kernel_rows` rows to fill; with fewer it pays for the lanes that are
+    // not there. Without this term the predicate declined the table at `m = 1`,
+    // where the table was three times faster and the tile had one useful row in
+    // six.
     let present = if rows < kernel_rows {
         rows
     } else {
         kernel_rows
     };
     let effective = kernel_step * present / kernel_rows;
-    let per_lane = block * rows;
-    if effective == 0 || per_lane <= effective {
+    if effective == 0 || table_step <= effective {
         return None;
     }
     // The predicate is strict, so the first satisfying `n` is one past the
     // quotient whether or not the division is exact.
-    Some(code_space * effective * block / (per_lane - effective) + 1)
+    Some(code_space * effective * block / (table_step - effective) + 1)
 }
 
 #[cfg(test)]

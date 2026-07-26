@@ -174,25 +174,31 @@ cache_line_bytes = 64
 # traversal stops paying. Like the four above, it can change which traversal
 # produces an output byte and never which byte (CD-13).
 l1_bytes = 32768
-# The second level of data cache. It sizes the *depth* of a tabulation stack:
-# `depth` tables are built once and then reduced into a lane held in registers, so
-# the exact accumulator is touched once per chunk instead of once per block.
-# Deeper is better until the stack leaves this budget: the column loop reduces
-# `depth` blocks per placement, so the exact accumulator's traffic falls as `1/depth`.
+# The second level of data cache. It sizes the *depth* of a tabulation stack, and
+# that is now the only thing it sizes: the stack has to stay resident because
+# every column step is a random read into it. It used to also decide how often
+# the exact accumulator was touched, because the lane was folded into the
+# accumulator once per chunk; the lane carries the whole reduction now, so the
+# accumulator is touched once per output element whatever the depth is.
 # `tabulation_depth` takes half, which is what the sweep in ANALYSIS.md settles on.
 l2_bytes = 524288
-# Products one instruction of a dense tile kernel issues. It is what makes the
-# tabulation predicate a comparison of *instructions* rather than of operations:
-# a lane operation covers `MAX_BLOCK * rows` products and a dense one covers this
-# many, so counting both as one apiece over-sells the table and selects it on
-# shapes where the kernels are four times faster per product. Like the five above
-# it can change which traversal produces an output byte and never which byte.
-kernel_products_per_step = 32
-# Rows of the output a dense tile kernel produces per call. A tile issues its
-# `kernel_products_per_step` products only when it has this many rows to fill;
-# with fewer it pays for the lanes that are not there, which is why a matrix-vector
-# product is where a tile kernel is weakest and a table is strongest. The
-# tabulation predicate scales the dense side by the rows actually present, and
-# without that it declined the table at `m = 1` where the table was three times
-# faster.
+# Products one instruction of the dense `i8` tile issues, which is what
+# `AVX2_I8_I32` declares as its `products_per_step`. It is not read by the
+# shipped predicate --- that reads the `KernelSpec` of the sequence that will
+# actually run, so a host with VNNI is priced at VNNI's density and not at this
+# one. It is here because `model/tiers.toml`'s recorded break-evens are a
+# derivation for one named pair of sequences, and this is that pair's dense half.
+# Like the five above it can change which traversal produces an output byte and
+# never which byte.
+kernel_products_per_step = 16
+# Rows of the output the dense traversal needs to amortize against. With fewer it
+# pays twice: for lanes the tile does not fill, and --- the larger cost --- for a
+# packed panel of `n * k` elements copied to compute `m * n * k` products, which
+# at `m = 1` is the same order as the arithmetic. That is why a matrix-vector
+# product is where a tile is weakest and a table is strongest, and why the
+# tabulation predicate scales the dense side by the rows actually present.
+# Without that term it declined the table at `m = 1`, where the table is five
+# times faster; reading the chosen tile's own `mr` instead of this declined it
+# for the same reason, because a one-row kernel wastes no lanes and still pays
+# for the copy.
 kernel_rows = 6
