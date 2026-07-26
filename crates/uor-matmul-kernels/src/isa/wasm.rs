@@ -193,13 +193,282 @@ unsafe fn simd128_r_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
 // The table sequences (§7.3)
 // ---------------------------------------------------------------------------
 
-/// The `i8` table sequence. Absent here; the reference carries this family.
+/// Lane words one 128-bit add covers, at a 32-bit lane.
+const SIMD_TABLE_LANES: usize = 4;
+
+/// The `i8` table sequence at `rows` rows and `group` columns.
 ///
-/// A table's column loop is integer adds and a masked index, so every SIMD
-/// target has a sequence for it and this absence is unfinished work rather
-/// than a property of the hardware. It is written as `None` rather than as a
-/// slower body so that the reference is the one that runs and `CB-*` compares
-/// against one sequence and not two.
-pub fn simd128_table_i8_i32(_rows: usize, _group: usize) -> Option<TableSpec<i8, i32>> {
+/// Sixteen and eight rows, which are four and two 128-bit registers of `i32`.
+/// Narrower tiles take the reference, whose row count is a compile-time constant
+/// there too.
+pub fn simd128_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
+    let (build, gather, gather_codes): (
+        crate::table::TableBuild<i8, i32>,
+        crate::table::TableGather<i32>,
+        crate::table::TableGatherCodes<i32>,
+    ) = match (rows, group) {
+        (16, 1) => (simd_build_v4, simd_gather_v4_u1, simd_codes_v4_u1),
+        (16, 2) => (simd_build_v4, simd_gather_v4_u2, simd_codes_v4_u2),
+        (8, 1) => (simd_build_v2, simd_gather_v2_u1, simd_codes_v2_u1),
+        (8, 2) => (simd_build_v2, simd_gather_v2_u2, simd_codes_v2_u2),
+        _ => return None,
+    };
+    Some(TableSpec {
+        backend: Backend::WasmSimd128,
+        rows,
+        group,
+        // `extmul` takes one block step at a time, so the activation tile wants
+        // the plain `k`-major layout and the sequence has no tail (S8).
+        k_group: 1,
+        lanes_per_add: SIMD_TABLE_LANES,
+        build_products_per_step: SIMD_TABLE_LANES,
+        lane_cap: i32::MAX as u128,
+        // Every product is widened to `i32` before it is accumulated, so
+        // nothing narrower than the lane is held.
+        max_bound: u128::MAX,
+        build,
+        gather,
+        gather_codes,
+    })
+}
+
+/// The `i16` table sequence. Absent here; the reference carries this family.
+pub fn simd128_table_i16_i64(_rows: usize, _group: usize) -> Option<TableSpec<i16, i64>> {
     None
+}
+
+/// One slot of the table, at `V` registers of `i32`.
+///
+/// `i32x4_extmul_*_i16x8` is a widening multiply, so each product reaches the
+/// `i32` lane with no `i16` intermediate to overflow.
+///
+/// # Safety
+///
+/// [`crate::table::TableBuild`]'s contract, with `rows == V * 4` and
+/// `V` in `{2, 4}`.
+unsafe fn simd_build<const V: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    debug_assert_eq!(rows, V * SIMD_TABLE_LANES);
+    // SAFETY: the caller established every extent.
+    unsafe {
+        for c in 0..space {
+            let d = book.add(c * block);
+            let mut entry = [i32x4_splat(0); V];
+            for t in 0..block {
+                let w = i16x8_splat(*d.add(t) as i16);
+                let a = acts.add(t * rows);
+                // Sixteen activations is a whole register; eight is a half-load
+                // that zeroes the rest, so a tile of eight never reads past its
+                // own row (S13, and the reason there is no `v128_load` here).
+                let x = if V == 4 {
+                    v128_load(a as *const v128)
+                } else {
+                    v128_load64_zero(a as *const u64)
+                };
+                let lo = i16x8_extend_low_i8x16(x);
+                entry[0] = i32x4_add(entry[0], i32x4_extmul_low_i16x8(lo, w));
+                entry[1] = i32x4_add(entry[1], i32x4_extmul_high_i16x8(lo, w));
+                if V == 4 {
+                    let hi = i16x8_extend_high_i8x16(x);
+                    entry[2] = i32x4_add(entry[2], i32x4_extmul_low_i16x8(hi, w));
+                    entry[3] = i32x4_add(entry[3], i32x4_extmul_high_i16x8(hi, w));
+                }
+            }
+            let o = out.add(c * rows);
+            for (v, cell) in entry.iter().enumerate() {
+                v128_store(o.add(v * SIMD_TABLE_LANES) as *mut v128, *cell);
+            }
+        }
+    }
+}
+
+/// One column group over a run of slots, at `V` registers of `i32` per column.
+///
+/// # Safety
+///
+/// [`crate::table::TableGather`]'s contract, with `rows == V * 4`, `group == U`.
+unsafe fn simd_gather<const V: usize, const U: usize>(
+    rows: usize,
+    _group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const i32,
+    off: *const u32,
+    lane: *mut i32,
+) {
+    debug_assert_eq!(rows, V * SIMD_TABLE_LANES);
+    debug_assert_eq!(_group, U);
+    let mask = (slab - 1) as u32;
+    // SAFETY: the caller established every extent.
+    unsafe {
+        let mut acc = [[i32x4_splat(0); V]; U];
+        for (u, cols) in acc.iter_mut().enumerate() {
+            for (v, cell) in cols.iter_mut().enumerate() {
+                *cell = v128_load(lane.add(u * rows + v * SIMD_TABLE_LANES) as *const v128);
+            }
+        }
+        let mut words = stack;
+        for slot in 0..depth {
+            for (u, cols) in acc.iter_mut().enumerate() {
+                // The mask, not a comparison: every offset reads in-slab
+                // whatever it holds, so this is one `and` and never a branch.
+                let entry = words.add((*off.add(slot * U + u) & mask) as usize);
+                for (v, cell) in cols.iter_mut().enumerate() {
+                    *cell = i32x4_add(
+                        *cell,
+                        v128_load(entry.add(v * SIMD_TABLE_LANES) as *const v128),
+                    );
+                }
+            }
+            words = words.add(slab);
+        }
+        for (u, cols) in acc.iter().enumerate() {
+            for (v, cell) in cols.iter().enumerate() {
+                v128_store(
+                    lane.add(u * rows + v * SIMD_TABLE_LANES) as *mut v128,
+                    *cell,
+                );
+            }
+        }
+    }
+}
+
+/// The same, over the coded operand's own memory.
+///
+/// # Safety
+///
+/// [`crate::table::TableGatherCodes`]'s contract, with `rows == V * 4`,
+/// `group == U`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn simd_codes<const V: usize, const U: usize>(
+    rows: usize,
+    _group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut i32,
+) {
+    debug_assert_eq!(rows, V * SIMD_TABLE_LANES);
+    debug_assert_eq!(_group, U);
+    let mask = (slab >> shift) - 1;
+    // SAFETY: the caller established every extent.
+    unsafe {
+        let mut acc = [[i32x4_splat(0); V]; U];
+        for (u, cols) in acc.iter_mut().enumerate() {
+            for (v, cell) in cols.iter_mut().enumerate() {
+                *cell = v128_load(lane.add(u * rows + v * SIMD_TABLE_LANES) as *const v128);
+            }
+        }
+        let mut cursor = [codes; U];
+        for u in 1..U {
+            cursor[u] = cursor[u - 1].add(stride);
+        }
+        let mut words = stack;
+        for _ in 0..depth {
+            for (u, cols) in acc.iter_mut().enumerate() {
+                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                cursor[u] = cursor[u].add(1);
+                for (v, cell) in cols.iter_mut().enumerate() {
+                    *cell = i32x4_add(
+                        *cell,
+                        v128_load(entry.add(v * SIMD_TABLE_LANES) as *const v128),
+                    );
+                }
+            }
+            words = words.add(slab);
+        }
+        for (u, cols) in acc.iter().enumerate() {
+            for (v, cell) in cols.iter().enumerate() {
+                v128_store(
+                    lane.add(u * rows + v * SIMD_TABLE_LANES) as *mut v128,
+                    *cell,
+                );
+            }
+        }
+    }
+}
+
+/// # Safety
+///
+/// [`crate::table::TableBuild`]'s contract at `rows == 16`.
+unsafe fn simd_build_v4(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller forwarded the extents.
+    unsafe { simd_build::<4>(rows, space, block, book, acts, out) }
+}
+
+/// # Safety
+///
+/// [`crate::table::TableBuild`]'s contract at `rows == 8`.
+unsafe fn simd_build_v2(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller forwarded the extents.
+    unsafe { simd_build::<2>(rows, space, block, book, acts, out) }
+}
+
+/// Generate the four `(rows, group)` gather entry points, each a named
+/// monomorphization of one sequence.
+macro_rules! simd_gathers {
+    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+        #[doc = concat!("# Safety\n\n[`crate::table::TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        unsafe fn $g(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            stack: *const i32,
+            off: *const u32,
+            lane: *mut i32,
+        ) {
+            // SAFETY: the caller forwarded the extents.
+            unsafe { simd_gather::<$v, $u>(rows, group, depth, slab, stack, off, lane) }
+        }
+
+        #[doc = concat!("# Safety\n\n[`crate::table::TableGatherCodes`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const i32,
+            codes: *const u16,
+            stride: usize,
+            lane: *mut i32,
+        ) {
+            // SAFETY: the caller forwarded the extents.
+            unsafe {
+                simd_codes::<$v, $u>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+            }
+        }
+    )*};
+}
+
+simd_gathers! {
+    simd_gather_v4_u1, simd_codes_v4_u1, 4, 1, 16;
+    simd_gather_v4_u2, simd_codes_v4_u2, 4, 2, 16;
+    simd_gather_v2_u1, simd_codes_v2_u1, 2, 1, 8;
+    simd_gather_v2_u2, simd_codes_v2_u2, 2, 2, 8;
 }

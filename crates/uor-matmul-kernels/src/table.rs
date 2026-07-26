@@ -864,6 +864,8 @@ pub fn available_table_i16(rows: usize, group: usize) -> impl Iterator<Item = Ta
     collect_table![
         true => portable_table::<i16, i64>(rows, group),
         crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i16_i64(rows, group),
+        crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i16_i64(rows, group),
+        crate::isa::wasm::simd128_available() => crate::isa::wasm::simd128_table_i16_i64(rows, group),
     ]
 }
 
