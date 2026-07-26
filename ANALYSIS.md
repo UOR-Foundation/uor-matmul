@@ -685,6 +685,18 @@ much smaller total rather than eleven percent of a larger one. It amortizes with
 where `1x1024x4096` reads 8.4. The remainder is unattributed and is not claimed
 as anything.
 
+One more hypothesis was checked and does not hold. `tabulation_depth` sizes the
+table against L2, and at a one-row tile the slab is 1 KiB, so 128 slots is a
+128 KiB table and every lookup is an L2 hit *by construction* --- L1 is 32 KiB.
+Splitting the reduction into passes that each fit L1 costs almost no extra
+traffic, because each code is still read exactly once and only the 16 KiB output
+lane is re-touched per pass. It was measured at depths of 128, 64, 32, 16 and 8
+and there is no signal: at a group of sixteen the L2-sized depth reads 15.13,
+15.22 and 15.18 across three runs, which is the steadiest figure in the table,
+while a 32 KiB depth reads 16.99 and then 9.79. The spread between neighbouring
+configurations is larger than any trend across them. The existing sizing stands,
+and a knob is not added to chase variance.
+
 ### Three factorizations, and the offer decides which
 
 A coded operand has three of them, all computing the same bytes:
