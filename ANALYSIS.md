@@ -604,17 +604,46 @@ to win: 25.0 against 29.6 there, 5.9 against 6.2 at `m = 1`. It was compensating
 for a defect, and when the defect went it went with it. A knob that stops paying
 is a knob that goes.
 
-What is left is two shapes still short of where they were:
+What is left is one shape still short of where it was, and it has been taken
+apart rather than left as a number:
 
 | `m x k x n` | before | after | |
 | --- | --- | --- | --- |
-| `1x1024x4096` | 9.93 | 6.20 | 0.62x |
-| `3x1024x4093` | 12.14 | 7.65 | 0.63x |
+| `1x1024x4096` | 8.9 | 5.35 | 0.60x |
+| `3x1024x4093` | 12.1 | 8.02 | 0.66x |
 
-Both are a one- or two-row tile, where the sequence is an indirect call and five
-length assertions around 128 adds and there is no vector width to amortize them:
-eight products per add is eight products per add whether the add is one lane or
-sixteen. The library is still 5.4x its own dense path at `m = 1`. It was 8.6x.
+Three measurements say where it is not.
+
+**Not the column loop.** Isolated --- one row, 4096 columns, 128 slots, the same
+128 KiB stack and 1 MiB code stream the traversal walks --- the shipped shape
+runs at **15.09 Gmac/s**, and it is the fastest of five forms tried. The
+pre-refactor shape, two columns with the accumulation in registers and the codes
+read inline, is **13.23** on the same data. The column group barely moves it:
+15.09, 14.68, 14.41, 14.30, 14.51 at groups of 1, 2, 4, 8, 16.
+
+**Not the build, and not the setup.** `1x1024x4096` and `1x1024x8192` are in the
+sweep as a pair for this: the build is `k/block * S * block * rows` and does not
+move with `n`, so the two times solve for both terms. They give an
+`n`-independent cost of **0.086 ms** against a total of 0.784 --- eleven percent.
+
+**Not the collapse.** Disabling the column-collapse pass entirely leaves
+`1x1024x4096` at 5.35, unchanged to two figures.
+
+So the per-column path in the traversal runs at about **3.3 cycles per code-step
+where the same loop in isolation runs at 1.3**, and the difference is framing the
+isolated form folds and the shipped one cannot: in the probe the slab and its
+mask are compile-time constants, and across the `TableSpec` boundary they are
+runtime values, because the slab is `CODE_SPACE.next_power_of_two() * rows` and
+the specs are selected by `(rows, group)` alone. At a sixteen-row tile that
+framing is amortized over sixteen adds and invisible --- 63 Gmac/s against an
+isolated 87. At a one-row tile there is nothing to amortize it over.
+
+Closing it means carrying the code space into the sequence selection, which
+multiplies the monomorphizations by the number of codecs. That is a real design
+question about where the boundary goes and it is not a tuning constant, so it is
+written here rather than guessed at. The library is 4.6x its own dense path at
+`m = 1` and the selection is right; what is short is a constant factor on one
+shape, located and unhidden.
 
 ### Three factorizations, and the offer decides which
 

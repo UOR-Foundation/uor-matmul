@@ -53,6 +53,68 @@ macro_rules! collect_table {
     }};
 }
 
+/// The `(rows, group)` pairs the driver walks, each a compile-time pair.
+///
+/// The driver's column group is `COLUMN_LANES / rows`, so the accumulation is
+/// sixteen lane words at every tile height and fits registers at every one of
+/// them; a group of one is the tail a shape that does not divide leaves over.
+/// A pair this list does not name takes the same sequence written for a runtime
+/// tile, which computes the same integer and issues the address arithmetic the
+/// compile-time forms do not need. Not a second method: one identity at a shape
+/// the list has no constant for (R13).
+macro_rules! dispatch_run {
+    ($rows:expr, $group:expr, $any:expr, |$r:ident, $g:ident| $body:expr) => {
+        match ($rows, $group) {
+            (16, 1) => {
+                const $r: usize = 16;
+                const $g: usize = 1;
+                $body
+            }
+            (8, 2) => {
+                const $r: usize = 8;
+                const $g: usize = 2;
+                $body
+            }
+            (8, 1) => {
+                const $r: usize = 8;
+                const $g: usize = 1;
+                $body
+            }
+            (4, 4) => {
+                const $r: usize = 4;
+                const $g: usize = 4;
+                $body
+            }
+            (4, 1) => {
+                const $r: usize = 4;
+                const $g: usize = 1;
+                $body
+            }
+            (2, 8) => {
+                const $r: usize = 2;
+                const $g: usize = 8;
+                $body
+            }
+            (2, 1) => {
+                const $r: usize = 2;
+                const $g: usize = 1;
+                $body
+            }
+            (1, 16) => {
+                const $r: usize = 1;
+                const $g: usize = 16;
+                $body
+            }
+            (1, 1) => {
+                const $r: usize = 1;
+                const $g: usize = 1;
+                $body
+            }
+            _ => $any,
+        }
+    };
+}
+
 /// A lane word: something a table entry's row can be added into.
 ///
 /// The narrow/wide factorization at the place the table needs it. A table entry
@@ -507,14 +569,12 @@ unsafe fn portable_gather<L: LaneWord>(
     // The tile heights the traversal walks, each a compile-time constant so the
     // step's addressing is a walk. The last arm keeps the sequence total for a
     // height no caller reaches, which is what stops this being a ceiling (R8).
-    match rows {
-        1 => gather_run::<1, L>(group, slab, stack, off, lane),
-        2 => gather_run::<2, L>(group, slab, stack, off, lane),
-        4 => gather_run::<4, L>(group, slab, stack, off, lane),
-        8 => gather_run::<8, L>(group, slab, stack, off, lane),
-        16 => gather_run::<16, L>(group, slab, stack, off, lane),
-        _ => gather_any(rows, group, slab, stack, off, lane),
-    }
+    dispatch_run!(
+        rows,
+        group,
+        gather_any(rows, group, slab, stack, off, lane),
+        |R, G| gather_run::<R, G, L>(slab, stack, off, lane)
+    )
 }
 
 /// # Safety
@@ -540,47 +600,12 @@ unsafe fn portable_gather_codes<L: LaneWord>(
             core::slice::from_raw_parts_mut(lane, group * rows),
         )
     };
-    match rows {
-        1 => codes_run::<1, L>(depth, slab, shift, stack, codes, stride, lane),
-        2 => codes_run::<2, L>(depth, slab, shift, stack, codes, stride, lane),
-        4 => codes_run::<4, L>(depth, slab, shift, stack, codes, stride, lane),
-        8 => codes_run::<8, L>(depth, slab, shift, stack, codes, stride, lane),
-        16 => codes_run::<16, L>(depth, slab, shift, stack, codes, stride, lane),
-        _ => codes_any(rows, depth, slab, shift, stack, codes, stride, lane),
-    }
-    let _ = group;
-}
-
-/// The reference column step over the operand's own code stream.
-///
-/// Walked exactly as [`gather_run`] is, with one more shift and one fewer
-/// memory round trip: there is no index stream to write and none to read back.
-#[inline(always)]
-fn codes_run<const R: usize, L: LaneWord>(
-    depth: usize,
-    slab: usize,
-    shift: u32,
-    stack: &[L],
-    codes: &[u16],
-    stride: usize,
-    lane: &mut [L],
-) {
-    // `words.len()` is `slab`, and `(c & mask) << shift <= slab - R`, so the
-    // compiler discharges both slice bounds below rather than checking them.
-    let mask = (slab >> shift) - 1;
-    let mut rest = stack;
-    for slot in 0..depth {
-        let (words, tail) = rest.split_at(slab);
-        rest = tail;
-        let mut at = slot;
-        for cols in lane.chunks_exact_mut(R) {
-            let entry = &words[(codes[at] as usize & mask) << shift..];
-            for (cell, &e) in cols.iter_mut().zip(&entry[..R]) {
-                *cell = cell.add(e);
-            }
-            at += stride;
-        }
-    }
+    dispatch_run!(
+        rows,
+        group,
+        codes_any(rows, depth, slab, shift, stack, codes, stride, lane),
+        |R, G| codes_run::<R, G, L>(depth, slab, shift, stack, codes, stride, lane)
+    )
 }
 
 /// The same, at a row count no shipped tile uses.
@@ -614,17 +639,19 @@ fn codes_any<L: LaneWord>(
 /// The reference column step: the whole of what `CU-06` reads.
 ///
 /// Everything is *walked*, and that is the claim. The slot's base advances by an
-/// add, the column's lane advances by an add, and the entry's address is one
-/// mask on an offset the caller already scaled --- so the loop is one `and` and
-/// one add per lane word and contains no multiply of any kind. A multiply here
-/// would be a product the table was supposed to have already computed.
+/// add, the entry's address is one mask on an offset the caller already scaled,
+/// and the accumulation is a compile-time array --- so the loop is one `and` and
+/// one add per lane word, and no multiply of any kind.
 ///
-/// `R` is a compile-time constant for exactly that reason. With a runtime row
-/// count the compiler re-derives each lane's address as `slot * rows`, which is
-/// a multiply per code, and the disassembly says so.
+/// `R` and `G` are both compile-time, and `G` is the reason this is not simply a
+/// slice. With the column group a runtime value the accumulation is a chunked
+/// iterator over the caller's buffer, so every lane word is loaded and stored
+/// once per slot; as `[[L; R]; G]` it is `R * G` registers loaded once and stored
+/// once for the whole run. Measured at a one-row tile and a group of sixteen,
+/// that is 32 memory operations per slot that do not happen, and it is the
+/// difference between 5.9 and 9.6 Gmac/s on `1x1024x4096`.
 #[inline(always)]
-fn gather_run<const R: usize, L: LaneWord>(
-    group: usize,
+fn gather_run<const R: usize, const G: usize, L: LaneWord>(
     slab: usize,
     stack: &[L],
     off: &[u32],
@@ -632,19 +659,21 @@ fn gather_run<const R: usize, L: LaneWord>(
 ) {
     // Derived here, not passed. `words.len()` is `slab` because `split_at` says
     // so, and `at & (slab - 1) <= slab - 1`, so the compiler discharges both
-    // slice bounds below instead of checking them. Passed in as an unrelated
-    // `u32` it could not, and measured that was two branches per code --- which
-    // at a one-row tile is more instructions than the accumulation.
+    // slice bounds below instead of checking them.
     let mask = slab - 1;
+    let mut acc = [[L::ZERO; R]; G];
+    for (cols, held) in acc.iter_mut().zip(lane.chunks_exact(R)) {
+        cols.copy_from_slice(held);
+    }
     // A cursor, not `chunks_exact`. The chunk length is a runtime value, and
     // measured on the emitted assembly the iterator re-derives each slot's base
     // as `slot * slab` --- a multiply per code, which is precisely what this
     // traversal exists to not issue. `split_at` advances by an add.
     let mut rest = stack;
-    for run in off.chunks_exact(group) {
+    for run in off.chunks_exact(G) {
         let (words, tail) = rest.split_at(slab);
         rest = tail;
-        for (cols, &at) in lane.chunks_exact_mut(R).zip(run) {
+        for (cols, &at) in acc.iter_mut().zip(run) {
             // The mask, not a comparison: every offset reads in-slab whatever it
             // holds, so there is no branch here and none is needed.
             let entry = &words[at as usize & mask..];
@@ -653,12 +682,15 @@ fn gather_run<const R: usize, L: LaneWord>(
             }
         }
     }
+    for (cols, held) in acc.iter().zip(lane.chunks_exact_mut(R)) {
+        held.copy_from_slice(cols);
+    }
 }
 
-/// The same, at a row count no shipped tile uses.
+/// The same, at a `(rows, group)` pair no shipped tile uses.
 ///
-/// Present so the sequence is total for every `rows` and not only for the ones
-/// the driver walks. It computes the same integer and issues the address
+/// Present so the sequence is total for every tile and not only for the ones the
+/// driver walks (R8). It computes the same integer and issues the address
 /// arithmetic [`gather_run`] does not need.
 fn gather_any<L: LaneWord>(
     rows: usize,
@@ -682,6 +714,43 @@ fn gather_any<L: LaneWord>(
     }
 }
 
+/// The same, over the coded operand's own memory.
+///
+/// One shift more than [`gather_run`] and one memory round trip fewer: there is
+/// no index stream to write and none to read back.
+#[inline(always)]
+fn codes_run<const R: usize, const G: usize, L: LaneWord>(
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: &[L],
+    codes: &[u16],
+    stride: usize,
+    lane: &mut [L],
+) {
+    let mask = (slab >> shift) - 1;
+    let mut acc = [[L::ZERO; R]; G];
+    for (cols, held) in acc.iter_mut().zip(lane.chunks_exact(R)) {
+        cols.copy_from_slice(held);
+    }
+    let mut rest = stack;
+    for slot in 0..depth {
+        let (words, tail) = rest.split_at(slab);
+        rest = tail;
+        let mut at = slot;
+        for cols in acc.iter_mut() {
+            let entry = &words[(codes[at] as usize & mask) << shift..];
+            for (cell, &e) in cols.iter_mut().zip(&entry[..R]) {
+                *cell = cell.add(e);
+            }
+            at += stride;
+        }
+    }
+    for (cols, held) in acc.iter().zip(lane.chunks_exact_mut(R)) {
+        held.copy_from_slice(cols);
+    }
+}
+
 /// The reference column step at the widest tile and the narrowest lane, named so
 /// that `CU-06`'s disassembly gate has a symbol to read.
 ///
@@ -690,27 +759,20 @@ fn gather_any<L: LaneWord>(
 /// a generic function emits no code until something instantiates it, and a gate
 /// cannot read instructions that were never emitted.
 #[inline(never)]
-pub fn gather_reference_i32(
-    group: usize,
-    slab: usize,
-    stack: &[i32],
-    off: &[u32],
-    lane: &mut [i32],
-) {
-    gather_run::<16, i32>(group, slab, stack, off, lane);
+pub fn gather_reference_i32(slab: usize, stack: &[i32], off: &[u32], lane: &mut [i32]) {
+    gather_run::<16, 1, i32>(slab, stack, off, lane);
 }
 
 /// The same, in the exact lane, for the element families that have no narrow
 /// register at all.
 #[inline(never)]
 pub fn gather_reference_wide(
-    group: usize,
     slab: usize,
     stack: &[Wide<i128>],
     off: &[u32],
     lane: &mut [Wide<i128>],
 ) {
-    gather_run::<16, Wide<i128>>(group, slab, stack, off, lane);
+    gather_run::<16, 1, Wide<i128>>(slab, stack, off, lane);
 }
 
 impl<E, L> TableSpec<E, L> {
@@ -850,6 +912,7 @@ pub fn available_table_i8(rows: usize, group: usize) -> impl Iterator<Item = Tab
     collect_table![
         true => portable_table::<i8, i32>(rows, group),
         crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i8_i32(rows, group),
+        crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i8_i32(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i8_i32(rows, group),
         crate::isa::wasm::simd128_available() => crate::isa::wasm::simd128_table_i8_i32(rows, group),
     ]
@@ -864,6 +927,7 @@ pub fn available_table_i16(rows: usize, group: usize) -> impl Iterator<Item = Ta
     collect_table![
         true => portable_table::<i16, i64>(rows, group),
         crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i16_i64(rows, group),
+        crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i16_i64(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i16_i64(rows, group),
         crate::isa::wasm::simd128_available() => crate::isa::wasm::simd128_table_i16_i64(rows, group),
     ]

@@ -43,6 +43,24 @@ pub fn avx512vnni_available() -> bool {
     }
 }
 
+/// Is AVX-512 available at the width the table sequences need?
+///
+/// `avx512f` for the register and `avx512bw` for `madd` on it. Not `avx512vnni`:
+/// a table issues no dot product, so the extension the dense tile wants is not
+/// the one this asks for, and a host with the first two and not the third still
+/// gets the wider table.
+pub fn avx512_available() -> bool {
+    #[cfg(any(feature = "std", test))]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+    }
+    #[cfg(not(any(feature = "std", test)))]
+    {
+        cfg!(target_feature = "avx512f") && cfg!(target_feature = "avx512bw")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // i8 x i8 -> i32
 // ---------------------------------------------------------------------------
@@ -2259,4 +2277,299 @@ unsafe fn avx2_codes_v1_u2(
     unsafe {
         avx2_table_gather_codes::<1, 2>(rows, group, depth, slab, shift, stack, codes, stride, lane)
     }
+}
+
+// ---------------------------------------------------------------------------
+// The table sequences, at 512 bits (§7.3)
+// ---------------------------------------------------------------------------
+
+/// Lane words one 512-bit add covers, at a 32-bit lane.
+const A5_TABLE_LANES: usize = 16;
+
+/// The `i8` table sequence at 512 bits.
+///
+/// One register is the whole shipped row tile, so `rows` is sixteen and the
+/// column step is a single load-add covering `16 * MAX_BLOCK` products --- 128 at
+/// `Book<256, 8>`, against 64 for `vpdpbusd`, which is the densest thing the
+/// dense side has on the same host. That is the pairing that decides whether a
+/// table pays on an AVX-512 machine at all, and without this sequence it does
+/// not: an AVX2 table against a VNNI tile is 64 against 64, and
+/// `tabulation_pays` correctly refuses it at every `n`.
+pub fn avx512_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
+    let (build, gather, gather_codes): (
+        TableBuild<i8, i32>,
+        TableGather<i32>,
+        TableGatherCodes<i32>,
+    ) = match (rows, group) {
+        (16, 1) => (a5_build8, a5_gather_u1, a5_codes_u1),
+        (16, 2) => (a5_build8, a5_gather_u2, a5_codes_u2),
+        _ => return None,
+    };
+    Some(TableSpec {
+        backend: Backend::Avx512Vnni,
+        rows,
+        group,
+        k_group: 2,
+        lanes_per_add: A5_TABLE_LANES,
+        build_products_per_step: A5_TABLE_LANES,
+        lane_cap: i32::MAX as u128,
+        // `madd`'s pair sum is `2 * bound^2`; an `i8` alphabet cannot reach the
+        // bound where that leaves an `i32`, so this is stated rather than
+        // binding.
+        max_bound: 32767,
+        build,
+        gather,
+        gather_codes,
+    })
+}
+
+/// The `i16` table sequence at 512 bits: eight `i64` lanes to a register.
+pub fn avx512_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i64>> {
+    let (build, gather, gather_codes): (
+        TableBuild<i16, i64>,
+        TableGather<i64>,
+        TableGatherCodes<i64>,
+    ) = match (rows, group) {
+        (16, 1) => (a5_build16, a5_gather64_u1, a5_codes64_u1),
+        (16, 2) => (a5_build16, a5_gather64_u2, a5_codes64_u2),
+        _ => return None,
+    };
+    Some(TableSpec {
+        backend: Backend::Avx512Vnni,
+        rows,
+        group,
+        k_group: 2,
+        lanes_per_add: A5_TABLE_LANES / 2,
+        build_products_per_step: A5_TABLE_LANES / 2,
+        lane_cap: i64::MAX as u128,
+        max_bound: 32767,
+        build,
+        gather,
+        gather_codes,
+    })
+}
+
+/// One slot of the `i8` table, `rows == 16` in one register.
+///
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`, with `block` even.
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn a5_build8_inner(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    debug_assert_eq!(rows, A5_TABLE_LANES);
+    debug_assert!(block.is_multiple_of(2));
+    // SAFETY: the caller established every extent.
+    unsafe {
+        for c in 0..space {
+            let d = book.add(c * block);
+            let mut entry = _mm512_setzero_si512();
+            for pair in 0..block / 2 {
+                let w =
+                    (*d.add(pair * 2) as u16 as u32) | ((*d.add(pair * 2 + 1) as u16 as u32) << 16);
+                let wv = _mm512_set1_epi32(w as i32);
+                // Sixteen lanes by two block steps is thirty-two `i8`, widened
+                // in one instruction.
+                let x = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
+                    acts.add(pair * rows * 2) as *const __m256i
+                ));
+                entry = _mm512_add_epi32(entry, _mm512_madd_epi16(x, wv));
+            }
+            _mm512_storeu_si512(out.add(c * rows) as *mut __m512i, entry);
+        }
+    }
+}
+
+/// One slot of the `i16` table, `rows == 16` in two registers of `i64`.
+///
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`, with `block` even.
+#[target_feature(enable = "avx512f,avx512bw")]
+unsafe fn a5_build16_inner(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i16,
+    acts: *const i16,
+    out: *mut i64,
+) {
+    debug_assert_eq!(rows, A5_TABLE_LANES);
+    debug_assert!(block.is_multiple_of(2));
+    // SAFETY: the caller established every extent.
+    unsafe {
+        for c in 0..space {
+            let d = book.add(c * block);
+            let (mut lo, mut hi) = (_mm512_setzero_si512(), _mm512_setzero_si512());
+            for pair in 0..block / 2 {
+                let w =
+                    (*d.add(pair * 2) as u16 as u32) | ((*d.add(pair * 2 + 1) as u16 as u32) << 16);
+                let wv = _mm512_set1_epi32(w as i32);
+                let x = _mm512_loadu_si512(acts.add(pair * rows * 2) as *const __m512i);
+                let p = _mm512_madd_epi16(x, wv);
+                lo = _mm512_add_epi64(lo, _mm512_cvtepi32_epi64(_mm512_castsi512_si256(p)));
+                hi = _mm512_add_epi64(hi, _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64::<1>(p)));
+            }
+            let o = out.add(c * rows);
+            _mm512_storeu_si512(o as *mut __m512i, lo);
+            _mm512_storeu_si512(o.add(A5_TABLE_LANES / 2) as *mut __m512i, hi);
+        }
+    }
+}
+
+/// Generate the 512-bit gather entry points for one lane width.
+macro_rules! avx512_gathers {
+    (
+        $lane:ty, $zero:ident, $add:ident, $per:expr,
+        $($g:ident, $c:ident, $u:expr;)*
+    ) => {$(
+        #[doc = concat!("# Safety\n\n[`TableGather`]'s contract at `rows == 16`, `group == ", stringify!($u), "`.")]
+        #[target_feature(enable = "avx512f,avx512bw")]
+        unsafe fn $g(
+            rows: usize,
+            _group: usize,
+            depth: usize,
+            slab: usize,
+            stack: *const $lane,
+            off: *const u32,
+            lane: *mut $lane,
+        ) {
+            debug_assert_eq!(rows, A5_TABLE_LANES);
+            debug_assert_eq!(_group, $u);
+            let mask = (slab - 1) as u32;
+            // SAFETY: the caller established every extent.
+            unsafe {
+                let mut acc = [[$zero(); { A5_TABLE_LANES / $per }]; $u];
+                for (u, cols) in acc.iter_mut().enumerate() {
+                    for (v, cell) in cols.iter_mut().enumerate() {
+                        *cell = _mm512_loadu_si512(lane.add(u * rows + v * $per) as *const __m512i);
+                    }
+                }
+                let mut words = stack;
+                for slot in 0..depth {
+                    for (u, cols) in acc.iter_mut().enumerate() {
+                        // The mask, not a comparison: every offset reads in-slab
+                        // whatever it holds, so this is one `and` and never a
+                        // branch.
+                        let entry = words.add((*off.add(slot * $u + u) & mask) as usize);
+                        for (v, cell) in cols.iter_mut().enumerate() {
+                            *cell = $add(
+                                *cell,
+                                _mm512_loadu_si512(entry.add(v * $per) as *const __m512i),
+                            );
+                        }
+                    }
+                    words = words.add(slab);
+                }
+                for (u, cols) in acc.iter().enumerate() {
+                    for (v, cell) in cols.iter().enumerate() {
+                        _mm512_storeu_si512(lane.add(u * rows + v * $per) as *mut __m512i, *cell);
+                    }
+                }
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`TableGatherCodes`]'s contract at `rows == 16`, `group == ", stringify!($u), "`.")]
+        #[target_feature(enable = "avx512f,avx512bw")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c(
+            rows: usize,
+            _group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const $lane,
+            codes: *const u16,
+            stride: usize,
+            lane: *mut $lane,
+        ) {
+            debug_assert_eq!(rows, A5_TABLE_LANES);
+            debug_assert_eq!(_group, $u);
+            let mask = (slab >> shift) - 1;
+            // SAFETY: the caller established every extent.
+            unsafe {
+                let mut acc = [[$zero(); { A5_TABLE_LANES / $per }]; $u];
+                for (u, cols) in acc.iter_mut().enumerate() {
+                    for (v, cell) in cols.iter_mut().enumerate() {
+                        *cell = _mm512_loadu_si512(lane.add(u * rows + v * $per) as *const __m512i);
+                    }
+                }
+                // One cursor per column, walked into place: a group of one is a
+                // group, and an empty range is not a way to say so.
+                let mut cursor = [codes; $u];
+                let mut at = codes;
+                for c in cursor.iter_mut() {
+                    *c = at;
+                    at = at.add(stride);
+                }
+                let mut words = stack;
+                for _ in 0..depth {
+                    for (u, cols) in acc.iter_mut().enumerate() {
+                        let entry = words.add((*cursor[u] as usize & mask) << shift);
+                        cursor[u] = cursor[u].add(1);
+                        for (v, cell) in cols.iter_mut().enumerate() {
+                            *cell = $add(
+                                *cell,
+                                _mm512_loadu_si512(entry.add(v * $per) as *const __m512i),
+                            );
+                        }
+                    }
+                    words = words.add(slab);
+                }
+                for (u, cols) in acc.iter().enumerate() {
+                    for (v, cell) in cols.iter().enumerate() {
+                        _mm512_storeu_si512(lane.add(u * rows + v * $per) as *mut __m512i, *cell);
+                    }
+                }
+            }
+        }
+    )*};
+}
+
+avx512_gathers! {
+    i32, _mm512_setzero_si512, _mm512_add_epi32, A5_TABLE_LANES,
+    a5_gather_u1, a5_codes_u1, 1;
+    a5_gather_u2, a5_codes_u2, 2;
+}
+
+avx512_gathers! {
+    i64, _mm512_setzero_si512, _mm512_add_epi64, { A5_TABLE_LANES / 2 },
+    a5_gather64_u1, a5_codes64_u1, 1;
+    a5_gather64_u2, a5_codes64_u2, 2;
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`.
+unsafe fn a5_build8(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller established `avx512f,avx512bw` and forwarded the extents.
+    unsafe { a5_build8_inner(rows, space, block, book, acts, out) }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`, in the 64-bit lane.
+unsafe fn a5_build16(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i16,
+    acts: *const i16,
+    out: *mut i64,
+) {
+    // SAFETY: the caller established `avx512f,avx512bw` and forwarded the extents.
+    unsafe { a5_build16_inner(rows, space, block, book, acts, out) }
 }

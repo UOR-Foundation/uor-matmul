@@ -84,6 +84,10 @@ fn main() {
 
     for &(m, k, n) in &[
         (1usize, 1024usize, 4096usize),
+        // The same `m` and `k` at twice the width. The build is `k/block * S *
+        // block * rows` and does not move with `n`, so the pair separates it
+        // from the column loop, which does.
+        (1, 1024, 8192),
         (8, 1024, 4096),
         (64, 1024, 4096),
         (64, 4096, 4096),
