@@ -181,7 +181,30 @@ mod tests {
         let w7 = crate::alphabet::as_alphabet::<i8, Bnd<127>>(&w).unwrap();
         assert_eq!(dot_ref(a7, w7), dot_wide(a7, w7));
         assert_eq!(dot_ref(a7, w7), dot_ref(af, wf));
-        assert!(narrow_run::<i8, Bnd<127>>() > narrow_run::<i8, Full<i8>>());
+
+        // The derivation is target-independent; the run a `usize` can *name* is
+        // not. `NARROW_CAP` is `i64::MAX`, so both runs are around `5.7e14` and
+        // neither is expressible on a 32-bit `usize`, where both clamp to
+        // `usize::MAX` --- a strict inequality between them would read as false
+        // on `wasm32` and `thumbv7em` with nothing wrong. So the ordering is
+        // asserted where it lives, in the derivation, and `narrow_run` is then
+        // pinned to that derivation exactly at whatever width the target has.
+        let derived = |b: u128| NARROW_CAP / (b * b);
+        let tight = <Bnd<127> as Bound>::VALUE;
+        let full = <Full<i8> as Bound>::VALUE;
+        assert!(tight < full, "the tighter declaration is the smaller bound");
+        assert!(
+            derived(tight) > derived(full),
+            "a tighter bound runs longer"
+        );
+        assert_eq!(
+            narrow_run::<i8, Bnd<127>>(),
+            Some(usize::try_from(derived(tight)).unwrap_or(usize::MAX))
+        );
+        assert_eq!(
+            narrow_run::<i8, Full<i8>>(),
+            Some(usize::try_from(derived(full)).unwrap_or(usize::MAX))
+        );
     }
 
     /// `CD-09`: the narrow-register tile path agrees with `dot_wide`, over

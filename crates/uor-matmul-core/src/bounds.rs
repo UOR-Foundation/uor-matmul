@@ -152,7 +152,19 @@ mod tests {
     fn narrow_candidates_are_ordered_by_speed_cu_02() {
         assert_eq!(narrow_cap_for(127, 1_000), Some(i32::MAX as u128));
         assert_eq!(narrow_cap_for(127, 200_000), Some(i64::MAX as u128));
-        assert_eq!(narrow_cap_for(127, usize::MAX), None);
         assert_eq!(NARROW_CAPS, [i64::MAX as u128, i32::MAX as u128]);
+        // No narrow register holds this run, and it says so on every target.
+        // `usize::MAX` will not serve here: it is `2^32 - 1` on `wasm32` and on
+        // `thumbv7em`, and at `b = 127` an `i64` lane holds *every* depth a
+        // 32-bit `usize` can express --- so the widest candidate fits and the
+        // honest answer on those targets is `Some`, not `None`. Reaching the
+        // `None` by way of the bound instead of the depth asks the same question
+        // of a 32-bit and a 64-bit host.
+        let wide = 1u128 << 31;
+        assert!(
+            wide * wide * 4 > i64::MAX as u128,
+            "the case has to be out of reach of the widest candidate to test it"
+        );
+        assert_eq!(narrow_cap_for(wide, 4), None);
     }
 }

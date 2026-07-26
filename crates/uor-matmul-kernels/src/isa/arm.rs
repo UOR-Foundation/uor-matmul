@@ -504,17 +504,22 @@ unsafe fn neon_build16<const V: usize>(
                 let w = vdup_n_s16(*d.add(t));
                 let a = acts.add(t * rows);
                 // Four activations per widening multiply, which is two
-                // registers of the lane.
+                // registers of the lane --- so one iteration covers four
+                // registers and therefore `4 * NEON_TABLE_LANES_64` rows. The
+                // register index and the row index advance at different rates
+                // and are written separately for that reason: an `i64` register
+                // holds two rows, so the row cursor moves twice as fast as the
+                // register cursor, and collapsing them silently re-reads the
+                // previous iteration's activations.
                 for quad in 0..V / 4 {
-                    let p = vmull_s16(vld1_s16(a.add(quad * 4)), w);
-                    entry[quad * 4] = vaddq_s64(entry[quad * 4], vmovl_s32(vget_low_s32(p)));
-                    entry[quad * 4 + 1] =
-                        vaddq_s64(entry[quad * 4 + 1], vmovl_s32(vget_high_s32(p)));
-                    let q = vmull_s16(vld1_s16(a.add(quad * 4 + 4)), w);
-                    entry[quad * 4 + 2] =
-                        vaddq_s64(entry[quad * 4 + 2], vmovl_s32(vget_low_s32(q)));
-                    entry[quad * 4 + 3] =
-                        vaddq_s64(entry[quad * 4 + 3], vmovl_s32(vget_high_s32(q)));
+                    let reg = quad * 4;
+                    let row = reg * NEON_TABLE_LANES_64;
+                    let p = vmull_s16(vld1_s16(a.add(row)), w);
+                    entry[reg] = vaddq_s64(entry[reg], vmovl_s32(vget_low_s32(p)));
+                    entry[reg + 1] = vaddq_s64(entry[reg + 1], vmovl_s32(vget_high_s32(p)));
+                    let q = vmull_s16(vld1_s16(a.add(row + 4)), w);
+                    entry[reg + 2] = vaddq_s64(entry[reg + 2], vmovl_s32(vget_low_s32(q)));
+                    entry[reg + 3] = vaddq_s64(entry[reg + 3], vmovl_s32(vget_high_s32(q)));
                 }
             }
             let o = out.add(c * rows);
