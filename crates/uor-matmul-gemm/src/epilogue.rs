@@ -169,7 +169,7 @@ pub trait ScaleExact: Accumulator {
 
 impl ScaleExact for i128 {
     fn scale_exact(self, factor: i64) -> Self {
-        self.saturating_mul(factor as i128)
+        self.saturating_mul(factor as i128) // R3-ok: the single encode step, as this trait's doc states
     }
 
     fn from_i128(v: i128) -> Self {

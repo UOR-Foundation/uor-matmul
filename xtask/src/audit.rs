@@ -258,8 +258,15 @@ pub fn audit_purity(root: &Path) -> Result<(), Fail> {
                     .lines()
                     .nth(line_no.saturating_sub(1))
                     .unwrap_or("");
-                let in_encode_step = src.rel.contains("gemm") || raw.contains("R3-ok:");
-                if !in_encode_step {
+                // The note, and nothing else. This read
+                // `src.rel.contains("gemm") || raw.contains("R3-ok:")`, and the
+                // first half exempts every path under `crates/uor-matmul-gemm/`
+                // --- the whole driver, which is where the accumulation lives and
+                // therefore the one crate the rule is about. R3 was unenforced
+                // exactly where it matters, and three sites in `float.rs` had no
+                // note. The author says why a saturating operation is not an
+                // accumulation; a directory name cannot say it for them.
+                if !raw.contains("R3-ok:") {
                     violations.push(format!(
                         "R3: {}:{line_no}: `{tok}` with no `R3-ok:` note\n    {}",
                         src.rel,
@@ -482,9 +489,19 @@ fn gather_all(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Fail> {
 /// the binary rather than the source, which is the only thing worth reporting.
 pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
     let out_dir = root.join("target").join("cu01-asm");
+    // Removed, not reused. `--emit asm` writes a `.s` only when the crate is
+    // actually compiled, so a warm directory makes `cargo rustc` answer
+    // "Finished" and leave last run's assembly --- or none at all. Observed: the
+    // gate reported three objects on a run where only two `.s` files existed, and
+    // the missing one was `uor-matmul-gemm`, the crate the float path lives in.
+    // A gate that silently reads fewer objects than it names is the vacuity this
+    // file exists to prevent.
+    let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir)?;
 
     let mut checked = 0usize;
+    // Per crate, so "how many objects" stops being a number nobody reconciles.
+    let mut per_crate: Vec<(&str, usize)> = Vec::new();
     let mut violations = Vec::new();
     // `CU-06`: the tabulated column loop, found by symbol and read instruction by
     // instruction. A source grep cannot see what the optimizer emitted, and the
@@ -492,6 +509,7 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
     let mut column_loops = 0usize;
 
     for krate in ["uor-matmul-kernels", "uor-matmul-core", "uor-matmul-gemm"] {
+        let before = checked;
         let status = std::process::Command::new(env!("CARGO"))
             .current_dir(root)
             .args(["rustc", "--release", "-p", krate, "--lib", "--target-dir"])
@@ -531,10 +549,20 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
                 }
             }
         }
+        per_crate.push((krate, checked - before));
     }
 
     if checked == 0 {
         return Err("CU-01 disassembled nothing; the gate would pass vacuously".into());
+    }
+    if let Some((krate, _)) = per_crate.iter().find(|&&(_, n)| n == 0) {
+        return Err(format!(
+            "CU-01 disassembled no object for `{krate}`, so every claim about that crate's \
+             emitted instructions passed without being read. The gate names three crates and \
+             must read all three: `--emit asm` writes a `.s` only when the crate is actually \
+             compiled, so this is what a stale `target/cu01-asm` looks like."
+        )
+        .into());
     }
     if column_loops == 0 {
         return Err(format!(

@@ -182,7 +182,7 @@ pub fn suggested_scratch(shape: Shape) -> usize {
     // (`CD-04`, `CD-10`).
     shape
         .k
-        .saturating_mul(shape.m.min(blocking::MC) + shape.n.min(blocking::NC))
+        .saturating_mul(shape.m.min(blocking::MC) + shape.n.min(blocking::NC)) // R3-ok: a scratch size query
 }
 
 /// How many exact accumulators would let the chunked-depth traversal run at its
@@ -208,5 +208,5 @@ pub fn suggested_accumulators(shape: Shape) -> usize {
     shape
         .m
         .min(blocking::MC)
-        .saturating_mul(shape.n.min(blocking::NC))
+        .saturating_mul(shape.n.min(blocking::NC)) // R3-ok: a scratch size query
 }

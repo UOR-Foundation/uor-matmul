@@ -41,9 +41,17 @@ purity:
 # all. A crate that had picked up an `alloc` dependency cannot link here.
 no-alloc:
     cargo build -p uor-matmul --no-default-features --target thumbv7em-none-eabihf
+    # `.cargo/config.toml` pins `+simd128` for this target, so the plain build
+    # below is the SIMD128-*on* one and the second has to say `-simd128` to be a
+    # second configuration at all. It used to say `+simd128` again by way of
+    # `build.rustflags`, which `target.<triple>.rustflags` outranks --- so the
+    # pair compiled the same thing twice and the comment claimed otherwise.
+    # Whether the two *agree* is `CB-05`, and that is asserted by running them
+    # under `wasmtime` in `cross-run`; what this pair asserts is that neither
+    # links an allocator.
     cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
     cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown \
-        --config 'build.rustflags=["-C","target-feature=+simd128"]'
+        --config 'target.wasm32-unknown-unknown.rustflags=["-C","target-feature=-simd128"]'
     cargo check -p uor-matmul --target aarch64-unknown-linux-gnu
 
 # The crates that carry an ISA sequence or a width that a 32-bit `usize` can

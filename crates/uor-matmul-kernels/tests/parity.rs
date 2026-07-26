@@ -931,6 +931,41 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                         compared += 1;
                     }
 
+                    // Offsets that are NOT multiples of the tile height. The
+                    // driver pre-scales, but `gather` is a safe public method and
+                    // its safety cannot rest on a caller doing so: without the
+                    // sub-row bits cleared, an offset near the end of the slab
+                    // starts the read inside the last entry and runs `rows - 1`
+                    // lanes past it -- a panic in the reference and an
+                    // out-of-bounds read in every ISA sequence. Every sequence
+                    // must agree on the row-aligned address, and none may fault.
+                    if rows > 1 {
+                        let ragged: Vec<u32> = (0..depth * group)
+                            .map(|i| ((i * 37 + 1) % (codes * rows)) as u32)
+                            .collect();
+                        let mut model = vec![0i32; group * rows];
+                        for slot in 0..depth {
+                            for u in 0..group {
+                                let at =
+                                    ragged[slot * group + u] as usize & (slab - 1) & !(rows - 1);
+                                for i in 0..rows {
+                                    model[u * rows + i] += stack[slot * slab + at + i];
+                                }
+                            }
+                        }
+                        for spec in &specs {
+                            let mut got = vec![0i32; group * rows];
+                            spec.gather(depth, slab as u32, &stack, &ragged, &mut got);
+                            assert_eq!(
+                                got, model,
+                                "{:?} disagrees on a ragged offset at space {space}, \
+                                 rows {rows}, group {group}",
+                                spec.backend
+                            );
+                            compared += 1;
+                        }
+                    }
+
                     // The same reduction read from a code stream instead of an
                     // index stream. Only where a codec could claim it: the
                     // enumeration has to be addressed by the code, which needs a

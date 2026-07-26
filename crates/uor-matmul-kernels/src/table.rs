@@ -781,9 +781,18 @@ fn gather_run<const C: usize, const R: usize, const G: usize, L: LaneWord>(
 ) {
     let slab = if C == 0 { slab_arg } else { C * R };
     // Derived here, not passed. `words.len()` is `slab` because `split_at` says
-    // so, and `at & (slab - 1) <= slab - 1`, so the compiler discharges both
-    // slice bounds below instead of checking them.
-    let mask = slab - 1;
+    // so, and the mask below is at most `slab - R`, so the compiler discharges
+    // both slice bounds instead of checking them.
+    //
+    // `slab - 1` alone would bound the entry's *base* and not the `R` lanes read
+    // from it, and [`TableSpec::gather`] is a safe public method: an offset that
+    // is not a multiple of `R` would start the read inside the last entry and run
+    // past the slab --- a panic here and, in the ISA sequences, a read out of
+    // bounds. `R` is a power of two and `slab` is a multiple of it, so clearing
+    // the sub-row bits is the same single `and` on a different constant, and it
+    // makes every read row-aligned by construction rather than by the caller's
+    // discipline.
+    let mask = (slab - 1) & !(R - 1);
     let mut acc = [[L::ZERO; R]; G];
     for (cols, held) in acc.iter_mut().zip(lane.chunks_exact(R)) {
         cols.copy_from_slice(held);
@@ -823,7 +832,7 @@ fn gather_any<L: LaneWord>(
     off: &[u32],
     lane: &mut [L],
 ) {
-    let mask = slab - 1;
+    let mask = (slab - 1) & !(rows - 1);
     let mut rest = stack;
     for run in off.chunks_exact(group) {
         let (words, tail) = rest.split_at(slab);
@@ -952,6 +961,11 @@ impl<E, L> TableSpec<E, L> {
     /// this checks lengths and nothing per code.
     pub fn gather(&self, depth: usize, slab: u32, stack: &[L], off: &[u32], lane: &mut [L]) {
         assert!(slab.is_power_of_two(), "one slot is 2^j lane words");
+        // The sequences clear the sub-row bits of every offset, which is what
+        // keeps a read of `rows` lanes inside the slab whatever the offset holds.
+        // That argument needs the tile height to be a power of two, so it is
+        // asserted here rather than assumed --- as `gather_codes` already does.
+        assert!(self.rows.is_power_of_two(), "the tile height is 2^j");
         let slab = slab as usize;
         assert_eq!(stack.len(), depth * slab, "the stack is depth * slab");
         assert_eq!(off.len(), depth * self.group, "the run is depth * group");

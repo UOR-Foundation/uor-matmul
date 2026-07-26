@@ -101,8 +101,8 @@ pub fn suggested_collapse_index(m: usize) -> usize {
     if m == 0 {
         return 0;
     }
-    let table = m.saturating_mul(2).next_power_of_two();
-    m.saturating_add(table.saturating_mul(2))
+    let table = m.saturating_mul(2).next_power_of_two(); // R3-ok: a scratch size query
+    m.saturating_add(table.saturating_mul(2)) // R3-ok: a scratch size query
 }
 
 /// How much room holds the distinct rows of an `m x k` operand.
@@ -113,7 +113,7 @@ pub fn suggested_collapse_index(m: usize) -> usize {
 /// that is enough and the packed traversal when it is not --- the same bytes
 /// either way, so the offer is a throughput choice and never a correctness one.
 pub fn suggested_collapse_rows(shape: Shape) -> usize {
-    shape.m.saturating_mul(shape.k)
+    shape.m.saturating_mul(shape.k) // R3-ok: a scratch size query
 }
 
 /// `C := epilogue(A * B, C)`, computing one output row per distinct row of `A`.

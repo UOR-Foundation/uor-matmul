@@ -327,7 +327,14 @@ unsafe fn simd_gather64<const V: usize, const U: usize>(
 ) {
     debug_assert_eq!(rows, V * SIMD_TABLE_LANES_64);
     debug_assert_eq!(_group, U);
-    let mask = (slab - 1) as u32;
+    // `slab - 1` alone bounds the entry's *base* and not the `rows` lanes read
+    // from it, and `gather` is a safe public method: an offset that is not a
+    // multiple of `rows` would start the read inside the last entry and run past
+    // the slab. `rows` is a power of two and `slab` is a multiple of it, so
+    // clearing the sub-row bits costs nothing --- both operands are constants and
+    // this is the same single `and` --- and makes every read row-aligned, and so
+    // in-slab, by construction rather than by the caller's discipline.
+    let mask = ((slab - 1) & !(rows - 1)) as u32;
     // SAFETY: the caller established every extent.
     unsafe {
         let mut acc = [[i64x2_splat(0); V]; U];
@@ -560,7 +567,14 @@ unsafe fn simd_gather<const V: usize, const U: usize>(
 ) {
     debug_assert_eq!(rows, V * SIMD_TABLE_LANES);
     debug_assert_eq!(_group, U);
-    let mask = (slab - 1) as u32;
+    // `slab - 1` alone bounds the entry's *base* and not the `rows` lanes read
+    // from it, and `gather` is a safe public method: an offset that is not a
+    // multiple of `rows` would start the read inside the last entry and run past
+    // the slab. `rows` is a power of two and `slab` is a multiple of it, so
+    // clearing the sub-row bits costs nothing --- both operands are constants and
+    // this is the same single `and` --- and makes every read row-aligned, and so
+    // in-slab, by construction rather than by the caller's discipline.
+    let mask = ((slab - 1) & !(rows - 1)) as u32;
     // SAFETY: the caller established every extent.
     unsafe {
         let mut acc = [[i32x4_splat(0); V]; U];

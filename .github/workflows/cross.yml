@@ -64,7 +64,29 @@ jobs:
         run: cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
         env:
           RUSTFLAGS: -C target-feature=+simd128
-      - name: run the suite under wasmtime
-        run: cargo test -p uor-matmul-core -p uor-matmul-codec --target wasm32-wasip1
+      # `uor-matmul-kernels` and `-gemm` are the point: every SIMD128 line in
+      # this workspace is in the first and every driver claim is in the second,
+      # and this job ran neither. It also enabled SIMD128 only for `cargo build`,
+      # so `CB-05` -- the claim that the two configurations agree -- was asserted
+      # by a compile. Both are now *run*, and neither is implied by the other:
+      # with SIMD128 off the selector offers only the portable sequence, so the
+      # comparison the parity tests make is a different one (measured, 525
+      # sequence comparisons against 657).
+      #
+      # `-conformance` and `-validate` stay out because their tests read the
+      # repository's own files, which a WASI sandbox does not hand them.
+      - name: run the suite under wasmtime, SIMD128 off
+        run: >-
+          cargo test --release --target wasm32-wasip1
+          -p uor-matmul-core -p uor-matmul-codec
+          -p uor-matmul-kernels -p uor-matmul-gemm
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      - name: run the suite under wasmtime, SIMD128 on
+        run: >-
+          cargo test --release --target wasm32-wasip1
+          -p uor-matmul-core -p uor-matmul-codec
+          -p uor-matmul-kernels -p uor-matmul-gemm
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+          RUSTFLAGS: -C target-feature=+simd128

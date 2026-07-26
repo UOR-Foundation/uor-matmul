@@ -516,16 +516,16 @@ fn packed_cost<E, L>(
     let rows = (shape.m.div_ceil(spec.mr) * spec.mr) as u64;
     let cols = (shape.n.div_ceil(spec.nr) * spec.nr) as u64;
     let pps = spec.products_per_step.max(1) as u64;
-    let issues = rows.saturating_mul(cols).saturating_mul(kpad);
+    let issues = rows.saturating_mul(cols).saturating_mul(kpad); // R3-ok: an op-count estimate for the cost model
     let accesses = if borrowed {
         0
     } else if blocked {
         // Each operand packed once per block, and at the suggested offer that is
         // once.
         (rows + cols)
-            .saturating_mul(kpad)
-            .saturating_mul(2)
-            .saturating_mul(pps)
+            .saturating_mul(kpad) // R3-ok: an op-count estimate for the cost model
+            .saturating_mul(2) // R3-ok: an op-count estimate for the cost model
+            .saturating_mul(pps) // R3-ok: an op-count estimate for the cost model
     } else {
         // An offer too small to hold a block does not buy the blocked traversal;
         // it buys the one that packs both panels afresh for every output tile.
@@ -533,14 +533,14 @@ fn packed_cost<E, L>(
         // look cheaper than the streaming reference at `4 x 4 x 4` while running
         // three and a half times slower than it --- the model was pricing a
         // traversal the offer could not run.
-        let calls = (rows / spec.mr as u64).saturating_mul(cols / spec.nr as u64);
+        let calls = (rows / spec.mr as u64).saturating_mul(cols / spec.nr as u64); // R3-ok: an op-count estimate for the cost model
         calls
-            .saturating_mul(spec.mr as u64 + spec.nr as u64)
-            .saturating_mul(kpad)
-            .saturating_mul(2)
-            .saturating_mul(pps)
+            .saturating_mul(spec.mr as u64 + spec.nr as u64) // R3-ok: an op-count estimate for the cost model
+            .saturating_mul(kpad) // R3-ok: an op-count estimate for the cost model
+            .saturating_mul(2) // R3-ok: an op-count estimate for the cost model
+            .saturating_mul(pps) // R3-ok: an op-count estimate for the cost model
     };
-    (issues.saturating_add(accesses), pps)
+    (issues.saturating_add(accesses), pps) // R3-ok: an op-count estimate for the cost model
 }
 
 /// Choose the cheaper packed sequence, or `None` for the streaming traversal.
@@ -605,7 +605,9 @@ where
             if let Some(c) = c {
                 let (cc, cp) = packed_cost(shape, &c, borrows(&c), blocks(&c));
                 // `a/p < b/q` without dividing.
-                if cc.saturating_mul(pps) < cost.saturating_mul(cp) {
+                // `a/p < b/q` without dividing, on op counts.
+                let cheaper = cc.saturating_mul(pps) < cost.saturating_mul(cp); // R3-ok: a cost comparison, not an accumulation
+                if cheaper {
                     best = c;
                     cost = cc;
                     pps = cp;
@@ -618,10 +620,11 @@ where
 
     // Two operand reads and one issue per product, and nothing packed.
     let stream = (shape.m as u64)
-        .saturating_mul(shape.k as u64)
-        .saturating_mul(shape.n as u64)
-        .saturating_mul(3);
-    if cost < stream.saturating_mul(pps) {
+        .saturating_mul(shape.k as u64) // R3-ok: an op-count estimate for the cost model
+        .saturating_mul(shape.n as u64) // R3-ok: an op-count estimate for the cost model
+        .saturating_mul(3); // R3-ok: an op-count estimate for the cost model
+    let streams = stream.saturating_mul(pps); // R3-ok: a cost comparison, not an accumulation
+    if cost < streams {
         Some(best)
     } else {
         None
@@ -676,6 +679,19 @@ fn run<E, Bd, O, Ep, L>(
     // A whole number of groups, so a chunk's padded depth never outgrows what
     // was reserved for it.
     let kc = (scratch.len() / per_step).min(lane_depth) / pad_to * pad_to;
+    if kc == 0 {
+        // The guard above establishes room for one group but not that the *lane*
+        // holds one, and `lane_depth` below `pad_to` rounds this to zero --- after
+        // which the chunk loop advances `p0` by zero and never returns. Measured
+        // over every sequence this library ships, no admissible alphabet makes
+        // `lane_depth` smaller than `k_group`, so this is unreachable today; it is
+        // written because that is an arithmetic coincidence between three separate
+        // declarations and not something any of them states. `CB-07` now asserts
+        // the coincidence, and this costs one comparison if it ever stops holding.
+        // `run_chunked_depth` has always guarded the same arithmetic this way.
+        crate::gemm(triple, epilogue, options, scratch);
+        return;
+    }
     let reads_c = epilogue.reads_c();
 
     // The panels are the only copies this driver makes, and which loop they sit
@@ -803,7 +819,8 @@ fn run<E, Bd, O, Ep, L>(
             // a repack per block. At `k = 262144` the old form drove `nc` to a
             // single column and made `A` be read once per column of `B`.
             let fits = |lanes: usize, set: usize| -> usize {
-                if lanes.saturating_mul(kpad) >= set {
+                let panel = lanes.saturating_mul(kpad); // R3-ok: a panel size question, not an accumulation
+                if panel >= set {
                     usize::MAX
                 } else {
                     (set / kpad).max(lanes)
@@ -1058,7 +1075,6 @@ fn run_chunked_depth<E, Bd, O, Ep, L>(
         / pad_to
         * pad_to;
     if kc == 0 {
-        // Not even one group of panel room. The full-depth traversals handle it.
         // Not even one group of panel room; the streaming traversal runs.
         crate::gemm(triple, epilogue, options, scratch);
         return;
@@ -1235,15 +1251,15 @@ fn pack_rows<E: IntegerElement, Bd: Bound>(
     count: usize,
     rows: usize,
 ) {
-    let count = count.min(rows.saturating_sub(row0));
-    // Which loop is inner decides which stride the *reads* walk, and the panel
-    // is written either way. A lane is a row here, so the lanes move by `rs` and
-    // the depth by `cs`: putting the lanes inside walks `rs`, putting the depth
-    // inside walks `cs`, and the right answer is whichever is smaller. Reading
-    // the wrong way round touches a new cache line per element, which for a
-    // shape whose packing is the same order as its arithmetic is the whole cost.
-    // Only worth it when there is more than one lane to put inside: a reduce
-    // panel has one, and an inner loop of one element is all overhead.
+    let count = count.min(rows.saturating_sub(row0)); // R3-ok: a row cursor, clamped by `min`
+                                                      // Which loop is inner decides which stride the *reads* walk, and the panel
+                                                      // is written either way. A lane is a row here, so the lanes move by `rs` and
+                                                      // the depth by `cs`: putting the lanes inside walks `rs`, putting the depth
+                                                      // inside walks `cs`, and the right answer is whichever is smaller. Reading
+                                                      // the wrong way round touches a new cache line per element, which for a
+                                                      // shape whose packing is the same order as its arithmetic is the whole cost.
+                                                      // Only worth it when there is more than one lane to put inside: a reduce
+                                                      // panel has one, and an inner loop of one element is all overhead.
     let cols_are_cheap = a.strides().rs.unsigned_abs() < a.strides().cs.unsigned_abs();
     if lanes == 1 && cols_are_cheap && count > 1 {
         // The symmetric case: a column-major `A`, whose rows are the expensive
@@ -1302,10 +1318,10 @@ fn pack_columns<E: IntegerElement, Bd: Bound>(
     count: usize,
     cols: usize,
 ) {
-    let count = count.min(cols.saturating_sub(col0));
-    // A lane is a column here, so the lanes move by `cs` and the depth by `rs`.
-    // See [`pack_rows`]: a row-major `B` wants the lanes inside, and walking it
-    // the other way round is a cache line per element.
+    let count = count.min(cols.saturating_sub(col0)); // R3-ok: a column cursor, clamped by `min`
+                                                      // A lane is a column here, so the lanes move by `cs` and the depth by `rs`.
+                                                      // See [`pack_rows`]: a row-major `B` wants the lanes inside, and walking it
+                                                      // the other way round is a cache line per element.
     let rows_are_cheap = b.strides().cs.unsigned_abs() < b.strides().rs.unsigned_abs();
     if lanes == 1 && rows_are_cheap && count > 1 {
         transpose_panels(out, kpad, depth, count, |p, c0, cn| {
@@ -1386,6 +1402,45 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, Full, MatView, MatViewMut};
+
+    /// `CT-01`, R14: a declared bound that shrinks the lane below a sequence's
+    /// `k_group` still terminates, and still computes the sum.
+    ///
+    /// The chunk depth is `min(room, lane_depth)` rounded *down* to a multiple of
+    /// `k_group`, and the `i8` reduce sequence declares `k_group = 32` while its
+    /// lane holds two steps at the widest alphabet it admits. That rounds the
+    /// depth to zero, and the chunk loop then advanced `p0` by zero: measured,
+    /// `gemm_packed` did not return, and a `timeout` had to kill it. Not a wrong
+    /// answer -- no answer, ever, which is the one outcome a total operation
+    /// cannot have.
+    ///
+    /// `32767` is not an arbitrary constant here: it is the widest bound the AVX2
+    /// sequences declare, so it is the alphabet at which the lane is shallowest
+    /// while those sequences are still admissible.
+    #[test]
+    fn a_bound_that_shrinks_the_lane_below_its_group_still_terminates_ct_01() {
+        use uor_matmul_core::{as_alphabet, Bnd};
+        type B = Bnd<32767>;
+        for k in [1usize, 31, 32, 33, 64, 4096] {
+            let a: Vec<i8> = vec![1; k];
+            let b: Vec<i8> = vec![1; k];
+            let mut c = [0i32; 1];
+            {
+                let av = MatView::row_major(as_alphabet::<i8, B>(&a).unwrap(), 1, k).unwrap();
+                let bv = MatView::row_major(as_alphabet::<i8, B>(&b).unwrap(), k, 1).unwrap();
+                let cv = MatViewMut::row_major(&mut c, 1, 1).unwrap();
+                let mut t = Triple::new(av, bv, cv).unwrap();
+                let mut buf = vec![Default::default(); 1 << 16];
+                crate::gemm_packed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut Scratch::new(&mut buf),
+                );
+            }
+            assert_eq!(c[0], k as i32, "k={k}");
+        }
+    }
 
     /// `CD-01`, `CD-10`: chunking the depth cannot change a byte.
     ///

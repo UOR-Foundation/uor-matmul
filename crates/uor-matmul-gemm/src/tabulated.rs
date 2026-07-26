@@ -261,8 +261,8 @@ pub const fn slab_codes(code_space: usize) -> usize {
 /// it calls anything.
 pub const fn table_words(code_space: usize, rows: usize, depth: usize) -> usize {
     slab_codes(code_space)
-        .saturating_mul(rows)
-        .saturating_mul(depth)
+        .saturating_mul(rows) // R3-ok: a size query, not an accumulation
+        .saturating_mul(depth) // R3-ok: a size query, not an accumulation
 }
 
 impl<'s, L: LaneWord> Table<'s, L> {
@@ -490,13 +490,12 @@ impl<'s> Tabulation<'s> {
 /// A *query*. Offering none gives the same bytes from the uncollapsed traversal,
 /// which is the rule every other offer in this library follows (`CD-13`).
 pub fn suggested_tabulation_index(shape: Shape) -> usize {
-    shape.n.saturating_add(
-        shape
-            .n
-            .saturating_mul(2)
-            .next_power_of_two()
-            .saturating_mul(2),
-    )
+    let doubled = shape
+        .n
+        .saturating_mul(2) // R3-ok: a size query, not an accumulation
+        .next_power_of_two()
+        .saturating_mul(2); // R3-ok: a size query, not an accumulation
+    shape.n.saturating_add(doubled) // R3-ok: a size query, not an accumulation
 }
 
 /// How many narrow lane words would let the tabulated traversal run at its
@@ -529,7 +528,7 @@ pub fn suggested_tabulation_lanes<E: Tabulated, Bd: Bound>(
     };
     // Reported in `i64` words, which is what the offer is made of.
     plan.lane_words(code_space)
-        .saturating_mul(E::LANE_BYTES)
+        .saturating_mul(E::LANE_BYTES) // R3-ok: a size query, not an accumulation
         .div_ceil(core::mem::size_of::<i64>())
 }
 
@@ -559,9 +558,9 @@ pub fn suggested_tabulation<E: Tabulated, Bd: Bound>(
     ) else {
         return 0;
     };
-    let tile = plan.rows.saturating_mul(plan.cols);
+    let tile = plan.rows.saturating_mul(plan.cols); // R3-ok: a size query, not an accumulation
     if E::LANE_IS_EXACT {
-        tile.saturating_add(plan.lane_words(code_space))
+        tile.saturating_add(plan.lane_words(code_space)) // R3-ok: a size query, not an accumulation
     } else {
         tile
     }
@@ -587,9 +586,9 @@ pub const fn tabulation_fits(
     code_space > 0
         && rows > 0
         && code_space
-            .saturating_mul(rows)
-            .saturating_mul(lane_bytes)
-            .saturating_mul(2)
+            .saturating_mul(rows) // R3-ok: a cache or tile question, not an accumulation
+            .saturating_mul(lane_bytes) // R3-ok: a cache or tile question, not an accumulation
+            .saturating_mul(2) // R3-ok: a cache or tile question, not an accumulation
             <= l1_bytes
 }
 
@@ -668,12 +667,12 @@ pub const fn tabulation_pays(
     } else {
         steps.dense_rows
     };
-    let effective = steps.dense.saturating_mul(present) / steps.dense_rows;
+    let effective = steps.dense.saturating_mul(present) / steps.dense_rows; // R3-ok: a cost estimate, not an accumulation
     block > 1
         && effective > 0
         && steps.table > effective
-        && cols.saturating_mul(steps.table - effective)
-            > code_space.saturating_mul(effective).saturating_mul(block)
+        && cols.saturating_mul(steps.table - effective) // R3-ok: a cost estimate, not an accumulation
+            > code_space.saturating_mul(effective).saturating_mul(block) // R3-ok: a cost estimate, not an accumulation
         && tabulation_fits(code_space, rows, l1_bytes, lane_bytes)
 }
 
@@ -926,8 +925,8 @@ impl Plan {
     /// touched once per output element.
     const fn lane_words(&self, code_space: usize) -> usize {
         self.rows
-            .saturating_mul(self.cols)
-            .saturating_add(table_words(code_space, self.rows, self.depth))
+            .saturating_mul(self.cols) // R3-ok: a size query, not an accumulation
+            .saturating_add(table_words(code_space, self.rows, self.depth)) // R3-ok: a size query, not an accumulation
     }
 
     /// The largest plan the two offers support.
@@ -955,7 +954,7 @@ impl Plan {
         let slab = slab_codes(code_space);
         let rows = ROW_TILES
             .into_iter()
-            .find(|&r| r <= row_cap && slab.saturating_mul(r) < lane_offer)?;
+            .find(|&r| r <= row_cap && slab.saturating_mul(r) < lane_offer)?; // R3-ok: a cache or tile question, not an accumulation
         let cols = shape.n.min(exact_offer / rows);
         if cols == 0 {
             return None;
@@ -964,15 +963,15 @@ impl Plan {
         // The stack shares the lane offer with the column accumulation, which is
         // `rows * cols` words and is claimed first because the reduction cannot
         // proceed without it.
-        let for_stack = lane_offer.saturating_sub(rows * cols);
-        // The lane's own capacity is a term here, not an afterthought handled
-        // downstream. `row_tile` places a run when *another* chunk would not fit,
-        // so a `depth` already past the lane has overflowed it before the first
-        // placement can happen --- the guard cannot rescue the first chunk. For
-        // every family this library ships the ratio is enormous (16643 blocks at
-        // `(i8, i32)` and `Bk = 8`, against a depth of at most `GATHER_SLOTS`),
-        // so this binds on nothing shipped and costs nothing; it is here because
-        // a bound that only holds by arithmetic nobody checked is not a bound.
+        let for_stack = lane_offer.saturating_sub(rows * cols); // R3-ok: a cache or tile question, not an accumulation
+                                                                // The lane's own capacity is a term here, not an afterthought handled
+                                                                // downstream. `row_tile` places a run when *another* chunk would not fit,
+                                                                // so a `depth` already past the lane has overflowed it before the first
+                                                                // placement can happen --- the guard cannot rescue the first chunk. For
+                                                                // every family this library ships the ratio is enormous (16643 blocks at
+                                                                // `(i8, i32)` and `Bk = 8`, against a depth of at most `GATHER_SLOTS`),
+                                                                // so this binds on nothing shipped and costs nothing; it is here because
+                                                                // a bound that only holds by arithmetic nobody checked is not a bound.
         let by_cache = tabulation_depth(
             code_space,
             rows,
@@ -1119,7 +1118,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
     );
     let dense = E::exact_spec(options.backend, Bd::VALUE, plan.rows);
     let steps = Steps {
-        table: block.saturating_mul(table.lanes_per_add),
+        table: block.saturating_mul(table.lanes_per_add), // R3-ok: a size or cost query, not an accumulation
         dense: dense.products_per_step,
         // The *blocking* row count, not the chosen tile's `mr`. Reading `mr`
         // says a one-row kernel wastes no lanes, which is true and is not why
@@ -1247,8 +1246,8 @@ where
 pub const fn suggested_tabulation_panel(code_space: usize, block: usize) -> usize {
     // The decoded codebook, plus the widest activation tile a row tile can pack.
     code_space
-        .saturating_add(ROW_TILES[0])
-        .saturating_mul(block)
+        .saturating_add(ROW_TILES[0]) // R3-ok: a size query, not an accumulation
+        .saturating_mul(block) // R3-ok: a size query, not an accumulation
 }
 
 /// Output columns reduced together in one pass over the stack.
@@ -2082,7 +2081,7 @@ mod tests {
         // are all reachable.
         let scale = |want: usize, offer: usize| -> usize {
             if offer >= OFFER_STEPS {
-                want.saturating_mul(offer - OFFER_STEPS + 1)
+                want.saturating_mul(offer - OFFER_STEPS + 1) // R3-ok: a size or cost query, not an accumulation
             } else {
                 want * offer / OFFER_STEPS
             }

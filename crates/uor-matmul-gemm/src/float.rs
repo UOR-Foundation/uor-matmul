@@ -70,7 +70,13 @@ pub fn gemm_float_packed<E, O, Ep>(
     // One row of `A` and one column of `B` is the smallest offer that removes a
     // whole factor of redundant decoding; below it, the streaming traversal
     // runs. The same identity, walked differently (S13).
-    if pa.len() < shape.k || pb.len() < shape.k {
+    // `k == 0` takes this path too, and not as a special case: the sum over an
+    // empty reduction is zero, the loop below computes exactly that, and the
+    // epilogue still runs. It is named because the comparison does not catch it
+    // --- `pa.len() < 0` is false for every `usize` --- and what followed was
+    // `pb.len() / shape.k`, which panics on every build. `gemm_float` returns
+    // `()` and has no failure to report (R14, `CT-04`).
+    if shape.k == 0 || pa.len() < shape.k || pb.len() < shape.k {
         for i in 0..shape.m {
             for j in 0..shape.n {
                 let mut acc = <AccOf<E> as Accumulator>::ZERO;
@@ -103,7 +109,7 @@ pub fn gemm_float_packed<E, O, Ep>(
     // order of work, so it pays exactly when `m * n > m + n` --- which is false
     // for a matrix-vector product, where the walk would more than double the
     // whole call, and true for everything with two real dimensions.
-    let worth_asking = shape.m.saturating_mul(shape.n) > shape.m.saturating_add(shape.n);
+    let worth_asking = shape.m.saturating_mul(shape.n) > shape.m.saturating_add(shape.n); // R3-ok: a shape predicate, not a value
     let prescaled = if !worth_asking {
         None
     } else {
@@ -485,7 +491,7 @@ fn admits<E: FloatElement>(k: usize, a: Span, b: Span) -> Option<Prescaled> {
         // One panel is all zeros, so the sum is zero at any base. Scaling is
         // still the cheaper sequence and still exact.
         return Some(Prescaled {
-            base: a.base().saturating_add(b.base()),
+            base: a.base().saturating_add(b.base()), // R3-ok: an exponent base, not an accumulation
             wide: false,
         });
     }
@@ -502,7 +508,7 @@ fn admits<E: FloatElement>(k: usize, a: Span, b: Span) -> Option<Prescaled> {
         .checked_add(wa)?
         .checked_add(wb)?
         .checked_add(depth)?;
-    let base = a.base().saturating_add(b.base());
+    let base = a.base().saturating_add(b.base()); // R3-ok: an exponent base, not an accumulation
     if need <= 62 {
         Some(Prescaled { base, wide: false })
     } else if need <= 126 {
@@ -569,6 +575,39 @@ mod tests {
             gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
         }
         c
+    }
+
+    /// `CT-04`: the degenerate shapes are shapes, not error conditions.
+    ///
+    /// `k == 0` is the one that mattered: the sum over an empty reduction is
+    /// zero and the epilogue still runs, but the offer guard reads
+    /// `pa.len() < shape.k`, which is false for every `usize` when `k` is zero,
+    /// so control reached `pb.len() / shape.k` and `gemm_float` panicked with
+    /// "attempt to divide by zero" --- on every build, release included, since
+    /// integer division by zero is not a debug assertion. `gemm_float` returns
+    /// `()` and has no failure to report (R14).
+    #[test]
+    fn degenerate_shapes_are_shapes_ct_04() {
+        for &(m, k, n) in &[
+            (2usize, 0usize, 2usize),
+            (0, 2, 2),
+            (2, 2, 0),
+            (0, 0, 0),
+            (1, 1, 1),
+            (1, 0, 1),
+            (3, 0, 7),
+        ] {
+            let a = vec![1.0f32; m * k];
+            let b = vec![1.0f32; k * n];
+            let got = product(m, k, n, &a, &b);
+            assert_eq!(got.len(), m * n, "{m}x{k}x{n}");
+            // Every cell is the empty sum where `k` is zero, and `k` products of
+            // ones otherwise.
+            assert!(
+                got.iter().all(|&x| x == k as f32),
+                "{m}x{k}x{n} gave {got:?}"
+            );
+        }
     }
 
     /// The ordinary case is ordinary: an exact small product is exactly right.

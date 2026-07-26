@@ -55,34 +55,43 @@ impl Strides {
             .wrapping_add((j as isize).wrapping_mul(self.cs))
     }
 
-    /// The lowest and highest offsets an `rows x cols` view reaches.
-    const fn extent(&self, rows: usize, cols: usize) -> (isize, isize) {
+    /// The lowest and highest offsets an `rows x cols` view reaches, or `None`
+    /// when that reach is not representable.
+    ///
+    /// Checked, not wrapping. [`place`] decides from this whether the view fits
+    /// the buffer, so a product that wrapped would report a reach the view does
+    /// not have --- and `MatView::new` would hand back a view whose cells are
+    /// outside the slice it was built from. Measured: `5 x 1` at `rs = 1 << 62`
+    /// was accepted and then panicked on the first `at`. A stride whose reach
+    /// does not fit an `isize` names no view of this buffer, and "what object
+    /// does not exist" is exactly the question `Option` answers here (R14).
+    const fn extent(&self, rows: usize, cols: usize) -> Option<(isize, isize)> {
         if rows == 0 || cols == 0 {
-            return (0, 0);
+            return Some((0, 0));
         }
         let last_r = (rows - 1) as isize;
         let last_c = (cols - 1) as isize;
-        let r_lo = if self.rs < 0 {
-            last_r.wrapping_mul(self.rs)
-        } else {
-            0
+        let r = match last_r.checked_mul(self.rs) {
+            Some(v) => v,
+            None => return None,
         };
-        let r_hi = if self.rs > 0 {
-            last_r.wrapping_mul(self.rs)
-        } else {
-            0
+        let c = match last_c.checked_mul(self.cs) {
+            Some(v) => v,
+            None => return None,
         };
-        let c_lo = if self.cs < 0 {
-            last_c.wrapping_mul(self.cs)
-        } else {
-            0
+        // A negative stride reaches below the origin and a positive one above it;
+        // a zero stride reaches neither, and `r`/`c` are then zero anyway.
+        let (r_lo, r_hi) = if self.rs < 0 { (r, 0) } else { (0, r) };
+        let (c_lo, c_hi) = if self.cs < 0 { (c, 0) } else { (0, c) };
+        let lo = match r_lo.checked_add(c_lo) {
+            Some(v) => v,
+            None => return None,
         };
-        let c_hi = if self.cs > 0 {
-            last_c.wrapping_mul(self.cs)
-        } else {
-            0
+        let hi = match r_hi.checked_add(c_hi) {
+            Some(v) => v,
+            None => return None,
         };
-        (r_lo.wrapping_add(c_lo), r_hi.wrapping_add(c_hi))
+        Some((lo, hi))
     }
 
     /// Do two distinct coordinates of an `rows x cols` view land on the same
@@ -159,7 +168,10 @@ const fn place(len: usize, rows: usize, cols: usize, strides: Strides) -> Option
     if rows == 0 || cols == 0 {
         return Some(0);
     }
-    let (lo, hi) = strides.extent(rows, cols);
+    let (lo, hi) = match strides.extent(rows, cols) {
+        Some(v) => v,
+        None => return None,
+    };
     // The origin sits at `-lo`, so that the lowest offset reached is index 0.
     if lo > 0 {
         return None;
@@ -599,6 +611,40 @@ impl<E: IntegerElement> MatView<'_, E> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CS-02`, R14: a stride whose reach does not fit an `isize` names no view,
+    /// and is refused rather than accepted and then read.
+    ///
+    /// `extent` decided the reach with `wrapping_mul`, so `place` compared a
+    /// wrapped number against the buffer length and said yes. `MatView::new` then
+    /// handed back a `5 x 1` view of a one-element slice whose second cell is at
+    /// index `2^62`: accepted by a safe constructor, panicking on the first `at`,
+    /// and inside `gemm` that is a panic in an operation that returns `()`.
+    #[test]
+    fn a_reach_that_does_not_fit_is_refused_cs_02() {
+        let data = [1i32, 2, 3, 4, 5, 6];
+        let a = crate::as_alphabet_full(&data);
+        for &(rows, cols, rs, cs) in &[
+            // Derived from `isize`, not a literal shift: `1 << 62` does not fit
+            // a 32-bit `isize` and will not compile for `wasm32`.
+            (5usize, 1usize, (isize::MAX >> 1) + 1, 1isize),
+            (3, 3, isize::MAX / 2, 1),
+            (2, 2, 1, isize::MAX),
+            (2, 2, isize::MIN, 1),
+            (3, 2, isize::MIN / 2, -1),
+        ] {
+            assert!(
+                MatView::new(a, rows, cols, Strides { rs, cs }).is_none(),
+                "{rows}x{cols} at rs={rs} cs={cs} reaches outside any buffer and \
+                 must not be constructible"
+            );
+        }
+        // The ordinary strides next to them are still accepted, so the refusal is
+        // about the reach and not about the sign or the magnitude alone.
+        assert!(MatView::new(a, 2, 3, Strides { rs: 3, cs: 1 }).is_some());
+        assert!(MatView::new(a, 2, 3, Strides { rs: -3, cs: 1 }).is_some());
+        assert!(MatView::new(a, 2, 3, Strides { rs: 3, cs: -1 }).is_some());
+    }
 
     /// CS-02: negative and zero input strides are honoured, not rejected.
     #[test]
