@@ -571,6 +571,15 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
             }
             return out;
         }
+        if factor == 1 {
+            // `alpha == 1` is the overwhelmingly common epilogue, and it is the
+            // identity. Without this it walked the double-and-add loop once
+            // anyway: one `combine` of `L` limbs into the accumulator plus one
+            // dead `combine` doubling the addend, and two full-width register
+            // materializations, per output element. At 67 limbs that is 536 bytes
+            // moved four times to compute `x * 1`.
+            return self;
+        }
         let flip = factor < 0;
         let mut magnitude = factor.unsigned_abs();
         let mut acc = Self {

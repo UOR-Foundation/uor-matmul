@@ -60,7 +60,6 @@ use uor_matmul_kernels::{
     available_table_i16, available_table_i8, choose_table, packed_slot, portable_table,
 };
 
-use crate::coded::self_aliases;
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
 use crate::kernel::{gemm_packed, Kernelized};
@@ -397,7 +396,7 @@ impl<'a, 'w, 'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, O>
             });
         }
         let s = c.strides();
-        if self_aliases(c.rows(), c.cols(), s.rs, s.cs) {
+        if s.self_aliases(c.rows(), c.cols()) {
             return Err(NotAProduct::OutputAliasesItself {
                 m: c.rows(),
                 n: c.cols(),
@@ -981,7 +980,12 @@ impl Plan {
             lane_bytes,
         );
         let by_offer = for_stack / (slab * rows);
-        let depth = by_cache.min(by_offer).min(blocks.max(1)).min(GATHER_SLOTS);
+        // `GATHER_SLOTS` is *not* a term here, and its own doc comment says why:
+        // it is the offset run's frame size, and a chunk deeper than it is walked
+        // in windows of it (see `sweep`). Capping the derived depth with it made
+        // the doc false and the frame size a limit on the traversal --- exactly the
+        // shape R8 forbids. Every term left is a cache, an offer, or the shape.
+        let depth = by_cache.min(by_offer).min(blocks.max(1));
         // A stack of no slots is not a stack. Every term above is a cache or an
         // offer, so this is the floor of a derivation and not a chosen minimum.
         let depth = if depth == 0 { 1 } else { depth };

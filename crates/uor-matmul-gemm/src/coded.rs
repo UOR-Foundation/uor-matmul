@@ -59,7 +59,7 @@ impl<'a, 'b, 'c, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>, O>
             });
         }
         let s = c.strides();
-        if self_aliases(c.rows(), c.cols(), s.rs, s.cs) {
+        if s.self_aliases(c.rows(), c.cols()) {
             return Err(NotAProduct::OutputAliasesItself {
                 m: c.rows(),
                 n: c.cols(),
@@ -78,35 +78,6 @@ impl<'a, 'b, 'c, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>, O>
             n: self.b.cols(),
         }
     }
-}
-
-/// The same aliasing question [`uor_matmul_core::Strides`] answers, asked here
-/// because a `CodedTriple` builds its own output view.
-pub(crate) fn self_aliases(rows: usize, cols: usize, rs: isize, cs: isize) -> bool {
-    if rows == 0 || cols == 0 {
-        // An empty output has no two distinct coordinates to collide.
-        return false;
-    }
-    if rows <= 1 && cols <= 1 {
-        return false;
-    }
-    if rows > 1 && rs == 0 {
-        return true;
-    }
-    if cols > 1 && cs == 0 {
-        return true;
-    }
-    if rows <= 1 || cols <= 1 {
-        return false;
-    }
-    let (mut a, mut b) = (rs.unsigned_abs(), cs.unsigned_abs());
-    while b != 0 {
-        let t = a % b;
-        a = b;
-        b = t;
-    }
-    let g = a;
-    (cs.unsigned_abs() / g) < rows && (rs.unsigned_abs() / g) < cols
 }
 
 /// `C := epilogue(A * decode(B), C)`.
@@ -136,10 +107,20 @@ pub fn coded_gemm<E, Bd, C, O, Ep>(
     for i in 0..shape.m {
         for j in 0..shape.n {
             let mut acc = <AccOf<E> as Accumulator>::ZERO;
-            for p in 0..shape.k {
+            // Walked, not indexed. `at(p, j)` is O(1) only for a fixed-width
+            // tier; for a variable-length one it walks row `p` *and*
+            // `row_code_range` walks rows `0..p`, so this loop cost O(k^2) per
+            // output element and the whole traversal O(m n k^2) --- which is the
+            // hazard `row_code_range`'s own note names, on the one driver that
+            // reads a coded operand an element at a time. The walk carries its
+            // cursor, so a column is one pass over the codes whatever the tier,
+            // and the identity is O(m n k) again.
+            for (p, w) in triple.b.column_walk(j).enumerate() {
+                if p >= shape.k {
+                    break;
+                }
                 // Decode, then accumulate exactly. The codec is not an argument
                 // of the arithmetic below it.
-                let w = triple.b.at(p, j);
                 E::mac(&mut acc, triple.a.at(i, p).get(), w.get());
             }
             let prior = if reads_c {

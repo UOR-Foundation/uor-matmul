@@ -698,10 +698,11 @@ mod tests {
 
 /// Implement the float family for one IEEE interchange format.
 macro_rules! impl_float_element {
-    ($t:ty, $bits:ty, $mant:expr, $expo:expr, $limbs:expr, $min_prod:expr, $max_prod:expr) => {
+    ($t:ty, $bits:ty, $limbs:expr, $min_prod:expr, $max_prod:expr) => {
         impl Element for $t {
             type Acc = crate::acc::Complete<{ $limbs }, { $min_prod }>;
-            const BITS: u32 = <$t>::MANTISSA_DIGITS + $expo;
+            // The format's whole width: stored mantissa, exponent, and sign.
+            const BITS: u32 = (core::mem::size_of::<$t>() * 8) as u32;
             const ZERO: Self = 0.0;
 
             fn mac(acc: &mut Self::Acc, a: Self, w: Self) {
@@ -748,14 +749,17 @@ macro_rules! impl_float_element {
             const MIN_PRODUCT_EXP: i32 = $min_prod;
             const MAX_PRODUCT_EXP: i32 = $max_prod;
             // The stored fraction plus the implicit leading bit.
-            const SIGNIFICAND_BITS: u32 = $mant + 1;
+            const SIGNIFICAND_BITS: u32 = <$t>::MANTISSA_DIGITS;
 
             fn decode(self) -> Decoded {
                 // Total on all bit patterns. No branch here can fail, and none
                 // rounds: an IEEE value *names* a dyadic rational exactly, and
                 // this reads the name (`CT-03`).
-                const MANT_BITS: u32 = $mant;
-                const EXP_BITS: u32 = $expo;
+                const MANT_BITS: u32 = <$t>::MANTISSA_DIGITS - 1;
+                // Whatever the format has left: its width, less the stored
+                // mantissa and the sign. Asked rather than told, so `f16` or
+                // `bf16` would need no numeral here either.
+                const EXP_BITS: u32 = (core::mem::size_of::<$t>() * 8) as u32 - MANT_BITS - 1;
                 const BIAS: i32 = (1 << (EXP_BITS - 1)) - 1;
 
                 let bits = self.to_bits();
@@ -789,8 +793,28 @@ macro_rules! impl_float_element {
     };
 }
 
-impl_float_element!(f32, u32, 23, 8, 10, -298, 256);
-impl_float_element!(f64, u64, 52, 11, 67, -2148, 2048);
+// The three widths come from the model, not from a literal restated beside it
+// (R1). `model/widths.toml` owns them, `generated::complete_width` is the single
+// place they are written, and `CM-01` pins all three for both formats --- it
+// pinned only the minimum product exponent, so the limb count and the maximum
+// could have drifted from the model without any gate noticing.
+//
+// `23`/`8` and `52`/`11` are gone for a related reason: they are properties of
+// the IEEE format, so the format can be asked instead of told.
+impl_float_element!(
+    f32,
+    u32,
+    crate::generated::complete_width::F32_LIMBS,
+    crate::generated::complete_width::F32_MIN_PRODUCT_EXP,
+    crate::generated::complete_width::F32_MAX_PRODUCT_EXP
+);
+impl_float_element!(
+    f64,
+    u64,
+    crate::generated::complete_width::F64_LIMBS,
+    crate::generated::complete_width::F64_MIN_PRODUCT_EXP,
+    crate::generated::complete_width::F64_MAX_PRODUCT_EXP
+);
 
 #[cfg(test)]
 mod float_tests {
@@ -885,5 +909,49 @@ mod float_tests {
             <f64 as FloatElement>::MIN_PRODUCT_EXP,
             crate::generated::complete_width::F64_MIN_PRODUCT_EXP
         );
+        // The other two widths, which this test did not pin. The limb count and
+        // the maximum product exponent were literals written beside the model's
+        // own values, so either could have drifted from `model/widths.toml`
+        // without a gate noticing (R1). They are now read from the model, and
+        // read back here.
+        assert_eq!(
+            <f32 as FloatElement>::MAX_PRODUCT_EXP,
+            crate::generated::complete_width::F32_MAX_PRODUCT_EXP
+        );
+        assert_eq!(
+            <f64 as FloatElement>::MAX_PRODUCT_EXP,
+            crate::generated::complete_width::F64_MAX_PRODUCT_EXP
+        );
+        // The limb count, against the derivation rather than against its own
+        // numeral: the accumulator spans the product exponent range, plus
+        // `MAX_K_BITS` of guard so that summing the deepest reduction the machine
+        // can address cannot leave it, plus a sign. `size_of` will not serve here
+        // --- `Complete` carries three sticky non-finite flags beyond its limbs ---
+        // and the const generic is not readable from outside, so the derivation is
+        // the handle. This is the same arithmetic `model/widths.toml` shows in its
+        // `span_bits`/`guard_bits`/`sign_bits` columns, recomputed here through the
+        // library's own `limbs_for`.
+        for (limbs, min, max) in [
+            (
+                crate::generated::complete_width::F32_LIMBS,
+                <f32 as FloatElement>::MIN_PRODUCT_EXP,
+                <f32 as FloatElement>::MAX_PRODUCT_EXP,
+            ),
+            (
+                crate::generated::complete_width::F64_LIMBS,
+                <f64 as FloatElement>::MIN_PRODUCT_EXP,
+                <f64 as FloatElement>::MAX_PRODUCT_EXP,
+            ),
+        ] {
+            assert!(max > min, "the product exponent range is non-empty");
+            let span = max.abs_diff(min);
+            let total = span + crate::generated::MAX_K_BITS + 1;
+            assert_eq!(
+                limbs,
+                crate::bounds::limbs_for(total),
+                "the model's limb count must be the width the span, the guard and \
+                 the sign demand"
+            );
+        }
     }
 }

@@ -926,12 +926,22 @@ fn run<E, Bd, O, Ep, L>(
         return;
     }
 
+    // Declared once, cleared per panel, and only over the part a panel uses.
+    // These were declared *inside* both loops, so every output panel paid to
+    // materialize and zero `MAX_TILE` of each --- 128 accumulators, which is 2 KiB
+    // at `AccOf<i8>` and 11 KiB at `AccOf<f32>`, against a panel that computes
+    // `mr * nr * k` products. The tile is `mr * nr` and nothing outside it is ever
+    // read or written, so that is what gets cleared.
+    let mut wide = [<AccOf<E> as Accumulator>::ZERO; MAX_TILE];
+    let mut carried = [L::default(); MAX_TILE];
+    let tile_lanes = mr * nr;
+
     let mut i0 = 0;
     while i0 < shape.m {
         let mut j0 = 0;
         while j0 < shape.n {
-            let mut wide = [<AccOf<E> as Accumulator>::ZERO; MAX_TILE];
-            let mut carried = [L::default(); MAX_TILE];
+            wide[..tile_lanes].fill(<AccOf<E> as Accumulator>::ZERO);
+            carried[..tile_lanes].fill(L::default());
 
             let mut p0 = 0;
             while p0 < shape.k {

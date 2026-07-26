@@ -246,6 +246,19 @@ fn a_run_codecs_counts_sum_to_the_row_width_ck_06() {
         assert_eq!(row.iter().map(|a| a.get()).collect::<Vec<_>>(), expected);
     }
 
+    // `column_walk` agrees with `at`, element for element, and exists because
+    // `at` does not scale on this tier: it walks row `r` *and* `row_code_range`
+    // walks rows `0..r`, so a driver reading a column one element at a time is
+    // O(rows^2). Measured on a 512-row run matrix: 12.4 ms indexed against
+    // 0.058 ms walked, a factor of 215 that grows with the row count. The
+    // zero-offer coded traversal was that driver.
+    for c in 0..12 {
+        let walked: Vec<i8> = m.column_walk(c).map(|a| a.get()).collect();
+        let indexed: Vec<i8> = (0..2).map(|r| m.at(r, c).get()).collect();
+        assert_eq!(walked, indexed, "column {c}");
+        assert_eq!(walked.len(), 2, "one element per row");
+    }
+
     // The residency claim is a number, not an adjective: six stored runs
     // against twenty-four decoded elements.
     assert_eq!(m.codec().run_count(), 6);

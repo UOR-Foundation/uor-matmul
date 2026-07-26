@@ -140,6 +140,11 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
         start..end
     }
 
+    /// The codec, for a walker that has to ask it lengths.
+    pub const fn codec_ref(&self) -> &C {
+        &self.codec
+    }
+
     /// The raw code slice.
     pub const fn codes(&self) -> &'a [C::Code] {
         self.codes
@@ -162,6 +167,27 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
     pub fn decode_range_into(&self, r: usize, cols: Range<usize>, out: &mut [Alphabet<E, Bd>]) {
         for (slot, col) in out.iter_mut().zip(cols) {
             *slot = self.at(r, col);
+        }
+    }
+
+    /// Column `c`, walked down every row, in one pass over the codes.
+    ///
+    /// [`CodedMatrix::at`] is O(1) for a fixed-width tier and O(row) for a
+    /// variable-length one --- *plus* the [`CodedMatrix::row_code_range`] walk
+    /// over rows `0..r`. A driver that loops `for r in 0..rows { at(r, c) }`
+    /// therefore pays O(rows^2) on a run codec, which is exactly the hazard the
+    /// note on `row_code_range` names, and exactly what the zero-offer coded
+    /// traversal was doing: `O(m n k^2)` where the identity is `O(m n k)`.
+    ///
+    /// This carries the cursor from one row to the next, so a whole column costs
+    /// one pass over the codes whatever the tier. It allocates nothing: the state
+    /// is two indices (R7).
+    pub fn column_walk<'m>(&'m self, c: usize) -> ColumnWalk<'m, 'a, E, Bd, C> {
+        ColumnWalk {
+            m: self,
+            col: c,
+            row: 0,
+            cursor: 0,
         }
     }
 
@@ -188,4 +214,62 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
         }
         Alphabet::ZERO
     }
+}
+
+/// One column of a [`CodedMatrix`], walked down the rows.
+///
+/// See [`CodedMatrix::column_walk`] for why this exists rather than a loop over
+/// [`CodedMatrix::at`].
+#[derive(Clone, Copy)]
+pub struct ColumnWalk<'m, 'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> {
+    m: &'m CodedMatrix<'a, E, Bd, C>,
+    col: usize,
+    row: usize,
+    cursor: usize,
+}
+
+impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> Iterator for ColumnWalk<'_, '_, E, Bd, C> {
+    type Item = Alphabet<E, Bd>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.row >= self.m.rows() || self.col >= self.m.cols() {
+            return None;
+        }
+        let out = if C::IS_FIXED_WIDTH {
+            // Arithmetic, and the cursor is unused: a fixed-width row starts
+            // where the previous one ended by construction.
+            let block = C::MAX_BLOCK;
+            let code = self.m.codes()[self.row * self.m.codes_per_row() + self.col / block];
+            self.m.codec_ref().decode_element(code, self.col % block)
+        } else {
+            // Walk this row once: capture the element as the run containing it
+            // goes past, and leave the cursor at the row's end for the next call.
+            // `CodedMatrix::new` established that the lengths sum to `cols` on
+            // every row, so this cannot run off (`CK-06`).
+            let mut found = Alphabet::ZERO;
+            let mut width = 0usize;
+            while width < self.m.cols() {
+                let code = self.m.codes()[self.cursor];
+                let n = self.m.codec_ref().decode_len(code);
+                if self.col >= width && self.col < width + n {
+                    found = self.m.codec_ref().decode_element(code, self.col - width);
+                }
+                width += n;
+                self.cursor += 1;
+            }
+            found
+        };
+        self.row += 1;
+        Some(out)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.m.rows().saturating_sub(self.row); // R3-ok: a remaining count, not an accumulation
+        (left, Some(left))
+    }
+}
+
+impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> ExactSizeIterator
+    for ColumnWalk<'_, '_, E, Bd, C>
+{
 }

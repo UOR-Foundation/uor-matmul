@@ -102,7 +102,16 @@ impl Strides {
     /// and `|dj| < cols`. When both strides are non-zero the smallest such
     /// solution is `(cs / g, -rs / g)` with `g = gcd(|rs|, |cs|)`, so the whole
     /// question reduces to two comparisons.
-    const fn self_aliases(&self, rows: usize, cols: usize) -> bool {
+    ///
+    /// `#[doc(hidden)] pub`, for the reason
+    /// [`crate::fits_narrow`] is: `uor-matmul-gemm` needs it across a crate
+    /// boundary, because a `CodedTriple` builds its own output view and has to
+    /// ask the same question. It asked it with a statement-for-statement copy of
+    /// this function, gcd and all --- two implementations of the predicate that
+    /// decides whether a product exists, with nothing asserting they agree
+    /// (R13). This is the one.
+    #[doc(hidden)]
+    pub const fn self_aliases(&self, rows: usize, cols: usize) -> bool {
         if rows == 0 || cols == 0 {
             // An empty output has no two distinct coordinates, so nothing can
             // collide. Found by the awkward-shape corpus: a 5x0 row-major view
