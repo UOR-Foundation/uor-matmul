@@ -1122,10 +1122,27 @@ Undefined Behaviour under Miri, reported as a dangling reference going beyond th
 bounds of its allocation. Both measured, by planting them.
 
 The job now runs `-p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p
-uor-matmul-codec`, and `CU-07` holds it there. Measured on two cores: 25m56s, 63
-tests, exit 0 --- the first conclusion this gate has reported in its history. The
-kernels' parity suite is 1166s of that, the codec suite 236s, `-core` 24s.
-GitHub's runners have four cores and a 45-minute ceiling.
+uor-matmul-codec`, and `CU-07` holds it there. Locally, on two cores: 25m56s, 63
+tests, exit 0. The kernels' parity suite is 1166s of that, the codec suite 236s,
+`-core` 24s.
+
+In CI, on `ba64fcf`: **18m07s, success**. That is the first conclusion this gate
+has reported. Its nine previous runs are four `failure` --- 30s to 7m, all of them
+the toolchain pin --- and five `cancelled`, each of which sat on a runner for
+exactly six hours and then reported nothing at all:
+
+| commit | conclusion | wall clock |
+| --- | --- | --- |
+| `ba64fcf` | `success` | 18m07s |
+| `655dc38` | `cancelled` | 6h00m |
+| `80204e8` | `cancelled` | 6h00m |
+| `3d36fea` | `cancelled` | 6h00m |
+| `b081b51` | `cancelled` | 6h00m |
+| `02eaf46` .. `f2637bf` | `failure` x4 | 30s .. 7m |
+
+Eighteen minutes against a 45-minute ceiling, so a regression that doubled the
+cost would still report, and one that grew tenfold would *fail* rather than be
+cancelled --- which was the whole point of setting the ceiling in the first place.
 
 ## Against the oracles
 
