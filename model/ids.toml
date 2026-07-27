@@ -270,6 +270,12 @@ suite = "purity"
 statement = """The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop"""
 
 [[id]]
+id = "CU-07"
+level = "build"
+suite = "purity"
+statement = """Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked"""
+
+[[id]]
 id = "CK-01"
 level = "build"
 suite = "codec"

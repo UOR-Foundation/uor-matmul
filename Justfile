@@ -29,6 +29,8 @@ test:
 # CT-02: the whole corpus in a build where every accumulator operation is
 # checked and any overflow panics. The width is derived so that this is
 # unreachable; the profile exists to witness that, not to guard it.
+#
+# The whole corpus with every accumulator operation checked.
 checked:
     cargo test --workspace --profile checked
 
@@ -39,6 +41,8 @@ purity:
 
 # R7, C1, CA-03: every shipped crate builds for a target with no allocator at
 # all. A crate that had picked up an `alloc` dependency cannot link here.
+#
+# Build the shipped crates for targets with no allocator at all.
 no-alloc:
     cargo build -p uor-matmul --no-default-features --target thumbv7em-none-eabihf
     # `.cargo/config.toml` pins `+simd128` for this target, so the plain build
@@ -75,6 +79,8 @@ cross_crates := "-p uor-matmul-core -p uor-matmul-codec -p uor-matmul-kernels -p
 # aarch64 is the *host* --- `cross.yml` has one, and a `runner` in the config sent
 # its native test binaries through a `qemu-aarch64` it does not have. Set per
 # invocation, they reach this cross-run and nothing else.
+#
+# Run the aarch64 and wasm sequences, on the emulators, for real.
 cross-run:
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu" \
@@ -87,6 +93,26 @@ cross-run:
     RUSTFLAGS="-C target-feature=+simd128" \
         cargo test --release --target wasm32-wasip1 {{cross_crates}}
 
+# `CU-01`'s companion: the crate with the `unsafe` in it, under Miri.
+#
+# A recipe because it was only ever run in CI, and in CI it never once reported:
+# every run in its history is a `failure` on the toolchain pin or a `cancelled` at
+# GitHub's six-hour ceiling. It was also pointed at the three crates that
+# `#![forbid(unsafe_code)]` rather than the one with the `unsafe` in it.
+#
+# Needs a nightly toolchain with the `miri` component, which is why it is not part
+# of `just vv`; `RUSTUP_TOOLCHAIN` is how the nightly wins against the pin in
+# `rust-toolchain.toml`, exactly as `cargo +nightly` does for `just fuzz`.
+#
+# `CU-07` reads the `-p` list out of this line *and* out of `miri.yml` and asserts
+# the two are equal, so a local run and the CI run cannot come to mean different
+# things.
+#
+# Undefined behaviour, in the crate that has the `unsafe`.
+miri:
+    MIRIFLAGS=-Zmiri-strict-provenance RUSTUP_TOOLCHAIN=nightly \
+        cargo miri test -p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p uor-matmul-codec
+
 # R11: the oracle crates are dev-dependencies and nothing shipped depends on
 # them. `cargo deny` is what says so about the *graph* rather than about the
 # source, and it also refuses a wildcard version requirement and an advisory
@@ -96,10 +122,14 @@ cross-run:
 # an unmaintained advisory sat in `main` unseen: `advisories FAILED, bans FAILED`
 # on every push. Needs `cargo install cargo-deny`, which is why it is not in
 # `just vv`.
+#
+# Advisories, bans, licences and sources, over the dependency graph.
 deny:
     cargo deny --all-features check
 
 # CA-02: the corpus digest is the same on every target.
+#
+# Every off-host axis: no-alloc, the emulators, and the corpus digest.
 cross: no-alloc cross-run
     cargo test -p uor-matmul-conformance --test environment
 
@@ -110,23 +140,31 @@ cross: no-alloc cross-run
 # throughput figure from an unoptimised build is not a figure --- measured, the
 # same shapes read two hundred times slower. The timed tests say so themselves if
 # they are run without it.
+#
+# Fitted scaling exponents against the oracle's, every figure `open`.
 scaling:
     cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
     cargo bench -p uor-matmul-validate
 
 # CG-09: throughput against the degeneracy of the operand, over the large shapes
 # `just vv` has no time for. Minutes.
+#
+# Throughput against operand degeneracy, over the large shapes. Minutes.
 collapse:
     cargo run --release -p uor-matmul-validate --example collapse_sweep
 
 # CT-06, CG-08: super-massive input. Minutes, and gigabytes of operands, so it is
 # its own recipe rather than part of `vv`.
+#
+# Super-massive input: operands past the last level of cache. Minutes.
 massive:
     cargo test --release -p uor-matmul-validate --test massive -- \
         --ignored --nocapture --test-threads=1
 
 # R4's meta-gate: no `open` claim is asserted as established, and no cited
 # authority is presented as this repository's own result.
+#
+# R4's meta-gate: no `open` claim asserted as established.
 honesty: bdd
     cargo run -q -p xtask -- check-model
 
@@ -137,6 +175,8 @@ bdd:
 
 # CT-01, CT-03, CK-06: the fuzz targets. Needs `cargo install cargo-fuzz` and a
 # nightly toolchain, which is why it is not part of `just vv`.
+#
+# Totality over unstructured input, on all three targets.
 fuzz duration="60":
     cargo +nightly fuzz run totality -- -max_total_time={{duration}}
     cargo +nightly fuzz run float_decode -- -max_total_time={{duration}}
@@ -144,10 +184,14 @@ fuzz duration="60":
 
 # Regenerate the NumPy oracle artifacts. Run only when the corpus changes; the
 # outputs are committed and their digests are recorded.
+#
+# Regenerate the NumPy oracle artifacts. Only when the corpus changes.
 oracles:
     python3 oracles/numpy/generate.py
 
 # CG-10: the tabulated traversal against this library's own packed kernels, over
 # shapes large enough for the table to amortize. Minutes.
+#
+# The tabulated traversal against the packed kernels. Minutes.
 tabulation:
     cargo run --release -p uor-matmul-validate --example tabulation_sweep

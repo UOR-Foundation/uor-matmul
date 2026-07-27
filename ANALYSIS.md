@@ -265,14 +265,27 @@ What remains, and why:
   with `matrixmultiply` and 4.6x ahead of `ndarray` on that shape, because the
   packing rather than the arithmetic was the cost; a narrower tile panel is the
   one thing left that would buy something there.
-- A deep, thin shape --- `16 x 400000 x 16` --- sustains 5.8 Gmac/s where the
-  microkernel alone runs at 38. With full-depth panels nothing is resident: the
-  `A` block is 1.6 MB and the `B` block 6.4 MB. The depth-chunked traversal makes
-  them resident but produces one kernel call per output column at that shape, and
-  measured the two land within 30% of each other. Closing it needs the traversal
-  choice to know the chunk depth before it picks the panel shape, which is a
-  circularity this driver does not yet break. It is reported, not hidden: `CG-08`
-  prints it per pass.
+- A deep, thin shape --- `16 x 400000 x 16` --- sustains 5.9 Gmac/s where the
+  microkernel alone runs at 38. The gap is the *pack*, and it is arithmetic
+  rather than a tuning choice: the operands are 12.8 M elements and the product
+  is 102.4 M multiply-accumulates, so every element copied into a panel serves
+  eight of them. The 38 figure is measured on panels that are already packed. At
+  a 16-wide output there is nothing to amortize the copy against --- an `A`
+  element is used by 16 columns, a `B` element by 16 rows --- and no traversal
+  reads fewer elements than the operands contain.
+
+  This used to be recorded here as a blocking choice: that the depth-chunked
+  traversal could not pick its panel shape without knowing its chunk depth, a
+  circularity left unbroken. It is not that. Measured, best of seven passes, with
+  the accumulator offer swept from the suggested 256 up to 2048 --- which is what
+  moves the block extents --- the shape runs 5.88, 5.89, 5.88, 5.89, 5.94, 5.90
+  Gmac/s. Flat. The block is not what is costing it, and it is worth saying so
+  where the wrong reason used to be: a single pass differed from another by 40% on
+  this host, which is how a 6% difference in a median came to look like a finding.
+
+  Nor is it bandwidth: 12.8 MB in 17.4 ms is 0.74 GB/s, two orders below what the
+  machine will do. It is the copy itself, at a shape with nothing to spread it
+  over. `CG-08` prints it per pass.
 - `f32` is far slower than the integer paths. The size of that gap is measured
   against the *oracles* below, not against our own integer path, because
   comparing a library to itself says nothing about whether the cost is
@@ -1010,6 +1023,109 @@ under the checked profile, which `CT-02` runs over the whole corpus. `CD-03`
 asserts both profiles by name, so the test cannot pass by not running:
 `Alphabet::wrap(100)` under a declared bound of one is loud where it used to be a
 quietly wrong integer.
+
+### The gate that never reported
+
+`miri` is the gate that checks for undefined behaviour, and it had never once
+finished. Every run in its history is `failure` --- the toolchain pin outranked
+the nightly the job installed, so `cargo miri` resolved to stable and reported
+that the component was unavailable --- or, once that was fixed, `cancelled` at
+exactly six hours, which is GitHub's ceiling on a job.
+
+Fixing the toolchain made it *run*, and running exposed what it was running.
+The workflow's own header says `uor-matmul-kernels` is the only crate with
+`unsafe` and that its portable module "is validated here". The job's command was
+
+    cargo miri test -p uor-matmul-core -p uor-matmul-codec -p uor-matmul-gemm
+
+--- three crates that each `#![forbid(unsafe_code)]`, and not the one that holds
+every `unsafe` block in the workspace. So it spent six hours emulating code that
+cannot contain the thing it was looking for, and then reported nothing at all.
+
+Its whole history is four `failure` and four `cancelled`. Not one success.
+
+Three changes, and the job finishes:
+
+- It runs `uor-matmul-kernels` now. Under Miri no feature-detection predicate
+  answers true, so the portable sequences are what execute --- which is exactly
+  what the header always claimed was being validated.
+- `uor-matmul-gemm` is out. It forbids `unsafe`, and its tests are whole
+  matmuls; `CD-13` alone sweeps 189 offer pairs. Its soundness surface is the
+  crates it calls, and those are in. `-core` and `-codec` stay, because both do
+  `bytemuck` casts and slice arithmetic that provenance checking has something
+  to say about.
+- The heavy differential sweeps take a smaller corpus under `cfg!(miri)`.
+  `CB-08` runs 4 spaces x 3 blocks x 5 rows x 5 groups natively; under Miri it
+  runs two of each. That reduces the number of *instances*, not the set of
+  *paths*: every arm of `dispatch_run!` and `dispatch_slab!` is one macro body
+  at different constants, so a narrow arm and a wide arm exercise the code, and
+  keeping a code space that is not a power of two keeps the padding claim.
+
+And `timeout-minutes: 45`, so that a run which stops finishing *fails* rather
+than occupying a runner for six hours and reporting `cancelled` --- which reads
+like an infrastructure hiccup instead of the regression it would be.
+
+### The partition, and the case it was missing
+
+Fixing the list is not the same as making the list checkable. The reason a job
+could point away from every `unsafe` block in the workspace and nobody notice is
+that nothing anywhere asserted where it pointed. `CU-07` does:
+
+> Every shipped crate either forbids `unsafe_code` outright or is a crate the
+> Miri job runs.
+
+Two cases, no third one. Either the compiler rules the question out, or Miri
+answers it. The test reads the `-p` list out of `.github/workflows/miri.yml`
+rather than restating it --- a restated list would agree with itself while the
+job ran something else, which is the failure --- and it reads the same list out
+of the `Justfile` and requires the two to be equal, so a local `just miri` and
+the CI job cannot come to mean different things.
+
+Writing it down found two more cases the corrected list still did not cover.
+
+`uor-matmul-model` neither forbids `unsafe_code` nor is run under Miri, and it
+had no `publish = false` --- so a crate the workspace lint table already calls
+"build-time and CI infrastructure", whose own module doc says it "is not a
+dependency of any shipped crate", was set to ship to crates.io at `0.1.0`, model
+reader and `serde` and `toml` and all. Its two dependents are `xtask` and
+`uor-matmul-conformance`, both `publish = false`; nothing a consumer of
+`uor-matmul` builds reaches it, because R10's generated consts are committed
+rather than produced at build time. It is `publish = false` now, which is what
+the other two infrastructure crates always said.
+
+`uor-matmul` is the harder one. The facade cannot `forbid(unsafe_code)` and says
+so in a comment: it carries the raw-pointer face (`CS-05`), whose contract is a
+caller obligation. It was not in the Miri list --- and adding it would have run
+nothing, because the crate had no tests at all. What tests it had lived in
+`uor-matmul-validate`, which is infrastructure the Miri job does not run, and
+they called `sgemm` with `k as isize` and `1`.
+
+Both positive. So of the two functions in `raw.rs` --- `low`, which finds the
+lowest offset a strided view reaches, and `span`, which counts elements from
+there --- `low` returned zero on every call ever made of it, and `span` returned
+`rows * cols`. The negative-stride arithmetic those two functions exist for had
+never been executed, by any test, on any target.
+
+`crates/uor-matmul/tests/raw.rs` executes it: every combination of stride sign,
+including column-major and padded, over four shapes, against the safe API on the
+same window --- 84 calls, plus the degenerate extents and the `f64`
+monomorphisation. Each buffer is allocated at *exactly* the reachable span and
+the caller's base pointer is `-lo` elements into it, so an off-by-one in either
+direction leaves the window rather than reading a neighbour. Unreached cells hold
+`NaN`, which an exact sum propagates, so a stray read *inside* the buffer is a
+`NaN` in the output rather than a plausible number.
+
+The two directions fail differently, and that difference is the argument for the
+Miri job existing at all. A window one element too *short* fails natively, in all
+three tests. A window one element too *long* passes the native run --- and is
+Undefined Behaviour under Miri, reported as a dangling reference going beyond the
+bounds of its allocation. Both measured, by planting them.
+
+The job now runs `-p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p
+uor-matmul-codec`, and `CU-07` holds it there. Measured on two cores: 25m56s, 63
+tests, exit 0 --- the first conclusion this gate has reported in its history. The
+kernels' parity suite is 1166s of that, the codec suite 236s, `-core` 24s.
+GitHub's runners have four cores and a 45-minute ceiling.
 
 ## Against the oracles
 

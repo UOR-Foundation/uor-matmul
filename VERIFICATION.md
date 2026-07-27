@@ -7,7 +7,7 @@ Which axis of `just vv` discharges which class of claim.
 | `just fmt-check` | the diff is reviewable | --- |
 | `just model` | R1, R8, R10, R11, R13, R15 | `CM-01`, and the absence of `CN-*` |
 | `just lint` | clippy at `-D warnings`, including the unsafe-documentation lints | --- |
-| `just test` | the whole suite | `CS-*`, `CT-*`, `CD-*`, `CB-*`, `CK-*`, `CX-*`, `CA-01`, `CP-01`, `CU-02` .. `CU-05`, `CG-*` |
+| `just test` | the whole suite | `CS-*`, `CT-*`, `CD-*`, `CB-*`, `CK-*`, `CX-*`, `CA-01`, `CP-01`, `CU-02` .. `CU-05`, `CU-07`, `CG-*` |
 | `just purity` | R2 by scope-tracking the source, R3 and R13 by grep, and `CU-01` by disassembly | `CU-01` |
 | `just no-alloc` | R7, C1 | `CA-03` |
 | `just bdd` | R9 and R4's behavioural half | `CM-02`, `CM-03` |
@@ -15,6 +15,7 @@ Which axis of `just vv` discharges which class of claim.
 | `just cross` | the corpus digest off the host | `CA-02` |
 | `just scaling` | fitted exponents, reported never asserted | `CG-01` .. `CG-07` |
 | `just fuzz` | totality over unstructured input | `CT-01`, `CT-03`, `CK-06` |
+| `just miri` | undefined behaviour in the crate that has the `unsafe`; `CU-07`, under `just test`, is what asserts it is pointed there | --- |
 
 ## The two halves of R2, and why both are needed
 
@@ -49,6 +50,9 @@ of these has been checked by planting the defect it exists to catch:
 | the ulp metric | `+0.0` against `-0.0`, and a known one-ulp pair | yes |
 | the scaling fit | a known exponent, and too few points | yes |
 | the NumPy digest check | a published SHA-256 vector | yes |
+| `just miri` | the raw face's window made one element too long: passes the native run, Undefined Behaviour under Miri | yes |
+| the raw-window tests (`CS-05`) | the same window made one element too short, caught by all three | yes |
+| `CU-07` | `-p uor-matmul-kernels` dropped from the job, from the recipe, and from both --- the last is the defect this workspace actually shipped | yes |
 
 `audit-disassembly` deliberately does *not* catch a float add the optimizer
 removed, because such an add is not in the shipped kernel. The gate reports the

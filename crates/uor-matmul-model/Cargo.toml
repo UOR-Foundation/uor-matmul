@@ -1,6 +1,14 @@
 [package]
 name = "uor-matmul-model"
 description = "Typed registries parsed from model/*.toml: the single source of every constant in uor-matmul (R10)."
+# Build-time and CI infrastructure, exactly as the workspace lint table already
+# calls it, and the only one of the three that did not say so here. Its two
+# dependents are `xtask` and `uor-matmul-conformance`, both `publish = false`;
+# nothing a consumer of `uor-matmul` builds reaches it, because R10's generated
+# consts are committed rather than produced at build time. Publishing it would
+# have shipped the model reader, `serde` and `toml` to crates.io as a public
+# `0.1.0` that no shipped crate depends on.
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

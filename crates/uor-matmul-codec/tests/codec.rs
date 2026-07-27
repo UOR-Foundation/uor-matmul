@@ -379,6 +379,36 @@ fn packed_panels_are_byte_equal_across_tiers_ck_03() {
     );
 }
 
+/// Every `u16` code, or a stride through them plus the boundaries under Miri.
+///
+/// Totality over all 65536 is the claim, and the native run makes it. Under Miri
+/// the three laws run 65536 times per call site at something like a hundredfold
+/// the cost per iteration, and there are three sites --- one of them `Book<256,
+/// 8>`, which decodes eight elements per code. That was the longest thing in the
+/// codec suite. A stride keeps what soundness needs --- the two ends, the codes
+/// either side of a code space, and a sample across the range --- and the claim
+/// stays the native run's.
+fn every_code(f: &mut dyn FnMut(u16)) {
+    if !cfg!(miri) {
+        for c in 0..=u16::MAX {
+            f(c);
+        }
+        return;
+    }
+    // The boundaries first: zero, one, either side of each code space this is
+    // called with --- sixteen and two hundred fifty-six --- and the top of the
+    // type, which is past every one of them and so is the in-range check's own
+    // worst case.
+    for c in [0u16, 1, 15, 16, 17, 255, 256, 257, u16::MAX - 1, u16::MAX] {
+        f(c);
+    }
+    let mut c = 0u32;
+    while c <= u32::from(u16::MAX) {
+        f(c as u16);
+        c += 257; // coprime with 16 and with 256, so it lands on every residue
+    }
+}
+
 /// `CK-09`: `Enumerable`'s two laws, for every codec that implements it.
 ///
 /// Law 1 is the round trip, checked over the *whole* code space rather than a
@@ -465,11 +495,7 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
 
     let table = i4_table();
     let grid = Grid::<i8, Full<i8>, 16>::new(&table);
-    laws("Grid<16>", &grid, 1, |f: &mut dyn FnMut(u16)| {
-        for c in 0..=u16::MAX {
-            f(c)
-        }
-    });
+    laws("Grid<16>", &grid, 1, |f: &mut dyn FnMut(u16)| every_code(f));
 
     let packed = Packed::<_, 2>::new(grid).expect("2 divides 8");
     laws(
@@ -521,9 +547,7 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
     let e8 = uor_matmul_codec::e8_table::<Full<i8>>().expect("i8 holds E8");
     let book = uor_matmul_codec::e8_codec(&e8);
     laws("Book<256, 8>", &book, 8, |f: &mut dyn FnMut(u16)| {
-        for c in 0..=u16::MAX {
-            f(c)
-        }
+        every_code(f)
     });
 
     // A zero point relabels the image and not the code space, so the offset
@@ -535,8 +559,6 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
     let offset =
         Offset::<i8, Bnd<8>, Full<i8>, _>::new(Grid::<i8, Bnd<8>, 16>::new(&narrow), 3).unwrap();
     laws("Offset<Grid<16>>", &offset, 1, |f: &mut dyn FnMut(u16)| {
-        for c in 0..=u16::MAX {
-            f(c)
-        }
+        every_code(f)
     });
 }

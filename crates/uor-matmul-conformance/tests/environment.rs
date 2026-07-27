@@ -1,5 +1,5 @@
-//! `CA-02`, `CA-03`, `CU-01`: claims about the built artifact rather than about
-//! the arithmetic.
+//! `CA-02`, `CA-03`, `CU-01`, `CU-07`: claims about the built artifact, and
+//! about the gates that inspect it, rather than about the arithmetic.
 //!
 //! Each shells out with its own `--target-dir`, because these run *inside*
 //! `cargo test` and sharing the workspace target directory would block on its
@@ -169,6 +169,116 @@ fn no_float_arithmetic_opcode_in_any_kernel_cu_01() {
     assert!(
         status.success(),
         "CU-01: a shipped kernel contains float arithmetic"
+    );
+}
+
+/// The crates the Miri job is pointed at, read out of the job that runs it.
+///
+/// Parses the `-p <name>` arguments of the `cargo miri test` line in
+/// `.github/workflows/miri.yml`. Reading the workflow rather than restating its
+/// list is the point: a list restated here would agree with itself while the job
+/// ran something else, which is precisely the failure this exists to catch.
+fn miri_crates(source: &str, marker: &str) -> Vec<String> {
+    let line = source
+        .lines()
+        .find(|l| l.contains(marker))
+        .unwrap_or_else(|| panic!("no `{marker}` line to read"));
+    let mut names = Vec::new();
+    let mut words = line.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "-p" {
+            if let Some(name) = words.next() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+/// `CU-07`: no shipped `unsafe` block goes unchecked.
+///
+/// The soundness argument for this workspace is a partition with two cases and
+/// no third one. A shipped crate either `#![forbid(unsafe_code)]`, in which case
+/// the compiler rules out the question, or it is a crate the Miri job runs, in
+/// which case Miri answers it. This asserts the partition is total.
+///
+/// It exists because the partition had a hole big enough to hold every `unsafe`
+/// block in the workspace. `miri.yml` ran `-p uor-matmul-core -p
+/// uor-matmul-codec -p uor-matmul-gemm` --- three crates that each forbid
+/// `unsafe_code` --- while `uor-matmul-kernels`, which holds all of it, was not
+/// in the list. The workflow's own header said otherwise. Nothing checked.
+///
+/// The `Justfile` recipe is checked against the workflow for the same reason: a
+/// local `just miri` that ran a different set from CI would make one of them a
+/// gate and the other a rehearsal, and the two would drift silently.
+#[test]
+fn every_shipped_unsafe_crate_is_under_miri_cu_07() {
+    let root = root();
+    let workflow =
+        std::fs::read_to_string(root.join(".github/workflows/miri.yml")).expect("miri.yml reads");
+    let justfile = std::fs::read_to_string(root.join("Justfile")).expect("Justfile reads");
+
+    let in_ci = miri_crates(&workflow, "cargo miri test");
+    let locally = miri_crates(&justfile, "cargo miri test");
+    assert!(
+        !in_ci.is_empty(),
+        "CU-07: the Miri job names no crate at all"
+    );
+    assert_eq!(
+        in_ci, locally,
+        "CU-07: `just miri` and the `miri` job must run the same crates, or one of \
+         them is a rehearsal"
+    );
+
+    let mut shipped = 0usize;
+    let mut forbidden = Vec::new();
+    let mut under_miri = Vec::new();
+    for entry in std::fs::read_dir(root.join("crates")).expect("crates/ reads") {
+        let dir = entry.expect("entry reads").path();
+        let manifest = dir.join("Cargo.toml");
+        let Ok(toml) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        // Infrastructure is out by the same token that keeps it out of R7: it is
+        // not published, so no consumer of this library ever compiles it.
+        if toml.lines().any(|l| l.trim() == "publish = false") {
+            continue;
+        }
+        let name = dir
+            .file_name()
+            .expect("a crate directory has a name")
+            .to_string_lossy()
+            .to_string();
+        shipped += 1;
+        let lib = std::fs::read_to_string(dir.join("src/lib.rs")).expect("a crate has a lib.rs");
+        let forbids = lib.lines().any(|l| l.trim() == "#![forbid(unsafe_code)]");
+        let checked = in_ci.contains(&name);
+        assert!(
+            forbids || checked,
+            "CU-07: `{name}` ships, does not `#![forbid(unsafe_code)]`, and is not a \
+             crate the Miri job runs --- so whatever `unsafe` it holds is unchecked"
+        );
+        if forbids {
+            forbidden.push(name);
+        } else {
+            under_miri.push(name);
+        }
+    }
+
+    assert!(shipped >= 2, "the workspace ships more than one crate");
+    // Not a vacuous partition: the crate with the `unsafe` in it has to be on
+    // the Miri side, or this test would pass on a workspace that forbids
+    // everything and runs Miri over nothing.
+    assert!(
+        under_miri.contains(&"uor-matmul-kernels".to_string()),
+        "CU-07: `uor-matmul-kernels` holds every `unsafe` block in the workspace \
+         and must be the crate Miri runs; the partition says {under_miri:?}"
+    );
+    eprintln!(
+        "CU-07: {shipped} shipped crate(s); {} forbid `unsafe_code` {forbidden:?}, \
+         {} run under Miri {under_miri:?}",
+        forbidden.len(),
+        under_miri.len()
     );
 }
 

@@ -25,7 +25,9 @@ fn at<T: Copy>(panel: &[T], p: usize, lane: usize, lanes: usize, group: usize) -
 /// The depths a kernel can be handed: a whole number of `k`-groups, which is
 /// what the driver always packs (it pads with the alphabet's zero).
 fn depths<E, L>(spec: &KernelSpec<E, L>) -> Vec<usize> {
-    let mut v: Vec<usize> = DEPTHS
+    // Empty, one, a whole group, and one past a group: the four shapes the tail
+    // handling has. Under Miri that is the corpus; natively it is the whole list.
+    let mut v: Vec<usize> = corpus(DEPTHS, &[0, 1, 8, 65])
         .iter()
         .map(|&kc| kc.div_ceil(spec.k_group) * spec.k_group)
         .collect();
@@ -60,6 +62,28 @@ fn reference_i8(spec: &KernelSpec<i8, i32>, kc: usize, pa: &[i8], pb: &[i8]) -> 
         }
     }
     out
+}
+
+/// The corpus, and the smaller one Miri takes.
+///
+/// Miri checks *soundness* --- provenance, bounds, initialisation --- and one
+/// instance of a code path shows that as well as three hundred do, at something
+/// like a hundredfold the cost per instance. The native run takes the whole
+/// corpus; this is what keeps the Miri job inside a CI budget instead of running
+/// past the six-hour ceiling and being cancelled, which is what it did on every
+/// push it was ever enabled for.
+///
+/// It reduces the number of *instances*, not the set of *paths*: every arm of
+/// `dispatch_run!` and `dispatch_slab!` is the same macro body at different
+/// constants, so a narrow arm and a wide arm together exercise the code, and
+/// keeping a code space that is not a power of two keeps the padding claim. The
+/// native run adds the rest of the corpus and still runs all of it.
+fn corpus<T: Copy>(all: &[T], under_miri: &[T]) -> Vec<T> {
+    if cfg!(miri) {
+        under_miri.to_vec()
+    } else {
+        all.to_vec()
+    }
 }
 
 const DEPTHS: &[usize] = &[0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 63, 64, 65, 129, 512];
@@ -116,7 +140,13 @@ fn every_i8_backend_equals_portable_cb_02() {
     // `std` feature reached it: without runtime detection every `available_*`
     // predicate answered from the *build*'s target features, and on a stock
     // x86-64 build that is none of them. So the vacuous case is named.
-    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+    //
+    // Not under Miri, which models no vector intrinsics and answers every
+    // feature-detection predicate with false. There the portable sequence *is*
+    // the whole list, and that is the thing Miri is there to check --- so the
+    // absence is expected rather than the misconfiguration this assert catches on
+    // a native build.
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) && !cfg!(miri) {
         assert!(
             names.len() > 1,
             "x86-64 and aarch64 both have an i8 kernel past the portable one; \
@@ -554,7 +584,9 @@ fn every_reduce_sequence_equals_its_reference_cb_06() {
         seen += 1;
     }
     assert!(seen > 0);
-    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) {
+    // Native only, as `CB-02`'s counterpart is: Miri models no vector intrinsics,
+    // so the reference is the whole list there by design.
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) && !cfg!(miri) {
         assert!(
             seen > 1,
             "x86-64 and aarch64 both have a vector i8 reduce sequence past the reference"
@@ -834,12 +866,12 @@ fn every_table_sequence_equals_the_reference_cb_08() {
     }
 
     let mut compared = 0usize;
-    for &space in &[16usize, 64, 200, 256] {
-        for &block in &[2usize, 4, 8] {
+    for &space in &corpus(&[16usize, 64, 200, 256], &[200, 256]) {
+        for &block in &corpus(&[2usize, 4, 8], &[2, 8]) {
             let book = fill(space * block, 0xb00c ^ space as u64);
-            for &rows in &[1usize, 2, 4, 8, 16] {
+            for &rows in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
                 let flat = fill(rows * block, 0xac75 ^ rows as u64);
-                for &group in &[1usize, 2, 4, 8, 16] {
+                for &group in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
                     let specs: Vec<_> = available_table_i8(rows, group).collect();
                     let reference = specs[0];
                     assert_eq!(
@@ -1134,10 +1166,10 @@ fn every_i16_table_sequence_equals_the_reference_cb_08() {
     }
 
     let mut compared = 0usize;
-    for &space in &[16usize, 200, 256] {
-        for &block in &[2usize, 8] {
+    for &space in &corpus(&[16usize, 200, 256], &[200, 256]) {
+        for &block in &corpus(&[2usize, 8], &[2]) {
             let book = fill(space * block, 0x16b0 ^ space as u64);
-            for &rows in &[1usize, 8, 16] {
+            for &rows in &corpus(&[1usize, 8, 16], &[1, 16]) {
                 let flat = fill(rows * block, 0x16ac ^ rows as u64);
                 for &group in &[1usize, 2] {
                     let specs: Vec<_> = available_table_i16(rows, group).collect();

@@ -276,7 +276,16 @@ mod tests {
     /// a fallback: if it ever disagreed, the library would have two answers.
     #[test]
     fn the_narrow_tile_path_agrees_with_dot_wide_cd_09() {
-        for k in [0usize, 1, 2, 3, 127, 128, 129, 1_000, 4_096, 10_007] {
+        // The two longest depths are native only: every one of these builds two
+        // `Vec`s and runs both functions over them, and at 4096 and 10007 that is
+        // most of what Miri spends here. The thresholds this straddles are all
+        // below 1000.
+        let depths: &[usize] = if cfg!(miri) {
+            &[0, 1, 2, 3, 127, 128, 129, 1_000]
+        } else {
+            &[0, 1, 2, 3, 127, 128, 129, 1_000, 4_096, 10_007]
+        };
+        for &k in depths {
             let a: Vec<i8> = (0..k)
                 .map(|i| ((i * 31 % 255) as i32 - 127) as i8)
                 .collect();
@@ -328,7 +337,12 @@ mod tests {
     /// exact sum, because there is no threshold on the answer (§3.2).
     #[test]
     fn depth_past_every_threshold_is_exact_ct_01() {
-        const K: usize = 200_000;
+        // Two hundred thousand natively. Under Miri the array is still walked
+        // twice --- once by each function --- and each element now also has its
+        // declaration checked, so this was the longest single test in the Miri
+        // job; two thousand shows the loop is sound just as well, and the depth
+        // claim belongs to the native run.
+        const K: usize = if cfg!(miri) { 2_000 } else { 200_000 };
         let a = [i8::MIN; K];
         let w = [i8::MIN; K];
         let expected = (K as i128) * 128 * 128;

@@ -41,3 +41,9 @@ Feature: Purity
     Given the standing corpus
     When the suite exercises CU-06
     Then the claim holds byte for byte
+
+  @CU-07 @build
+  Scenario: Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs
+    Given the standing corpus
+    When the suite exercises CU-07
+    Then the claim holds byte for byte

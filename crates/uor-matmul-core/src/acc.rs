@@ -779,11 +779,17 @@ mod tests {
     /// threshold governs a register, not an answer (§3.2, CD-03).
     #[test]
     fn i128_accumulation_is_exact_past_the_narrow_threshold_cd_03() {
+        // A million natively; a thousand under Miri, which is checking that the
+        // limb arithmetic is *sound* --- provenance, bounds, initialisation ---
+        // and sees that at a thousand as well as at a million, at something like
+        // a hundredfold the cost per step. The depth claim is the native run's.
+        // Measured: this loop alone was minutes of the Miri job.
+        let depth: i128 = if cfg!(miri) { 1_000 } else { 1_000_000 };
         let mut acc = 0i128;
-        for _ in 0..1_000_000 {
+        for _ in 0..depth {
             <i8 as Element>::mac(&mut acc, i8::MIN, i8::MIN);
         }
-        assert_eq!(acc, 1_000_000i128 * 128 * 128);
+        assert_eq!(acc, depth * 128 * 128);
     }
 
     /// `Limbs` addition and negation round-trip, including across a limb

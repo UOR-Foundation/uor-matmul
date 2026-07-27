@@ -1,9 +1,39 @@
-# The portable kernel and the codecs under Miri.
+# The crate with the `unsafe` in it, under Miri.
 #
-# `uor-matmul-kernels` is the only crate with `unsafe`, and its portable module
-# is the one Miri can run: the SIMD modules use intrinsics Miri does not model.
-# That is the right split --- the SIMD kernels are validated by differential
-# testing against the portable one, which is validated here.
+# `uor-matmul-kernels` is the only crate with `unsafe` --- 304 occurrences of the
+# word against three, one and one in the others, and those are the
+# `#![forbid(unsafe_code)]` and lint lines that rule it out --- and its portable
+# module is the one Miri can run: the SIMD modules use intrinsics Miri does not
+# model, and under Miri no feature-detection predicate answers true, so the
+# portable sequences are what execute. That is the right split: the SIMD kernels
+# are validated by differential testing against the portable one, and the portable
+# one is validated here.
+#
+# It did not run that crate. It ran the three that forbid `unsafe`, took longer
+# than six hours, and was cancelled at GitHub's ceiling on every push it was ever
+# enabled for --- so it checked crates that cannot contain the thing it looks for,
+# and never reported. `uor-matmul-gemm` is out for that reason: it forbids
+# `unsafe`, and its tests are whole matmuls whose cost under emulation is
+# unbounded. `uor-matmul-core` and `-codec` stay, because both do `bytemuck` casts
+# and slice arithmetic that provenance checking has something to say about.
+#
+# `uor-matmul` is here because the facade carries the raw-pointer face (`CS-05`),
+# which cannot `forbid(unsafe_code)`: it turns a caller's pointer and four strides
+# into slices, and the window it computes for a negative stride is arithmetic no
+# type can check. `crates/uor-matmul/tests/raw.rs` hands it buffers that are
+# exactly the reachable window, so an off-by-one in either direction is an
+# out-of-bounds access here. Measured: a window one element too long passes the
+# native run and is Undefined Behaviour under Miri.
+#
+# `timeout-minutes` is set so that a run which stops finishing *fails*, promptly,
+# instead of occupying a runner for six hours and reporting `cancelled` --- which
+# reads like an infrastructure hiccup rather than the regression it would be.
+#
+# The `-p` list below is not prose: `CU-07` reads it out of this file and asserts
+# that every shipped crate either `#![forbid(unsafe_code)]` or appears here, so
+# the partition that makes this workspace sound has no third case. Dropping a
+# crate from the list fails that test rather than quietly narrowing the gate,
+# which is exactly how the original list went unnoticed.
 name: miri
 
 on:
@@ -14,6 +44,7 @@ on:
 jobs:
   miri:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -26,7 +57,7 @@ jobs:
       # right for every other job; this is the one that needs nightly, and it says
       # so here rather than by removing the pin. `Justfile`'s `fuzz` recipe has
       # always spelled the same thing `cargo +nightly`.
-      - run: cargo miri test -p uor-matmul-core -p uor-matmul-codec -p uor-matmul-gemm
+      - run: cargo miri test -p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p uor-matmul-codec
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
           RUSTUP_TOOLCHAIN: nightly

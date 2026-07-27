@@ -87,6 +87,7 @@ returns an error the model does not sanction.
 | `CU-04` | `build` | Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases |
 | `CU-05` | `build` | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph |
 | `CU-06` | `build` | The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop |
+| `CU-07` | `build` | Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked |
 
 ## `CK-*` --- Codec: tier equivalence, transcode, kappa addressing
 
