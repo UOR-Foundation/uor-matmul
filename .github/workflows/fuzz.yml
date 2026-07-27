@@ -33,7 +33,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+      # `@v2` with an explicit `tool:`, not `@cargo-fuzz`. The tool-name tag form
+      # resolved to a *version* SHA and the action then installed nothing at all,
+      # warning `no tool specified; this could be caused by a dependabot bug where
+      # @<tool_name> tags on this action are replaced by @<version> tags`. It is a
+      # warning, so the step succeeded, and the failure surfaced one step later as
+      # `error: no such command: fuzz` --- which reads like a toolchain problem and
+      # is not one. Naming the tool cannot be rewritten into naming nothing.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - uses: Swatinem/rust-cache@v2
       # As `miri.yml`: the stable pin in `rust-toolchain.toml` outranks the nightly
       # installed above, and `cargo fuzz` reported "no such command: `fuzz`"
