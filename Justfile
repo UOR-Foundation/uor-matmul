@@ -61,7 +61,12 @@ no-alloc:
 # The crates that carry an ISA sequence or a width that a 32-bit `usize` can
 # change. `uor-matmul-conformance` and `-validate` are absent because their tests
 # read the repository's own files, which a WASI sandbox does not hand them.
-cross_crates := "-p uor-matmul-core -p uor-matmul-codec -p uor-matmul-kernels -p uor-matmul-gemm"
+#
+# `uor-matmul` is here for the raw-pointer face: `low` and `span` compute a
+# strided view's window in `isize`, which is 32 bits on `wasm32` and 64 here, and
+# a window is exactly the kind of arithmetic that changes with the width. Two
+# tests that assumed a 64-bit `usize` were already found this way.
+cross_crates := "-p uor-matmul-core -p uor-matmul-codec -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul"
 
 # CB-04, CB-05: execute the sequences no register here can run.
 #

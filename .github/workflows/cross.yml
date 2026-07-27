@@ -73,20 +73,25 @@ jobs:
       # comparison the parity tests make is a different one (measured, 525
       # sequence comparisons against 657).
       #
+      # `uor-matmul` is here for the raw-pointer face: `low` and `span` compute a
+      # strided view's window in `isize`, 32 bits on this target and 64 on the
+      # hosts every other job runs. Two tests that assumed a 64-bit `usize` were
+      # already found this way.
+      #
       # `-conformance` and `-validate` stay out because their tests read the
       # repository's own files, which a WASI sandbox does not hand them.
       - name: run the suite under wasmtime, SIMD128 off
         run: >-
           cargo test --release --target wasm32-wasip1
           -p uor-matmul-core -p uor-matmul-codec
-          -p uor-matmul-kernels -p uor-matmul-gemm
+          -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       - name: run the suite under wasmtime, SIMD128 on
         run: >-
           cargo test --release --target wasm32-wasip1
           -p uor-matmul-core -p uor-matmul-codec
-          -p uor-matmul-kernels -p uor-matmul-gemm
+          -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
           RUSTFLAGS: -C target-feature=+simd128

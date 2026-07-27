@@ -147,15 +147,31 @@ fn safely(shape: (usize, usize, usize), a: &Strided, b: &Strided, linear: &Linea
 /// ran them: the differential test in `uor-matmul-validate` passes `k as isize`
 /// and `1`, both positive, so `low` returned zero every time it was called and
 /// `span` returned `rows * cols`.
+///
+/// Under Miri the *shapes* shrink and the stride pairs do not. That split is the
+/// whole of the reduction and it is the one that keeps the claim: a stride sign
+/// is a distinct path through `low` and `span` --- which branch on exactly that
+/// --- while a shape only changes how many times the same path runs. All 21
+/// stride pairs still run; two shapes carry them instead of four, and the two
+/// kept are the degenerate `1x1x1` and one with every extent distinct, which is
+/// what a transposed or off-by-one window would show up in.
+///
+/// The two dropped are the two largest, and under Miri a shape costs what its
+/// whole product costs: `13x17x19` is forty times the multiply-accumulates of
+/// `3x7x5`. Measured: all four shapes cost 680 s for these three tests alone,
+/// against 1556 s for the rest of the Miri job and a 45-minute ceiling on the
+/// runner --- so the facade would have been two fifths of the budget. Two shapes
+/// cost 18.5 s, and the same three tests pass. That is the margin between a gate
+/// that reports and the six-hour cancellations this one used to produce.
 #[test]
 fn every_stride_sign_reaches_exactly_its_window_cs_05() {
+    let shapes: &[(usize, usize, usize)] = if cfg!(miri) {
+        &[(1, 1, 1), (3, 7, 5)]
+    } else {
+        &[(1, 1, 1), (3, 7, 5), (4, 16, 6), (13, 17, 19)]
+    };
     let mut checked = 0usize;
-    for (m, k, n) in [
-        (1usize, 1usize, 1usize),
-        (3, 7, 5),
-        (4, 16, 6),
-        (13, 17, 19),
-    ] {
+    for &(m, k, n) in shapes {
         for &(rsa, csa) in &[
             (k as isize, 1isize),   // row-major
             (1, m as isize),        // column-major
@@ -210,9 +226,12 @@ fn every_stride_sign_reaches_exactly_its_window_cs_05() {
             }
         }
     }
+    // Seven `A` stride pairs by three `C` stride pairs, per shape. Written as the
+    // product rather than as a literal so that adding a stride pair and
+    // forgetting to run it cannot pass: the count has to move with the lists.
     assert_eq!(
         checked,
-        4 * 7 * 3,
+        shapes.len() * 7 * 3,
         "every shape crossed with every stride pair"
     );
 }
@@ -225,6 +244,11 @@ fn every_stride_sign_reaches_exactly_its_window_cs_05() {
 /// zero-height `b` --- whose exact sum is the empty sum, so `C` becomes `beta * C`
 /// and nothing else. Miri checks the zero-length slices; the assertions check the
 /// answer.
+///
+/// Every call below satisfies the documented contract on its own terms, which at
+/// a degenerate extent is the whole difficulty: it is easy to write a test that
+/// hands the raw face a buffer too small for what the arguments declare and then
+/// passes because nothing was read. That asserts the early return by assuming it.
 #[test]
 fn a_degenerate_extent_is_a_window_of_nothing_cs_05() {
     // `k == 0`: the empty sum, so `alpha * 0 + beta * C`.
@@ -253,20 +277,29 @@ fn a_degenerate_extent_is_a_window_of_nothing_cs_05() {
     assert_eq!(c, [3.0, 6.0, 9.0, 12.0], "beta absorbs the prior C");
 
     // `m == 0` and `n == 0` write nothing at all, and must not touch `c`.
+    //
+    // The operands are real here rather than empty. A zero-`n` call still
+    // declares `a` to be a readable `m x 4`, and handing it a zero-length buffer
+    // would be a contract violation that passes only because the implementation
+    // returns before reading --- which is the claim under test, asserted by
+    // assuming it. Eight elements cover every `(m, n)` below at `k = 4`.
+    let operand = [1.0f32; 8];
     let mut untouched = [7.0f32; 4];
     for (m, n) in [(0usize, 2usize), (2, 0), (0, 0)] {
-        // SAFETY: no cell is reachable at either extent, so no pointer here is
-        // dereferenced; the call must return before it builds a slice.
+        // SAFETY: `operand` is a readable row-major `m x 4` and `4 x n` at every
+        // extent below, since both need at most eight elements; `untouched` holds
+        // the `m x n` output, which is empty. No output coordinate exists, so no
+        // two of them alias.
         unsafe {
             uor_matmul::raw::sgemm(
                 m,
                 4,
                 n,
                 1,
-                empty.as_ptr(),
+                operand.as_ptr(),
                 4,
                 1,
-                empty.as_ptr(),
+                operand.as_ptr(),
                 n as isize,
                 1,
                 0,

@@ -15,7 +15,17 @@ ignore = ["RUSTSEC-2024-0436"]
 
 [licenses]
 version = 2
-allow = ["Apache-2.0", "MIT", "Unicode-3.0", "BSD-2-Clause", "BSD-3-Clause", "Zlib", "ISC"]
+# Exactly the licences the graph carries, and no more. `ISC` and `BSD-3-Clause`
+# used to be here and nothing used either, which cargo-deny reports as
+# `license-not-encountered` on every run --- a standing warning that makes the
+# list a wish rather than a description, and that trains a reader to skip past
+# the place a real warning would appear. `cargo deny list` is what says which
+# five these are.
+#
+# A dependency arriving under a licence not below now fails this gate. That is
+# the point: it is a decision a reviewer makes at the time, not one a
+# pre-granted allowance made for them in advance.
+allow = ["Apache-2.0", "MIT", "Unicode-3.0", "BSD-2-Clause", "Zlib"]
 confidence-threshold = 0.93
 
 [bans]
