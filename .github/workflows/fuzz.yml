@@ -48,6 +48,24 @@ jobs:
       # installed above, and `cargo fuzz` reported "no such command: `fuzz`"
       # because it resolved to the pinned stable toolchain, which has no
       # `cargo-fuzz`. `cargo fuzz` also requires nightly to build a target at all.
-      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=${{ github.event_name == 'schedule' && 900 || 60 }}
+      # `--target` is not optional here, and the reason is not obvious. `cargo
+      # fuzz` defaults its target triple to the triple `cargo-fuzz` itself was
+      # built for --- not to the toolchain's host. `install-action` fetches a
+      # prebuilt static binary, which is built for musl, so the default became
+      # `x86_64-unknown-linux-musl`: a target whose `std` this toolchain does not
+      # have, and one a sanitizer cannot use at all.
+      #
+      #     error: sanitizer is incompatible with statically linked libc
+      #     error[E0463]: can't find crate for `std`
+      #
+      # Building `cargo-fuzz` from source instead would hide this rather than fix
+      # it --- it works locally for exactly that reason, which is why the local
+      # runs did not catch it --- and would cost a from-scratch compile in every
+      # job. Asking `rustc` for the host triple makes the fuzzer follow the
+      # toolchain, whatever the tool's own build happens to be.
+      - run: >-
+          cargo fuzz run --target "$(rustc -vV | sed -n 's/^host: //p')"
+          ${{ matrix.target }}
+          -- -max_total_time=${{ github.event_name == 'schedule' && 900 || 60 }}
         env:
           RUSTUP_TOOLCHAIN: nightly
