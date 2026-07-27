@@ -251,7 +251,7 @@ the documentation.
 | `oracles/` | committed external artifacts, with provenance and checksums |
 | `crates/uor-matmul-core` | alphabet, accumulator, reference accumulation, views. `no_std`, no `alloc`, `forbid(unsafe_code)`, no float arithmetic |
 | `crates/uor-matmul-codec` | the `Codec` trait, every tier, and the E8 codebook |
-| `crates/uor-matmul-kernels` | one module per ISA: the dense tile sequences and the table sequences. The only crate with `unsafe`, and therefore the only one that can write `#[target_feature]` |
+| `crates/uor-matmul-kernels` | one module per ISA: the dense tile sequences and the table sequences. The only crate that writes `#[target_feature]`, which is why every sequence lives here |
 | `crates/uor-matmul-gemm` | the driver: traversal, scratch, epilogue, tile partition |
 | `crates/uor-matmul` | the facade, and the raw-pointer face |
 | `crates/uor-matmul-model` | build-time: parses `model/*.toml`, generates the Rust consts and `CONFORMANCE.md` |
@@ -283,11 +283,11 @@ two-core runner with AVX2:
 | | uor-matmul | oracle | |
 | --- | --- | --- | --- |
 | `i8`, `n = 1024` | 37.7 Gmac/s | matrixmultiply `f32` 43.3 | 1.1x behind, across element types |
-| `i32`, `n = 1024` | 29.1 Gmac/s | ndarray 0.21 | **142x ahead** |
+| `i32`, `n = 1024` | 29.1 Gmac/s | ndarray 0.21 | **139x ahead** |
 | `i32`, `n = 1024` | 29.1 Gmac/s | nalgebra 4.58 | **6.3x ahead** |
 | `i8`, `1024x1024x1` | 37.5 Gmac/s | ndarray 3.24 | **12x ahead** |
 | `i8`, `1x1048576x1` | 40.1 Gmac/s | ndarray 2.41 | **17x ahead** |
-| `f32`, `n = 1024` | 1.12 Gmac/s | matrixmultiply 43.2 | 39x behind |
+| `f32`, `n = 1024` | 1.12 Gmac/s | matrixmultiply 43.3 | 39x behind |
 | latency at `n = 1` | 140 ns | ndarray 60 ns | 2.3x behind |
 
 The integer paths are ahead of both integer oracles at every size that is not

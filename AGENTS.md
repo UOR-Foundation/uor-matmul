@@ -51,9 +51,11 @@ scenario, a scenario with no ID, or an ID with no test all fail `just bdd`.
 ## Adding a backend
 
 Add a module under `crates/uor-matmul-kernels/src/isa/` exporting a
-`KernelSpec`, and add it to `available()`. Touch no driver code --- if you need
-to, the abstraction is wrong and that is the thing to fix. The differential test
-picks it up automatically.
+`KernelSpec`, and add it to the `available_*` iterator for its element and lane
+pair --- `available_i8`, `available_i16_modular`, `available_i32_exact` and so on
+in `spec.rs`; there is no single `available()`. Touch no driver code --- if you
+need to, the abstraction is wrong and that is the thing to fix. The differential
+test picks it up automatically.
 
 ## Adding an element type
 
@@ -64,8 +66,13 @@ adding a branch anywhere else, the type is not being added parametrically.
 
 A gate that cannot fail is worse than no gate, because it reads as evidence.
 Before adding one, plant the defect it exists to catch and confirm it fires;
-then record that in `VERIFICATION.md`'s falsifiability table. Two gates in this
-repository were found to be vacuous exactly this way.
+then record that in `VERIFICATION.md`'s falsifiability table, which is the
+running list. Gates in this repository have been found vacuous repeatedly and in
+every flavour: a differential test comparing the reference against itself, a
+claim discharged by a compile rather than a run, a job whose `-p` list omitted
+the crate it was named for, a feature nothing ever built, and examples in the
+`README` that nothing compiled. Assume yours is one until you have watched it
+fail.
 
 ## Comments
 

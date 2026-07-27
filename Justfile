@@ -3,7 +3,7 @@
 default: vv
 
 # The whole gate.
-vv: fmt-check model lint test purity no-alloc bdd
+vv: fmt-check model lint test features purity no-alloc bdd
     @echo "vv: the acceptance gate passed"
 
 # R1, R2, R8, R10, R11, R13, R15 --- the repository gates, each falsifiable.
@@ -25,6 +25,22 @@ lint:
 
 test:
     cargo test --workspace
+
+# A recipe because `kappa` did not compile. `address_into` read
+# `AddressOutcome::label`, a field `uor-addr-1` does not have --- it is
+# `.address` --- and nothing in the workspace ever built the feature, so the
+# error existed in `main` without a single gate having an opinion about it.
+# `just test` and `just lint` both run at default features, and `kappa` is off by
+# default; `cargo deny --all-features` reads the dependency graph and compiles
+# nothing. A feature only its author has built is a feature that does not work.
+#
+# `--all-targets` because the tests behind a feature flag are code too, and they
+# are the half most likely to be left behind by an upstream rename.
+#
+# Every optional feature compiles, and the ones with tests run them.
+features:
+    cargo check --workspace --all-features --all-targets
+    cargo test -p uor-matmul-codec --all-features
 
 # CT-02: the whole corpus in a build where every accumulator operation is
 # checked and any overflow panics. The width is derived so that this is

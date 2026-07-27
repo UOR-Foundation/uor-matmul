@@ -519,8 +519,9 @@ because a traversal with a cliff at an awkward size would show it there.
 The number above the previous one was `28.04` at `64x1024x4096`, and the whole
 distance to `52.24` is this: **the tabulated traversal compiled at the target's
 baseline**. Every AVX2 sequence in this workspace is behind `#[target_feature]`
-in `uor-matmul-kernels`, because that is the only crate permitted `unsafe`, and
-the table's column loop and its build were written in `uor-matmul-gemm`. Counted
+in `uor-matmul-kernels`, because that attribute requires `unsafe` and
+`uor-matmul-gemm` forbids it --- and the table's column loop and its build were
+written in `uor-matmul-gemm`. Counted
 off the disassembly of `tabulate`, the traversal contained zero `vpaddd` and zero
 `vpaddq`. It was not slow because the construction was wrong; it was slow because
 nothing had told the compiler it could use the machine.

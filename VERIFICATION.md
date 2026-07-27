@@ -14,6 +14,7 @@ Which axis of `just vv` discharges which class of claim.
 | `just checked` | every accumulator operation checked, no overflow | `CT-02` |
 | `just cross` | the corpus digest off the host | `CA-02` |
 | `just scaling` | fitted exponents, reported never asserted | `CG-01` .. `CG-07` |
+| `just features` | every optional feature compiles, and `kappa`'s tests run | --- |
 | `just fuzz` | totality over unstructured input | `CT-01`, `CT-03`, `CK-06` |
 | `just miri` | undefined behaviour in the crate that has the `unsafe`; `CU-07`, under `just test`, is what asserts it is pointed there | --- |
 
@@ -50,6 +51,8 @@ of these has been checked by planting the defect it exists to catch:
 | the ulp metric | `+0.0` against `-0.0`, and a known one-ulp pair | yes |
 | the scaling fit | a known exponent, and too few points | yes |
 | the NumPy digest check | a published SHA-256 vector | yes |
+| `just features` | `AddressOutcome::label` for `.address` --- the defect `kappa` actually shipped, unbuilt by any gate | yes |
+| the README examples | a wrong asserted value in a fenced block; they are doctests now | yes |
 | `just miri` | the raw face's window made one element too long: passes the native run, Undefined Behaviour under Miri | yes |
 | the raw-window tests (`CS-05`) | the same window made one element too short, caught by all three | yes |
 | `CU-07` | `-p uor-matmul-kernels` dropped from the job, from the recipe, and from both --- the last is the defect this workspace actually shipped | yes |

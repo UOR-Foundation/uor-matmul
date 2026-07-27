@@ -25,8 +25,12 @@ having the most instruction support and the most external oracles.
 | `uor-matmul-conformance` | the BDD runner and the honesty meta-gate | none | freely | n/a |
 
 The split is not organizational. `uor-matmul-kernels` is separate because it is
-the only crate that may write `unsafe`, and a boundary is the only way to say so
-in a way a reviewer can check. `uor-matmul-validate` is separate because the
+where `#[target_feature]` is written, which requires `unsafe`; the three
+numerical crates above it `#![forbid(unsafe_code)]`, so the boundary is a thing a
+compiler checks rather than a thing a reviewer remembers. The facade's raw face
+is the one other place `unsafe` appears, and it appears there because a caller's
+pointer carries no shape to check --- `CU-07` asserts that both of them, and only
+they, are what the Miri job runs. `uor-matmul-validate` is separate because the
 oracles must not be reachable from a shipped crate, and a dependency edge is the
 only way to enforce that.
 
@@ -125,8 +129,10 @@ different algorithm:
 
 `TableSpec` is `KernelSpec`'s shape for the two things a table needs --- fill one
 slot, reduce one column group --- and it lives in `uor-matmul-kernels` for the same
-reason every other sequence does: that is the only crate permitted `unsafe`, and
-therefore the only one that can write `#[target_feature]`. A sequence written
+reason every other sequence does: it is the only crate that writes
+`#[target_feature]` --- 39 of them, against none anywhere else --- and that
+attribute requires `unsafe`, which the other numerical crates forbid outright.
+A sequence written
 anywhere else compiles at the target's baseline. Measured, that was the whole
 difference between 17.6 and 86.7 Gmac/s on the column loop.
 

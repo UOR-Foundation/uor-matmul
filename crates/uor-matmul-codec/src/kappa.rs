@@ -225,7 +225,11 @@ pub fn address_into(
 ) -> Result<(), KappaError> {
     let n = manifest.write_canonical_json(scratch)?;
     let outcome = uor_addr_1::address(&scratch[..n]).map_err(|_| KappaError::NotAddressable)?;
-    let label = outcome.label.as_bytes();
+    // `AddressOutcome::address`, not `.label`: the field is the ASCII wire form,
+    // `sha256:<64 lowercase hex>`, which is the 71 bytes `ADDRESS_LABEL_BYTES`
+    // names. This read `.label`, a field the crate does not have, and said so
+    // only when something built the `kappa` feature --- which nothing did.
+    let label = outcome.address.as_bytes();
     if label.len() != ADDRESS_LABEL_BYTES {
         return Err(KappaError::NotAddressable);
     }

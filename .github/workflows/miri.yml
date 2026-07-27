@@ -1,13 +1,15 @@
 # The crate with the `unsafe` in it, under Miri.
 #
-# `uor-matmul-kernels` is the only crate with `unsafe` --- 304 occurrences of the
-# word against three, one and one in the others, and those are the
-# `#![forbid(unsafe_code)]` and lint lines that rule it out --- and its portable
-# module is the one Miri can run: the SIMD modules use intrinsics Miri does not
-# model, and under Miri no feature-detection predicate answers true, so the
-# portable sequences are what execute. That is the right split: the SIMD kernels
-# are validated by differential testing against the portable one, and the portable
-# one is validated here.
+# `uor-matmul-kernels` holds 298 of the workspace's 305 `unsafe` blocks and
+# functions; `uor-matmul` holds the other seven, in the raw-pointer face; the
+# remaining three shipped crates hold none and `#![forbid(unsafe_code)]` says so.
+# `CU-07` asserts that partition rather than leaving it to this comment.
+#
+# The kernels' portable module is the one Miri can run: the SIMD modules use
+# intrinsics Miri does not model, and under Miri no feature-detection predicate
+# answers true, so the portable sequences are what execute. That is the right
+# split: the SIMD kernels are validated by differential testing against the
+# portable one, and the portable one is validated here.
 #
 # It did not run that crate. It ran the three that forbid `unsafe`, took longer
 # than six hours, and was cancelled at GitHub's ceiling on every push it was ever

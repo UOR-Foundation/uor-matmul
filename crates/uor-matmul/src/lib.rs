@@ -83,6 +83,22 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+/// The `README.md` code blocks, compiled and run as doctests.
+///
+/// The README opens with two worked examples against this crate's public API,
+/// and nothing compiled them. A README is the first thing a caller reads and the
+/// last thing a refactor updates; an example that no longer builds is worse than
+/// no example, because it is read as authority. `#[cfg(doctest)]` keeps the file
+/// out of the rendered documentation --- it is already the crate's `readme`, and
+/// duplicating it here would say everything twice --- while still handing every
+/// fenced `rust` block to the doctest harness.
+///
+/// So `cargo test` now fails if the README's calls stop compiling or stop
+/// producing the values it asserts.
+#[doc = include_str!("../../../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeExamples;
+
 pub mod raw;
 pub mod slice;
 
