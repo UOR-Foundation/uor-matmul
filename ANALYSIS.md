@@ -855,20 +855,56 @@ at 0.92--1.00 --- noise, against the fifth-to-a-third the composition pays.
 At sixteen rows the tier edges the book itself (1.01--1.06), which is the
 decodes differing and not the gathers: the tier's codebook is a bit test, the
 book's is a 2048-byte copy of E8, and at that row count the build is the
-amortized cost either way. What did not move is the `Bnd<1>` column, and it
-should not have: its cost is selection (no NEON bound-1 spec on this host),
-not the gather, and the tier changes nothing about which build is admissible.
+amortized cost either way. What did not move, on that day, is the `Bnd<1>`
+column, and it should not have: its cost was selection (no NEON bound-1 spec
+on this host yet), not the gather, and the tier changes nothing about which
+build is admissible.
 
-The `Bnd<1>` column wants a careful reading. Its build issues no multiply ---
-the census says so at every shape --- and it is still the slowest column by a
-wide margin. The reason is selection, not arithmetic: at bound 1 the only
-admissible spec on this host is the portable reference, whose gathers are the
-reference's own, while the `Full` column runs the NEON build and the NEON
-gathers. The adds-only build's win is real but it is a scalar build against a
-vector one, and the gathers move with the spec. On an AVX2 host the bound-1
-build has a vector spelling and this column prices differently; what an M4 Max
-measures is that a NEON bound-1 spec does not exist, not that the adds-only
-build is slow.
+The `Bnd<1>` column wanted a careful reading then, and the reading dated it.
+Its build issues no multiply --- the census says so at every shape --- and it
+was still the slowest column by a wide margin. The reason was selection, not
+arithmetic: at bound 1 the only admissible spec on this host was the portable
+reference, whose gathers are the reference's own, while the `Full` column runs
+the NEON build and the NEON gathers. The adds-only build's win was real but it
+was a scalar build against a vector one, and the gathers move with the spec.
+
+The NEON bound-1 build now exists (a `neon_table_i8_i32_bound1` spec beside
+the AVX2 one, same shapes, same gathers, `((a & keep) ^ sign) - sign` with the
+masked negation computed in the `i16` lane and folded into the accumulation by
+a widening add). The first spelling computed the masks in the `i32` lane and
+measured *slower* than the reference it replaced --- 10.3 against 18.0 Gprod/s
+at a sixteen-row tile --- because the autovectorizer already writes the
+reference in NEON; the widening-add spelling is what overtook it (18.3 and
+14.8 Gprod/s at sixteen and eight rows, against the reference's 15.7 and
+11.2). Re-measured on the same host later the same day (2026-07-28), same
+discipline, two runs; the table is the first. Every figure is `open`.
+
+| `m x k x n` | `Book<256,8>` | sign, `Full` | `Sign<8>` | sign, `Bnd<1>` | sign/book | tier/book | b1/book | b1/full | build mul |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 14.75 | 10.98 | 14.99 | 4.31 | 0.74x | 1.02x | 0.29x | 0.39x | 262144 -> 0 |
+| `1x1024x4096` | 20.73 | 13.42 | 19.91 | 8.28 | 0.65x | 0.96x | 0.40x | 0.62x | 262144 -> 0 |
+| `1x4096x1024` | 11.28 | 8.34 | 11.36 | 3.27 | 0.74x | 1.01x | 0.29x | 0.39x | 1048576 -> 0 |
+| `1x4096x4096` | 14.45 | 9.49 | 14.56 | 7.04 | 0.66x | 1.01x | 0.49x | 0.74x | 1048576 -> 0 |
+| `4x1024x1024` | 37.45 | 28.65 | 37.56 | 13.36 | 0.77x | 1.00x | 0.36x | 0.47x | 1048576 -> 0 |
+| `4x1024x4096` | 61.37 | 37.85 | 58.47 | 27.09 | 0.62x | 0.95x | 0.44x | 0.72x | 1048576 -> 0 |
+| `4x4096x1024` | 41.12 | 29.58 | 39.21 | 13.23 | 0.72x | 0.95x | 0.32x | 0.45x | 4194304 -> 0 |
+| `4x4096x4096` | 62.87 | 41.68 | 66.65 | 27.52 | 0.66x | 1.06x | 0.44x | 0.66x | 4194304 -> 0 |
+| `16x1024x1024` | 58.75 | 56.00 | 60.17 | 37.40 | 0.95x | 1.02x | 0.64x | 0.67x | 4194304 -> 0 |
+| `16x1024x4096` | 82.94 | 85.13 | 94.56 | 69.35 | 1.03x | 1.14x | 0.84x | 0.81x | 4194304 -> 0 |
+| `16x4096x1024` | 61.31 | 58.49 | 66.14 | 40.03 | 0.95x | 1.08x | 0.65x | 0.68x | 16777216 -> 0 |
+| `16x4096x4096` | 74.63 | 72.38 | 93.29 | 70.51 | 0.97x | 1.25x | 0.94x | 0.97x | 16777216 -> 0 |
+
+The column now splits exactly where the spec does. At one and four rows
+nothing moved, and nothing should have: the NEON table sequences spell tiles
+of eight and sixteen rows --- the same coverage the full-alphabet spec has ---
+so below eight rows the build is still the portable one and the column
+reproduces (0.29--0.49 across both runs, against 0.29--0.48 before). At
+sixteen rows the build is the NEON one and the column moved: `b1/full` is
+0.67--0.97 where it was 0.62--0.83, with the second run putting the four
+sixteen-row cells at 0.63--0.94. The widest cell is also the noisiest --- the
+book column itself swung 74--101 across the two runs --- so the statement that
+survives the noise is the build probe's above, measured directly, not any one
+cell of this table.
 
 ### Everything between 2.95 and 28 was overhead
 
