@@ -155,6 +155,16 @@ break_even_n = 1025
 honesty = "build"
 
 [[tabulation]]
+codec = "Packed<Grid<2>, 8>"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 8
+break_even_n = 683
+note = "the sign tier: one-bit codes, eight to a byte, over a [-1,+1] table. The same code space and block as E8's book, so the same break-even --- a longer block is what makes a table pay at all, and bound 1 is where the build's only multiply is a sign flip."
+honesty = "build"
+
+[[tabulation]]
 codec = "Book<256, 8>"
 code_space = 256
 block = 8
