@@ -18,6 +18,9 @@
 #![allow(missing_docs)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
+use uor_matmul::prelude::*;
+use uor_matmul::{suggested_scratch, Shape};
+use uor_matmul_core::{Alphabet, EncodeMode, Full, PackedCode};
 use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 
 /// Emit the fitted exponents, then time a few shapes so `cargo bench` has
@@ -49,5 +52,178 @@ fn scaling_report(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, scaling_report);
+/// `cargo bench` as the quick answer to "are we faster?": this library and
+/// every enabled oracle timed in the one run, at shapes chosen to separate the
+/// questions --- one latency-bound, one arithmetic-bound, one non-square. The
+/// sweeps (`oracle_sweep`, `just scaling`) remain the measurement of record;
+/// this group is the thirty-second version, and its figures are every bit as
+/// `open`. Criterion's own report gives the ratio within a shape.
+///
+/// What is asserted, inside each timed closure, is that the answer is right
+/// (`CG-06`). The operands are a constant fill, which every implementation here
+/// computes exactly --- and which flatters the float path, whose limb window
+/// never flushes when every product shares one exponent. The recorded-random
+/// fill lives in `oracle_sweep`, whose header explains what the flattery hid.
+///
+/// The `handwritten/` row is the comparison against *no* library: the triple
+/// loop a caller writes without one. The `i32` half is §3.4's wrapping oracle,
+/// which is deliberately the dumbest possible implementation --- one function,
+/// not two, or the baseline and the oracle could drift apart.
+fn vs_oracles(c: &mut Criterion) {
+    const SHAPES: [(usize, usize, usize); 3] = [(16, 16, 16), (128, 128, 128), (64, 512, 1024)];
+
+    let mut i32_group = c.benchmark_group("gemm_i32");
+    for &(m, k, n) in &SHAPES {
+        let shape = format!("{m}x{k}x{n}");
+        let a = vec![1i32; m * k];
+        let b = vec![1i32; k * n];
+
+        i32_group.bench_function(format!("uor-matmul/{shape}"), |bench| {
+            let mut out = vec![0i32; m * n];
+            let mut scratch =
+                vec![Alphabet::<i32, Full<i32>>::ZERO; suggested_scratch(Shape { m, k, n })];
+            bench.iter(|| {
+                let av = MatView::row_major(as_alphabet_full(&a), m, k).expect("A fits");
+                let bv = MatView::row_major(as_alphabet_full(&b), k, n).expect("B fits");
+                let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                let mut t = Triple::new(av, bv, cv).expect("the product exists");
+                // The packed driver, which is what the library runs. Timing the
+                // generic traversal would time a factorization no caller gets.
+                uor_matmul::gemm_packed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    GemmOptions {
+                        encode: EncodeMode::Wrapping,
+                        ..Default::default()
+                    },
+                    &mut Scratch::new(&mut scratch),
+                );
+                assert!(
+                    out.iter().all(|&v| v == k as i32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        i32_group.bench_function(format!("handwritten/{shape}"), |bench| {
+            bench.iter(|| {
+                let out = uor_matmul_validate::reference_wrapping_i32(m, k, n, &a, &b);
+                assert!(
+                    out.iter().all(|&v| v == k as i32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        #[cfg(feature = "ref-ndarray")]
+        i32_group.bench_function(format!("ndarray/{shape}"), |bench| {
+            use uor_matmul_validate::oracle::{NdArray, Oracle};
+            bench.iter(|| {
+                let out = NdArray::product_i32(m, k, n, &a, &b);
+                assert!(
+                    out.iter().all(|&v| v == k as i32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        #[cfg(feature = "ref-nalgebra")]
+        i32_group.bench_function(format!("nalgebra/{shape}"), |bench| {
+            use uor_matmul_validate::oracle::{Nalgebra, Oracle};
+            bench.iter(|| {
+                let out = Nalgebra::product_i32(m, k, n, &a, &b);
+                assert!(
+                    out.iter().all(|&v| v == k as i32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+    }
+    i32_group.finish();
+
+    let mut f32_group = c.benchmark_group("gemm_f32");
+    for &(m, k, n) in &SHAPES {
+        let shape = format!("{m}x{k}x{n}");
+        let a = vec![1.0f32; m * k];
+        let b = vec![1.0f32; k * n];
+
+        f32_group.bench_function(format!("uor-matmul/{shape}"), |bench| {
+            let mut out = vec![0.0f32; m * n];
+            // The packed float path and its caller-held panels, which is what
+            // the library runs; the generic driver would time a factorization
+            // no caller gets, and it reads several times slower.
+            let mut pa = vec![PackedCode::default(); k];
+            let mut pb = vec![PackedCode::default(); k * n];
+            bench.iter(|| {
+                let av = MatView::row_major(&a, m, k).expect("A fits");
+                let bv = MatView::row_major(&b, k, n).expect("B fits");
+                let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                let mut t = Triple::new(av, bv, cv).expect("the product exists");
+                uor_matmul::gemm_float_packed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut pa,
+                    &mut pb,
+                );
+                assert!(
+                    out.iter().all(|&v| v == k as f32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        f32_group.bench_function(format!("handwritten/{shape}"), |bench| {
+            let mut out = vec![0.0f32; m * n];
+            bench.iter(|| {
+                handwritten_f32(m, k, n, &a, &b, &mut out);
+                assert!(
+                    out.iter().all(|&v| v == k as f32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        #[cfg(feature = "ref-matrixmultiply")]
+        f32_group.bench_function(format!("matrixmultiply/{shape}"), |bench| {
+            use uor_matmul_validate::oracle::{FloatOracle, MatrixMultiply};
+            bench.iter(|| {
+                let out = MatrixMultiply::product_f32(m, k, n, &a, &b);
+                assert!(
+                    out.iter().all(|&v| v == k as f32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        #[cfg(feature = "ref-faer")]
+        f32_group.bench_function(format!("faer/{shape}"), |bench| {
+            use uor_matmul_validate::oracle::{Faer, FloatOracle};
+            bench.iter(|| {
+                let out = Faer::product_f32(m, k, n, &a, &b);
+                assert!(
+                    out.iter().all(|&v| v == k as f32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+    }
+    f32_group.finish();
+}
+
+/// The `f32` half of "no library": three loops and an `f32` accumulator.
+///
+/// Iterator-shaped rather than index-shaped so the workspace's clippy denies
+/// stay quiet; the arithmetic is the same naive sum, in the same order, with
+/// the same order-dependent rounding a classical caller gets.
+fn handwritten_f32(m: usize, k: usize, n: usize, a: &[f32], b: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(out.len(), m * n, "the output is the product's shape");
+    for (i, row) in out.chunks_exact_mut(n).enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = (0..k).map(|p| a[i * k + p] * b[p * n + j]).sum();
+        }
+    }
+}
+
+criterion_group!(benches, scaling_report, vs_oracles);
 criterion_main!(benches);
