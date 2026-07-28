@@ -1768,21 +1768,25 @@ fn every_bound1_table_build_equals_the_reference_cb_10() {
                     );
                     // The gathers are bound-independent, so the bound-1 spec
                     // carries its backend's own --- shared, not duplicated
-                    // (R13).
-                    let donor = specs[1..]
-                        .iter()
-                        .find(|s| s.backend == spec.backend && s.max_bound > 1)
-                        .unwrap_or(&reference);
-                    assert!(
-                        core::ptr::fn_addr_eq(spec.gather, donor.gather),
-                        "{:?} bound-1 spec duplicates the gather instead of sharing it",
-                        spec.backend
-                    );
-                    assert!(
-                        core::ptr::fn_addr_eq(spec.gather_codes, donor.gather_codes),
-                        "{:?} bound-1 spec duplicates gather_codes instead of sharing it",
-                        spec.backend
-                    );
+                    // (R13). Under Miri every fn-pointer creation is a fresh
+                    // allocation, so address equality cannot witness sharing
+                    // there; the claim is asserted on real targets.
+                    if !cfg!(miri) {
+                        let donor = specs[1..]
+                            .iter()
+                            .find(|s| s.backend == spec.backend && s.max_bound > 1)
+                            .unwrap_or(&reference);
+                        assert!(
+                            core::ptr::fn_addr_eq(spec.gather, donor.gather),
+                            "{:?} bound-1 spec duplicates the gather instead of sharing it",
+                            spec.backend
+                        );
+                        assert!(
+                            core::ptr::fn_addr_eq(spec.gather_codes, donor.gather_codes),
+                            "{:?} bound-1 spec duplicates gather_codes instead of sharing it",
+                            spec.backend
+                        );
+                    }
                     let mut got = vec![0i32; space * rows];
                     spec.build(
                         space,
