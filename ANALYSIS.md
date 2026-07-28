@@ -760,6 +760,27 @@ The ceiling at `d = 1` is the table *build*, which does not collapse: it is
 2x and not 4096x, and it is the honest shape of the construction rather than a
 disappointment.
 
+The same sweep reports a `narrow block` column: the collapsed traversal with
+the accumulator offer halved, so the column block resolves to half the output
+width and the collapse that runs is `CD-14`'s block-local one or none.
+Measured on an aarch64 dev machine --- not the runner the table above came
+from, so the absolute figures are its own and only the shape transfers:
+
+| `d` | collapsed | narrow block |
+| --- | --- | --- |
+| 1 | 62.62 | 46.11 |
+| 8 | 56.70 | 43.85 |
+| 64 | 53.12 | 44.39 |
+| 512 | 50.64 | 34.70 |
+| 4096 | 31.77 | 23.31 |
+
+Two readings. The collapse survives narrowing: every degenerate row sits well
+above the nothing-to-collapse row of the same column (`d = 4096`), where
+before `CD-14` a halved offer disabled the collapse outright. And the drop
+from the full-offer figure is the build, which does not collapse and now runs
+once per column block --- halving the block doubles it, the same ceiling the
+`d = 1` row of the main table already names.
+
 One thing this cost to get right. Naming the columns instead of counting from a
 first one turns the code base and the accumulator base from induction variables
 into indexed loads, and measured that **halved every shape, including the ones
