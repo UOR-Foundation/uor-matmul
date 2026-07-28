@@ -205,6 +205,14 @@ pub enum TierId {
     /// intended semantics of the kappa label (§"canonical weight manifest"):
     /// two artifacts that decode alike are still two artifacts.
     Sign,
+    /// Weights in `{-1, 0, +1}`, two bits per element: the codebook is the
+    /// constant.
+    ///
+    /// `Ternary` and the `Packed<Grid<4>,4>` spelling decode the same stream
+    /// (`CK-12`) yet carry different manifest identities --- and that is the
+    /// intended semantics of the kappa label (§"canonical weight manifest"):
+    /// two artifacts that decode alike are still two artifacts.
+    Ternary,
     /// `d(c) - z`: asymmetric quantization as a codec composition.
     Offset,
     /// Sparse storage as a codec.
@@ -224,6 +232,7 @@ impl TierId {
             Self::Packed => "Packed",
             Self::Book => "Book",
             Self::Sign => "Sign",
+            Self::Ternary => "Ternary",
             Self::Offset => "Offset",
             Self::Runs => "Runs",
             Self::Transcode => "Transcode",

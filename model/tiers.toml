@@ -53,6 +53,15 @@ note = "weights in {-1, +1}, one bit per element. Bit t of the code is element t
 honesty = "build"
 
 [[tier]]
+id = "Ternary"
+rust = "Ternary<E, Bd, BLK>"
+code = "u16"
+block = "BLK"
+table = "none: the codebook is the constant {-1, 0, +1}"
+note = "weights in {-1, 0, +1}, two bits per element. Digit t of the code (bits 2t and 2t+1) is element t: 0 is -1, 1 is 0, 2 is +1, and 3 --- the dead digit no ternary encoder emits --- decodes to 0, low digit first (normative, the order Packed reads its sub-codes in, CK-03). The same decode as the Packed<Grid<4>,4> spelling (CK-12) with the code *being* the index, so as_index_stream always answers Some and the traversal builds nothing."
+honesty = "build"
+
+[[tier]]
 id = "Offset"
 rust = "Offset<C>"
 code = "C::Code"
@@ -191,6 +200,16 @@ rows = 16
 lanes_per_add = 8
 break_even_n = 683
 note = "the sign tier as its own codec: one bit per element, the code being the index. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even --- what changes is not the op count but the gather, which reads the operand's own memory instead of a built index stream."
+honesty = "build"
+
+[[tabulation]]
+codec = "Ternary<4>"
+code_space = 256
+block = 4
+rows = 16
+lanes_per_add = 8
+break_even_n = 1025
+note = "the ternary tier as its own codec: two bits per element, the code being the index. The same code space and block as the Packed<Grid<4>,4> spelling, so the same break-even --- what changes is not the op count but the gather, which reads the operand's own memory instead of a built index stream."
 honesty = "build"
 
 [[tabulation]]

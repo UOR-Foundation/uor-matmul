@@ -405,6 +405,106 @@ impl<E: IntegerElement, Bd: Bound, const BLK: usize> Enumerable<E, Bd> for Sign<
 }
 
 // ---------------------------------------------------------------------------
+// Ternary
+// ---------------------------------------------------------------------------
+
+/// Weights in `{-1, 0, +1}`, two bits per element, with no table at all.
+///
+/// The `Packed<Grid<4>,4>` spelling of the same decode (`CK-10`) tabulates but
+/// can never answer [`Enumerable::as_index_stream`]: a packed byte's index is
+/// a mixed-radix decomposition of it, so the tabulated traversal builds the
+/// index stream it gathers from. This tier spells the same decode with the
+/// code *being* the index --- `Code = u16`, one base-4 digit per element of
+/// the block, and a base-4 digit stream is a power-of-two code space (4^BLK =
+/// 2^(2BLK)) --- so the operand's own memory is the stream and there is
+/// nothing to build. `CK-12` pins the two spellings byte for byte.
+///
+/// The codebook is the constant `{-1, 0, +1}`, so there is nothing to borrow
+/// and no lifetime: the decode is a two-bit field test. **Digit `t` of the
+/// code --- bits `2t` and `2t+1` --- is element `t`; 0 is `-1`, 1 is `0`, 2 is
+/// `+1`, and 3, the dead digit no ternary encoder emits, decodes to `0`, low
+/// digit first** --- the order `Packed` reads its sub-codes in (`CK-03`) and
+/// the decode the spelling's `[-1, 0, +1, dead]` table gives every digit
+/// (`CK-10`), so a `Ternary` code spells the block the composition spells from
+/// the same byte value. The convention is normative: the encoder side is out
+/// of tree, and this decode is the whole contract with it.
+#[derive(Clone, Copy, Debug)]
+pub struct Ternary<E: IntegerElement, Bd: Bound, const BLK: usize> {
+    _marker: PhantomData<fn() -> (E, Bd)>,
+}
+
+impl<E: IntegerElement, Bd: Bound, const BLK: usize> Ternary<E, Bd, BLK> {
+    /// The one non-existence check: an alphabet that does not admit `+-1` has
+    /// no ternary codec --- `0` is in every alphabet. Decided at construction,
+    /// before any arithmetic, like every other non-existence in this library
+    /// (C6).
+    pub const fn new() -> Option<Self> {
+        if Bd::VALUE < 1 || E::FULL < 1 {
+            return None;
+        }
+        Some(Self {
+            _marker: PhantomData,
+        })
+    }
+}
+
+impl<E: IntegerElement, Bd: Bound, const BLK: usize> Codec<E, Bd> for Ternary<E, Bd, BLK> {
+    type Code = u16;
+    const MAX_BLOCK: usize = BLK;
+    const TIER: TierId = TierId::Ternary;
+
+    fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd> {
+        let shift = 2 * (i % BLK);
+        // The `shift < 16` guard keeps the shift total past the code type's own
+        // width: at `BLK > 8` a code holds no digit for those positions, and
+        // they decode to `-1` like any zero field.
+        let digit = if shift < u16::BITS as usize {
+            (code >> shift) & 3
+        } else {
+            0
+        };
+        let v = match digit {
+            // `0 - 1`: exact for every integer element, never a wrap.
+            0 => E::ZERO.sub(E::ONE),
+            2 => E::ONE,
+            // 1 is the zero digit, and 3 the dead one --- which also decodes
+            // to 0, a priced duplicate of it rather than an error (`CK-10`).
+            _ => E::ZERO,
+        };
+        // `new` established that the declared alphabet admits `+-1`, so the
+        // wrap cannot put a value outside its bound: it is that O(1) check
+        // being cashed in, exactly as `Sign`'s decode cashes in its own.
+        Alphabet::wrap(v)
+    }
+}
+
+impl<E: IntegerElement, Bd: Bound, const BLK: usize> Enumerable<E, Bd> for Ternary<E, Bd, BLK> {
+    // 4^BLK, capped at what a `u16` can address (BLK = 8 already fills it) ---
+    // a power of two at every block width, the same honesty about the code
+    // type's width as `Grid`'s, and what makes the index stream unconditional
+    // below.
+    const CODE_SPACE: usize = if BLK < 8 { 1 << (2 * BLK) } else { U16_CODES };
+
+    fn code_at(index: usize) -> Self::Code {
+        (index % Self::CODE_SPACE.max(1)) as u16
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        // A mask, not a remainder: the space is a power of two at every block
+        // width, and the stored code *is* the index, which is the whole point
+        // of the tier.
+        (code as usize) & (Self::CODE_SPACE - 1)
+    }
+
+    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+        // Always, as `Sign` answers and for one reason more: 4^BLK is 2^(2BLK),
+        // so the code addresses the enumeration unconditionally. This is the
+        // answer `Packed` can never give, and the gap this tier exists to close.
+        Some(codes)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Offset
 // ---------------------------------------------------------------------------
 
