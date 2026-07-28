@@ -490,3 +490,15 @@ id = "CM-04"
 level = "build"
 suite = "model"
 statement = """`tabulation_pays`'s inputs come from `model/tiers.toml`, and the resolved break-even matches the model's recorded value for every enumerable codec"""
+
+[[id]]
+id = "CK-10"
+level = "build"
+suite = "codec"
+statement = """An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols"""
+
+[[id]]
+id = "CD-14"
+level = "build"
+suite = "determinism"
+statement = """An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all"""

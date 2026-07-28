@@ -561,6 +561,21 @@ impl<E, L> core::fmt::Debug for TableSpec<E, L> {
 /// register at all, where this is not a placeholder but the whole of what the
 /// hardware offers.
 pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -> TableSpec<E, L> {
+    // The staged gather holds one column group of lane words in a compile-time
+    // array so the run's adds stay in registers. That pays exactly when the
+    // words fit a register file: sixteen of them at sixteen bytes is every
+    // 128-bit vector register the baseline targets have. A wider word --- the
+    // exact accumulator of a float family is 88 or 544 bytes --- cannot be
+    // staged, and trying is a frame the size of the group per dispatched tile
+    // of pure copy, which an unoptimized build sums over every arm of the
+    // dispatcher. It accumulates where it lies instead: the same reads, the
+    // same adds, the same lane words (`CB-08`).
+    let (gather, gather_codes): (TableGather<L>, TableGatherCodes<L>) =
+        if core::mem::size_of::<L>() * 16 <= 256 {
+            (portable_gather::<L>, portable_gather_codes::<L>)
+        } else {
+            (portable_gather_wide::<L>, portable_gather_codes_wide::<L>)
+        };
     TableSpec {
         backend: Backend::Portable,
         rows,
@@ -575,8 +590,8 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
         // intermediate to outgrow and no alphabet it is inexact on.
         max_bound: u128::MAX,
         build: portable_build::<E, L>,
-        gather: portable_gather::<L>,
-        gather_codes: portable_gather_codes::<L>,
+        gather,
+        gather_codes,
     }
 }
 
@@ -722,6 +737,59 @@ unsafe fn portable_gather_codes<L: LaneWord>(
             depth, slab, shift, stack, codes, stride, lane
         ))
     )
+}
+
+/// # Safety
+///
+/// [`TableGather`]'s contract.
+unsafe fn portable_gather_wide<L: LaneWord>(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    stack: *const L,
+    off: *const u32,
+    lane: *mut L,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (stack, off, lane) = unsafe {
+        (
+            core::slice::from_raw_parts(stack, depth * slab),
+            core::slice::from_raw_parts(off, depth * group),
+            core::slice::from_raw_parts_mut(lane, group * rows),
+        )
+    };
+    // No dispatch and no staging: the tile heights exist to name register
+    // counts, and a lane this wide has none.
+    gather_any(rows, group, slab, stack, off, lane)
+}
+
+/// # Safety
+///
+/// [`TableGatherCodes`]'s contract.
+#[allow(clippy::too_many_arguments)]
+unsafe fn portable_gather_codes_wide<L: LaneWord>(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const L,
+    codes: *const u16,
+    stride: usize,
+    lane: *mut L,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (stack, codes, lane) = unsafe {
+        (
+            core::slice::from_raw_parts(stack, depth * slab),
+            core::slice::from_raw_parts(codes, (group - 1) * stride + depth),
+            core::slice::from_raw_parts_mut(lane, group * rows),
+        )
+    };
+    // As [`portable_gather_wide`]: the same accumulation, walked, with nothing
+    // staged.
+    codes_any(rows, depth, slab, shift, stack, codes, stride, lane)
 }
 
 /// The same, at a row count no shipped tile uses.

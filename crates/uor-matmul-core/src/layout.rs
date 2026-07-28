@@ -5,8 +5,10 @@
 //! transposed operand takes the same path as any other and not a different one
 //! (S7, `CS-06`).
 
-use crate::alphabet::IntegerElement;
+use crate::alphabet::{Alphabet, Bound, Element, IntegerElement};
 use crate::error::NotAProduct;
+
+use bytemuck::TransparentWrapper;
 
 /// The three dimensions of a product.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -615,6 +617,25 @@ impl<E: IntegerElement> MatView<'_, E> {
     /// decodes to. Zero padding is exact, which is why an unaligned or prime
     /// shape takes the same path and not a different one (S8).
     pub const PAD: E = E::ZERO;
+}
+
+impl<'a, E: Element, Bd: Bound> MatView<'a, Alphabet<E, Bd>> {
+    /// The same cells with the alphabet wrapper peeled off.
+    ///
+    /// `Alphabet` is `repr(transparent)` over the element, so this names the
+    /// same buffer with the same origin and strides and copies nothing. It
+    /// exists for the tabulated traversal's decline: an arena-coded float
+    /// operand is decoded into an alphabet buffer, and the float driver --- the
+    /// dense factorization it is handed to --- reads the codes themselves.
+    pub fn peeled(&self) -> MatView<'a, E> {
+        MatView {
+            data: TransparentWrapper::peel_slice(self.data),
+            origin: self.origin,
+            rows: self.rows,
+            cols: self.cols,
+            strides: self.strides,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -252,6 +252,15 @@ pub trait FloatElement: Element {
     /// The codec. Total on all bit patterns, non-finite ones included.
     fn decode(self) -> Decoded;
 
+    /// The bit pattern, widened to `u64`.
+    ///
+    /// The symbol's *identity*: two codes are the same symbol exactly when
+    /// their patterns are equal, so `-0.0` and `+0.0` are distinct symbols
+    /// with equal decodes, and two NaNs with different payloads are distinct
+    /// symbols. Canonical order on symbols is unsigned order on patterns
+    /// (`CK-10`). No float arithmetic is involved in producing it.
+    fn symbol_bits(self) -> u64;
+
     /// The codec's output in packed form, for a driver that decodes once and
     /// multiplies many times.
     fn pack(self) -> PackedCode {
@@ -288,6 +297,22 @@ impl<E: IntegerElement> Bound for Full<E> {
     const VALUE: u128 = E::FULL;
 }
 
+/// The bound a float element carries: none, because a float has an exponent
+/// range rather than a magnitude (§5.2b). Zero-sized.
+///
+/// Used by the arena tier, where the codebook *is* the alphabet: membership is
+/// discharged by the table's construction, so there is nothing for a bound
+/// check to ask. `VALUE` is `u128::MAX` so that any reader which asks a
+/// magnitude question anyway gets the conservative answer --- `fits_narrow`'s
+/// `b * b` overflows to `None`, which selects the wide register, the only
+/// register a float accumulation has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Whole<E: FloatElement>(PhantomData<E>);
+
+impl<E: FloatElement> Bound for Whole<E> {
+    const VALUE: u128 = u128::MAX;
+}
+
 /// A declared narrower bound, e.g. `Bnd<127>` for W8A8.
 ///
 /// A narrower bound lets more tiles take the narrow-register path (§5.1), and
@@ -301,12 +326,18 @@ impl<const V: u128> Bound for Bnd<V> {
 }
 
 /// An element of the symmetric alphabet `{-B..B}`.
+///
+/// The bound is `E: Element`, not `E: IntegerElement`: a float carries no
+/// magnitude, so it cannot be *admitted* by a bound check --- but an arena's
+/// codebook is an alphabet of symbols, and the wrapper is what the codec's
+/// decode returns for any element type. The checking constructor
+/// [`Alphabet::new`] stays integer-only, because `magnitude` does.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, TransparentWrapper)]
 #[repr(transparent)]
 #[transparent(E)]
-pub struct Alphabet<E: IntegerElement, Bd: Bound>(E, PhantomData<Bd>);
+pub struct Alphabet<E: Element, Bd: Bound>(E, PhantomData<Bd>);
 
-impl<E: IntegerElement, Bd: Bound> Alphabet<E, Bd> {
+impl<E: Element, Bd: Bound> Alphabet<E, Bd> {
     /// `B`, the bound this alphabet declares.
     pub const BOUND: u128 = Bd::VALUE;
 
@@ -317,7 +348,9 @@ impl<E: IntegerElement, Bd: Bound> Alphabet<E, Bd> {
     pub const fn get(self) -> E {
         self.0
     }
+}
 
+impl<E: IntegerElement, Bd: Bound> Alphabet<E, Bd> {
     /// Admit a value whose magnitude is within the declared bound.
     ///
     /// Returns the observed magnitude rather than a unit error, so a caller who
@@ -380,6 +413,24 @@ pub fn as_alphabet_full<E: IntegerElement>(xs: &[E]) -> &[Alphabet<E, Full<E>>] 
 /// The mutable twin of [`as_alphabet_full`].
 pub fn as_alphabet_full_mut<E: IntegerElement>(xs: &mut [E]) -> &mut [Alphabet<E, Full<E>>] {
     Alphabet::wrap_slice_mut(xs)
+}
+
+impl<E: FloatElement> Alphabet<E, Whole<E>> {
+    /// Admit any code of `E`. Infallible: `Whole<E>` declares no magnitude, and
+    /// the arena's codebook is what makes the symbol a member.
+    ///
+    /// Named `symbol` rather than `of`: a float in an alphabet is a code's
+    /// name, and the distinct name keeps `Alphabet::of` unambiguous for the
+    /// integer `Full<E>` impl.
+    pub const fn symbol(value: E) -> Self {
+        Self(value, PhantomData)
+    }
+}
+
+/// The float twin of [`as_alphabet_full`]: every bit pattern is a symbol, so
+/// the wrap is infallible, zero-copy, and with no validating pass.
+pub fn as_alphabet_whole<E: FloatElement>(xs: &[E]) -> &[Alphabet<E, Whole<E>>] {
+    Alphabet::wrap_slice(xs)
 }
 
 /// The declared-bound entry point, for a caller who knows their data is
@@ -750,6 +801,10 @@ macro_rules! impl_float_element {
             const MAX_PRODUCT_EXP: i32 = $max_prod;
             // The stored fraction plus the implicit leading bit.
             const SIGNIFICAND_BITS: u32 = <$t>::MANTISSA_DIGITS;
+
+            fn symbol_bits(self) -> u64 {
+                self.to_bits() as u64
+            }
 
             fn decode(self) -> Decoded {
                 // Total on all bit patterns. No branch here can fail, and none

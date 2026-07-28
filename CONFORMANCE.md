@@ -63,6 +63,7 @@ returns an error the model does not sanction.
 | `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room |
 | `CD-12` | `build` | Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer |
 | `CD-13` | `build` | `Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all |
+| `CD-14` | `build` | An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
 
@@ -101,6 +102,7 @@ returns an error the model does not sanction.
 | `CK-06` | `build` | A run codec's returned counts sum to the declared row width on every row |
 | `CK-08` | `build` | The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected |
 | `CK-09` | `build` | `Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type |
+| `CK-10` | `build` | An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols |
 
 ## `CX-*` --- Cross-library agreement against an external library
 

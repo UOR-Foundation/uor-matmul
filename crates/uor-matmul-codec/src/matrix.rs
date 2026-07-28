@@ -2,7 +2,7 @@
 
 use core::ops::Range;
 
-use uor_matmul_core::{Alphabet, Bound, IntegerElement};
+use uor_matmul_core::{Alphabet, Bound, Element};
 
 use crate::tier::Codec;
 
@@ -12,7 +12,7 @@ use crate::tier::Codec;
 /// `CodedMatrix` is a handful of pointers and three integers. Nothing here is
 /// owned, nothing is copied, and nothing is allocated (R7, C1).
 #[derive(Clone, Copy, Debug)]
-pub struct CodedMatrix<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> {
+pub struct CodedMatrix<'a, E: Element, Bd: Bound, C: Codec<E, Bd>> {
     codec: C,
     rows: usize,
     cols: usize,
@@ -20,7 +20,7 @@ pub struct CodedMatrix<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> {
     _marker: core::marker::PhantomData<fn() -> (E, Bd)>,
 }
 
-impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C> {
+impl<'a, E: Element, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C> {
     /// Borrow `codes` as an `rows x cols` coded matrix.
     ///
     /// `None` only when the codes do not describe the declared shape, which
@@ -223,14 +223,14 @@ impl<'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> CodedMatrix<'a, E, Bd, C
 /// See [`CodedMatrix::column_walk`] for why this exists rather than a loop over
 /// [`CodedMatrix::at`].
 #[derive(Clone, Copy)]
-pub struct ColumnWalk<'m, 'a, E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> {
+pub struct ColumnWalk<'m, 'a, E: Element, Bd: Bound, C: Codec<E, Bd>> {
     m: &'m CodedMatrix<'a, E, Bd, C>,
     col: usize,
     row: usize,
     cursor: usize,
 }
 
-impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> Iterator for ColumnWalk<'_, '_, E, Bd, C> {
+impl<E: Element, Bd: Bound, C: Codec<E, Bd>> Iterator for ColumnWalk<'_, '_, E, Bd, C> {
     type Item = Alphabet<E, Bd>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -271,7 +271,4 @@ impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> Iterator for ColumnWalk<'_, 
     }
 }
 
-impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>> ExactSizeIterator
-    for ColumnWalk<'_, '_, E, Bd, C>
-{
-}
+impl<E: Element, Bd: Bound, C: Codec<E, Bd>> ExactSizeIterator for ColumnWalk<'_, '_, E, Bd, C> {}

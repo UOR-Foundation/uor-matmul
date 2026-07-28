@@ -186,7 +186,7 @@ impl Manifest<'_> {
         spec: &'static str,
     ) -> Manifest<'static>
     where
-        E: uor_matmul_core::IntegerElement,
+        E: uor_matmul_core::Element,
         Bd: Bound,
         C: crate::Codec<E, Bd>,
     {
@@ -317,6 +317,38 @@ mod tests {
         assert_eq!(
             m.write_canonical_json(&mut buf),
             Err(KappaError::MalformedDigest)
+        );
+    }
+
+    /// CK-08: the arena tier's spelling is pinned like every other token. A
+    /// float alphabet has no magnitude, so the bound field is `Whole`'s value,
+    /// recorded as itself --- and a new token mints new addresses, which is the
+    /// point of the tier (CL-MM01).
+    #[test]
+    fn arena_manifest_spelling_is_byte_stable_ck_08() {
+        let m = Manifest {
+            tier: TierId::Arena,
+            bound: u128::MAX,
+            rows: 4096,
+            cols: 4096,
+            block: 1,
+            codebook_sha256: D0,
+            codes_sha256: D1,
+            spec: "uor-matmul/1",
+        };
+        let mut buf = [0u8; 512];
+        let n = m.write_canonical_json(&mut buf).unwrap();
+        let text = core::str::from_utf8(&buf[..n]).unwrap();
+        assert_eq!(
+            text,
+            concat!(
+                "{\"block\":1,\"bound\":340282366920938463463374607431768211455,",
+                "\"codebook_sha256\":\"sha256:00000000000000000000000000000000",
+                "00000000000000000000000000000000\",",
+                "\"codes_sha256\":\"sha256:11111111111111111111111111111111",
+                "11111111111111111111111111111111\",",
+                "\"cols\":4096,\"rows\":4096,\"spec\":\"uor-matmul/1\",\"tier\":\"Arena\"}"
+            )
         );
     }
 }
