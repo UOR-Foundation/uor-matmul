@@ -53,3 +53,9 @@ Feature: Backend parity
     Given the standing corpus
     When the suite exercises CB-08
     Then the claim holds byte for byte
+
+  @CB-09 @build
+  Scenario: Every modular table sequence equals the portable modular reference lane for lane
+    Given the standing corpus
+    When the suite exercises CB-09
+    Then the claim holds byte for byte

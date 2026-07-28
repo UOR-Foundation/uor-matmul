@@ -1326,3 +1326,342 @@ fn every_i16_table_sequence_equals_the_reference_cb_08() {
     }
     assert!(compared > 0, "CB-08 compared nothing for the 64-bit lane");
 }
+
+/// `CB-09`: every modular table sequence equals the portable modular
+/// reference, lane for lane.
+///
+/// The modular lane is `Z/2^w`: the build's products wrap and the gather's
+/// adds wrap, and both are the ring's own operations, so the model oracle is
+/// written in wrapping arithmetic. As in `CB-08`, the reference is read
+/// against the model rather than against itself, because below eight rows no
+/// ISA offers a sequence and the reference is the only party to the
+/// comparison. For `i64` the reference is the *only* sequence at every height
+/// --- the build's multiply is the table's only one, and no SIMD integer
+/// multiply reaches an `i64` lane, which is why the dense family is
+/// portable-only too.
+#[test]
+fn every_modular_table_sequence_equals_the_reference_cb_09() {
+    use uor_matmul_kernels::{
+        available_table_i32_modular, available_table_i64_modular, packed_slot, Mod32, Mod64,
+        TableSpec,
+    };
+
+    /// Full-range fills: the modular lane declares no bound, so the extremes
+    /// of the element type are ordinary inputs here, and a product of two of
+    /// them wraps on purpose.
+    fn fill32(len: usize, salt: u64) -> Vec<i32> {
+        fill(len, salt, |v| v.wrapping_mul(0x9E37_79B9) as i32)
+    }
+
+    fn fill64(len: usize, salt: u64) -> Vec<i64> {
+        fill(len, salt, |v| {
+            v.wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64)
+        })
+    }
+
+    fn pack32(flat: &[i32], rows: usize, block: usize, spec: &TableSpec<i32, Mod32>) -> Vec<i32> {
+        let mut out = vec![0i32; rows * block];
+        for t in 0..block {
+            for i in 0..rows {
+                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
+            }
+        }
+        out
+    }
+
+    fn pack64(flat: &[i64], rows: usize, block: usize, spec: &TableSpec<i64, Mod64>) -> Vec<i64> {
+        let mut out = vec![0i64; rows * block];
+        for t in 0..block {
+            for i in 0..rows {
+                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
+            }
+        }
+        out
+    }
+
+    let mut compared = 0usize;
+    for &space in &corpus(&[16usize, 64, 200, 256], &[200, 256]) {
+        for &block in &corpus(&[2usize, 4, 8], &[2, 8]) {
+            let book = fill32(space * block, 0xb32c ^ space as u64);
+            for &rows in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
+                let flat = fill32(rows * block, 0xa32c ^ rows as u64);
+                for &group in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
+                    let specs: Vec<_> = available_table_i32_modular(rows, group).collect();
+                    let reference = specs[0];
+                    assert_eq!(
+                        reference.backend,
+                        uor_matmul_core::Backend::Portable,
+                        "the reference is listed first"
+                    );
+
+                    // The build, against the model in the ring itself. `T[c][i]
+                    // = sum_t A[i][t] * D[c][t]` with every operation taken mod
+                    // `2^32` is the whole definition.
+                    let model = {
+                        let mut out = vec![0i32; space * rows];
+                        for c in 0..space {
+                            for i in 0..rows {
+                                let mut acc = 0i32;
+                                for t in 0..block {
+                                    acc = acc.wrapping_add(
+                                        flat[t * rows + i].wrapping_mul(book[c * block + t]),
+                                    );
+                                }
+                                out[c * rows + i] = acc;
+                            }
+                        }
+                        out
+                    };
+                    let mut want = vec![Mod32(0); space * rows];
+                    reference.build(
+                        space,
+                        block,
+                        &book,
+                        &pack32(&flat, rows, block, &reference),
+                        &mut want,
+                    );
+                    assert_eq!(
+                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
+                        model,
+                        "the reference mod32 build disagrees with the model at space {space}, \
+                         block {block}, rows {rows}"
+                    );
+                    compared += 1;
+                    for spec in &specs[1..] {
+                        let mut got = vec![Mod32(0); space * rows];
+                        spec.build(
+                            space,
+                            block,
+                            &book,
+                            &pack32(&flat, rows, block, spec),
+                            &mut got,
+                        );
+                        assert_eq!(
+                            got, want,
+                            "{:?} mod32 build disagrees at space {space}, block {block}, \
+                             rows {rows}",
+                            spec.backend
+                        );
+                        compared += 1;
+                    }
+
+                    // The gather, over a stack whose slab is the rounded space,
+                    // with wrapping adds on both sides.
+                    let codes = space.next_power_of_two();
+                    let slab = codes * rows;
+                    let depth = 5usize;
+                    let mut stack = vec![Mod32(0); depth * slab];
+                    for slot in 0..depth {
+                        let at = slot * slab;
+                        for (i, cell) in stack[at..at + space * rows].iter_mut().enumerate() {
+                            *cell = Mod32(fill32(1, (slot * space * rows + i) as u64)[0]);
+                        }
+                    }
+                    let off: Vec<u32> = (0..depth * group)
+                        .map(|i| ((i * 37 % space) * rows) as u32)
+                        .collect();
+                    let model = {
+                        let mut out = vec![7i32; group * rows];
+                        for slot in 0..depth {
+                            for u in 0..group {
+                                let at = off[slot * group + u] as usize & (slab - 1);
+                                for i in 0..rows {
+                                    out[u * rows + i] = out[u * rows + i]
+                                        .wrapping_add(stack[slot * slab + at + i].0);
+                                }
+                            }
+                        }
+                        out
+                    };
+                    let mut want = vec![Mod32(7); group * rows];
+                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
+                    assert_eq!(
+                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
+                        model,
+                        "the reference mod32 gather disagrees with the model at space {space}, \
+                         rows {rows}, group {group}"
+                    );
+                    compared += 1;
+                    for spec in &specs[1..] {
+                        let mut got = vec![Mod32(7); group * rows];
+                        spec.gather(depth, slab as u32, &stack, &off, &mut got);
+                        assert_eq!(
+                            got, want,
+                            "{:?} mod32 gather disagrees at space {space}, rows {rows}, \
+                             group {group}",
+                            spec.backend
+                        );
+                        compared += 1;
+                    }
+
+                    // Ragged offsets, exactly as `CB-08` requires of the exact
+                    // lane: the sub-row bits are cleared, every read is
+                    // row-aligned, and every sequence agrees on which.
+                    if rows > 1 {
+                        let ragged: Vec<u32> = (0..depth * group)
+                            .map(|i| ((i * 37 + 1) % (codes * rows)) as u32)
+                            .collect();
+                        let mut model = vec![0i32; group * rows];
+                        for slot in 0..depth {
+                            for u in 0..group {
+                                let at =
+                                    ragged[slot * group + u] as usize & (slab - 1) & !(rows - 1);
+                                for i in 0..rows {
+                                    model[u * rows + i] = model[u * rows + i]
+                                        .wrapping_add(stack[slot * slab + at + i].0);
+                                }
+                            }
+                        }
+                        for spec in &specs {
+                            let mut got = vec![Mod32(0); group * rows];
+                            spec.gather(depth, slab as u32, &stack, &ragged, &mut got);
+                            assert_eq!(
+                                got.iter().map(|m| m.0).collect::<Vec<_>>(),
+                                model,
+                                "{:?} mod32 disagrees on a ragged offset at space {space}, \
+                                 rows {rows}, group {group}",
+                                spec.backend
+                            );
+                            compared += 1;
+                        }
+                    }
+
+                    // The same reduction read from a code stream.
+                    if codes == space {
+                        let stride = depth + 3;
+                        let stream: Vec<u16> = (0..(group - 1) * stride + depth)
+                            .map(|i| ((i * 37) % space) as u16)
+                            .collect();
+                        let model = {
+                            let mut out = vec![-3i32; group * rows];
+                            for slot in 0..depth {
+                                for u in 0..group {
+                                    let at =
+                                        (stream[u * stride + slot] as usize & (codes - 1)) * rows;
+                                    for i in 0..rows {
+                                        out[u * rows + i] = out[u * rows + i]
+                                            .wrapping_add(stack[slot * slab + at + i].0);
+                                    }
+                                }
+                            }
+                            out
+                        };
+                        for spec in &specs {
+                            let mut got = vec![Mod32(-3); group * rows];
+                            spec.gather_codes(
+                                depth,
+                                slab as u32,
+                                &stack,
+                                &stream,
+                                stride,
+                                &mut got,
+                            );
+                            assert_eq!(
+                                got.iter().map(|m| m.0).collect::<Vec<_>>(),
+                                model,
+                                "{:?} mod32 gather_codes disagrees at space {space}, rows \
+                                 {rows}, group {group}",
+                                spec.backend
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The `i64` half: the portable reference is the whole list, so the sweep
+    // reads it against the model at every shape --- the comparison `CB-08`
+    // gives the families that have ISA sequences, with the ISA half empty.
+    for &space in &corpus(&[16usize, 200, 256], &[200, 256]) {
+        for &block in &corpus(&[2usize, 8], &[2]) {
+            let book = fill64(space * block, 0xb64c ^ space as u64);
+            for &rows in &corpus(&[1usize, 8, 16], &[1, 16]) {
+                let flat = fill64(rows * block, 0xa64c ^ rows as u64);
+                for &group in &[1usize, 2] {
+                    let specs: Vec<_> = available_table_i64_modular(rows, group).collect();
+                    assert_eq!(
+                        specs.len(),
+                        1,
+                        "the i64 modular table is portable-only: no SIMD integer multiply \
+                         reaches the lane"
+                    );
+                    let reference = specs[0];
+                    let model = {
+                        let mut out = vec![0i64; space * rows];
+                        for c in 0..space {
+                            for i in 0..rows {
+                                let mut acc = 0i64;
+                                for t in 0..block {
+                                    acc = acc.wrapping_add(
+                                        flat[t * rows + i].wrapping_mul(book[c * block + t]),
+                                    );
+                                }
+                                out[c * rows + i] = acc;
+                            }
+                        }
+                        out
+                    };
+                    let mut want = vec![Mod64(0); space * rows];
+                    reference.build(
+                        space,
+                        block,
+                        &book,
+                        &pack64(&flat, rows, block, &reference),
+                        &mut want,
+                    );
+                    assert_eq!(
+                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
+                        model,
+                        "the reference mod64 build disagrees with the model at space {space}, \
+                         block {block}, rows {rows}"
+                    );
+                    compared += 1;
+
+                    let codes = space.next_power_of_two();
+                    let slab = codes * rows;
+                    let depth = 5usize;
+                    let mut stack = vec![Mod64(0); depth * slab];
+                    for slot in 0..depth {
+                        let at = slot * slab;
+                        for (i, cell) in stack[at..at + space * rows].iter_mut().enumerate() {
+                            *cell = Mod64(fill64(1, (slot * space * rows + i) as u64 | 0x5A)[0]);
+                        }
+                    }
+                    let off: Vec<u32> = (0..depth * group)
+                        .map(|i| ((i * 37 % space) * rows) as u32)
+                        .collect();
+                    let model = {
+                        let mut out = vec![11i64; group * rows];
+                        for slot in 0..depth {
+                            for u in 0..group {
+                                let at = off[slot * group + u] as usize & (slab - 1);
+                                for i in 0..rows {
+                                    out[u * rows + i] = out[u * rows + i]
+                                        .wrapping_add(stack[slot * slab + at + i].0);
+                                }
+                            }
+                        }
+                        out
+                    };
+                    let mut want = vec![Mod64(11); group * rows];
+                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
+                    assert_eq!(
+                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
+                        model,
+                        "the reference mod64 gather disagrees with the model at space {space}, \
+                         rows {rows}, group {group}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        compared > 0,
+        "CB-09 compared nothing; on a host with no modular table sequence beyond the \
+         reference this gate would pass vacuously"
+    );
+}

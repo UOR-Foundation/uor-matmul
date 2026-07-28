@@ -56,6 +56,8 @@ of these has been checked by planting the defect it exists to catch:
 | `just miri` | the raw face's window made one element too long: passes the native run, Undefined Behaviour under Miri | yes |
 | the raw-window tests (`CS-05`) | the same window made one element too short, caught by all three | yes |
 | `CU-07` | `-p uor-matmul-kernels` dropped from the job, from the recipe, and from both --- the last is the defect this workspace actually shipped | yes |
+| `CB-09` | the modular lane's `place` written into the wrong limb (`<< 32` for `Mod32`, `<< 64` for `Mod64`), one at a time --- each failed its own family's end-to-end byte comparison and not the other's | yes |
+| `CU-08` | the modular table lane admitted under `Saturating` as well as `Wrapping` --- the census half caught the table running where the exact lane must stream | yes |
 
 `audit-disassembly` deliberately does *not* catch a float add the optimizer
 removed, because such an add is not in the shipped kernel. The gate reports the

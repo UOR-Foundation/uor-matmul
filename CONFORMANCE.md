@@ -78,6 +78,7 @@ returns an error the model does not sanction.
 | `CB-06` | `build` | Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes |
 | `CB-07` | `build` | Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet |
 | `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two |
+| `CB-09` | `build` | Every modular table sequence equals the portable modular reference lane for lane |
 
 ## `CU-*` --- Purity: one method, no classical path, no fallback
 
@@ -90,6 +91,7 @@ returns an error the model does not sanction.
 | `CU-05` | `build` | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph |
 | `CU-06` | `build` | The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop |
 | `CU-07` | `build` | Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked |
+| `CU-08` | `build` | The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound |
 
 ## `CK-*` --- Codec: tier equivalence, transcode, kappa addressing
 
