@@ -1689,7 +1689,7 @@ fn every_modular_table_sequence_equals_the_reference_cb_09() {
 /// test and comparing it against itself would pass whatever it did. The code
 /// spaces are the sign codec's --- `Packed<Grid<2>, Bk>` enumerates `2^Bk`
 /// words, and 256 is also the ternary spelling's --- and the fill includes
-/// zero, so both spellings `CK-10` declared are exercised.
+/// zero, so both spellings `CK-13` declared are exercised.
 ///
 /// The selection half is `CB-07`'s rule at the new declaration: the bound-1
 /// builds are listed after every full-alphabet sequence, so `Auto` takes one

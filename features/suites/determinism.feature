@@ -90,10 +90,10 @@ Feature: Determinism
     When the suite exercises CD-14
     Then the claim holds byte for byte
 
-  @CD-14 @build
+  @CD-16 @build
   Scenario: Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block
     Given the standing corpus
-    When the suite exercises CD-14
+    When the suite exercises CD-16
     Then the claim holds byte for byte
 
   @CD-15 @build

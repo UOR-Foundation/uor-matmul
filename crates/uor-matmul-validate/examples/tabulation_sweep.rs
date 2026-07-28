@@ -30,7 +30,7 @@ use uor_matmul_gemm::{
 
 type Book<'a> = uor_matmul_codec::Book<'a, i8, Full<i8>, 256, 8>;
 
-/// The sign tier's composition spelling (`CK-10`): one-bit codes, eight to a
+/// The sign tier's composition spelling (`CK-13`): one-bit codes, eight to a
 /// byte, over a two-entry table. Its code space and block are `Book<256,8>`'s
 /// numbers --- and the dedicated `Sign` tier's (`CK-11`).
 type PackedSign<'a, Bd> = Packed<Grid<'a, i8, Bd, 2>, 8>;
@@ -303,7 +303,7 @@ fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
         let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
         // Half the suggestion narrows the column block below the output width,
-        // which is where `CD-14`'s block-local collapse is the only collapse.
+        // which is where `CD-16`'s block-local collapse is the only collapse.
         let mut accumulators_half = vec![<AccOf<i8> as Accumulator>::ZERO; offer / 2];
         let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
         let mut ids = vec![0usize; suggested_tabulation_index(shape)];
@@ -412,7 +412,7 @@ fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
 /// The sign composition against the index stream it cannot spell --- and the
 /// dedicated tier that can.
 ///
-/// `Packed<Grid<2>,8>` is the sign tier's composition spelling (`CK-10`): a
+/// `Packed<Grid<2>,8>` is the sign tier's composition spelling (`CK-13`): a
 /// code space of 256 and a block of 8, `Book<256,8>`'s numbers exactly. The
 /// one gather-path difference is `Enumerable::as_index_stream`, which `Book`
 /// answers and `Packed` cannot --- a packed byte's index is a mixed-radix

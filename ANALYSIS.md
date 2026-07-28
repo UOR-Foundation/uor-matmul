@@ -762,7 +762,7 @@ disappointment.
 
 The same sweep reports a `narrow block` column: the collapsed traversal with
 the accumulator offer halved, so the column block resolves to half the output
-width and the collapse that runs is `CD-14`'s block-local one or none.
+width and the collapse that runs is `CD-16`'s block-local one or none.
 Measured on an aarch64 dev machine --- not the runner the table above came
 from, so the absolute figures are its own and only the shape transfers:
 
@@ -776,7 +776,7 @@ from, so the absolute figures are its own and only the shape transfers:
 
 Two readings. The collapse survives narrowing: every degenerate row sits well
 above the nothing-to-collapse row of the same column (`d = 4096`), where
-before `CD-14` a halved offer disabled the collapse outright. And the drop
+before `CD-16` a halved offer disabled the collapse outright. And the drop
 from the full-offer figure is the build, which does not collapse and now runs
 once per column block --- halving the block doubles it, the same ceiling the
 `d = 1` row of the main table already names.
@@ -791,7 +791,7 @@ parameter.
 
 ### What the missing index stream costs the sign composition
 
-The sign tier is spelled as `Packed<Grid<2>,8>` (`CK-10`): a code space of 256
+The sign tier is spelled as `Packed<Grid<2>,8>` (`CK-13`): a code space of 256
 and a block of 8, `Book<256,8>`'s numbers exactly, with one gather-path
 difference --- `Packed` cannot answer `as_index_stream`, because a packed
 byte's index is a mixed-radix decomposition and not the byte. So the

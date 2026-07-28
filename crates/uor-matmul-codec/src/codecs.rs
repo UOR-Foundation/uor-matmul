@@ -320,7 +320,7 @@ impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Enumerable<
 
 /// Weights in `{-1, +1}`, one bit per element, with no table at all.
 ///
-/// The `Packed<Grid<2>,8>` spelling of the same decode (`CK-10`) tabulates but
+/// The `Packed<Grid<2>,8>` spelling of the same decode (`CK-13`) tabulates but
 /// can never answer [`Enumerable::as_index_stream`]: a packed byte's index is
 /// a mixed-radix decomposition of it, so the tabulated traversal builds the
 /// index stream it gathers from. Measured, that build is a fifth to a third of

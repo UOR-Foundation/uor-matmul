@@ -747,7 +747,7 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
 /// reference's own, shared rather than duplicated.
 ///
 /// Concrete over `i8` rather than generic like [`portable_table`]: the
-/// bound-1 spelling is the sign tier's, which `CK-10` declared over `i8`, and
+/// bound-1 spelling is the sign tier's, which `CK-13` declared over `i8`, and
 /// a generic negation is not an operation [`Element`] names.
 pub const fn portable_table_bound1(rows: usize, group: usize) -> TableSpec<i8, i32> {
     TableSpec {

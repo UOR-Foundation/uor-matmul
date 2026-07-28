@@ -110,7 +110,7 @@ is `n > 292`, which `model/tiers.toml` records and `CM-04` recomputes.
 The build is the one place a multiply remains, and at bound 1 not even there.
 The sign spelling (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) and the
 ternary one (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) --- both declared by
-`CK-10` as compositions of codecs that already existed --- put every book word
+`CK-13` as compositions of codecs that already existed --- put every book word
 in `{-1, 0, +1}`, where the product is the activation, its negation, or zero:
 `T[c][i]` is adds and subtracts, with the negation an XOR against the sign mask
 and the mask subtracted back, two's complement's own spelling of `-a`. So the
@@ -134,7 +134,7 @@ output; the column side is a first-occurrence map over the code stream, made
 block-local so it holds at any column-block width. Both follow the offer
 discipline of the dense collapse: an epilogue that reads `C` declines the row
 side outright, and a short offer, or an operand with nothing to share, gives
-the same bytes from the uncollapsed traversal. `CD-15` and `CD-14` assert the
+the same bytes from the uncollapsed traversal. `CD-15` and `CD-16` assert the
 bytes at every degeneracy, and the census asserts the charge actually moved.
 
 Three things make this a factorization of the same identity rather than a

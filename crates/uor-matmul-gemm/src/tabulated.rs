@@ -466,7 +466,7 @@ impl<'s> Tabulation<'s> {
     /// rows of `A` and the same move tabulation itself makes on the codes. A cost
     /// that tracks meanings rather than expressions. The collapse applies at any
     /// column-block width: a class spread across blocks is charged once per block
-    /// it appears in, which is the most a narrow offer can extract (`CD-14`).
+    /// it appears in, which is the most a narrow offer can extract (`CD-16`).
     ///
     /// See [`suggested_tabulation_index`] for the size. An operand that repeats no
     /// column pays one pass over its code stream for the question, and `CG-10`
@@ -555,7 +555,7 @@ pub fn suggested_tabulation_lanes<E: Tabulated, Bd: Bound>(
 ///
 /// A *query*, like [`crate::suggested_scratch`]. Offering less narrows the column
 /// block --- the column collapse still applies, at one charge per distinct column
-/// per block (`CD-14`) --- and offering none gives the same bytes from the
+/// per block (`CD-16`) --- and offering none gives the same bytes from the
 /// streaming traversal (`CD-13`). It does not grow with `k`.
 ///
 /// When the element type has no narrow register this covers the table stack and
@@ -906,7 +906,10 @@ pub trait Tabulated: Element {
     /// elements have no `Hash` --- a float --- never row-collapses. That is
     /// the uncollapsed traversal, at the same bytes, which is the rule every
     /// declined offer in this library follows.
-    fn distinct_a_rows<Bd>(a: &MatView<'_, Alphabet<Self, Bd>>, index: &mut [usize]) -> Option<usize>
+    fn distinct_a_rows<Bd>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize>
     where
         Bd: Bound,
     {
@@ -3375,7 +3378,7 @@ mod tests {
         sweep!(8);
     }
 
-    /// `CK-10`: the sign and ternary tiers are spellings of codec compositions
+    /// `CK-13`: the sign and ternary tiers are spellings of codec compositions
     /// that already exist, not new arithmetic. Weights in `{-1, +1}` stored as
     /// one-bit codes (`Packed<Grid<2>, 8>`, table `[-1, +1]`) give the dense
     /// spelling's bytes through the packed route and through the table, and the
@@ -3394,7 +3397,7 @@ mod tests {
     /// block word in the portable table build was seen to fail this test before
     /// it was accepted.
     #[test]
-    fn sign_and_ternary_spellings_match_the_dense_spelling_ck_10() {
+    fn sign_and_ternary_spellings_match_the_dense_spelling_ck_13() {
         // The sign tier: one-bit codes, eight to a byte. `code_space = 256` and
         // `block = 8` are E8's numbers, so the break-even is 683 too --- the
         // shapes straddle it.
@@ -3509,7 +3512,7 @@ mod tests {
 
     /// `CK-11`: the `Sign` tier and the `Packed<Grid<2>,8>` spelling are two
     /// manifests for one decode. The gemm output is byte-identical through the
-    /// packed route and through the table, at the shapes `CK-10` straddles the
+    /// packed route and through the table, at the shapes `CK-13` straddles the
     /// shared break-even with --- and the tier is run through the same
     /// every-offer gate the composition is.
     ///
@@ -3538,7 +3541,7 @@ mod tests {
             let codes: Vec<u16> = bytes.iter().map(|&b| u16::from(b)).collect();
 
             // The tier against the dense driver's bytes at every offer --- the
-            // gate `CK-10` runs the composition through, unchanged.
+            // gate `CK-13` runs the composition through, unchanged.
             every_traversal_agrees("Sign<8>", tier, &codes, m, k, n);
 
             // And the two spellings against each other directly: equal decodes
@@ -3657,7 +3660,7 @@ mod tests {
         );
     }
 
-    /// `CD-14`: the column collapse applies at every column-block width, not
+    /// `CD-16`: the column collapse applies at every column-block width, not
     /// only when the block is the whole output width.
     ///
     /// The accumulator offer is halved (and quartered) so `Plan::choose`
@@ -3676,7 +3679,7 @@ mod tests {
     /// For `d = n` there is nothing to collapse and the count must be the
     /// closed form itself: nothing may be skipped either.
     #[test]
-    fn collapsing_equal_columns_at_any_block_width_cannot_change_a_byte_cd_14() {
+    fn collapsing_equal_columns_at_any_block_width_cannot_change_a_byte_cd_16() {
         let table = e8_table::<Full<i8>>().expect("i8 holds E8");
         let book = e8_codec(&table);
         let block = 8usize;
