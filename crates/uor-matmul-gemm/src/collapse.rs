@@ -68,7 +68,7 @@ use crate::scratch::Scratch;
 /// Neither is a requirement. A short offer of either is answered by the packed
 /// traversal at the same bytes, and there is no error to report (`CD-12`).
 #[derive(Debug)]
-pub struct Collapse<'s, E: IntegerElement, Bd: Bound> {
+pub struct Collapse<'s, E: Element, Bd: Bound> {
     // `pub(crate)`, not accessors: the tabulated driver runs the same pass,
     // compaction, and expansion on its dense `A` (`CD-15`), and an accessor
     // per field would only restate the type.
@@ -76,7 +76,7 @@ pub struct Collapse<'s, E: IntegerElement, Bd: Bound> {
     pub(crate) rows: &'s mut [Alphabet<E, Bd>],
 }
 
-impl<'s, E: IntegerElement, Bd: Bound> Collapse<'s, E, Bd> {
+impl<'s, E: Element, Bd: Bound> Collapse<'s, E, Bd> {
     /// Offer an index buffer and room for the distinct rows.
     ///
     /// See [`suggested_collapse_index`] and [`suggested_collapse_rows`] for the
@@ -352,7 +352,7 @@ where
 /// the comparison costing as much as the hash and costing a tenth of it.
 fn rows_equal<E, Bd>(a: &MatView<'_, Alphabet<E, Bd>>, x: usize, y: usize, k: usize) -> bool
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
 {
     match (row_run(a, x, k), row_run(a, y, k)) {
@@ -373,7 +373,7 @@ where
 /// value.
 fn row_run<'v, E, Bd>(a: &MatView<'v, Alphabet<E, Bd>>, i: usize, k: usize) -> Option<&'v [E]>
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
 {
     a.row_block(i, 0, 1, k)
@@ -397,7 +397,7 @@ pub(crate) fn compact<E, Bd>(
     distinct: usize,
 ) -> bool
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
 {
     let (m, k) = (a.rows(), a.cols());

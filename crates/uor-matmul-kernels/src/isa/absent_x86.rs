@@ -103,6 +103,15 @@ pub fn avx2_table_i16_i64(_rows: usize, _group: usize) -> Option<TableSpec<i16, 
     None
 }
 
+/// The `i32` table sequence in `Z/2^32`. Absent here; the reference carries
+/// this family, exactly as it does the exact lane's.
+pub fn avx2_table_i32_mod32(
+    _rows: usize,
+    _group: usize,
+) -> Option<TableSpec<i32, crate::table::Mod32>> {
+    None
+}
+
 /// Is AVX-512 available? Never, on a target that is not x86-64.
 pub fn avx512_available() -> bool {
     false

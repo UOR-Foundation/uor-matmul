@@ -60,6 +60,8 @@ of these has been checked by planting the defect it exists to catch:
 | `CK-09` on the arena tier | an off-by-one `index_of` | yes |
 | the `CK-08` arena spelling | `Arena` spelled `Grid` in the canonical manifest | yes |
 | `CD-14` | rows and column group swapped in the wide-lane gather | yes |
+| `CB-09` | the modular lane's `place` written into the wrong limb (`<< 32` for `Mod32`, `<< 64` for `Mod64`), one at a time --- each failed its own family's end-to-end byte comparison and not the other's | yes |
+| `CU-08` | the modular table lane admitted under `Saturating` as well as `Wrapping` --- the census half caught the table running where the exact lane must stream | yes |
 
 `audit-disassembly` deliberately does *not* catch a float add the optimizer
 removed, because such an add is not in the shipped kernel. The gate reports the

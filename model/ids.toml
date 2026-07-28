@@ -246,6 +246,12 @@ suite = "backends"
 statement = """Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two"""
 
 [[id]]
+id = "CB-09"
+level = "build"
+suite = "backends"
+statement = """Every modular table sequence equals the portable modular reference lane for lane"""
+
+[[id]]
 id = "CU-01"
 level = "build"
 suite = "purity"
@@ -286,6 +292,12 @@ id = "CU-07"
 level = "build"
 suite = "purity"
 statement = """Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked"""
+
+[[id]]
+id = "CU-08"
+level = "build"
+suite = "purity"
+statement = """The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound"""
 
 [[id]]
 id = "CK-01"

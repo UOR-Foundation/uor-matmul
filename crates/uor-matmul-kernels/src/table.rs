@@ -385,6 +385,134 @@ impl<E: Element> Lane<E> for Wide<E::Acc> {
     }
 }
 
+/// A lane word in `Z/2^32`: the wrap is the encode, not an overflow.
+///
+/// The newtype exists because the blanket `impl<E: Element> Lane<E> for i32`
+/// above already speaks for `i32`-as-lane with *exact* semantics --- one
+/// product of the full `i32` alphabet and no more. The same bits read as a
+/// quotient are a different lane: wrapping arithmetic, unbounded depth, and a
+/// placement that is congruent mod `2^32` rather than equal. Admissibility is
+/// the driver's question (`CU-08`); this type only states what the ring does.
+///
+/// Legitimate exactly when the caller asked to encode by wrapping into an
+/// output no wider than 32 bits, because then the lane's own wrap *is* the
+/// encode and nothing is lost that the caller did not ask to lose --- the same
+/// argument [`crate::available_i32_modular`] makes for the dense tile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Mod32(pub i32);
+
+impl Mod32 {
+    /// A buffer of `i128` accumulators, read as a buffer of modular lanes.
+    ///
+    /// Four lanes per accumulator, so an offer sized for the exact lane holds
+    /// the same table four times over. This is a relabelling, never a copy.
+    pub fn wrap_i128s_mut(words: &mut [i128]) -> &mut [Mod32] {
+        let (ptr, len) = (words.as_mut_ptr(), words.len());
+        // SAFETY: `i128` is sixteen bytes aligned to sixteen and `Mod32` is
+        // `#[repr(transparent)]` over `i32`, so the buffer is a valid buffer of
+        // four times as many `Mod32`, and the borrow is moved rather than
+        // duplicated.
+        unsafe { core::slice::from_raw_parts_mut(ptr.cast::<Mod32>(), len * 4) }
+    }
+}
+
+impl LaneWord for Mod32 {
+    const ZERO: Self = Mod32(0);
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        // The ring's own addition: wrapping here is the quotient's arithmetic,
+        // reached at every depth rather than only within a capacity.
+        Mod32(self.0.wrapping_add(other.0))
+    }
+}
+
+impl Lane<i32> for Mod32 {
+    #[inline]
+    fn capacity(_: u128) -> Option<usize> {
+        // Unbounded at every bound: reduction mod `2^32` commutes with `+` and
+        // `*`, so no depth can make the lane disagree with the encode. The
+        // table-side form of `Factorization::Modular` (`KernelSpec::lane_depth`
+        // returns `usize::MAX` for the same reason).
+        None
+    }
+
+    #[inline(always)]
+    fn mac(self, a: i32, w: i32) -> Self {
+        // The only multiply the table issues, in the ring: `mullo` semantics.
+        Mod32(self.0.wrapping_add(a.wrapping_mul(w)))
+    }
+
+    #[inline]
+    fn place(self, acc: i128) -> i128 {
+        // Congruent mod `2^32` to the exact sum, and the `Wrapping` encode
+        // into a <= 32-bit output reads only the low limb --- the argument
+        // `Kernelized::modular_as_acc` records on the dense side. With the
+        // capacity unbounded a run is the whole column block, so this is
+        // reached once per output element and `acc` cannot outgrow the exact
+        // sum the width derivation sized it for.
+        acc + i128::from(self.0)
+    }
+}
+
+/// A lane word in `Z/2^64`, one width up from [`Mod32`] and portable-only.
+///
+/// The build's multiply is the table's only one, and no SIMD integer multiply
+/// reaches an `i64` lane --- the same reason [`crate::available_i64_modular`]
+/// lists the reference alone. The lane is still worth naming: the gather is
+/// the column loop's whole arithmetic, and in the quotient it needs no exact
+/// accumulator until placement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Mod64(pub i64);
+
+impl Mod64 {
+    /// A buffer of three-limb accumulators, read as a buffer of modular lanes.
+    ///
+    /// Three lanes per accumulator, for the same reason and in the same way as
+    /// [`Mod32::wrap_i128s_mut`]: an offer sized for the exact lane relabelled,
+    /// never copied.
+    pub fn wrap_limbs_mut(words: &mut [uor_matmul_core::acc::Limbs<3>]) -> &mut [Mod64] {
+        let (ptr, len) = (words.as_mut_ptr(), words.len());
+        // SAFETY: `Limbs<3>` is twenty-four bytes aligned to eight --- one
+        // `[u64; 3]` --- and `Mod64` is `#[repr(transparent)]` over `i64`, so
+        // the buffer is a valid buffer of three times as many `Mod64`, and the
+        // borrow is moved rather than duplicated.
+        unsafe { core::slice::from_raw_parts_mut(ptr.cast::<Mod64>(), len * 3) }
+    }
+}
+
+impl LaneWord for Mod64 {
+    const ZERO: Self = Mod64(0);
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        Mod64(self.0.wrapping_add(other.0))
+    }
+}
+
+impl Lane<i64> for Mod64 {
+    #[inline]
+    fn capacity(_: u128) -> Option<usize> {
+        // Unbounded at every bound, as `Mod32`'s: the wrap is the encode.
+        None
+    }
+
+    #[inline(always)]
+    fn mac(self, a: i64, w: i64) -> Self {
+        Mod64(self.0.wrapping_add(a.wrapping_mul(w)))
+    }
+
+    #[inline]
+    fn place(self, acc: uor_matmul_core::acc::Limbs<3>) -> uor_matmul_core::acc::Limbs<3> {
+        // The low limb *is* the value in `Z/2^64`, which is what the `Wrapping`
+        // encode reads; the placement is congruent mod `2^64` to the exact sum
+        // for the same reason `Mod32`'s is mod `2^32`.
+        acc.add_i128(i128::from(self.0))
+    }
+}
+
 /// Fill one slot of the table.
 ///
 /// `T[c][i] = sum_{t < block} acts[t][i] * book[c][t]`, for `c < space` and
@@ -1164,6 +1292,41 @@ pub fn available_table_i16(rows: usize, group: usize) -> impl Iterator<Item = Ta
         crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i16_i64(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i16_i64(rows, group),
         crate::isa::wasm::simd128_available() => crate::isa::wasm::simd128_table_i16_i64(rows, group),
+    ]
+}
+
+/// The `i32` table sequences in `Z/2^32` this build can run, reference first.
+///
+/// The lane is [`Mod32`]. Legitimate exactly when the caller asked to encode by
+/// wrapping into an output no wider than the lane, because then the lane's own
+/// wrap *is* the encode --- the same declaration [`crate::available_i32_modular`]
+/// cashes in on the dense side. *Whether* it may run is the driver's question
+/// (`CU-08`); this list only answers what the host can run.
+#[inline]
+pub fn available_table_i32_modular(
+    rows: usize,
+    group: usize,
+) -> impl Iterator<Item = TableSpec<i32, Mod32>> {
+    collect_table![
+        true => portable_table::<i32, Mod32>(rows, group),
+        crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i32_mod32(rows, group),
+    ]
+}
+
+/// The `i64` table sequences in `Z/2^64` this build can run: the reference
+/// alone.
+///
+/// The build's multiply is the table's only one, and no SIMD integer multiply
+/// reaches an `i64` lane --- the same reason [`crate::available_i64_modular`]
+/// is portable-only. The reference is not a placeholder here but the whole of
+/// what the hardware offers.
+#[inline]
+pub fn available_table_i64_modular(
+    rows: usize,
+    group: usize,
+) -> impl Iterator<Item = TableSpec<i64, Mod64>> {
+    collect_table![
+        true => portable_table::<i64, Mod64>(rows, group),
     ]
 }
 

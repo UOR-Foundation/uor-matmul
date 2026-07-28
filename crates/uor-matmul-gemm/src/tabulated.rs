@@ -48,18 +48,17 @@
 //! and it is the orientation in which a code names `Bk` consecutive *outputs*.
 //! Tabulation simply has nothing to sum there.
 
-use core::hash::Hash;
-
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
-    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, MatView, MatViewMut, NotAProduct,
-    Shape, Traversal,
+    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, EncodeMode, MatView, MatViewMut,
+    NotAProduct, Shape, Traversal,
 };
 
 use uor_matmul_core::{Backend, Strides, Triple};
 use uor_matmul_kernels::{
-    available_table_i16, available_table_i8, choose_table, packed_slot, portable_table,
+    available_table_i16, available_table_i32_modular, available_table_i64_modular,
+    available_table_i8, choose_table, packed_slot, portable_table, Mod32, Mod64,
 };
 
 use crate::collapse::{compact, distinct_rows, expand, Collapse};
@@ -772,6 +771,20 @@ pub trait Tabulated: Element {
     /// The lane one table entry's row is held in.
     type Lane: Lane<Self>;
 
+    /// The lane the same table runs in when the caller asked to wrap into an
+    /// output no wider than it: `Z/2^w`, where the lane's own wrap *is* the
+    /// encode. Which lane runs is a function of two declarations --- the
+    /// encode mode and the output type --- decided once at the traversal
+    /// boundary, exactly as the dense side decides it in
+    /// [`uor_matmul_kernels::KernelSpec::lane_depth`]'s `Factorization::Modular`
+    /// arm (`CU-08`).
+    ///
+    /// `Self::Lane` for a family that offers no quotient (`i8`, `i16`): their
+    /// exact lane already holds every depth a weight row reaches, so a
+    /// quotient read would buy nothing, and [`Self::modular_table_admitted`]
+    /// is `false` there.
+    type ModLane: Lane<Self>;
+
     /// Bytes one lane word occupies. The column loop's traffic is this divided
     /// by the codec's block, per product, which is the whole of why it is here.
     const LANE_BYTES: usize = core::mem::size_of::<Self::Lane>();
@@ -780,8 +793,19 @@ pub trait Tabulated: Element {
     /// the narrow one?
     ///
     /// True exactly when the lane *is* the exact accumulator, which is where a
-    /// word that wide already lives.
+    /// word that wide already lives. The family's modular lane is read out of
+    /// the same offer, relabelled --- an offer sized for the exact lane holds
+    /// the same table several times over in a narrower quotient.
     const LANE_IS_EXACT: bool;
+
+    /// Is the modular lane admissible for an output of `out_bits` bits?
+    ///
+    /// The width half of the dense side's rule ([`Kernelized::modular_spec`]):
+    /// reduction modulo `2^w` is a ring homomorphism, so `Z/2^w` refines
+    /// `Z/2^out_bits` exactly when `out_bits <= w`, and nothing is lost that
+    /// the caller did not ask to lose. The other half --- the encode mode ---
+    /// is asked at the traversal boundary, where `options` lives.
+    fn modular_table_admitted(out_bits: u32) -> bool;
 
     /// The sequence for this backend, at this tile height and column group.
     ///
@@ -794,6 +818,17 @@ pub trait Tabulated: Element {
         group: usize,
         block: usize,
     ) -> TableSpec<Self, Self::Lane>;
+
+    /// The same, in the modular lane. Always present for the same reason, and
+    /// reached only where [`Self::modular_table_admitted`] has said the output
+    /// width admits the lane.
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<Self, Self::ModLane>;
 
     /// Borrow `want` lane words out of whichever offer this family's lane lives
     /// in.
@@ -843,6 +878,30 @@ pub trait Tabulated: Element {
         Bd: Bound,
         O: Element + EncodeFrom<AccOf<Self>>,
         Ep: Epilogue<Self, O>;
+
+    /// The same borrow, of the modular lane. Reached only from the boundary's
+    /// modular arm, and `None` under the same rule.
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<Self>],
+        want: usize,
+    ) -> Option<&'s mut [Self::ModLane]>;
+
+    /// Number the rows of `a` by equality, writing each row's representative
+    /// into `index` and returning how many are distinct --- the row half of
+    /// the collapse (`CD-15`). `None` when the offer cannot hold the answer.
+    ///
+    /// The default is always `None`: the pass hashes, and a family whose
+    /// elements have no `Hash` --- a float --- never row-collapses. That is
+    /// the uncollapsed traversal, at the same bytes, which is the rule every
+    /// declined offer in this library follows.
+    fn distinct_a_rows<Bd>(a: &MatView<'_, Alphabet<Self, Bd>>, index: &mut [usize]) -> Option<usize>
+    where
+        Bd: Bound,
+    {
+        let _ = (a, index);
+        None
+    }
 }
 
 /// The integer families' [`Tabulated::dense_steps`]: the tile kernel's own
@@ -893,7 +952,14 @@ where
 /// every depth a weight row reaches, so the whole reduction is one run.
 impl Tabulated for i8 {
     type Lane = i32;
+    type ModLane = i32;
     const LANE_IS_EXACT: bool = false;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // The exact lane already holds every depth a weight row reaches, so a
+        // quotient read buys no depth and no instructions, and none is offered.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -904,6 +970,20 @@ impl Tabulated for i8 {
     ) -> TableSpec<i8, i32> {
         choose_table(available_table_i8(rows, group), backend, bound, block)
             .expect("the reference sequence is always present")
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i8, i32> {
+        // Never reached: `modular_table_admitted` is `false`, so the boundary
+        // never selects this lane. Written as the exact sequence rather than a
+        // panic because the exact `i32` lane is congruent mod `2^32` anyway ---
+        // if it ever ran, the bytes would still be the caller's.
+        Self::table_spec(backend, bound, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -933,13 +1013,35 @@ impl Tabulated for i8 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<i8>],
+        want: usize,
+    ) -> Option<&'s mut [i32]> {
+        // Never reached, as `table_spec_modular`.
+        Self::lanes(narrow, exact, want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
 /// `i16`: two full `i16` products already need 31 bits, so no 32-bit lane holds
 /// an entry of any block longer than one.
 impl Tabulated for i16 {
     type Lane = i64;
+    type ModLane = i64;
     const LANE_IS_EXACT: bool = false;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // As `i8`: the exact lane already reaches every depth there is.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -950,6 +1052,17 @@ impl Tabulated for i16 {
     ) -> TableSpec<i16, i64> {
         choose_table(available_table_i16(rows, group), backend, bound, block)
             .expect("the reference sequence is always present")
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i16, i64> {
+        // Never reached, as `i8`'s.
+        Self::table_spec(backend, bound, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -979,15 +1092,43 @@ impl Tabulated for i16 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<i16>],
+        want: usize,
+    ) -> Option<&'s mut [i64]> {
+        // Never reached, as `i8`'s.
+        Self::lanes(narrow, exact, want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
 /// `i32`: the product of two `i32` needs 62 bits and a run of them needs more, so
-/// the lane is the exact accumulator. Nothing narrower is a lane here --- an
-/// `i64` would hold two products --- and that is a fact about the width, not a
-/// gap in the sequence table.
+/// the lane is the exact accumulator. Nothing narrower is an *exact* lane here
+/// --- an `i64` would hold two products --- and that is a fact about the width,
+/// not a gap in the sequence table.
+///
+/// In the quotient there is a narrower lane: `Z/2^32` needs only the low half
+/// of each product, so a `Mod32` word serves at any depth, admissible exactly
+/// when the caller encodes by wrapping into an output no wider than it
+/// (`CU-08`). It is read out of the accumulator offer, four words to the word,
+/// so an offer sized for the exact lane already holds it.
 impl Tabulated for i32 {
     type Lane = Wide<AccOf<i32>>;
+    type ModLane = Mod32;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(out_bits: u32) -> bool {
+        // `Z/2^32` refines `Z/2^out_bits` exactly here.
+        out_bits <= 32
+    }
 
     fn table_spec(
         backend: Backend,
@@ -1000,6 +1141,22 @@ impl Tabulated for i32 {
         // is one, which divides every block.
         let _ = (backend, bound, block);
         portable_table::<i32, Wide<AccOf<i32>>>(rows, group)
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i32, Mod32> {
+        choose_table(
+            available_table_i32_modular(rows, group),
+            backend,
+            bound,
+            block,
+        )
+        .expect("the reference sequence is always present")
     }
 
     fn lanes<'s>(
@@ -1029,12 +1186,36 @@ impl Tabulated for i32 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<i32>],
+        want: usize,
+    ) -> Option<&'s mut [Mod32]> {
+        // The family's lanes live in the accumulator offer, as the exact one
+        // does; the relabelling is four modular words to the accumulator.
+        Mod32::wrap_i128s_mut(exact).get_mut(..want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
-/// `i64`: as `i32`, one width up.
+/// `i64`: as `i32`, one width up. The build's multiply has no SIMD instruction
+/// at this width, so the modular lane is the portable sequence alone --- the
+/// same reason the dense `i64` modular family is portable-only.
 impl Tabulated for i64 {
     type Lane = Wide<AccOf<i64>>;
+    type ModLane = Mod64;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(out_bits: u32) -> bool {
+        out_bits <= 64
+    }
 
     fn table_spec(
         backend: Backend,
@@ -1047,6 +1228,22 @@ impl Tabulated for i64 {
         // is one, which divides every block.
         let _ = (backend, bound, block);
         portable_table::<i64, Wide<AccOf<i64>>>(rows, group)
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i64, Mod64> {
+        choose_table(
+            available_table_i64_modular(rows, group),
+            backend,
+            bound,
+            block,
+        )
+        .expect("the reference sequence is always present")
     }
 
     fn lanes<'s>(
@@ -1076,6 +1273,22 @@ impl Tabulated for i64 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<i64>],
+        want: usize,
+    ) -> Option<&'s mut [Mod64]> {
+        // Three modular words to the three-limb accumulator, as `i32`'s four.
+        Mod64::wrap_limbs_mut(exact).get_mut(..want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
 /// `f32`: a float has no magnitude for a bound to measure, and the only
@@ -1085,7 +1298,14 @@ impl Tabulated for i64 {
 /// in, because there is no float arithmetic in the accumulation at all (`CU-01`).
 impl Tabulated for f32 {
     type Lane = Wide<AccOf<f32>>;
+    type ModLane = Wide<AccOf<f32>>;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // There is no quotient a float wraps into: the exact accumulator is
+        // the only lane, as the impl's note above says.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -1100,12 +1320,32 @@ impl Tabulated for f32 {
         portable_table::<f32, Wide<AccOf<f32>>>(rows, group)
     }
 
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<f32, Wide<AccOf<f32>>> {
+        // Never reached, as `i8`'s.
+        Self::table_spec(backend, bound, rows, group, block)
+    }
+
     fn lanes<'s>(
         _: &'s mut [i64],
         exact: &'s mut [AccOf<f32>],
         want: usize,
     ) -> Option<&'s mut [Wide<AccOf<f32>>]> {
         Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<f32>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<f32>>]> {
+        // Never reached, as `i8`'s.
+        Self::lanes(narrow, exact, want)
     }
 
     fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
@@ -1148,7 +1388,13 @@ impl Tabulated for f32 {
 /// `f64`: as `f32`, one width up.
 impl Tabulated for f64 {
     type Lane = Wide<AccOf<f64>>;
+    type ModLane = Wide<AccOf<f64>>;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // As `f32`: no quotient to wrap into, no modular lane.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -1163,12 +1409,32 @@ impl Tabulated for f64 {
         portable_table::<f64, Wide<AccOf<f64>>>(rows, group)
     }
 
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<f64, Wide<AccOf<f64>>> {
+        // Never reached, as `f32`'s.
+        Self::table_spec(backend, bound, rows, group, block)
+    }
+
     fn lanes<'s>(
         _: &'s mut [i64],
         exact: &'s mut [AccOf<f64>],
         want: usize,
     ) -> Option<&'s mut [Wide<AccOf<f64>>]> {
         Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<f64>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<f64>>]> {
+        // Never reached, as `f32`'s.
+        Self::lanes(narrow, exact, want)
     }
 
     fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
@@ -1322,7 +1588,7 @@ pub fn gemm_tabulated<E, Bd, C, O, Ep>(
     lanes: &mut Tabulation<'_>,
     collapse: &mut Collapse<'_, E, Bd>,
 ) where
-    E: Tabulated + Hash,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1345,7 +1611,7 @@ pub fn gemm_tabulated_counted<E, Bd, C, O, Ep>(
     collapse: &mut Collapse<'_, E, Bd>,
     census: &mut Census,
 ) where
-    E: Tabulated + Hash,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1364,7 +1630,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
     collapse: &mut Collapse<'_, E, Bd>,
     ledger: &mut Lg,
 ) where
-    E: Tabulated + Hash,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1389,7 +1655,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
     // same row of `A`, so there is no shared meaning to find. A declaration,
     // read once.
     if !epilogue.reads_c() {
-        let found = distinct_rows(&triple.a, collapse.index)
+        let found = E::distinct_a_rows(&triple.a, collapse.index)
             .filter(|&d| d < shape.m)
             .filter(|&d| compact(&triple.a, collapse.index, collapse.rows, d));
         if let Some(d) = found {
@@ -1446,15 +1712,95 @@ fn run<E, Bd, C, O, Ep, Lg>(
     // Only when it saves work. An operand with no repeated column has paid one
     // pass over its code stream for the question and must not also pay for a
     // traversal shaped around an answer of "none".
-    let index = distinct.filter(|&d| d < shape.n).map(|_| &index[..shape.n]);
+    let repeated = matches!(distinct, Some(d) if d < shape.n);
 
-    let lane_bytes = E::LANE_BYTES;
+    // The modular lane is admissible exactly when the caller asked to wrap into
+    // an output no wider than it: a question about two declarations --- the
+    // encode mode and the output type --- asked once, here, at the boundary,
+    // mirroring the dense side (`kernel.rs`). The row-collapse recursion above
+    // re-runs this body with the same `options` and the same `O`, so both
+    // levels of it decide identically (`CU-08`). One branch, and none in the
+    // loops: the chosen lane is a type from here down.
+    if matches!(options.encode, EncodeMode::Wrapping) && E::modular_table_admitted(O::BITS) {
+        run_lane::<E, Bd, C, O, Ep, Lg, E::ModLane>(
+            triple,
+            epilogue,
+            options,
+            scratch,
+            words,
+            index,
+            repeated,
+            E::table_spec_modular,
+            E::lanes_modular,
+            ledger,
+        );
+    } else {
+        run_lane::<E, Bd, C, O, Ep, Lg, E::Lane>(
+            triple,
+            epilogue,
+            options,
+            scratch,
+            words,
+            index,
+            repeated,
+            E::table_spec,
+            E::lanes,
+            ledger,
+        );
+    }
+}
+
+/// The sequence lookup for one lane, as a function pointer: the family's own
+/// [`Tabulated::table_spec`] or [`Tabulated::table_spec_modular`], named at the
+/// boundary because the two lanes are two types.
+type SpecOf<E, L> = fn(Backend, u128, usize, usize, usize) -> TableSpec<E, L>;
+
+/// The offer-relabelling half of a lane, likewise: [`Tabulated::lanes`] or
+/// [`Tabulated::lanes_modular`].
+type LanesOf<E, L> = for<'s> fn(&'s mut [i64], &'s mut [AccOf<E>], usize) -> Option<&'s mut [L]>;
+
+/// The table traversal in the lane the boundary chose.
+///
+/// Written once, generic over the lane: the exact accumulator and the modular
+/// word are two types, and the two `fn` pointers are how the boundary's
+/// declaration reaches the two places a type cannot be threaded --- the
+/// sequence lookup and the offer relabelling, both of which are the family's
+/// own associated functions.
+#[allow(clippy::too_many_arguments)]
+fn run_lane<E, Bd, C, O, Ep, Lg, L>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    words: &mut [i64],
+    index: &mut [usize],
+    repeated: bool,
+    spec_of: SpecOf<E, L>,
+    lanes_of: LanesOf<E, L>,
+    ledger: &mut Lg,
+) where
+    E: Tabulated,
+    Bd: Bound,
+    C: Enumerable<E, Bd> + Copy,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: Ledger,
+    L: Lane<E>,
+{
+    let shape = triple.shape();
+    let space = C::CODE_SPACE;
+    let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
+    let lane_bytes = core::mem::size_of::<L>();
     let exact_offer = scratch.accumulators();
-    // The lane offer is `i64`-shaped, read as however many lane words fit in the
-    // same bytes; a family whose lane *is* the exact accumulator reads that
-    // offer instead, because that is where a word so wide already lives.
+    // Where the lane lives. A family whose lane *is* the exact accumulator
+    // reads that offer, because that is where a word so wide already lives ---
+    // and its modular lane reads the same words, relabelled, so a narrower
+    // lane simply fits more of them into the offer. Every other family's lane
+    // offer is `i64`-shaped, read as however many lane words fit in the same
+    // bytes.
     let offered = if E::LANE_IS_EXACT {
-        exact_offer
+        let per_word = core::mem::size_of::<AccOf<E>>() / lane_bytes;
+        exact_offer.saturating_mul(per_word) // R3-ok: a size query, not an accumulation
     } else {
         core::mem::size_of_val(&*words) / lane_bytes
     };
@@ -1465,14 +1811,26 @@ fn run<E, Bd, C, O, Ep, Lg>(
         exact_offer,
         offered,
         block,
-        <E::Lane as Lane<E>>::capacity(Bd::VALUE),
+        <L as Lane<E>>::capacity(Bd::VALUE),
     ) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
+    // The classes `distinct_columns` found are global, and a global first
+    // occurrence is no use to a column block narrower than the output: the
+    // class's representative may sit in an earlier block whose accumulator was
+    // encoded and `exact` reused before this block began. The map is rewritten
+    // block-relative here, once per call, where the block width is known ---
+    // and into the dictionary region `distinct_columns` is finished with, so
+    // the offer's size and layout are unchanged.
+    let collapse = if repeated {
+        ColumnMap::derive(index, shape.n, plan.cols)
+    } else {
+        None
+    };
     // Both declarations come from the sequences that will run, at the tile the
     // plan resolved to --- never from a constant standing in for them.
-    let table = E::table_spec(
+    let table = spec_of(
         options.backend,
         Bd::VALUE,
         plan.rows,
@@ -1492,7 +1850,13 @@ fn run<E, Bd, C, O, Ep, Lg>(
 
     let want = plan.lane_words(space);
     let tile = plan.rows * plan.cols;
-    let take = if E::LANE_IS_EXACT { tile + want } else { tile };
+    // The accumulator words the lane words occupy: one each when the lane *is*
+    // the accumulator, fewer for a modular lane reading the same offer.
+    let take = if E::LANE_IS_EXACT {
+        tile + want.div_ceil(core::mem::size_of::<AccOf<E>>() / lane_bytes)
+    } else {
+        tile
+    };
     if take > exact_offer {
         decline(triple, epilogue, options, scratch, ledger);
         return;
@@ -1503,12 +1867,12 @@ fn run<E, Bd, C, O, Ep, Lg>(
         return;
     }
     let (exact, rest) = accumulators.split_at_mut(tile);
-    let Some(lanes) = E::lanes(words, rest, want) else {
+    let Some(lanes) = lanes_of(words, rest, want) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
-    tabulate::<E, Bd, C, O, Ep, Lg>(
-        triple, epilogue, options, exact, lanes, panel, index, plan, ledger,
+    tabulate::<E, Bd, C, O, Ep, Lg, L>(
+        triple, epilogue, options, exact, lanes, panel, collapse, plan, spec_of, ledger,
     );
 }
 
@@ -1882,16 +2246,17 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     lane: &mut [L],
     table: &mut Table<'_, L>,
     spec: &TableSpec<E, L>,
+    spec_of: SpecOf<E, L>,
     book: &[E],
     acts: &mut [E],
-    index: Option<&[usize]>,
+    collapse: Option<ColumnMap<'_>>,
     plan: Plan,
     rows: usize,
     group: usize,
     row0: usize,
     ledger: &mut Lg,
 ) where
-    E: Tabulated<Lane = L>,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1923,16 +2288,17 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         single: if group == 1 {
             *spec
         } else {
-            E::table_spec(options.backend, Bd::VALUE, rows, 1, block)
+            spec_of(options.backend, Bd::VALUE, rows, 1, block)
         },
         codes,
         stream: C::as_index_stream(codes),
         codes_per_row,
-        // Set per column block, from `collapsed` rather than from `index`. The
-        // sweep *skips* a repeated column and the expansion below *fills* it,
-        // and the two have to be reading the same decision: a sweep that skips
-        // on `index` while the expansion fills on `collapsed` leaves every
-        // repeat of a narrowed block holding whatever was in the accumulator.
+        // Set per column block, from `collapsed` --- the block's own slice of
+        // the map --- rather than from the map itself. The sweep *skips* a
+        // repeated column and the expansion below *fills* it, and the two have
+        // to be reading the same decision: a sweep that skips on the whole map
+        // while the expansion fills on `collapsed` leaves every repeat of a
+        // narrowed block holding whatever was in the accumulator.
         index: None,
         rows,
         slab,
@@ -2169,15 +2535,16 @@ fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc], onto: bool)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tabulate<E, Bd, C, O, Ep, Lg>(
+fn tabulate<E, Bd, C, O, Ep, Lg, L>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     exact: &mut [AccOf<E>],
-    lanes: &mut [E::Lane],
+    lanes: &mut [L],
     panel: &mut [Alphabet<E, Bd>],
-    index: Option<&[usize]>,
+    collapse: Option<ColumnMap<'_>>,
     plan: Plan,
+    spec_of: SpecOf<E, L>,
     ledger: &mut Lg,
 ) where
     E: Tabulated,
@@ -2186,6 +2553,7 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
     Lg: Ledger,
+    L: Lane<E>,
 {
     let shape = triple.shape();
     let space = C::CODE_SPACE;
@@ -2205,7 +2573,7 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
         // register file, not a different function, and the reference carries
         // every height no vector sequence has (R13).
         let group = column_group(rows);
-        let spec = E::table_spec(options.backend, Bd::VALUE, rows, group, block);
+        let spec = spec_of(options.backend, Bd::VALUE, rows, group, block);
         let Some(mut table) = Table::new(stack, space, rows, plan.depth) else {
             // `Plan::choose` sized the offer for the widest tile it admits and
             // `rows` is never wider, so this cannot be reached. It is written as
@@ -2221,9 +2589,9 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
         let (book, acts) = panel.split_at_mut(space * block);
         let book: &[E] = bytemuck::TransparentWrapper::peel_slice(book);
         let acts: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(acts);
-        row_tile::<E, Bd, C, O, Ep, E::Lane, Lg>(
-            triple, epilogue, options, exact, columns, &mut table, &spec, book, acts, index, plan,
-            rows, group, row0, ledger,
+        row_tile::<E, Bd, C, O, Ep, L, Lg>(
+            triple, epilogue, options, exact, columns, &mut table, &spec, spec_of, book, acts,
+            collapse, plan, rows, group, row0, ledger,
         );
         row0 += rows;
     }
@@ -2800,6 +3168,7 @@ mod tests {
                 },
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
                 &mut Tabulation::with_index(&mut [], &mut ids),
+                &mut Collapse::none(),
                 &mut census,
             );
         }
@@ -3155,6 +3524,345 @@ mod tests {
             census.table_reads,
             (rows_d * cols_d * (k / block)) as u64,
             "both axes: the column loop charges per distinct column ({census:?})"
+        );
+    }
+
+    /// One `i32` tabulated product at one encode mode and one accumulator
+    /// offer, with the panel holding the decoded codebook and nothing more.
+    ///
+    /// The `i32` lanes --- the exact accumulator and the modular word alike ---
+    /// live in the accumulator offer, so there is one knob and the census says
+    /// which lane it admitted.
+    fn tabulated_i32<C: Enumerable<i32, Full<i32>> + Copy>(
+        w: &CodedMatrix<'_, i32, Full<i32>, C>,
+        a: &[i32],
+        m: usize,
+        n: usize,
+        encode: EncodeMode,
+        acc_offer: usize,
+    ) -> (Vec<i32>, Census) {
+        let k = w.cols();
+        let block = <C as uor_matmul_codec::Codec<i32, Full<i32>>>::MAX_BLOCK;
+        let mut panel = vec![
+            Alphabet::<i32, Full<i32>>::ZERO;
+            suggested_tabulation_panel(C::CODE_SPACE, block)
+        ];
+        let mut accumulators = vec![<AccOf<i32> as Accumulator>::ZERO; acc_offer];
+        let mut c = vec![0i32; m * n];
+        let mut census = Census::default();
+        {
+            let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, *w, cv).unwrap();
+            gemm_tabulated_counted(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    encode,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+        (c, census)
+    }
+
+    /// The dense product of the same `i32` operands at the same encode mode,
+    /// by the driver whose bytes every other traversal is measured against.
+    fn reference_i32<C: Enumerable<i32, Full<i32>> + Copy>(
+        w: &CodedMatrix<'_, i32, Full<i32>, C>,
+        a: &[i32],
+        m: usize,
+        k: usize,
+        n: usize,
+        encode: EncodeMode,
+    ) -> Vec<i32> {
+        let mut b = vec![0i32; k * n];
+        for p in 0..k {
+            for j in 0..n {
+                b[p * n + j] = w.at(j, p).get();
+            }
+        }
+        let mut c = vec![0i32; m * n];
+        let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+        let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+        let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+        let mut t = Triple::new(av, bv, cv).unwrap();
+        gemm(
+            &mut t,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                traversal: Traversal::Blocked,
+                encode,
+                ..Default::default()
+            },
+            &mut Scratch::none(),
+        );
+        c
+    }
+
+    /// The shape, codec, operands, and offer the two modular-lane tests share.
+    ///
+    /// The offer is the point of the fixture. The exact `i32` lane *is* the
+    /// accumulator, so a table in it costs one accumulator per lane word ---
+    /// `slab * rows * depth` of them past the `rows * n` tile. The modular
+    /// lane is four lane words per accumulator, so the same stack costs a
+    /// quarter as many, and the offer below covers the modular stack and not
+    /// the exact one. The census then says which lane ran, rather than the
+    /// predicate being asked to say it again.
+    #[allow(clippy::type_complexity)]
+    fn modular_i32_fixture() -> (
+        [[Alphabet<i32, Full<i32>>; 4]; 16],
+        Vec<u16>,
+        Vec<i32>,
+        usize,
+    ) {
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (space, block) = (16usize, 4usize);
+        let rows = 16usize;
+        assert!(
+            tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<Mod32>()) >= rows
+                && tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<i128>()) >= rows,
+            "the fixture's row tile fits L1 in either lane"
+        );
+        let slab = slab_codes(space);
+        let tile = rows * n;
+        // `tile + ceil((tile + slab * rows * blocks) / 4)`: the modular take,
+        // derived in the doc comment above. The exact take at this offer is
+        // `tile + tile + slab * rows` --- one slot deep, which is all the
+        // remainder buys at one accumulator per word --- and it exceeds the
+        // offer, so the exact lane must decline.
+        let offer = tile + (tile + slab * rows * (k / block)).div_ceil(4);
+        let flat: Vec<i32> = fill(space * block, 0xb32c, |x| {
+            (x as i32).wrapping_mul(0x9E37_79B9u32 as i32)
+        });
+        let cells: [[Alphabet<i32, Full<i32>>; 4]; 16] =
+            core::array::from_fn(|c| core::array::from_fn(|t| Alphabet::of(flat[c * block + t])));
+        // Full-range activations: the modular lane declares no bound, so the
+        // extremes of the alphabet are ordinary inputs and a product of two of
+        // them wraps on purpose.
+        let a: Vec<i32> = fill(m * k, 0xa32c, |x| {
+            (x as i32).wrapping_mul(0x85EB_CA6Bu32 as i32)
+        });
+        let stream: Vec<u16> = fill(n * (k / block), 0xc32c, |x| (x % 16) as u16);
+        (cells, stream, a, offer)
+    }
+
+    /// `CU-08`: the modular table lane runs exactly when the encode is
+    /// `Wrapping` and the output is no wider than the lane, and its depth is
+    /// unbounded at every bound.
+    ///
+    /// The depth half is the table-side form of what `CU-02` pins for the
+    /// dense lane: the wrap *is* the encode, so there is nothing to chunk.
+    #[test]
+    fn the_modular_table_lane_runs_exactly_when_the_encode_admits_it_cu_08() {
+        for bound in [0u128, 1, 1 << 10, 1 << 31, u128::MAX] {
+            assert_eq!(<Mod32 as Lane<i32>>::capacity(bound), None);
+        }
+        for bound in [0u128, 1, 1 << 10, 1 << 63, u128::MAX] {
+            assert_eq!(<Mod64 as Lane<i64>>::capacity(bound), None);
+        }
+        // The specs say the same, at every tile the driver walks: the lane's
+        // depth is `usize::MAX` at every bound, exactly as
+        // `Factorization::Modular` declares on the dense side.
+        for &(rows, group) in &[(16usize, 1usize), (8, 2), (1, 1)] {
+            let spec32 = choose_table(
+                available_table_i32_modular(rows, group),
+                Backend::Auto,
+                1 << 31,
+                4,
+            )
+            .expect("the reference sequence is always present");
+            assert_eq!(spec32.lane_depth(1 << 31), usize::MAX);
+            assert_eq!(spec32.lane_depth(1), usize::MAX);
+            let spec64 = choose_table(
+                available_table_i64_modular(rows, group),
+                Backend::Auto,
+                1 << 63,
+                4,
+            )
+            .expect("the reference sequence is always present");
+            assert_eq!(spec64.lane_depth(1 << 63), usize::MAX);
+            assert_eq!(spec64.lane_depth(1), usize::MAX);
+        }
+
+        // The width half of admissibility, per family: an output no wider than
+        // the lane. `i8` and `i16` offer no modular table lane at all --- their
+        // exact lane already holds every depth a weight row reaches, so a
+        // quotient read would buy nothing.
+        assert!(<i32 as Tabulated>::modular_table_admitted(8));
+        assert!(<i32 as Tabulated>::modular_table_admitted(16));
+        assert!(<i32 as Tabulated>::modular_table_admitted(32));
+        assert!(!<i32 as Tabulated>::modular_table_admitted(64));
+        assert!(<i64 as Tabulated>::modular_table_admitted(32));
+        assert!(<i64 as Tabulated>::modular_table_admitted(64));
+        assert!(!<i64 as Tabulated>::modular_table_admitted(128));
+        assert!(!<i8 as Tabulated>::modular_table_admitted(32));
+        assert!(!<i16 as Tabulated>::modular_table_admitted(32));
+
+        // The encode-mode half, behaviourally. At the fixture's offer the
+        // modular lane holds a table and the exact lane cannot (see
+        // `modular_i32_fixture`), so which traversal ran is the census's to
+        // say: under `Wrapping` the table runs, under `Saturating` the same
+        // call streams --- and both give the dense driver's bytes at their own
+        // encode mode.
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (cells, stream, a, offer) = modular_i32_fixture();
+        let book = Book::new(&cells);
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let (wrapped, wrap_census) = tabulated_i32(&w, &a, m, n, EncodeMode::Wrapping, offer);
+        assert_eq!(
+            wrapped,
+            reference_i32(&w, &a, m, k, n, EncodeMode::Wrapping),
+            "the modular table must give the dense driver's bytes"
+        );
+        assert_eq!(
+            wrap_census.table_reads,
+            (m * n * (k / 4)) as u64,
+            "under `Wrapping` the modular table ran, one read per code per row: {wrap_census:?}"
+        );
+        for mode in [EncodeMode::Nearest, EncodeMode::Saturating] {
+            let (got, census) = tabulated_i32(&w, &a, m, n, mode, offer);
+            assert_eq!(
+                got,
+                reference_i32(&w, &a, m, k, n, mode),
+                "under {mode:?} the stream must give the dense driver's bytes"
+            );
+            assert_eq!(
+                census.table_reads, 0,
+                "under {mode:?} no modular lane is admitted and the exact one cannot fit \
+                 this offer, so the call streams: {census:?}"
+            );
+        }
+    }
+
+    /// `CB-09`, end to end: through the driver, the modular table lane gives
+    /// the dense modular traversal's bytes.
+    ///
+    /// The parity half in `uor-matmul-kernels` reads every modular sequence
+    /// against the model lane for lane; this half reads the *dispatch*. At
+    /// every offer --- nothing, a fraction, the fixture's sized offer, and
+    /// beyond it --- the bytes are the dense driver's, and at the sized offer
+    /// the census says the table, not the stream, produced them.
+    #[test]
+    fn the_modular_table_lane_gives_the_dense_drivers_bytes_cb_09() {
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (cells, stream, a, offer) = modular_i32_fixture();
+        let book = Book::new(&cells);
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let want = reference_i32(&w, &a, m, k, n, EncodeMode::Wrapping);
+        for offer in [0usize, offer / 2, offer, offer * 2] {
+            let (got, census) = tabulated_i32(&w, &a, m, n, EncodeMode::Wrapping, offer);
+            assert_eq!(
+                got, want,
+                "an accumulator offer of {offer} must give the dense driver's bytes ({census:?})"
+            );
+        }
+        let (_, census) = tabulated_i32(&w, &a, m, n, EncodeMode::Wrapping, offer);
+        assert_eq!(
+            census.table_reads,
+            (m * n * (k / 4)) as u64,
+            "the offer was sized for the modular table and none was read: {census:?}"
+        );
+    }
+
+    /// The `i64` half of `CB-09`'s dispatch read: the portable-only lane,
+    /// through the same boundary.
+    ///
+    /// The lane is three `Mod64` words to the three-limb accumulator, so the
+    /// sizing argument is `modular_i32_fixture`'s with a third in place of a
+    /// quarter. Without this half `Mod64::place` is code no test can fail.
+    #[test]
+    fn the_modular_i64_table_lane_gives_the_dense_drivers_bytes_cb_09() {
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (space, block) = (16usize, 4usize);
+        let rows = 16usize;
+        assert!(
+            tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<Mod64>()) >= rows
+                && tabulation_rows(
+                    space,
+                    blocking::L1_BYTES,
+                    core::mem::size_of::<AccOf<i64>>()
+                ) >= rows,
+            "the fixture's row tile fits L1 in either lane"
+        );
+        let slab = slab_codes(space);
+        let tile = rows * n;
+        let offer = tile + (tile + slab * rows * (k / block)).div_ceil(3);
+        let flat: Vec<i64> = fill(space * block, 0xb64c, |x| {
+            (x as i64).wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64)
+        });
+        let cells: [[Alphabet<i64, Full<i64>>; 4]; 16] =
+            core::array::from_fn(|c| core::array::from_fn(|t| Alphabet::of(flat[c * block + t])));
+        let a: Vec<i64> = fill(m * k, 0xa64c, |x| {
+            (x as i64).wrapping_mul(0x2545_F491_4F6C_DD1Du64 as i64)
+        });
+        let stream: Vec<u16> = fill(n * (k / block), 0xc64c, |x| (x % 16) as u16);
+        let book = Book::new(&cells);
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+
+        // The dense product at the same encode mode, by the same driver the
+        // `i32` half is read against.
+        let want = {
+            let mut b = vec![0i64; k * n];
+            for p in 0..k {
+                for j in 0..n {
+                    b[p * n + j] = w.at(j, p).get();
+                }
+            }
+            let mut c = vec![0i64; m * n];
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            gemm(
+                &mut t,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Blocked,
+                    encode: EncodeMode::Wrapping,
+                    ..Default::default()
+                },
+                &mut Scratch::none(),
+            );
+            c
+        };
+
+        let mut panel =
+            vec![Alphabet::<i64, Full<i64>>::ZERO; suggested_tabulation_panel(space, block)];
+        let mut accumulators = vec![<AccOf<i64> as Accumulator>::ZERO; offer];
+        let mut c = vec![0i64; m * n];
+        let mut census = Census::default();
+        {
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            gemm_tabulated_counted(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    encode: EncodeMode::Wrapping,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+        assert_eq!(
+            c, want,
+            "the modular i64 table must give the dense driver's bytes ({census:?})"
+        );
+        assert_eq!(
+            census.table_reads,
+            (m * n * (k / block)) as u64,
+            "the offer was sized for the modular table and none was read: {census:?}"
         );
     }
 

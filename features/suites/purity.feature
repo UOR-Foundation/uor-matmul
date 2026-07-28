@@ -47,3 +47,9 @@ Feature: Purity
     Given the standing corpus
     When the suite exercises CU-07
     Then the claim holds byte for byte
+
+  @CU-08 @build
+  Scenario: The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound
+    Given the standing corpus
+    When the suite exercises CU-08
+    Then the claim holds byte for byte

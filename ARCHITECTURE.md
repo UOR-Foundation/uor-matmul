@@ -227,6 +227,23 @@ in registers and is a frame of pure copy when they cannot --- 80 or 536 bytes
 of limbs never can. `portable_table` chooses at compile time: words of sixteen
 bytes or fewer take the staged gather, wider words accumulate in place, and
 both are the same reads and the same adds (`CB-08`).
+There is a second lane, chosen by declaration rather than by shape. When the
+caller asks to encode by wrapping into an output no wider than `w` bits, the
+table can run in `Z/2^w` --- the same ring-homomorphism factorization the dense
+side cashes in (`ANALYSIS.md` §"The modular factorization"), with the same
+two-declaration admissibility: the encode mode is asked at the traversal
+boundary, the output width is `Tabulated::modular_table_admitted`. For `i32`
+the `Mod32` word replaces scalar widening macs with eight-wide `mullo_epi32` on
+the build and scalar 128-bit gather adds with `vpaddd` on the column loop, at a
+quarter of the lane traffic; `CB-09` pins every modular sequence to the
+portable modular reference lane for lane, and `CU-08` pins when the lane may
+run and that its depth is unbounded at every bound. The lane is read out of the
+accumulator offer, relabelled several words to the word, so an offer sized for
+the exact lane already holds it. For `i64` the build's multiply has no SIMD
+instruction, so the modular lane is the portable sequence alone --- the same
+reason the dense `i64` modular family is portable-only. `i8` and `i16` offer
+none: their exact lane already holds every depth a weight row reaches, so a
+quotient read would buy nothing.
 
 ## Borrowing instead of packing
 
