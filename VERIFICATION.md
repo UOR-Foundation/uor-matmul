@@ -45,6 +45,7 @@ of these has been checked by planting the defect it exists to catch:
 | `audit-limits` (R8) | a `Result` over an unsanctioned error | yes |
 | `audit-purity` (R2) | eight float-arithmetic plants: two typed params added, a `f64` multiply, a typed `let`, a `for` over `&[f32]`, `mul_add`, an `as f32` cast, two `*const f64` derefs, and a two-step aliasing chain | yes |
 | `audit-disassembly` (`CU-01`) | a `black_box`-guarded float add inside an emitted function, reported as `addss` | yes |
+| `audit-disassembly` (`CU-06`) | a `black_box`-guarded value multiply in `gather_run`'s column loop, reported as `mul` in both `gather_reference_*` bodies. The Mach-O framing defect this exposed --- every body ran to end-of-file, so a dense NEON kernel's `sdot` was attributed to the gather --- is the one the gate actually shipped | yes |
 | `audit-deferral` (R15) | a `TODO` in a shipped crate | yes |
 | the honesty meta-gate (R4) | an ID with no test | yes |
 | the differential comparator | a one-element difference | yes |

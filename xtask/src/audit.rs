@@ -843,7 +843,16 @@ fn function_bodies<'t>(text: &'t str, fragment: &str) -> Vec<(String, Vec<(usize
         let mut body = Vec::new();
         for (i, inner) in lines.iter().enumerate().skip(start + 1) {
             let inner = inner.trim();
-            if inner.starts_with(".Lfunc_end") || inner.starts_with(".size") {
+            // ELF ends a function with `.Lfunc_end` and a `.size` directive;
+            // Mach-O has neither and ends one with `.cfi_endproc`. Reading only
+            // the ELF framing made every body run to end-of-file on macOS, so
+            // the gate attributed the *rest of the crate's* instructions ---
+            // including a dense NEON kernel's `sdot` --- to the gather it was
+            // meant to be reading.
+            if inner.starts_with(".Lfunc_end")
+                || inner.starts_with(".size")
+                || inner.starts_with(".cfi_endproc")
+            {
                 break;
             }
             if inner.is_empty()
