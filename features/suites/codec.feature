@@ -53,3 +53,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-09
     Then the claim holds byte for byte
+
+  @CK-10 @build
+  Scenario: Sign- and ternary-coded weights give the dense spelling's bytes, packed and tabulated
+    Given the standing corpus
+    When the suite exercises CK-10
+    Then the claim holds byte for byte

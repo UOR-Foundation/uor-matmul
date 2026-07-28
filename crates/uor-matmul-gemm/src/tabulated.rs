@@ -2405,7 +2405,7 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_codec::{e8_codec, e8_table, Book, Grid, Packed};
-    use uor_matmul_core::{as_alphabet_full, EncodeMode, Full, Triple};
+    use uor_matmul_core::{as_alphabet, as_alphabet_full, Bnd, EncodeMode, Full, Triple};
 
     type A8 = Alphabet<i8, Full<i8>>;
 
@@ -2435,8 +2435,8 @@ mod tests {
     ///
     /// `W` is decoded into a `k x n` dense matrix first, so this is the identity
     /// tabulation claims to compute and not a restatement of it.
-    fn reference<C: Enumerable<i8, Full<i8>> + Copy>(
-        w: &CodedMatrix<'_, i8, Full<i8>, C>,
+    fn reference<Bd: Bound, C: Enumerable<i8, Bd> + Copy>(
+        w: &CodedMatrix<'_, i8, Bd, C>,
         a: &[i8],
         m: usize,
         k: usize,
@@ -2449,8 +2449,21 @@ mod tests {
             }
         }
         let mut c = vec![0i32; m * n];
-        let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
-        let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+        // A validating wrap rather than the transmute, so the one helper serves
+        // any declared bound: at `Full` the check cannot fail, and at a named
+        // bound it re-checks the caller's premise at the boundary.
+        let av = MatView::row_major(
+            as_alphabet::<i8, Bd>(a).expect("the activations fit the declared bound"),
+            m,
+            k,
+        )
+        .unwrap();
+        let bv = MatView::row_major(
+            as_alphabet::<i8, Bd>(&b).expect("decoded weights are in the alphabet by construction"),
+            k,
+            n,
+        )
+        .unwrap();
         let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
         let mut t = Triple::new(av, bv, cv).unwrap();
         gemm(
@@ -2472,8 +2485,8 @@ mod tests {
     /// narrowed column block that skipped a repeated column without filling it
     /// lived there --- silently, at 896 wrong cells out of 1024.
     #[allow(clippy::too_many_arguments)]
-    fn tabulated<C: Enumerable<i8, Full<i8>> + Copy>(
-        w: &CodedMatrix<'_, i8, Full<i8>, C>,
+    fn tabulated<Bd: Bound, C: Enumerable<i8, Bd> + Copy>(
+        w: &CodedMatrix<'_, i8, Bd, C>,
         a: &[i8],
         m: usize,
         n: usize,
@@ -2484,10 +2497,9 @@ mod tests {
     ) -> (Vec<i32>, Census) {
         let k = w.cols();
         let shape = Shape { m, k, n };
-        let block = <C as uor_matmul_codec::Codec<i8, Full<i8>>>::MAX_BLOCK;
-        let want_acc = suggested_tabulation::<i8, Full<i8>>(shape, C::CODE_SPACE, block).max(1);
-        let want_lanes =
-            suggested_tabulation_lanes::<i8, Full<i8>>(shape, C::CODE_SPACE, block).max(1);
+        let block = <C as uor_matmul_codec::Codec<i8, Bd>>::MAX_BLOCK;
+        let want_acc = suggested_tabulation::<i8, Bd>(shape, C::CODE_SPACE, block).max(1);
+        let want_lanes = suggested_tabulation_lanes::<i8, Bd>(shape, C::CODE_SPACE, block).max(1);
         // `offer` is a numerator over the suggested amount, so one knob sweeps
         // both buffers and the extremes -- nothing, one word, exactly enough --
         // are all reachable.
@@ -2506,7 +2518,7 @@ mod tests {
         // stream can be reached. All three are asserted against the same bytes.
         let want_panel = suggested_tabulation_panel(C::CODE_SPACE, block)
             .max(n * k + crate::suggested_scratch(shape));
-        let mut panel = vec![A8::ZERO; scale(want_panel, aux_offer)];
+        let mut panel = vec![Alphabet::<i8, Bd>::ZERO; scale(want_panel, aux_offer)];
         // The row-collapse offer is a third knob, and not a fraction like the
         // other two: `0` offers nothing and anything else is the exact number
         // of `Alphabet` elements the distinct rows are allowed to occupy, with
@@ -2520,11 +2532,16 @@ mod tests {
                 suggested_collapse_index(m)
             }
         ];
-        let mut collapse_rows = vec![A8::ZERO; collapse_offer];
+        let mut collapse_rows = vec![Alphabet::<i8, Bd>::ZERO; collapse_offer];
         let mut c = vec![0i32; m * n];
         let mut census = Census::default();
         {
-            let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+            let av = MatView::row_major(
+                as_alphabet::<i8, Bd>(a).expect("the activations fit the declared bound"),
+                m,
+                k,
+            )
+            .unwrap();
             let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
             let mut tr = TabulatedTriple::new(av, *w, cv).unwrap();
             let mut collapse = if collapse_offer == 0 {
@@ -2719,6 +2736,138 @@ mod tests {
         for &(m, k, n) in &[(1usize, 2usize, 1usize), (4, 6, 600), (6, 10, 13)] {
             let stream: Vec<u8> = fill(n * (k / 2), 0xd0e, |x| x as u8);
             every_traversal_agrees("Packed<Grid<16>,2>", packed, &stream, m, k, n);
+        }
+    }
+
+    /// `CK-10`: the sign and ternary tiers are spellings of codec compositions
+    /// that already exist, not new arithmetic. Weights in `{-1, +1}` stored as
+    /// one-bit codes (`Packed<Grid<2>, 8>`, table `[-1, +1]`) give the dense
+    /// spelling's bytes through the packed route and through the table, and the
+    /// ternary spelling (`Packed<Grid<4>, 4>`, table `[-1, 0, +1, dead]`)
+    /// likewise --- at shapes on both sides of each tier's recorded break-even.
+    ///
+    /// Because the composition predates this ID, the byte assertions alone would
+    /// pass against a table that was silently declined. What makes them a gate
+    /// is what they are paired with: the census (`every_traversal_agrees` fails
+    /// unless a full offer reads the table and an empty one cannot), and the
+    /// `[[tabulation]]` rows in `model/tiers.toml`, whose break-evens `CM-04`
+    /// recomputes from the codec's own consts. Note what the byte assertions do
+    /// *not* watch: the decode itself, which every route here shares, so a wrong
+    /// table would move all of them together --- decode order is `CK-03`'s and
+    /// `CK-09`'s ground. What they watch is the traversal: a planted drop of one
+    /// block word in the portable table build was seen to fail this test before
+    /// it was accepted.
+    #[test]
+    fn sign_and_ternary_spellings_match_the_dense_spelling_ck_10() {
+        // The sign tier: one-bit codes, eight to a byte. `code_space = 256` and
+        // `block = 8` are E8's numbers, so the break-even is 683 too --- the
+        // shapes straddle it.
+        let sign_table: [A8; 2] = [Alphabet::of(-1), Alphabet::of(1)];
+        let sign =
+            Packed::<_, 8>::new(Grid::<i8, Full<i8>, 2>::new(&sign_table)).expect("8 divides 8");
+        for &(m, k, n) in &[
+            (1usize, 8usize, 1usize),
+            (5, 24, 683),
+            (3, 8, 684),
+            (4, 16, 700),
+        ] {
+            let stream: Vec<u8> = fill(n * (k / 8), 0x516, |x| x as u8);
+            every_traversal_agrees("Packed<Grid<2>,8>", sign, &stream, m, k, n);
+        }
+
+        // The ternary tier: two-bit codes over `[-1, 0, +1, dead]`. The fourth
+        // entry is one no ternary encoder emits; it decodes to 0 here, which is
+        // what "dead" means --- a priced duplicate, not an error (the ratio is
+        // `CG-10`'s to report). The full-range streams hit it on purpose; the
+        // restricted streams spell what an encoder would actually write.
+        let ternary_table: [A8; 4] = [
+            Alphabet::of(-1),
+            Alphabet::of(0),
+            Alphabet::of(1),
+            Alphabet::of(0),
+        ];
+        let ternary =
+            Packed::<_, 4>::new(Grid::<i8, Full<i8>, 4>::new(&ternary_table)).expect("4 divides 8");
+        for &(m, k, n) in &[(1usize, 4usize, 1usize), (5, 12, 1025), (4, 16, 1100)] {
+            let stream: Vec<u8> = fill(n * (k / 4), 0x7e7, |x| x as u8);
+            every_traversal_agrees(
+                "Packed<Grid<4>,4> with the dead entry",
+                ternary,
+                &stream,
+                m,
+                k,
+                n,
+            );
+            let live: Vec<u8> = fill(n * (k / 4), 0x11e, |x| {
+                (0..4).fold(0u8, |b, s| b | (((x >> (2 * s)) % 3) as u8) << (2 * s))
+            });
+            every_traversal_agrees("Packed<Grid<4>,4> ternary", ternary, &live, m, k, n);
+        }
+
+        // The bound the claim names, exercised literally: at `Bnd<1>` the
+        // weights *and* the activations are signs, so the products are `+-1`
+        // and the table's entries are small sums of them. One route decodes
+        // the operand and runs the tile kernels, the other reads the table;
+        // the census says the second really did.
+        fn check_bound_one<C: Enumerable<i8, Bnd<1>> + Copy>(
+            label: &str,
+            w: &CodedMatrix<'_, i8, Bnd<1>, C>,
+            m: usize,
+            n: usize,
+        ) {
+            let k = w.cols();
+            let a: Vec<i8> = fill(m * k, 0xac7, |x| if x & 1 == 0 { -1 } else { 1 });
+            let want = reference(w, &a, m, k, n);
+            let (packed, _) =
+                tabulated(w, &a, m, n, Traversal::Blocked, OFFER_STEPS, OFFER_STEPS, 0);
+            let (tabled, census) = tabulated(
+                w,
+                &a,
+                m,
+                n,
+                Traversal::Tabulated,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
+            assert_eq!(
+                packed, want,
+                "{label} {m}x{k}x{n}: the packed route must give the dense driver's bytes"
+            );
+            assert_eq!(
+                tabled, want,
+                "{label} {m}x{k}x{n}: the tabulated route must give the dense driver's bytes"
+            );
+            assert!(
+                census.table_reads > 0,
+                "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
+            );
+        }
+
+        let sign_one: [Alphabet<i8, Bnd<1>>; 2] = [
+            Alphabet::new(-1).expect("|-1| <= 1"),
+            Alphabet::new(1).expect("|1| <= 1"),
+        ];
+        let sign_b1 =
+            Packed::<_, 8>::new(Grid::<i8, Bnd<1>, 2>::new(&sign_one)).expect("8 divides 8");
+        for &(m, k, n) in &[(4usize, 16usize, 700), (3, 8, 96)] {
+            let stream: Vec<u8> = fill(n * (k / 8), 0xb1d, |x| x as u8);
+            let w = CodedMatrix::new(sign_b1, n, k, &stream).expect("the codes describe n x k");
+            check_bound_one("Packed<Grid<2>,8> at Bnd<1>", &w, m, n);
+        }
+
+        let ternary_one: [Alphabet<i8, Bnd<1>>; 4] = [
+            Alphabet::new(-1).expect("|-1| <= 1"),
+            Alphabet::new(0).expect("|0| <= 1"),
+            Alphabet::new(1).expect("|1| <= 1"),
+            Alphabet::new(0).expect("|0| <= 1"),
+        ];
+        let ternary_b1 =
+            Packed::<_, 4>::new(Grid::<i8, Bnd<1>, 4>::new(&ternary_one)).expect("4 divides 8");
+        for &(m, k, n) in &[(4usize, 16usize, 1100), (3, 8, 96)] {
+            let stream: Vec<u8> = fill(n * (k / 4), 0x7e9, |x| x as u8);
+            let w = CodedMatrix::new(ternary_b1, n, k, &stream).expect("the codes describe n x k");
+            check_bound_one("Packed<Grid<4>,4> at Bnd<1>", &w, m, n);
         }
     }
 
