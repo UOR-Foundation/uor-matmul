@@ -1643,6 +1643,60 @@ pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         // bound where that leaves an `i32`, so this is stated rather than
         // binding.
         max_bound: 32767,
+        build_multiplies: true,
+        build,
+        gather,
+        gather_codes,
+    })
+}
+
+/// The bound-1 `i8` table sequence at `rows` rows and `group` columns.
+///
+/// The same shapes and the same gathers as [`avx2_table_i8_i32`] --- the
+/// gathers are bound-independent, so they are shared, not duplicated. Only the
+/// build differs: at bound 1 the `madd` has nothing left to do, and the slot
+/// is a sign mask, an XOR and a subtract (`CB-10`).
+pub fn avx2_table_i8_i32_bound1(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
+    type Trio = (TableBuild<i8, i32>, TableGather<i32>, TableGatherCodes<i32>);
+    let (build, gather, gather_codes): Trio = match (rows, group) {
+        (16, 1) => (
+            avx2_table_build_i8_bound1_v2,
+            avx2_table_gather_i32_v2_u1,
+            avx2_codes_v2_u1,
+        ),
+        (16, 2) => (
+            avx2_table_build_i8_bound1_v2,
+            avx2_table_gather_i32_v2_u2,
+            avx2_codes_v2_u2,
+        ),
+        (8, 1) => (
+            avx2_table_build_i8_bound1_v1,
+            avx2_table_gather_i32_v1_u1,
+            avx2_codes_v1_u1,
+        ),
+        (8, 2) => (
+            avx2_table_build_i8_bound1_v1,
+            avx2_table_gather_i32_v1_u2,
+            avx2_codes_v1_u2,
+        ),
+        _ => return None,
+    };
+    Some(TableSpec {
+        backend: Backend::Avx2,
+        rows,
+        group,
+        // Nothing is paired: one block step is one sign mask, so an odd block
+        // packs as well as an even one and there is no tail.
+        k_group: 1,
+        lanes_per_add: A2_TABLE_LANES,
+        // One XOR, one subtract and one add per eight lanes and one block step.
+        build_products_per_step: A2_TABLE_LANES,
+        lane_cap: i32::MAX as u128,
+        // Exact exactly when every book word is in `{-1, 0, +1}`: the sign
+        // mask is the whole of the arithmetic, and this is the declaration
+        // `choose_table` reads.
+        max_bound: 1,
+        build_multiplies: false,
         build,
         gather,
         gather_codes,
@@ -1684,6 +1738,7 @@ pub fn avx2_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
         // declaration --- the same rule `AVX2_I16_I64` follows, and the reason
         // the reference carries a full `i16` bound rather than this.
         max_bound: 32767,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,
@@ -2143,6 +2198,90 @@ unsafe fn avx2_table_build_i8_v1(
     unsafe { avx2_table_build::<1>(rows, space, block, book, acts, out) }
 }
 
+/// One slot of the table at bound 1, at `V` registers: no multiply.
+///
+/// `T[c][i] = sum_t +-acts[t][i]`: the book word is in `{-1, 0, +1}`, so the
+/// product is a masked negation. Two masks per block step, broadcast into the
+/// lane's width --- `keep`, all-ones unless the word is zero, and `sign`,
+/// all-ones when it is `-1` --- and `((a & keep) ^ sign) - sign` is the
+/// product: in two's complement the XOR with all-ones is the one's complement,
+/// and subtracting the mask back adds the one that makes it the negation. No
+/// instruction in the loop multiplies.
+///
+/// # Safety
+///
+/// [`TableBuild`]'s contract, with `rows == V * 8` and every element of `book`
+/// in `{-1, 0, +1}` --- which the caller's bound-1 alphabet has already
+/// established at the boundary.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_table_build_bound1<const V: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    debug_assert_eq!(rows, V * A2_TABLE_LANES);
+    // SAFETY: the caller established every extent.
+    unsafe {
+        for c in 0..space {
+            let d = book.add(c * block);
+            let mut entry = [_mm256_setzero_si256(); V];
+            for t in 0..block {
+                let w = *d.add(t);
+                // `w >> 7` is the arithmetic shift: all-ones exactly when the
+                // word is -1, and `keep` is all-ones exactly when it is not 0.
+                let sign = _mm256_set1_epi32(i32::from(w >> 7));
+                let keep = _mm256_set1_epi32(-i32::from(w != 0));
+                let a = acts.add(t * rows);
+                for (v, cell) in entry.iter_mut().enumerate() {
+                    let x = _mm256_cvtepi8_epi32(_mm_loadl_epi64(
+                        a.add(v * A2_TABLE_LANES) as *const __m128i
+                    ));
+                    let x = _mm256_and_si256(x, keep);
+                    *cell =
+                        _mm256_add_epi32(*cell, _mm256_sub_epi32(_mm256_xor_si256(x, sign), sign));
+                }
+            }
+            let o = out.add(c * rows);
+            for (v, cell) in entry.iter().enumerate() {
+                _mm256_storeu_si256(o.add(v * A2_TABLE_LANES) as *mut __m256i, *cell);
+            }
+        }
+    }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`, every book word in `{-1, 0, +1}`.
+unsafe fn avx2_table_build_i8_bound1_v2(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_build_bound1::<2>(rows, space, block, book, acts, out) }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 8`, every book word in `{-1, 0, +1}`.
+unsafe fn avx2_table_build_i8_bound1_v1(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe { avx2_table_build_bound1::<1>(rows, space, block, book, acts, out) }
+}
+
 /// The same reduction, over the coded operand's own memory.
 ///
 /// One shift more than [`avx2_table_gather`] and one memory round trip fewer:
@@ -2347,6 +2486,7 @@ pub fn avx2_table_i32_mod32(rows: usize, group: usize) -> Option<TableSpec<i32, 
         // alphabet the quotient is wrong on.
         lane_cap: u128::MAX,
         max_bound: u128::MAX,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,
@@ -2537,6 +2677,7 @@ pub fn avx512_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i3
         // bound where that leaves an `i32`, so this is stated rather than
         // binding.
         max_bound: 32767,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,
@@ -2563,6 +2704,7 @@ pub fn avx512_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, 
         build_products_per_step: A5_TABLE_LANES / 2,
         lane_cap: i64::MAX as u128,
         max_bound: 32767,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,

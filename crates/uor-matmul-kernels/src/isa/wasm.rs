@@ -226,6 +226,7 @@ pub fn simd128_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i
         // Every product is widened to `i32` before it is accumulated, so
         // nothing narrower than the lane is held.
         max_bound: u128::MAX,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,
@@ -261,6 +262,7 @@ pub fn simd128_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16,
         build_products_per_step: SIMD_TABLE_LANES_64,
         lane_cap: i64::MAX as u128,
         max_bound: u128::MAX,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,

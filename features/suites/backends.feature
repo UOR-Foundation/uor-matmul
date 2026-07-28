@@ -59,3 +59,9 @@ Feature: Backend parity
     Given the standing corpus
     When the suite exercises CB-09
     Then the claim holds byte for byte
+
+  @CB-10 @build
+  Scenario: At bound 1 the table build issues no multiply, and selection offers the adds-only build exactly when the declared bound admits it
+    Given the standing corpus
+    When the suite exercises CB-10
+    Then the claim holds byte for byte

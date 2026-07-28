@@ -252,6 +252,12 @@ suite = "backends"
 statement = """Every modular table sequence equals the portable modular reference lane for lane"""
 
 [[id]]
+id = "CB-10"
+level = "build"
+suite = "backends"
+statement = """At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run"""
+
+[[id]]
 id = "CU-01"
 level = "build"
 suite = "purity"

@@ -436,6 +436,7 @@ pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         // nothing narrower than the lane is held and no alphabet is out of
         // reach --- the same statement `NEON_I8_I32` makes.
         max_bound: u128::MAX,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,
@@ -472,6 +473,7 @@ pub fn neon_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
         build_products_per_step: NEON_TABLE_LANES_64,
         lane_cap: i64::MAX as u128,
         max_bound: u128::MAX,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,
