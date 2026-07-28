@@ -2415,7 +2415,7 @@ mod tests {
     use crate::epilogue::Linear;
     use std::vec;
     use std::vec::Vec;
-    use uor_matmul_codec::{e8_codec, e8_table, Book, Grid, Packed};
+    use uor_matmul_codec::{e8_codec, e8_table, Book, Grid, Packed, Sign};
     use uor_matmul_core::{as_alphabet, as_alphabet_full, Bnd, EncodeMode, Full, Triple};
 
     type A8 = Alphabet<i8, Full<i8>>;
@@ -2879,6 +2879,69 @@ mod tests {
             let stream: Vec<u8> = fill(n * (k / 4), 0x7e9, |x| x as u8);
             let w = CodedMatrix::new(ternary_b1, n, k, &stream).expect("the codes describe n x k");
             check_bound_one("Packed<Grid<4>,4> at Bnd<1>", &w, m, n);
+        }
+    }
+
+    /// `CK-11`: the `Sign` tier and the `Packed<Grid<2>,8>` spelling are two
+    /// manifests for one decode. The gemm output is byte-identical through the
+    /// packed route and through the table, at the shapes `CK-10` straddles the
+    /// shared break-even with --- and the tier is run through the same
+    /// every-offer gate the composition is.
+    ///
+    /// What the tier adds over the composition is not a different answer but
+    /// the index stream: a `Sign` code addresses its enumeration directly, so
+    /// the tabulated run gathers from the operand's own memory instead of a
+    /// stream it built. That is asserted where the claim lives, at the codec
+    /// (`as_index_stream` answers the same slice it was handed); what this
+    /// test watches is that the answer does not move with the spelling.
+    #[test]
+    fn the_sign_tier_matches_the_composition_byte_for_byte_ck_11() {
+        let sign_table: [A8; 2] = [Alphabet::of(-1), Alphabet::of(1)];
+        let composition =
+            Packed::<_, 8>::new(Grid::<i8, Full<i8>, 2>::new(&sign_table)).expect("8 divides 8");
+        let tier = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
+
+        for &(m, k, n) in &[
+            (1usize, 8usize, 1usize),
+            (5, 24, 683),
+            (3, 8, 684),
+            (4, 16, 700),
+        ] {
+            // One stream, two spellings: the composition stores the byte, the
+            // tier the same value zero-extended to a `u16` code.
+            let bytes: Vec<u8> = fill(n * (k / 8), 0x516, |x| x as u8);
+            let codes: Vec<u16> = bytes.iter().map(|&b| u16::from(b)).collect();
+
+            // The tier against the dense driver's bytes at every offer --- the
+            // gate `CK-10` runs the composition through, unchanged.
+            every_traversal_agrees("Sign<8>", tier, &codes, m, k, n);
+
+            // And the two spellings against each other directly: equal decodes
+            // under different kappa labels, so identical bytes (`CK-05`
+            // restated for this pair), through the packed route and through
+            // the table.
+            let a: Vec<i8> = fill(m * k, 0xa11, |x| ((x % 255) as i64 - 127) as i8);
+            let w_packed =
+                CodedMatrix::new(composition, n, k, &bytes).expect("the codes describe n x k");
+            let w_tier = CodedMatrix::new(tier, n, k, &codes).expect("the codes describe n x k");
+            for traversal in [Traversal::Tabulated, Traversal::Blocked] {
+                let (from_composition, _) =
+                    tabulated(&w_packed, &a, m, n, traversal, OFFER_STEPS, OFFER_STEPS, 0);
+                let (from_tier, census) =
+                    tabulated(&w_tier, &a, m, n, traversal, OFFER_STEPS, OFFER_STEPS, 0);
+                assert_eq!(
+                    from_composition, from_tier,
+                    "Sign<8> {m}x{k}x{n} at {traversal:?}: the two spellings of one \
+                     decode must give the same bytes"
+                );
+                if traversal == Traversal::Tabulated {
+                    assert!(
+                        census.table_reads > 0,
+                        "Sign<8> {m}x{k}x{n}: the offer was sized for a table and none \
+                         was read ({census:?})"
+                    );
+                }
+            }
         }
     }
 

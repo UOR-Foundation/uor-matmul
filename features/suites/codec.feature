@@ -59,3 +59,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-10
     Then the claim holds byte for byte
+
+  @CK-11 @build
+  Scenario: The `Sign` tier decodes the `Packed<Grid<2>,8>` stream byte-identically and its index stream is the code stream
+    Given the standing corpus
+    When the suite exercises CK-11
+    Then the claim holds byte for byte
