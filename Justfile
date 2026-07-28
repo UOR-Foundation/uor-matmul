@@ -154,6 +154,16 @@ deny:
 cross: no-alloc cross-run
     cargo test -p uor-matmul-conformance --test environment
 
+# The bench half of `scaling`, on its own for the quick loop: one criterion
+# group per element type times this library beside every enabled oracle at
+# three shapes, byte-equality asserted inside each timed closure. A regression
+# against your own last run is a criterion baseline away ---
+# `--save-baseline before` before the change, `--baseline before` after.
+#
+# "Are we faster?", beside every enabled oracle. Seconds.
+bench:
+    cargo bench -p uor-matmul-validate
+
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a
 # fitted exponent with a confidence interval, against the same fit for the
 # oracle. Every figure it prints is `open`.
@@ -163,9 +173,8 @@ cross: no-alloc cross-run
 # they are run without it.
 #
 # Fitted scaling exponents against the oracle's, every figure `open`.
-scaling:
+scaling: bench
     cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
-    cargo bench -p uor-matmul-validate
 
 # CG-09: throughput against the degeneracy of the operand, over the large shapes
 # `just vv` has no time for. Minutes.

@@ -216,11 +216,17 @@ fn gmacs(macs: f64, secs: f64) -> f64 {
     macs / 1e9 / secs
 }
 
-/// Least squares in log-log space; returns the exponent against MAC count.
+/// Least squares in log-log space; returns the exponent of throughput against
+/// MAC count (positive: still speeding up with size; negative: degrading).
+///
+/// Non-finite points are dropped, not fitted: at the smallest shapes a call can
+/// land inside one tick of the clock, which reads as zero seconds and infinite
+/// throughput, and a fit that admits `inf` as a point reports `NaN` rather than
+/// a number. A disabled oracle is `NaN` for the same treatment.
 fn exponent(points: &[(f64, f64)]) -> f64 {
     let usable: Vec<(f64, f64)> = points
         .iter()
-        .filter(|(x, y)| *x > 0.0 && *y > 0.0)
+        .filter(|(x, y)| x.is_finite() && y.is_finite() && *x > 0.0 && *y > 0.0)
         .map(|(x, y)| (x.log10(), y.log10()))
         .collect();
     if usable.len() < 3 {
@@ -449,7 +455,7 @@ fn main() {
     }
 
     println!();
-    println!("# fitted exponent against MAC count, over the square sweep");
+    println!("# fitted exponent of throughput against MAC count, over the square sweep");
     for (name, pick) in [
         ("uor i8", 0usize),
         ("uor i32", 1),
