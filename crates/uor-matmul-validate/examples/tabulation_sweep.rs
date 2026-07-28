@@ -24,7 +24,7 @@ use uor_matmul_core::{
 use uor_matmul_gemm::{
     gemm_packed, gemm_tabulated, gemm_tabulated_counted, suggested_scratch, suggested_tabulation,
     suggested_tabulation_index, suggested_tabulation_lanes, suggested_tabulation_panel, Census,
-    GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
+    Collapse, GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
 };
 
 type Book<'a> = uor_matmul_codec::Book<'a, i8, Full<i8>, 256, 8>;
@@ -166,6 +166,7 @@ fn main() {
                         options(Traversal::Blocked),
                         &mut Scratch::with_accumulators(lanes, accumulators),
                         &mut Tabulation::with_index(words, ids),
+                        &mut Collapse::none(),
                     );
                 }
                 s.elapsed().as_secs_f64()
@@ -186,6 +187,7 @@ fn main() {
                     options(Traversal::OutputMajor),
                     &mut Scratch::none(),
                     &mut Tabulation::none(),
+                    &mut Collapse::none(),
                 );
             }
             s.elapsed().as_secs_f64()
@@ -211,6 +213,7 @@ fn main() {
                 options(Traversal::Blocked),
                 &mut Scratch::with_accumulators(&mut lanes, &mut accumulators),
                 &mut Tabulation::with_index(&mut words, &mut ids),
+                &mut Collapse::none(),
                 &mut census,
             );
             if census.table_reads > 0 {
@@ -325,6 +328,7 @@ fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
                 } else {
                     Tabulation::with_index(words, &mut none)
                 },
+                &mut Collapse::none(),
             );
         };
 

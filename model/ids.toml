@@ -192,6 +192,12 @@ suite = "determinism"
 statement = """Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block"""
 
 [[id]]
+id = "CD-15"
+level = "build"
+suite = "determinism"
+statement = """Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer"""
+
+[[id]]
 id = "CB-01"
 level = "build"
 suite = "backends"

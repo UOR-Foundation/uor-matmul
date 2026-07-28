@@ -62,6 +62,7 @@ use uor_matmul_kernels::{
     available_table_i16, available_table_i8, choose_table, packed_slot, portable_table,
 };
 
+use crate::collapse::{compact, distinct_rows, expand, Collapse};
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
 use crate::float::gemm_float;
@@ -1303,20 +1304,31 @@ impl Plan {
 /// `C := epilogue(A * W^T, C)`, with the table when the offers admit one.
 ///
 /// Returns `()`, for the same reason [`crate::gemm`] does.
+///
+/// `collapse` is the row side of the same offer [`Tabulation::with_index`] is
+/// the column side of: room to number the rows of `A` and hold the distinct
+/// ones, so the table is built once per *distinct* row rather than once per
+/// row (`CD-15`). It is the [`crate::Collapse`] buffer, unchanged --- `A` is
+/// dense here, so the pass, the compaction, and the expansion are literally
+/// [`crate::collapse`]'s. Offering none, or too little for what the pass
+/// finds, gives the same bytes from the uncollapsed traversal; and an
+/// epilogue that reads `C` declines it outright, because two rows with equal
+/// rows of `A` still have different outputs when the `C` they read differs.
 pub fn gemm_tabulated<E, Bd, C, O, Ep>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
+    collapse: &mut Collapse<'_, E, Bd>,
 ) where
-    E: Tabulated,
+    E: Tabulated + Hash,
     Bd: Bound,
-    C: Enumerable<E, Bd>,
+    C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    run(triple, epilogue, options, scratch, lanes, &mut ());
+    run(triple, epilogue, options, scratch, lanes, collapse, &mut ());
 }
 
 /// The same traversal, with the operation census written out.
@@ -1330,28 +1342,31 @@ pub fn gemm_tabulated_counted<E, Bd, C, O, Ep>(
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
+    collapse: &mut Collapse<'_, E, Bd>,
     census: &mut Census,
 ) where
-    E: Tabulated,
+    E: Tabulated + Hash,
     Bd: Bound,
-    C: Enumerable<E, Bd>,
+    C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    run(triple, epilogue, options, scratch, lanes, census);
+    run(triple, epilogue, options, scratch, lanes, collapse, census);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run<E, Bd, C, O, Ep, Lg>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
+    collapse: &mut Collapse<'_, E, Bd>,
     ledger: &mut Lg,
 ) where
-    E: Tabulated,
+    E: Tabulated + Hash,
     Bd: Bound,
-    C: Enumerable<E, Bd>,
+    C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
     Lg: Ledger,
@@ -1361,6 +1376,50 @@ fn run<E, Bd, C, O, Ep, Lg>(
         // Nothing to write. Not a special case: the loops below would do the same
         // thing, and saying so costs one comparison.
         return;
+    }
+
+    // The row collapse, before any traversal choice: two equal rows of `A`
+    // name the same sum against every column of `W`, so the product is
+    // computed once per *distinct* row and then expanded --- the same pass,
+    // compaction, and expansion [`crate::collapse`] runs, on an `A` that is
+    // always dense here (`CD-15`, mirroring `CD-12`). Every decline of the
+    // offer falls through to the ordinary path, at the same bytes.
+    //
+    // An epilogue that reads `C` gives two rows different answers from the
+    // same row of `A`, so there is no shared meaning to find. A declaration,
+    // read once.
+    if !epilogue.reads_c() {
+        let found = distinct_rows(&triple.a, collapse.index)
+            .filter(|&d| d < shape.m)
+            .filter(|&d| compact(&triple.a, collapse.index, collapse.rows, d));
+        if let Some(d) = found {
+            // The compacted product is a product in its own right: `d x k`
+            // against the same `W`, written to the first `d` rows of the same
+            // `C`. The recursion plans at `m = d` --- offer checks and the
+            // column collapse included --- and is offered no row collapse: the
+            // compacted rows are pairwise distinct, so a second pass could
+            // find nothing.
+            let compacted = {
+                let a = MatView::row_major(&collapse.rows[..d * shape.k], d, shape.k);
+                match (a, triple.c.top_rows(d)) {
+                    (Some(a), Some(c)) => TabulatedTriple::new(a, triple.w, c).ok(),
+                    _ => None,
+                }
+            };
+            if let Some(mut compacted) = compacted {
+                run(
+                    &mut compacted,
+                    epilogue,
+                    options,
+                    scratch,
+                    lanes,
+                    &mut Collapse::none(),
+                    ledger,
+                );
+                expand(&mut triple.c, &collapse.index[..shape.m], shape.m, shape.n);
+                return;
+            }
+        }
     }
 
     let space = C::CODE_SPACE;
@@ -2352,6 +2411,7 @@ fn stream<E, Bd, C, O, Ep, Lg>(
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use crate::collapse::suggested_collapse_index;
     use crate::driver::gemm;
     use crate::epilogue::Linear;
     use std::vec;
@@ -2425,6 +2485,7 @@ mod tests {
     /// scaled them together left the disagreeing case unreachable, and a
     /// narrowed column block that skipped a repeated column without filling it
     /// lived there --- silently, at 896 wrong cells out of 1024.
+    #[allow(clippy::too_many_arguments)]
     fn tabulated<C: Enumerable<i8, Full<i8>> + Copy>(
         w: &CodedMatrix<'_, i8, Full<i8>, C>,
         a: &[i8],
@@ -2433,6 +2494,7 @@ mod tests {
         traversal: Traversal,
         acc_offer: usize,
         aux_offer: usize,
+        collapse_offer: usize,
     ) -> (Vec<i32>, Census) {
         let k = w.cols();
         let shape = Shape { m, k, n };
@@ -2459,18 +2521,38 @@ mod tests {
         let want_panel = suggested_tabulation_panel(C::CODE_SPACE, block)
             .max(n * k + crate::suggested_scratch(shape));
         let mut panel = vec![A8::ZERO; scale(want_panel, aux_offer)];
+        // The row-collapse offer is a third knob, and not a fraction like the
+        // other two: `0` offers nothing and anything else is the exact number
+        // of `Alphabet` elements the distinct rows are allowed to occupy, with
+        // the index sized for the pass. A short rows offer is how the decline
+        // is exercised (`CD-15`).
+        let mut collapse_index = vec![
+            0usize;
+            if collapse_offer == 0 {
+                0
+            } else {
+                suggested_collapse_index(m)
+            }
+        ];
+        let mut collapse_rows = vec![A8::ZERO; collapse_offer];
         let mut c = vec![0i32; m * n];
         let mut census = Census::default();
         {
             let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
             let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
             let mut tr = TabulatedTriple::new(av, *w, cv).unwrap();
+            let mut collapse = if collapse_offer == 0 {
+                Collapse::none()
+            } else {
+                Collapse::new(&mut collapse_index, &mut collapse_rows)
+            };
             gemm_tabulated_counted(
                 &mut tr,
                 &Linear::OVERWRITE,
                 options(traversal),
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
                 &mut Tabulation::with_index(&mut lane_words, &mut ids),
+                &mut collapse,
                 &mut census,
             );
         }
@@ -2503,7 +2585,7 @@ mod tests {
             Traversal::OutputMajor,
         ] {
             for offer in offers {
-                let (got, census) = tabulated(&w, &a, m, n, traversal, offer, offer);
+                let (got, census) = tabulated(&w, &a, m, n, traversal, offer, offer, 0);
                 assert_eq!(
                     got, want,
                     "{label} {m}x{k}x{n}: {traversal:?} at an offer of {offer} \
@@ -2526,7 +2608,7 @@ mod tests {
         for acc_offer in 1..=OFFER_STEPS {
             for aux_offer in 1..=OFFER_STEPS {
                 let (got, census) =
-                    tabulated(&w, &a, m, n, Traversal::Tabulated, acc_offer, aux_offer);
+                    tabulated(&w, &a, m, n, Traversal::Tabulated, acc_offer, aux_offer, 0);
                 assert_eq!(
                     got, want,
                     "{label} {m}x{k}x{n}: accumulators at {acc_offer}/{OFFER_STEPS} and \
@@ -2539,15 +2621,33 @@ mod tests {
         // The collapse is reached and is not vacuous: an operand whose columns
         // repeat is charged for the ones it has.
         if C::CODE_SPACE > 0 {
-            let (_, full) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
+            let (_, full) = tabulated(
+                &w,
+                &a,
+                m,
+                n,
+                Traversal::Tabulated,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
             assert!(full.table_reads > 0 || full.kernel_calls > 0);
         }
 
         // And the comparison is not vacuous: each of the three factorizations is
         // reached by some offer, and the census says which ran rather than the
         // predicate being asked to say it again.
-        let (_, with) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
-        let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0, 0);
+        let (_, with) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0, 0, 0);
         assert!(
             with.table_reads > 0,
             "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
@@ -2566,6 +2666,7 @@ mod tests {
             Traversal::OutputMajor,
             OFFER_STEPS,
             OFFER_STEPS,
+            0,
         );
         assert_eq!(streamed.table_reads, 0);
         assert_eq!(streamed.multiplies, (m * k * n) as u64);
@@ -2948,6 +3049,115 @@ mod tests {
         }
     }
 
+    /// `CD-15`: collapsing equal rows of `A` in the tabulated traversal cannot
+    /// change a byte, at every degeneracy and every offer.
+    ///
+    /// Row `i` of `A` is row `i % d`, so the operand has exactly `d` distinct
+    /// rows and the table build may be charged `d * k * code_space` instead of
+    /// `m * k * code_space` --- the closed form `CU-06` pins at `d = m`, which
+    /// is also the charge when the collapse is offered nothing or finds
+    /// nothing. Two assertions per case: the bytes are the dense driver's, and
+    /// the census is the charge the offer admits. Without the second this test
+    /// passed with the collapse silently inert, which is what it was before
+    /// this ID existed.
+    #[test]
+    fn collapsing_equal_rows_of_a_cannot_change_a_byte_cd_15() {
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        let space = 256usize;
+        let block = 8usize;
+        for &(m, k, n) in &[(8usize, 32usize, 64usize), (16, 64, 512), (7, 24, 40)] {
+            let stream: Vec<u16> = fill(n * (k / block), 0xb00c, |x| (x % 400) as u16);
+            let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+            for d in [1usize, 2, m / 2, m] {
+                let d = d.max(1).min(m);
+                // `d` distinct rows, numbered by first occurrence: row `i` is
+                // row `i % d`, and the first `d` are pairwise distinct.
+                let a: Vec<i8> = (0..m * k)
+                    .map(|x| {
+                        let (row, col) = (x / k, x % k);
+                        (((row % d) * 31 + col * 17) % 251) as i8
+                    })
+                    .collect();
+                let want = reference(&w, &a, m, k, n);
+                // No offer, a rows offer too short for the distinct rows,
+                // exactly enough, and the worst case.
+                for rows_offer in [0usize, k / 2, d * k, m * k] {
+                    let (got, census) = tabulated(
+                        &w,
+                        &a,
+                        m,
+                        n,
+                        Traversal::Tabulated,
+                        OFFER_STEPS,
+                        OFFER_STEPS,
+                        rows_offer,
+                    );
+                    assert_eq!(
+                        got, want,
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the collapse must give \
+                         the dense driver's bytes ({census:?})"
+                    );
+                    assert!(
+                        census.table_reads > 0,
+                        "{m}x{k}x{n} d={d}: the offer was sized for a table and none was read"
+                    );
+                    // The build charges per *distinct* row when the collapse
+                    // ran, and per row when anything declined it.
+                    let charged = if rows_offer >= d * k && d < m { d } else { m };
+                    assert_eq!(
+                        census.multiplies,
+                        (charged * k * space) as u64,
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the build must charge \
+                         per distinct row ({census:?})"
+                    );
+                }
+            }
+        }
+
+        // Both collapse axes at once: two distinct rows of `A` against a `W`
+        // with four distinct columns. The two expansions read their own
+        // indices, and the census says so from both sides at once.
+        let (m, k, n) = (16usize, 64usize, 512usize);
+        let (rows_d, cols_d) = (2usize, 4usize);
+        let a: Vec<i8> = (0..m * k)
+            .map(|x| {
+                let (row, col) = (x / k, x % k);
+                (((row % rows_d) * 31 + col * 17) % 251) as i8
+            })
+            .collect();
+        let base: Vec<u16> = fill(cols_d * (k / block), 0xd0b, |x| (x % 400) as u16);
+        let stream: Vec<u16> = (0..n * (k / block))
+            .map(|x| base[(x / (k / block) % cols_d) * (k / block) + x % (k / block)])
+            .collect();
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let want = reference(&w, &a, m, k, n);
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            rows_d * k,
+        );
+        assert_eq!(
+            got, want,
+            "both axes: the dense driver's bytes ({census:?})"
+        );
+        assert_eq!(
+            census.multiplies,
+            (rows_d * k * space) as u64,
+            "both axes: the build charges per distinct row ({census:?})"
+        );
+        assert_eq!(
+            census.table_reads,
+            (rows_d * cols_d * (k / block)) as u64,
+            "both axes: the column loop charges per distinct column ({census:?})"
+        );
+    }
+
     /// `CT-07`: tabulation is total. Every value the code type can hold indexes a
     /// live table entry, so no code stream can produce a miss or a panic.
     ///
@@ -2964,7 +3174,16 @@ mod tests {
         let w = CodedMatrix::new(book, n, k, &stream).expect("65536 rows of one code");
         let a: Vec<i8> = fill(k, 0xfeed, |x| ((x % 255) as i64 - 127) as i8);
 
-        let (got, census) = tabulated(&w, &a, 1, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            1,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
         assert!(census.table_reads > 0, "the table must have been read");
         assert_eq!(got, reference(&w, &a, 1, k, n));
 
@@ -3025,7 +3244,16 @@ mod tests {
         // right, and it made this test fail on whichever CI runner happened to
         // have VNNI while passing on the ones that did not. The predicate's own
         // claim is `CM-04`'s, and it asserts that VNNI case directly.
-        let (got, census) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
         assert_eq!(
             got,
             reference(&w, &a, m, k, n),
@@ -3077,6 +3305,7 @@ mod tests {
             Traversal::OutputMajor,
             OFFER_STEPS,
             OFFER_STEPS,
+            0,
         );
         assert_eq!(streamed, got);
         assert_eq!(plain.multiplies, dense);
