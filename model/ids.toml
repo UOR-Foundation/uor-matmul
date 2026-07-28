@@ -444,6 +444,12 @@ suite = "codec"
 statement = """The `Sign` tier decodes the same alphabet stream as the `Packed<Grid<2>,8>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream"""
 
 [[id]]
+id = "CK-12"
+level = "build"
+suite = "codec"
+statement = """The `Ternary` tier decodes the same alphabet stream as the `Packed<Grid<4>,4>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream"""
+
+[[id]]
 id = "CK-13"
 level = "build"
 suite = "codec"

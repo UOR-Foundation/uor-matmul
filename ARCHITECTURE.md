@@ -16,7 +16,7 @@ having the most instruction support and the most external oracles.
 | Crate | Contains | `unsafe` | `alloc` | float arithmetic |
 | --- | --- | --- | --- | --- |
 | `uor-matmul-core` | alphabet, accumulator, reference accumulation, views, the error surface | forbidden | none | none |
-| `uor-matmul-codec` | the `Codec` trait, eight tiers, `CodedMatrix`, the kappa manifest, the E8 table | forbidden | none | none |
+| `uor-matmul-codec` | the `Codec` trait, ten tiers, `CodedMatrix`, the kappa manifest, the E8 table | forbidden | none | none |
 | `uor-matmul-kernels` | one module per ISA, each a `KernelSpec` value | permitted, documented | none | none |
 | `uor-matmul-gemm` | the driver: traversals, scratch, epilogue, partition | none | none | none |
 | `uor-matmul` | the facade and the raw-pointer face | the raw face only | none | none |

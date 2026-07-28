@@ -71,3 +71,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-11
     Then the claim holds byte for byte
+
+  @CK-12 @build
+  Scenario: The `Ternary` tier decodes the `Packed<Grid<4>,4>` stream byte-identically and its index stream is the code stream
+    Given the standing corpus
+    When the suite exercises CK-12
+    Then the claim holds byte for byte

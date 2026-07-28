@@ -7,7 +7,7 @@
 
 use uor_matmul_codec::{
     canonicalize, Arena, Book, Codec, CodedMatrix, Enumerable, Grid, Identity, Offset, Packed,
-    Runs, Sign, Transcode,
+    Runs, Sign, Ternary, Transcode,
 };
 use uor_matmul_core::{
     as_alphabet_full, as_alphabet_whole, dot_ref, Alphabet, Bnd, Bound, Element, FloatElement,
@@ -562,6 +562,14 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
     let sign = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
     laws("Sign<8>", &sign, 8, |f: &mut dyn FnMut(u16)| every_code(f));
 
+    // The ternary tier, for the same reason one level up: a base-4 digit
+    // stream is a power-of-two code space (4^BLK = 2^(2BLK)), so its code is
+    // the index at every block width too.
+    let ternary = Ternary::<i8, Full<i8>, 4>::new().expect("the full alphabet admits 0 and +-1");
+    laws("Ternary<4>", &ternary, 4, |f: &mut dyn FnMut(u16)| {
+        every_code(f)
+    });
+
     // A zero point relabels the image and not the code space, so the offset
     // tier's enumeration is the inner one and needs no new law.
     // The inner bound has to leave the zero point room, which is the O(1) check
@@ -691,4 +699,65 @@ fn the_sign_tier_decodes_the_compositions_stream_ck_11() {
     // An alphabet too narrow for +-1 has no sign codec, and that is decided at
     // construction, before any arithmetic (C6).
     assert!(Sign::<i8, Bnd<0>, 8>::new().is_none());
+}
+
+/// `CK-12`: the `Ternary` tier decodes the same alphabet stream as the
+/// `Packed<Grid<4>,4>` spelling, and its index stream is the code stream.
+///
+/// The decode check is exhaustive over the shared code space --- all 256 codes
+/// at block 4, through `decode_into` --- so the digit convention is pinned
+/// against the composition's own decode rather than restated alongside it: low
+/// digit first, digit `d` mapping to `[-1, 0, +1, 0][d]`, the dead digit 3
+/// decoding to 0 like the table's dead entry does. The index-stream check is
+/// the tier's reason to exist, and the same one the sign tier's is: a packed
+/// byte's index is a mixed-radix decomposition, so the composition *builds*
+/// the stream the tabulated traversal gathers from, where a `Ternary` code
+/// already is one.
+#[test]
+fn the_ternary_tier_decodes_the_compositions_stream_ck_12() {
+    // The table `CK-10` spells the composition with, dead entry included.
+    let table: [A8; 4] = [
+        Alphabet::of(-1),
+        Alphabet::of(0),
+        Alphabet::of(1),
+        Alphabet::of(0),
+    ];
+    let packed = Packed::<_, 4>::new(Grid::<i8, Full<i8>, 4>::new(&table)).expect("4 divides 8");
+    let ternary = Ternary::<i8, Full<i8>, 4>::new().expect("the full alphabet admits 0 and +-1");
+
+    let mut want = [A8::ZERO; 4];
+    let mut got = [A8::ZERO; 4];
+    for code in 0..256u16 {
+        assert_eq!(packed.decode_into(code as u8, &mut want), 4);
+        assert_eq!(ternary.decode_into(code, &mut got), 4);
+        assert_eq!(
+            want, got,
+            "code {code:#04x} decodes differently under the two spellings"
+        );
+    }
+
+    // The index stream is the code stream: the same memory, not a copy of it.
+    let codes: Vec<u16> = (0..256).collect();
+    let stream = Ternary::<i8, Full<i8>, 4>::as_index_stream(&codes)
+        .expect("a Ternary code addresses the enumeration");
+    assert!(
+        core::ptr::eq(stream.as_ptr(), codes.as_ptr()),
+        "the stream must be borrowed, not built"
+    );
+
+    // The composition cannot answer it, which is the gap this tier exists to
+    // close. If `Packed` ever could, this assertion --- not a benchmark --- is
+    // what should be revisited first.
+    assert!(
+        <Packed<Grid<'_, i8, Full<i8>, 4>, 4> as uor_matmul_codec::Enumerable<
+            i8,
+            Full<i8>,
+        >>::as_index_stream(&[0u8; 4])
+        .is_none()
+    );
+
+    // An alphabet too narrow for +-1 has no ternary codec --- `0` is in every
+    // alphabet --- and that is decided at construction, before any arithmetic
+    // (C6).
+    assert!(Ternary::<i8, Bnd<0>, 4>::new().is_none());
 }
