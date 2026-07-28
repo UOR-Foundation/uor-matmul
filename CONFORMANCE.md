@@ -109,6 +109,7 @@ returns an error the model does not sanction.
 | `CK-09` | `build` | `Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type |
 | `CK-10` | `build` | An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols |
 | `CK-10` | `build` | Sign-coded weights (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) produce byte-identical output to the dense spelling of the same decoded operand, packed and tabulated, and the ternary spelling (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) likewise |
+| `CK-11` | `build` | The `Sign` tier decodes the same alphabet stream as the `Packed<Grid<2>,8>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream |
 
 ## `CX-*` --- Cross-library agreement against an external library
 

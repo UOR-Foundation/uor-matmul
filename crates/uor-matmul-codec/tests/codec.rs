@@ -6,7 +6,8 @@
 //! upstream and says nothing about any binary in this repository (§2, R4).
 
 use uor_matmul_codec::{
-    canonicalize, Arena, Book, Codec, CodedMatrix, Grid, Identity, Offset, Packed, Runs, Transcode,
+    canonicalize, Arena, Book, Codec, CodedMatrix, Enumerable, Grid, Identity, Offset, Packed,
+    Runs, Sign, Transcode,
 };
 use uor_matmul_core::{
     as_alphabet_full, as_alphabet_whole, dot_ref, Alphabet, Bnd, Bound, Element, FloatElement,
@@ -555,6 +556,12 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
         every_code(f)
     });
 
+    // The sign tier. Its code *is* the index at every block width, so the
+    // third law's `Some` arm is the whole point of the tier rather than a
+    // power-of-two coincidence.
+    let sign = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
+    laws("Sign<8>", &sign, 8, |f: &mut dyn FnMut(u16)| every_code(f));
+
     // A zero point relabels the image and not the code space, so the offset
     // tier's enumeration is the inner one and needs no new law.
     // The inner bound has to leave the zero point room, which is the O(1) check
@@ -633,4 +640,55 @@ fn arena_construction_is_canonical_ck_10() {
             .to_bits(),
         values[1].to_bits()
     );
+}
+
+/// `CK-11`: the `Sign` tier decodes the same alphabet stream as the
+/// `Packed<Grid<2>,8>` spelling, and its index stream is the code stream.
+///
+/// The decode check is exhaustive over the shared code space --- all 256 codes
+/// at block 8, through `decode_into` --- so the bit convention is pinned
+/// against the composition's own decode rather than restated alongside it. The
+/// index-stream check is the tier's reason to exist: a packed byte's index is
+/// a mixed-radix decomposition, so the composition *builds* the stream the
+/// tabulated traversal gathers from, where a `Sign` code already is one.
+#[test]
+fn the_sign_tier_decodes_the_compositions_stream_ck_11() {
+    let table: [A8; 2] = [Alphabet::of(-1), Alphabet::of(1)];
+    let packed = Packed::<_, 8>::new(Grid::<i8, Full<i8>, 2>::new(&table)).expect("8 divides 8");
+    let sign = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
+
+    let mut want = [A8::ZERO; 8];
+    let mut got = [A8::ZERO; 8];
+    for code in 0..256u16 {
+        assert_eq!(packed.decode_into(code as u8, &mut want), 8);
+        assert_eq!(sign.decode_into(code, &mut got), 8);
+        assert_eq!(
+            want, got,
+            "code {code:#04x} decodes differently under the two spellings"
+        );
+    }
+
+    // The index stream is the code stream: the same memory, not a copy of it.
+    let codes: Vec<u16> = (0..256).collect();
+    let stream = Sign::<i8, Full<i8>, 8>::as_index_stream(&codes)
+        .expect("a Sign code addresses the enumeration");
+    assert!(
+        core::ptr::eq(stream.as_ptr(), codes.as_ptr()),
+        "the stream must be borrowed, not built"
+    );
+
+    // The composition cannot answer it, which is the gap this tier exists to
+    // close. If `Packed` ever could, this assertion --- not a benchmark --- is
+    // what should be revisited first.
+    assert!(
+        <Packed<Grid<'_, i8, Full<i8>, 2>, 8> as uor_matmul_codec::Enumerable<
+            i8,
+            Full<i8>,
+        >>::as_index_stream(&[0u8; 4])
+        .is_none()
+    );
+
+    // An alphabet too narrow for +-1 has no sign codec, and that is decided at
+    // construction, before any arithmetic (C6).
+    assert!(Sign::<i8, Bnd<0>, 8>::new().is_none());
 }

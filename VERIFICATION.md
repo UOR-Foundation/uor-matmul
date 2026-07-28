@@ -63,6 +63,7 @@ of these has been checked by planting the defect it exists to catch:
 | `CB-09` | the modular lane's `place` written into the wrong limb (`<< 32` for `Mod32`, `<< 64` for `Mod64`), one at a time --- each failed its own family's end-to-end byte comparison and not the other's | yes |
 | `CU-08` | the modular table lane admitted under `Saturating` as well as `Wrapping` --- the census half caught the table running where the exact lane must stream | yes |
 | `CB-10` | a sign inversion inside the bound-1 build (the `w == 1` and `w == -1` arms swapped, in both row-specialized and any-row forms) --- the parity sweep failed at the first tile, and the census test's byte assertion failed with the negated product. The AVX2 twin is gated by the same parity test on x86 CI. Also: the bound-1 build's `max_bound` raised to admit bound 2 --- the parity test failed on the missing bound-1 declaration, with the selection half's `choose_table` assertions behind it | yes |
+| `CK-11` | the `Sign` decode's bit convention inverted (set is `-1`, clear is `+1`) --- both `CK-11` tests failed, the codec-level one on the first exhaustive code and the gemm-level one on the first shape. `CK-09` did *not* fire: the inversion permutes the table, which the enumeration laws are blind to by design --- the cross-spelling byte identity is the gate for the convention, and it held | yes |
 
 `audit-disassembly` deliberately does *not* catch a float add the optimizer
 removed, because such an add is not in the shipped kernel. The gate reports the

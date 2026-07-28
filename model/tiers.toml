@@ -44,6 +44,15 @@ note = "any codebook; E8 is Book<256, 8>"
 honesty = "build"
 
 [[tier]]
+id = "Sign"
+rust = "Sign<E, Bd, BLK>"
+code = "u16"
+block = "BLK"
+table = "none: the codebook is the constant {-1, +1}"
+note = "weights in {-1, +1}, one bit per element. Bit t of the code is element t; set is +1, clear is -1, low bit first (normative, CK-03's order). The same decode as the Packed<Grid<2>,8> spelling (CK-11) with the code *being* the index, so as_index_stream always answers Some and the traversal builds nothing."
+honesty = "build"
+
+[[tier]]
 id = "Offset"
 rust = "Offset<C>"
 code = "C::Code"
@@ -172,6 +181,16 @@ rows = 16
 lanes_per_add = 8
 break_even_n = 683
 note = "E8. The row to read first: 683 is below every transformer layer width in practical use, and the amortization is over n, so it holds for a single decoded token as much as for a prefill."
+honesty = "build"
+
+[[tabulation]]
+codec = "Sign<8>"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 8
+break_even_n = 683
+note = "the sign tier as its own codec: one bit per element, the code being the index. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even --- what changes is not the op count but the gather, which reads the operand's own memory instead of a built index stream."
 honesty = "build"
 
 [[tabulation]]

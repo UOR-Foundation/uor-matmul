@@ -16,18 +16,24 @@
 
 use std::time::Instant;
 
-use uor_matmul_codec::{e8_codec, e8_table, Codec, CodedMatrix, Enumerable};
+use uor_matmul_codec::{e8_codec, e8_table, Codec, CodedMatrix, Enumerable, Grid, Packed, Sign};
 use uor_matmul_core::{
-    as_alphabet_full, AccOf, Accumulator, Alphabet, EncodeMode, Full, MatView, MatViewMut, Shape,
-    Traversal, Triple,
+    as_alphabet, as_alphabet_full, AccOf, Accumulator, Alphabet, Bnd, Bound, EncodeMode, Full,
+    MatView, MatViewMut, Shape, Traversal, Triple,
 };
 use uor_matmul_gemm::{
-    gemm_packed, gemm_tabulated, gemm_tabulated_counted, suggested_scratch, suggested_tabulation,
-    suggested_tabulation_index, suggested_tabulation_lanes, suggested_tabulation_panel, Census,
-    Collapse, GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
+    gemm, gemm_packed, gemm_tabulated, gemm_tabulated_counted, suggested_scratch,
+    suggested_tabulation, suggested_tabulation_index, suggested_tabulation_lanes,
+    suggested_tabulation_panel, Census, Collapse, GemmOptions, Linear, Scratch, TabulatedTriple,
+    Tabulation,
 };
 
 type Book<'a> = uor_matmul_codec::Book<'a, i8, Full<i8>, 256, 8>;
+
+/// The sign tier's composition spelling (`CK-10`): one-bit codes, eight to a
+/// byte, over a two-entry table. Its code space and block are `Book<256,8>`'s
+/// numbers --- and the dedicated `Sign` tier's (`CK-11`).
+type PackedSign<'a, Bd> = Packed<Grid<'a, i8, Bd, 2>, 8>;
 
 /// One timed product, with every buffer the traversal may take.
 type Run<'a> = dyn FnMut(
@@ -81,6 +87,7 @@ fn main() {
     println!("| --- | --- | --- | --- | --- | --- |");
 
     degeneracy(&book, space, block);
+    sign_stream(book);
 
     for &(m, k, n) in &[
         (1usize, 1024usize, 4096usize),
@@ -400,4 +407,250 @@ fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
         }
         d = (d * 8).min(n);
     }
+}
+
+/// The sign composition against the index stream it cannot spell --- and the
+/// dedicated tier that can.
+///
+/// `Packed<Grid<2>,8>` is the sign tier's composition spelling (`CK-10`): a
+/// code space of 256 and a block of 8, `Book<256,8>`'s numbers exactly. The
+/// one gather-path difference is `Enumerable::as_index_stream`, which `Book`
+/// answers and `Packed` cannot --- a packed byte's index is a mixed-radix
+/// decomposition, not the byte --- so the composition pays one `index_of`
+/// pass over its codes where the book reads the operand's own memory. The
+/// dedicated `Sign` tier (`CK-11`) spells the same decode with the `u16` code
+/// *being* the index, so it borrows exactly as the book does. This sweep
+/// prices both differences, at the one-row and small tiles where the index
+/// stream was documented to matter.
+///
+/// Four columns per shape. The book is the index-stream path. The sign
+/// composition at `Full<i8>` keeps the general build, so its ratio against the
+/// book isolates the gather. The `Sign<8>` column is the same decode through
+/// the dedicated tier: its ratio against the book prices everything *but* the
+/// borrowed stream (a wider code word, a table of sign flips against the E8
+/// lattice's), and its ratio against the composition is what the missing
+/// stream was worth. The sign composition at `Bnd<1>` --- activations and
+/// weights both in `{-1,+1}`, so the bound-1 build is the admissible one ---
+/// is the tier as it stands, and its ratio against the `Full` column is what
+/// the adds-only build is worth on the clock. The census column is the build's
+/// multiplies, which is the same fact counted rather than timed.
+///
+/// Every figure is `open`. Each side is asserted against its own dense
+/// reference once per shape, and the census is asserted to have read a table,
+/// so a silently declined table fails the sweep rather than misreporting it.
+fn sign_stream(book: Book<'_>) {
+    let sign_full_table: [Alphabet<i8, Full<i8>>; 2] = [Alphabet::of(-1), Alphabet::of(1)];
+    let sign_full: PackedSign<'_, Full<i8>> =
+        Packed::<_, 8>::new(Grid::new(&sign_full_table)).expect("8 divides 8");
+    let sign_one_table: [Alphabet<i8, Bnd<1>>; 2] = [
+        Alphabet::new(-1).expect("|-1| <= 1"),
+        Alphabet::new(1).expect("|1| <= 1"),
+    ];
+    let sign_b1: PackedSign<'_, Bnd<1>> =
+        Packed::<_, 8>::new(Grid::new(&sign_one_table)).expect("8 divides 8");
+    let tier = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
+
+    println!();
+    println!("## The sign composition against the index stream");
+    println!();
+    println!("Gmac/s, `Traversal::Tabulated` at the full offer. `sign` is");
+    println!("`Packed<Grid<2>,8>`: at `Full<i8>` with the general build, and at");
+    println!("`Bnd<1>` with the adds-only build. `Sign<8>` is the dedicated tier");
+    println!("(`CK-11`): the same decode, the code being the index. `build mul` is");
+    println!("the census's multiply count for the `Full` column against the");
+    println!("`Bnd<1>` one.");
+    println!();
+    println!("| `m x k x n` | `Book<256,8>` | sign, `Full` | `Sign<8>` | sign, `Bnd<1>` | sign/book | tier/book | b1/book | b1/full | build mul |");
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+
+    for &(m, k, n) in &[
+        (1usize, 1024usize, 1024usize),
+        (1, 1024, 4096),
+        (1, 4096, 1024),
+        (1, 4096, 4096),
+        (4, 1024, 1024),
+        (4, 1024, 4096),
+        (4, 4096, 1024),
+        (4, 4096, 4096),
+        (16, 1024, 1024),
+        (16, 1024, 4096),
+        (16, 4096, 1024),
+        (16, 4096, 4096),
+    ] {
+        let macs = (m * k * n) as f64;
+        let blocks = k / 8;
+        let a: Vec<i8> = fill(m * k, 0xa11)
+            .into_iter()
+            .map(|x| ((x % 255) as i64 - 127) as i8)
+            .collect();
+        // At `Bnd<1>` the activations are signs too: the adds-only build is
+        // admissible only when both operands are.
+        let a1: Vec<i8> = fill(m * k, 0xac7)
+            .into_iter()
+            .map(|x| if x & 1 == 0 { -1 } else { 1 })
+            .collect();
+        let book_codes: Vec<u16> = fill(n * blocks, 0xb00c)
+            .into_iter()
+            .map(|x| (x % 256) as u16)
+            .collect();
+        let sign_codes: Vec<u8> = fill(n * blocks, 0x516)
+            .into_iter()
+            .map(|x| x as u8)
+            .collect();
+        // The tier's stream is the composition's, zero-extended: the same
+        // bits, spelling the same decoded operand.
+        let tier_codes: Vec<u16> = sign_codes.iter().map(|&b| u16::from(b)).collect();
+
+        let (t_book, _) = side(book, &book_codes, &a, m, k, n);
+        let (t_sign, sign_census) = side(sign_full, &sign_codes, &a, m, k, n);
+        let (t_tier, _) = side(tier, &tier_codes, &a, m, k, n);
+        let (t_b1, b1_census) = side(sign_b1, &sign_codes, &a1, m, k, n);
+
+        let g = |t: f64| macs / t / 1e9;
+        println!(
+            "| `{m}x{k}x{n}` | {:.2} | {:.2} | {:.2} | {:.2} | {:.2}x | {:.2}x | {:.2}x | {:.2}x | {} -> {} |",
+            g(t_book),
+            g(t_sign),
+            g(t_tier),
+            g(t_b1),
+            t_book / t_sign,
+            t_book / t_tier,
+            t_book / t_b1,
+            t_sign / t_b1,
+            sign_census.multiplies,
+            b1_census.multiplies,
+        );
+    }
+}
+
+/// One side of the sign sweep: a forced tabulated run, best of a 0.40 s
+/// budget, asserted against the dense driver's bytes on the same operands.
+fn side<Bd: Bound, C: Enumerable<i8, Bd> + Copy>(
+    codec: C,
+    codes: &[C::Code],
+    a: &[i8],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> (f64, Census) {
+    let shape = Shape { m, k, n };
+    let space = <C as Enumerable<i8, Bd>>::CODE_SPACE;
+    let block = <C as Codec<i8, Bd>>::MAX_BLOCK;
+    let w = CodedMatrix::new(codec, n, k, codes).expect("the codes describe n x k");
+
+    // The dense reference, once: the same weights decoded, through the driver
+    // whose bytes every traversal in this library is measured against.
+    let mut b = vec![0i8; k * n];
+    for p in 0..k {
+        for j in 0..n {
+            b[p * n + j] = w.at(j, p).get();
+        }
+    }
+    let want = {
+        let mut c = vec![0i32; m * n];
+        let av = MatView::row_major(
+            as_alphabet::<i8, Bd>(a).expect("the activations fit the declared bound"),
+            m,
+            k,
+        )
+        .unwrap();
+        let bv = MatView::row_major(
+            as_alphabet::<i8, Bd>(&b).expect("decoded weights are in the alphabet by construction"),
+            k,
+            n,
+        )
+        .unwrap();
+        let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+        let mut tr = Triple::new(av, bv, cv).unwrap();
+        gemm(
+            &mut tr,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                traversal: Traversal::Blocked,
+                encode: EncodeMode::Wrapping,
+                ..Default::default()
+            },
+            &mut Scratch::none(),
+        );
+        c
+    };
+
+    let mut accumulators =
+        vec![<AccOf<i8> as Accumulator>::ZERO; suggested_tabulation::<i8, Bd>(shape, space, block)];
+    let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Bd>(shape, space, block)];
+    let mut ids = vec![0usize; suggested_tabulation_index(shape)];
+    // The panel offer is the table's own, so the tile-kernel route cannot
+    // answer for the table and the `Tabulated` request is what runs.
+    let mut lanes = vec![Alphabet::<i8, Bd>::ZERO; suggested_tabulation_panel(space, block)];
+    let mut c = vec![0i32; m * n];
+
+    let t = {
+        let (a, w, c, lanes, accumulators, words, ids) = (
+            &a,
+            &w,
+            &mut c,
+            &mut lanes,
+            &mut accumulators,
+            &mut words,
+            &mut ids,
+        );
+        best(|| {
+            let s = Instant::now();
+            {
+                let av = MatView::row_major(
+                    as_alphabet::<i8, Bd>(a).expect("the activations fit the declared bound"),
+                    m,
+                    k,
+                )
+                .unwrap();
+                let cv = MatViewMut::row_major(c, m, n).unwrap();
+                let mut tr = TabulatedTriple::new(av, *w, cv).unwrap();
+                gemm_tabulated(
+                    &mut tr,
+                    &Linear::OVERWRITE,
+                    GemmOptions {
+                        traversal: Traversal::Tabulated,
+                        encode: EncodeMode::Wrapping,
+                        ..Default::default()
+                    },
+                    &mut Scratch::with_accumulators(lanes, accumulators),
+                    &mut Tabulation::with_index(words, ids),
+                    &mut Collapse::none(),
+                );
+            }
+            s.elapsed().as_secs_f64()
+        })
+    };
+    assert_eq!(c, want, "the table must give the dense driver's bytes");
+
+    let mut census = Census::default();
+    let mut out = vec![0i32; m * n];
+    {
+        let av = MatView::row_major(
+            as_alphabet::<i8, Bd>(a).expect("the activations fit the declared bound"),
+            m,
+            k,
+        )
+        .unwrap();
+        let cv = MatViewMut::row_major(&mut out, m, n).unwrap();
+        let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+        gemm_tabulated_counted(
+            &mut tr,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                traversal: Traversal::Tabulated,
+                encode: EncodeMode::Wrapping,
+                ..Default::default()
+            },
+            &mut Scratch::with_accumulators(&mut lanes, &mut accumulators),
+            &mut Tabulation::with_index(&mut words, &mut ids),
+            &mut Collapse::none(),
+            &mut census,
+        );
+    }
+    assert!(
+        census.table_reads > 0,
+        "the offer was sized for a table and none was read"
+    );
+    (t, census)
 }
