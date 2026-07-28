@@ -112,6 +112,12 @@ pub fn avx2_table_i32_mod32(
     None
 }
 
+/// The bound-1 `i8` table sequence. Absent here; the portable bound-1 build
+/// carries this alphabet.
+pub fn avx2_table_i8_i32_bound1(_rows: usize, _group: usize) -> Option<TableSpec<i8, i32>> {
+    None
+}
+
 /// Is AVX-512 available? Never, on a target that is not x86-64.
 pub fn avx512_available() -> bool {
     false

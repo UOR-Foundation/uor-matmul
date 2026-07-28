@@ -107,6 +107,21 @@ The op counts follow from the two shapes: `m*k*S + m*k*n/Bk` against `m*k*n`, so
 tabulation is cheaper exactly when `n * (Bk - 1) > S * Bk`. For `Book<256,8>` that
 is `n > 292`, which `model/tiers.toml` records and `CM-04` recomputes.
 
+The build is the one place a multiply remains, and at bound 1 not even there.
+The sign spelling (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) and the
+ternary one (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) --- both declared by
+`CK-10` as compositions of codecs that already existed --- put every book word
+in `{-1, 0, +1}`, where the product is the activation, its negation, or zero:
+`T[c][i]` is adds and subtracts, with the negation an XOR against the sign mask
+and the mask subtracted back, two's complement's own spelling of `-a`. So the
+builds that declare `max_bound = 1` issue no multiply at all. This is selection
+by declaration, not a second method: the bound-1 builds sit after every
+full-alphabet sequence in the available list, `choose_table` hands them exactly
+the alphabet they declare, and only the build differs --- the gathers are
+bound-independent and are the same function pointers, shared rather than
+duplicated. `CB-10` pins every bound-1 build to the model slot for slot and the
+census to what was issued: zero multiplies on a bound-1 tabulated run.
+
 The table is not the only sharing in this driver, and the other two axes are
 the collapse traversal's own move applied to its two operands. Two equal rows
 of `A` name the same sum against every column of `W`, and two equal columns of
@@ -145,7 +160,7 @@ different algorithm:
 `TableSpec` is `KernelSpec`'s shape for the two things a table needs --- fill one
 slot, reduce one column group --- and it lives in `uor-matmul-kernels` for the same
 reason every other sequence does: it is the only crate that writes
-`#[target_feature]` --- 39 of them, against none anywhere else --- and that
+`#[target_feature]` --- 40 of them, against none anywhere else --- and that
 attribute requires `unsafe`, which the other numerical crates forbid outright.
 A sequence written
 anywhere else compiles at the target's baseline. Measured, that was the whole

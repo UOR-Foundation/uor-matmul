@@ -90,7 +90,8 @@ use crate::scratch::Scratch;
 pub struct Census {
     /// Widening multiply-accumulates. Zero in the column loop, by construction.
     pub multiplies: u64,
-    /// Accumulator combines: exact adds at the accumulator's full width.
+    /// Accumulator combines: exact adds at the accumulator's full width, and
+    /// the bound-1 build's products, which are issued as signed adds (`CB-10`).
     pub adds: u64,
     /// Reads of a tabulated partial sum.
     pub table_reads: u64,
@@ -326,7 +327,10 @@ impl<'s, L: LaneWord> Table<'s, L> {
     /// Every entry of one block of the reduction, into stack slot `slot`.
     ///
     /// `code_space * block * rows` products, and the only multiplies the
-    /// tabulated traversal issues at all.
+    /// tabulated traversal issues at all --- unless the spec's build declares
+    /// it does not multiply: at bound 1 every product is `+-a` or `0`, the
+    /// build is adds and subtracts, and the census is charged what was issued
+    /// (`CB-10`).
     ///
     /// The sequence is the spec's. The reduction's step is the inner loop and
     /// the code space the outer, so one entry's `rows` words stay in registers
@@ -356,7 +360,14 @@ impl<'s, L: LaneWord> Table<'s, L> {
             acts,
             &mut self.words[start..start + live],
         );
-        ledger.multiplied((self.code_space * block * self.rows) as u64);
+        let products = (self.code_space * block * self.rows) as u64;
+        if spec.build_multiplies {
+            ledger.multiplied(products);
+        } else {
+            // The census counts what was issued, and the bound-1 build issues
+            // the products as adds and subtracts (CB-10).
+            ledger.added(products);
+        }
     }
 
     /// The stack itself, one slab per block held.
@@ -2869,6 +2880,93 @@ mod tests {
             let w = CodedMatrix::new(ternary_b1, n, k, &stream).expect("the codes describe n x k");
             check_bound_one("Packed<Grid<4>,4> at Bnd<1>", &w, m, n);
         }
+    }
+
+    /// `CB-10`, counted: a bound-1 tabulated run issues no multiply at all.
+    ///
+    /// `CU-06` counts the tabulated traversal at the full alphabet, where the
+    /// build is the table's only multiply; this is the same census at bound 1,
+    /// where the build is adds and subtracts and the census's multiply count
+    /// is zero. The shape is one column of one block, so the collapse has
+    /// nothing to do and the closed forms are exact. That the census *moves*
+    /// is also the selection witness: only the adds-only build charges zero
+    /// multiplies, so a zero here is `Backend::Auto` having selected it ---
+    /// and this test failed with `multiplies: 2048` while the build still
+    /// multiplied.
+    #[test]
+    fn the_bound1_table_build_issues_no_multiply_cb_10() {
+        let sign_one: [Alphabet<i8, Bnd<1>>; 2] = [
+            Alphabet::new(-1).expect("|-1| <= 1"),
+            Alphabet::new(1).expect("|1| <= 1"),
+        ];
+        let sign = Packed::<_, 8>::new(Grid::<i8, Bnd<1>, 2>::new(&sign_one)).expect("8 divides 8");
+
+        // One column of one block: every closed form is exact.
+        let (m, k, n) = (1usize, 8usize, 1usize);
+        let space = 256usize;
+        let stream: Vec<u8> = fill(n * (k / 8), 0xc10, |x| x as u8);
+        let w = CodedMatrix::new(sign, n, k, &stream).expect("the codes describe n x k");
+        let a: Vec<i8> = fill(m * k, 0xa10, |x| if x & 1 == 0 { -1 } else { 1 });
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        assert_eq!(
+            got,
+            reference(&w, &a, m, k, n),
+            "and it is still the product"
+        );
+        assert_eq!(
+            census.multiplies, 0,
+            "at bound 1 the build is adds and subtracts: {census:?}"
+        );
+        assert_eq!(
+            census.table_reads, 1,
+            "one read per code per row: {census:?}"
+        );
+        assert_eq!(
+            census.adds,
+            1 + (m * k * space) as u64,
+            "one add per read, and the build's `m * k * code_space` products charged as the \
+             signed adds they are: {census:?}"
+        );
+
+        // A tile tall enough for the widest sequence, so the build that runs
+        // is the ISA's where the host has one --- the census asks the same
+        // question of it.
+        let (m, k, n) = (16usize, 64usize, 3usize);
+        let stream: Vec<u8> = fill(n * (k / 8), 0xc11, |x| x as u8);
+        let w = CodedMatrix::new(sign, n, k, &stream).expect("the codes describe n x k");
+        let a: Vec<i8> = fill(m * k, 0xa11, |x| if x & 1 == 0 { -1 } else { 1 });
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        assert_eq!(
+            got,
+            reference(&w, &a, m, k, n),
+            "and it is still the product"
+        );
+        assert_eq!(
+            census.multiplies, 0,
+            "at bound 1 the widest build is adds and subtracts too: {census:?}"
+        );
+        assert!(
+            census.table_reads > 0,
+            "the offer was sized for a table and none was read: {census:?}"
+        );
     }
 
     /// `CD-14`: the column collapse applies at every column-block width, not

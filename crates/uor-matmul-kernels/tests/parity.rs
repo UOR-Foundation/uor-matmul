@@ -916,6 +916,14 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                     );
                     compared += 1;
                     for spec in &specs[1..] {
+                        // The fill is full-range; a sequence that declares a
+                        // narrower alphabet --- the bound-1 build --- is exact
+                        // only within its declaration, and reading it against
+                        // data outside that is not a comparison but a contract
+                        // breach. `CB-10` holds it to the bound it declares.
+                        if spec.max_bound < 128 {
+                            continue;
+                        }
                         let mut got = vec![0i32; space * rows];
                         spec.build(
                             space,
@@ -1664,4 +1672,167 @@ fn every_modular_table_sequence_equals_the_reference_cb_09() {
         "CB-09 compared nothing; on a host with no modular table sequence beyond the \
          reference this gate would pass vacuously"
     );
+}
+
+// ---------------------------------------------------------------------------
+// CB-10: the bound-1 table build
+// ---------------------------------------------------------------------------
+
+/// `CB-10`: at bound 1 the table build issues no multiply, and selection
+/// offers the adds-only build exactly when the declared bound admits it.
+///
+/// At bound 1 every product is `+-a` or `0`, so a build can fill the same slot
+/// the reference fills with adds and subtracts alone. The parity half reads
+/// every bound-1 build sequence against the model oracle --- the identity
+/// `T[c][i] = sum_t A[i][t] * D[c][t]` transcribed, as in `CB-08`, because at
+/// the tile heights no ISA serves, the reference is not the sequence under
+/// test and comparing it against itself would pass whatever it did. The code
+/// spaces are the sign codec's --- `Packed<Grid<2>, Bk>` enumerates `2^Bk`
+/// words, and 256 is also the ternary spelling's --- and the fill includes
+/// zero, so both spellings `CK-10` declared are exercised.
+///
+/// The selection half is `CB-07`'s rule at the new declaration: the bound-1
+/// builds are listed after every full-alphabet sequence, so `Auto` takes one
+/// exactly at bound 1 and never one past it.
+#[test]
+fn every_bound1_table_build_equals_the_reference_cb_10() {
+    use uor_matmul_kernels::{available_table_i8, choose_table, packed_slot, TableSpec};
+
+    /// A fill over the whole bound-1 alphabet, zero included.
+    fn fill1(len: usize, salt: u64) -> Vec<i8> {
+        fill(len, salt, |x| ((x % 3) as i8) - 1)
+    }
+
+    /// The activation tile in the layout `spec` declared, as in `CB-08`.
+    fn pack(flat: &[i8], rows: usize, block: usize, spec: &TableSpec<i8, i32>) -> Vec<i8> {
+        let mut out = vec![0i8; rows * block];
+        for t in 0..block {
+            for i in 0..rows {
+                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
+            }
+        }
+        out
+    }
+
+    let mut compared = 0usize;
+    for &(space, block) in &corpus(&[(4usize, 2usize), (16, 4), (256, 8)], &[(4, 2), (256, 8)]) {
+        let book = fill1(space * block, 0xb10c ^ space as u64);
+        for rows in corpus(&(1..=16usize).collect::<Vec<_>>(), &[1, 16]) {
+            let flat = fill1(rows * block, 0xb10a ^ rows as u64);
+            for group in corpus(&(1..=16usize).collect::<Vec<_>>(), &[1, 16]) {
+                let specs: Vec<_> = available_table_i8(rows, group).collect();
+                let reference = specs[0];
+
+                let model = {
+                    let mut out = vec![0i32; space * rows];
+                    for c in 0..space {
+                        for i in 0..rows {
+                            let mut acc = 0i32;
+                            for t in 0..block {
+                                acc +=
+                                    i32::from(flat[t * rows + i]) * i32::from(book[c * block + t]);
+                            }
+                            out[c * rows + i] = acc;
+                        }
+                    }
+                    out
+                };
+                let mut want = vec![0i32; space * rows];
+                reference.build(
+                    space,
+                    block,
+                    &book,
+                    &pack(&flat, rows, block, &reference),
+                    &mut want,
+                );
+                assert_eq!(
+                    want, model,
+                    "the reference build disagrees with the model at bound 1, space {space}, \
+                     block {block}, rows {rows}"
+                );
+                compared += 1;
+
+                let mut bound1 = 0usize;
+                for spec in &specs[1..] {
+                    // A full-alphabet sequence at bound-1 data is `CB-08`'s
+                    // ground; this sweep reads the sequences that declare the
+                    // bound.
+                    if spec.max_bound > 1 {
+                        continue;
+                    }
+                    bound1 += 1;
+                    assert!(
+                        !spec.build_multiplies,
+                        "{:?} declares bound 1 but still multiplies",
+                        spec.backend
+                    );
+                    // The gathers are bound-independent, so the bound-1 spec
+                    // carries its backend's own --- shared, not duplicated
+                    // (R13).
+                    let donor = specs[1..]
+                        .iter()
+                        .find(|s| s.backend == spec.backend && s.max_bound > 1)
+                        .unwrap_or(&reference);
+                    assert!(
+                        core::ptr::fn_addr_eq(spec.gather, donor.gather),
+                        "{:?} bound-1 spec duplicates the gather instead of sharing it",
+                        spec.backend
+                    );
+                    assert!(
+                        core::ptr::fn_addr_eq(spec.gather_codes, donor.gather_codes),
+                        "{:?} bound-1 spec duplicates gather_codes instead of sharing it",
+                        spec.backend
+                    );
+                    let mut got = vec![0i32; space * rows];
+                    spec.build(
+                        space,
+                        block,
+                        &book,
+                        &pack(&flat, rows, block, spec),
+                        &mut got,
+                    );
+                    assert_eq!(
+                        got, model,
+                        "{:?} bound-1 build disagrees at space {space}, block {block}, \
+                         rows {rows}",
+                        spec.backend
+                    );
+                    compared += 1;
+                }
+                assert!(
+                    bound1 >= 1,
+                    "no bound-1 build offered at rows {rows}, group {group}; the portable one \
+                     is unconditional"
+                );
+            }
+        }
+    }
+    assert!(
+        compared > 0,
+        "CB-10 compared nothing; the portable bound-1 build is present on every host"
+    );
+
+    // The selection half. At bound 1 the adds-only build is what `Auto` runs;
+    // one past its declaration it is not considered at all --- not because it
+    // is riskier there, but because there it computes a different number.
+    for &(rows, group) in &[(16usize, 1usize), (16, 2), (8, 1), (8, 2), (1, 16), (1, 1)] {
+        for &block in &[2usize, 4, 8] {
+            let picked = choose_table(available_table_i8(rows, group), Backend::Auto, 1, block)
+                .expect("the reference sequence is always present");
+            assert_eq!(
+                picked.max_bound, 1,
+                "bound 1 must select a bound-1 build at {rows}x{group} b={block}"
+            );
+            assert!(
+                !picked.build_multiplies,
+                "the build bound 1 selects must be the adds-only one at {rows}x{group} b={block}"
+            );
+            let past = choose_table(available_table_i8(rows, group), Backend::Auto, 2, block)
+                .expect("the reference sequence is always present");
+            assert!(
+                past.build_multiplies,
+                "bound 2 must not be offered the adds-only build at {rows}x{group} b={block}"
+            );
+        }
+    }
 }

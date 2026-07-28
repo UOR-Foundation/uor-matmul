@@ -256,7 +256,10 @@ pub trait Lane<E: Element>: LaneWord {
     /// licenses for the tile kernels.
     fn capacity(b: u128) -> Option<usize>;
 
-    /// Accumulate one exact product. The only multiply the table issues.
+    /// Accumulate one exact product. The only multiply the table issues ---
+    /// and at bound 1 not even this one: [`portable_table_bound1`] fills the
+    /// same slot with adds and subtracts, because there every product is
+    /// `+-a` or `0` (`CB-10`).
     fn mac(self, a: E, w: E) -> Self;
 
     /// Place a completed run into the exact accumulator.
@@ -650,6 +653,13 @@ pub struct TableSpec<E, L> {
     /// the same reason: a sequence with an intermediate narrower than its lane
     /// is wrong past a magnitude however shallow the chunk.
     pub max_bound: u128,
+    /// Whether [`Self::build`] issues multiplies.
+    ///
+    /// Every build but the bound-1 one does. At bound 1 every product is
+    /// `+-a` or `0`, so the build that declares it is adds and subtracts, and
+    /// the driver's census charges it as such (`CB-10`) rather than as the
+    /// products it computes.
+    pub build_multiplies: bool,
     /// Fill one slot.
     pub build: TableBuild<E, L>,
     /// Reduce one column group from an index stream the driver built.
@@ -702,9 +712,120 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
         // The reference multiplies in the lane's own width, so there is no
         // intermediate to outgrow and no alphabet it is inexact on.
         max_bound: u128::MAX,
+        build_multiplies: true,
         build: portable_build::<E, L>,
         gather: portable_gather::<L>,
         gather_codes: portable_gather_codes::<L>,
+    }
+}
+
+/// The bound-1 build: the table's only multiply, absent.
+///
+/// At bound 1 every book word is in `{-1, 0, +1}`, so `T[c][i] = sum_t
+/// +-A[i][t]` is adds and subtracts and the multiply [`portable_build`] issues
+/// has nothing left to do. Listed after every full-alphabet sequence, so
+/// [`choose_table`] hands it exactly the alphabet it declares and no other ---
+/// selection by declaration, the same rule the `madd` pair follows on the
+/// dense side (R13).
+///
+/// Only the build differs; the gathers are bound-independent and are the
+/// reference's own, shared rather than duplicated.
+///
+/// Concrete over `i8` rather than generic like [`portable_table`]: the
+/// bound-1 spelling is the sign tier's, which `CK-10` declared over `i8`, and
+/// a generic negation is not an operation [`Element`] names.
+pub const fn portable_table_bound1(rows: usize, group: usize) -> TableSpec<i8, i32> {
+    TableSpec {
+        backend: Backend::Portable,
+        rows,
+        group,
+        k_group: 1,
+        lanes_per_add: 1,
+        build_products_per_step: 1,
+        lane_cap: u128::MAX,
+        // Exact exactly when every book word is in `{-1, 0, +1}`: the whole of
+        // what the sequence assumes, stated as the declaration `choose_table`
+        // reads.
+        max_bound: 1,
+        build_multiplies: false,
+        build: portable_build_bound1,
+        gather: portable_gather::<i32>,
+        gather_codes: portable_gather_codes::<i32>,
+    }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract, with every element of `book` in `{-1, 0, +1}` ---
+/// which the caller's bound-1 alphabet has already established at the boundary.
+unsafe fn portable_build_bound1(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller guaranteed the three extents, as in `portable_build`.
+    let (book, acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(book, space * block),
+            core::slice::from_raw_parts(acts, block * rows),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    // The same compile-time tile heights as the reference build, for the same
+    // reason: one entry's words live in registers for its whole codeword.
+    match rows {
+        1 => build_run_bound1::<1>(block, book, acts, out),
+        2 => build_run_bound1::<2>(block, book, acts, out),
+        4 => build_run_bound1::<4>(block, book, acts, out),
+        8 => build_run_bound1::<8>(block, book, acts, out),
+        16 => build_run_bound1::<16>(block, book, acts, out),
+        _ => build_any_bound1(rows, block, book, acts, out),
+    }
+}
+
+/// The bound-1 build at a compile-time tile height: [`build_run`]'s loop nest,
+/// with the product read as an add, a subtract, or nothing.
+#[inline(always)]
+fn build_run_bound1<const R: usize>(block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(R).zip(book.chunks_exact(block)) {
+        let mut acc = [0i32; R];
+        for (&w, col) in word.iter().zip(acts.chunks_exact(R)) {
+            for (cell, &a) in acc.iter_mut().zip(&col[..R]) {
+                // `w` is in `{-1, 0, +1}`: the product is the activation, its
+                // negation, or zero, and there is nothing to multiply.
+                let a = i32::from(a);
+                *cell += if w == 1 {
+                    a
+                } else if w == -1 {
+                    -a
+                } else {
+                    0
+                };
+            }
+        }
+        entry.copy_from_slice(&acc);
+    }
+}
+
+/// The same, at a row count no shipped tile uses.
+fn build_any_bound1(rows: usize, block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(rows).zip(book.chunks_exact(block)) {
+        entry.fill(0);
+        for (&w, col) in word.iter().zip(acts.chunks_exact(rows)) {
+            for (cell, &a) in entry.iter_mut().zip(col) {
+                let a = i32::from(a);
+                *cell += if w == 1 {
+                    a
+                } else if w == -1 {
+                    -a
+                } else {
+                    0
+                };
+            }
+        }
     }
 }
 
@@ -1209,6 +1330,11 @@ pub fn available_table_i8(rows: usize, group: usize) -> impl Iterator<Item = Tab
         crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i8_i32(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i8_i32(rows, group),
         crate::isa::wasm::simd128_available() => crate::isa::wasm::simd128_table_i8_i32(rows, group),
+        // The bound-1 builds, last so `Auto` hands them exactly the alphabet
+        // they declare: a full-alphabet sequence is never shadowed, and at
+        // bound 1 the adds-only build is the last admissible entry (CB-10).
+        true => portable_table_bound1(rows, group),
+        crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i8_i32_bound1(rows, group),
     ]
 }
 
@@ -1284,7 +1410,10 @@ impl<E, L> IntoSpec<E, L> for Option<TableSpec<E, L>> {
 ///
 /// Last, not first, because the list is written reference-first and every entry
 /// after it issues fewer instructions for the same integer. `Backend::Portable`
-/// pins the reference, which is what the parity tests compare against.
+/// pins a portable sequence --- the reference, or at bound 1 the portable
+/// bound-1 build listed after it, which computes the same integer by the
+/// declaration it carries (`CB-10`). The parity tests compare against the
+/// list's first entry either way.
 ///
 /// **Selection cannot fail**, exactly as [`crate::choose`] cannot, and for the
 /// same reason: a named backend this host has no sequence for yields the first

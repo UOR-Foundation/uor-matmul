@@ -79,6 +79,7 @@ returns an error the model does not sanction.
 | `CB-07` | `build` | Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet |
 | `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two |
 | `CB-09` | `build` | Every modular table sequence equals the portable modular reference lane for lane |
+| `CB-10` | `build` | At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run |
 
 ## `CU-*` --- Purity: one method, no classical path, no fallback
 
