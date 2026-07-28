@@ -52,7 +52,7 @@
 use core::hash::{Hash, Hasher};
 
 use uor_matmul_core::{
-    AccOf, Alphabet, Bound, Element, EncodeFrom, IntegerElement, MatView, Shape, Triple,
+    AccOf, Alphabet, Bound, Element, EncodeFrom, IntegerElement, MatView, MatViewMut, Shape, Triple,
 };
 
 use crate::driver::GemmOptions;
@@ -69,8 +69,11 @@ use crate::scratch::Scratch;
 /// traversal at the same bytes, and there is no error to report (`CD-12`).
 #[derive(Debug)]
 pub struct Collapse<'s, E: IntegerElement, Bd: Bound> {
-    index: &'s mut [usize],
-    rows: &'s mut [Alphabet<E, Bd>],
+    // `pub(crate)`, not accessors: the tabulated driver runs the same pass,
+    // compaction, and expansion on its dense `A` (`CD-15`), and an accessor
+    // per field would only restate the type.
+    pub(crate) index: &'s mut [usize],
+    pub(crate) rows: &'s mut [Alphabet<E, Bd>],
 }
 
 impl<'s, E: IntegerElement, Bd: Bound> Collapse<'s, E, Bd> {
@@ -219,29 +222,34 @@ pub fn gemm_collapsed<E, Bd, O, Ep>(
         return;
     };
     gemm_packed(&mut compacted, epilogue, options, scratch);
+    expand(triple.c_mut(), &collapse.index[..shape.m], shape.m, shape.n);
+}
 
-    // Expand, from the bottom. The distinct row a row resolves to was numbered
-    // in order of first occurrence, so `index[i] <= i` for every `i` --- and a
-    // descending walk therefore reads each compacted row before the step that
-    // overwrites it. No copy of `C` is needed and none is made.
-    // Which loop is inner is decided by the output's own strides, not by the
-    // order the rows are written in. Every column is independent --- the
-    // descending walk is what matters and it is preserved either way --- so the
-    // inner loop is free to be whichever axis is the near one. It matters: the
-    // *transposed* triple names the rows of `C^T`, which for a row-major `C` are
-    // its columns, and walking them outermost reads a cache line per cell.
-    let c = triple.c_mut();
+/// Replicate the compacted product's rows into the full output, from the
+/// bottom.
+///
+/// The distinct row a row resolves to was numbered in order of first
+/// occurrence, so `index[i] <= i` for every `i` --- and a descending walk
+/// therefore reads each compacted row before the step that overwrites it. No
+/// copy of `C` is needed and none is made.
+///
+/// Which loop is inner is decided by the output's own strides, not by the
+/// order the rows are written in. Every column is independent --- the
+/// descending walk is what matters and it is preserved either way --- so the
+/// inner loop is free to be whichever axis is the near one. It matters: the
+/// *transposed* triple names the rows of `C^T`, which for a row-major `C` are
+/// its columns, and walking them outermost reads a cache line per cell.
+pub(crate) fn expand<O: Element>(c: &mut MatViewMut<'_, O>, index: &[usize], m: usize, n: usize) {
     let strides = c.strides();
-    let index = &collapse.index[..shape.m];
     if strides.cs == 1 {
         // A row is a run, so replicating one is a move of that run. Called for
         // its effect and not inside an assertion: `debug_assert!` does not
         // evaluate its argument in a release build, which is a way to write a
         // move that only happens in the tests.
-        for i in (0..shape.m).rev() {
+        for i in (0..m).rev() {
             let from = index[i];
             if from != i && !c.copy_row(from, i) {
-                for j in 0..shape.n {
+                for j in 0..n {
                     let value = *c.at(from, j);
                     *c.at_mut(i, j) = value;
                 }
@@ -249,8 +257,8 @@ pub fn gemm_collapsed<E, Bd, O, Ep>(
         }
     } else if strides.rs.unsigned_abs() < strides.cs.unsigned_abs() {
         // The row axis is the near one: walk it innermost.
-        for j in 0..shape.n {
-            for i in (0..shape.m).rev() {
+        for j in 0..n {
+            for i in (0..m).rev() {
                 let from = index[i];
                 if from != i {
                     let value = *c.at(from, j);
@@ -259,12 +267,12 @@ pub fn gemm_collapsed<E, Bd, O, Ep>(
             }
         }
     } else {
-        for i in (0..shape.m).rev() {
+        for i in (0..m).rev() {
             let from = index[i];
             if from == i {
                 continue;
             }
-            for j in 0..shape.n {
+            for j in 0..n {
                 let value = *c.at(from, j);
                 *c.at_mut(i, j) = value;
             }
@@ -285,7 +293,10 @@ pub fn gemm_collapsed<E, Bd, O, Ep>(
 /// collision costs a comparison and can change nothing about the answer --- the
 /// same discipline the upstream content addressing uses, where `kappa`'s
 /// injectivity is verified on the materialized set rather than assumed.
-fn distinct_rows<E, Bd>(a: &MatView<'_, Alphabet<E, Bd>>, index: &mut [usize]) -> Option<usize>
+pub(crate) fn distinct_rows<E, Bd>(
+    a: &MatView<'_, Alphabet<E, Bd>>,
+    index: &mut [usize],
+) -> Option<usize>
 where
     E: IntegerElement + Hash,
     Bd: Bound,
@@ -379,7 +390,7 @@ where
 /// `false` when the offer does not hold them, and then nothing has been written
 /// and nothing renumbered: the caller runs the packed traversal at the same
 /// bytes.
-fn compact<E, Bd>(
+pub(crate) fn compact<E, Bd>(
     a: &MatView<'_, Alphabet<E, Bd>>,
     index: &mut [usize],
     rows: &mut [Alphabet<E, Bd>],

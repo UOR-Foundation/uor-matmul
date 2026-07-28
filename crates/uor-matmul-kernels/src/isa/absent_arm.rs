@@ -46,6 +46,11 @@ pub fn neon_table_i8_i32(_rows: usize, _group: usize) -> Option<TableSpec<i8, i3
     None
 }
 
+/// The bound-1 `i8` table sequence, on a target that is not this one.
+pub fn neon_table_i8_i32_bound1(_rows: usize, _group: usize) -> Option<TableSpec<i8, i32>> {
+    None
+}
+
 /// The `i16` table sequence, on a target that is not this one.
 pub fn neon_table_i16_i64(_rows: usize, _group: usize) -> Option<TableSpec<i16, i64>> {
     None

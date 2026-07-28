@@ -448,8 +448,8 @@ fn tabulation_census_and_throughput_cg_10() {
     };
     use uor_matmul_gemm::{
         gemm_tabulated, gemm_tabulated_counted, suggested_tabulation, suggested_tabulation_lanes,
-        suggested_tabulation_panel, Census, GemmOptions, Linear, Scratch, TabulatedTriple,
-        Tabulation,
+        suggested_tabulation_panel, Census, Collapse, GemmOptions, Linear, Scratch,
+        TabulatedTriple, Tabulation,
     };
 
     let table = e8_table::<Full<i8>>().expect("i8 holds E8");
@@ -537,6 +537,7 @@ fn tabulation_census_and_throughput_cg_10() {
                 },
                 &mut Scratch::with_accumulators(panel, accumulators),
                 &mut Tabulation::new(words),
+                &mut Collapse::none(),
             );
         };
 
@@ -590,6 +591,7 @@ fn tabulation_census_and_throughput_cg_10() {
                 },
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
                 &mut Tabulation::new(&mut words),
+                &mut Collapse::none(),
                 &mut census,
             );
             census

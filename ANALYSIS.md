@@ -760,6 +760,27 @@ The ceiling at `d = 1` is the table *build*, which does not collapse: it is
 2x and not 4096x, and it is the honest shape of the construction rather than a
 disappointment.
 
+The same sweep reports a `narrow block` column: the collapsed traversal with
+the accumulator offer halved, so the column block resolves to half the output
+width and the collapse that runs is `CD-14`'s block-local one or none.
+Measured on an aarch64 dev machine --- not the runner the table above came
+from, so the absolute figures are its own and only the shape transfers:
+
+| `d` | collapsed | narrow block |
+| --- | --- | --- |
+| 1 | 62.62 | 46.11 |
+| 8 | 56.70 | 43.85 |
+| 64 | 53.12 | 44.39 |
+| 512 | 50.64 | 34.70 |
+| 4096 | 31.77 | 23.31 |
+
+Two readings. The collapse survives narrowing: every degenerate row sits well
+above the nothing-to-collapse row of the same column (`d = 4096`), where
+before `CD-14` a halved offer disabled the collapse outright. And the drop
+from the full-offer figure is the build, which does not collapse and now runs
+once per column block --- halving the block doubles it, the same ceiling the
+`d = 1` row of the main table already names.
+
 One thing this cost to get right. Naming the columns instead of counting from a
 first one turns the code base and the accumulator base from induction variables
 into indexed loads, and measured that **halved every shape, including the ones
@@ -767,6 +788,123 @@ with nothing to collapse**. So there are two column loops: the consecutive one,
 unchanged, and an indexed one reached only when the collapse has something to do.
 A specialization in the direction that costs something is a second function, not a
 parameter.
+
+### What the missing index stream costs the sign composition
+
+The sign tier is spelled as `Packed<Grid<2>,8>` (`CK-10`): a code space of 256
+and a block of 8, `Book<256,8>`'s numbers exactly, with one gather-path
+difference --- `Packed` cannot answer `as_index_stream`, because a packed
+byte's index is a mixed-radix decomposition and not the byte. So the
+composition builds its index stream where the book borrows the operand's own
+memory. This is the price of that, measured on an Apple M4 Max (aarch64),
+2026-07-27, `Traversal::Tabulated` at the full offer, each side asserted
+against its own dense reference. Every figure is `open`.
+
+`sign, Full` is the composition over `Full<i8>` with the general build, so its
+ratio against the book isolates the gather. `sign, Bnd<1>` is the tier as it
+stands: activations and weights both in `{-1,+1}`, the bound-1 build
+admissible, and the census's build multiplies going from `m*k*256` to zero.
+
+| `m x k x n` | `Book<256,8>` | sign, `Full` | sign, `Bnd<1>` | sign/book | b1/book | b1/full | build mul |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 15.32 | 12.15 | 4.38 | 0.79x | 0.29x | 0.36x | 262144 -> 0 |
+| `1x1024x4096` | 20.70 | 13.51 | 8.27 | 0.65x | 0.40x | 0.61x | 262144 -> 0 |
+| `1x4096x1024` | 11.68 | 8.62 | 3.30 | 0.74x | 0.28x | 0.38x | 1048576 -> 0 |
+| `1x4096x4096` | 14.69 | 10.36 | 7.13 | 0.71x | 0.49x | 0.69x | 1048576 -> 0 |
+| `4x1024x1024` | 38.00 | 28.94 | 14.25 | 0.76x | 0.38x | 0.49x | 1048576 -> 0 |
+| `4x1024x4096` | 59.06 | 39.56 | 28.44 | 0.67x | 0.48x | 0.72x | 1048576 -> 0 |
+| `4x4096x1024` | 41.11 | 29.88 | 13.74 | 0.73x | 0.33x | 0.46x | 4194304 -> 0 |
+| `4x4096x4096` | 62.90 | 41.04 | 28.25 | 0.65x | 0.45x | 0.69x | 4194304 -> 0 |
+| `16x1024x1024` | 60.03 | 55.69 | 34.88 | 0.93x | 0.58x | 0.63x | 4194304 -> 0 |
+| `16x1024x4096` | 92.14 | 84.86 | 59.19 | 0.92x | 0.64x | 0.70x | 4194304 -> 0 |
+| `16x4096x1024` | 66.02 | 58.55 | 36.25 | 0.89x | 0.55x | 0.62x | 16777216 -> 0 |
+| `16x4096x4096` | 93.60 | 85.34 | 56.97 | 0.91x | 0.61x | 0.67x | 16777216 -> 0 |
+
+Three runs of the sweep put the one-row ratios at 0.65--0.79 every time and the
+sixteen-row ratios at 0.87--1.00, with one cell (`16x4096x4096`) swinging to
+0.66 in a single run; the one-row and four-row figures are the stable ones.
+The gather the composition cannot borrow costs it **a fifth to a third at a
+one-row tile, about a quarter to a third at four rows, and under a tenth at
+sixteen** --- real, and shrinking exactly as the build and the row count
+amortize it.
+
+That measurement is what demanded the dedicated `Sign` tier (`CK-11`): the
+same decode with the `u16` code *being* the index, so the traversal borrows
+the operand's own memory exactly as the book does. Re-measured on the same
+host the day after (2026-07-28), same discipline, the composition column
+reproduced and the tier column new. Every figure is `open`.
+
+| `m x k x n` | `Book<256,8>` | sign, `Full` | `Sign<8>` | sign, `Bnd<1>` | sign/book | tier/book | b1/book | b1/full | build mul |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 14.99 | 10.99 | 14.89 | 4.57 | 0.73x | 0.99x | 0.30x | 0.42x | 262144 -> 0 |
+| `1x1024x4096` | 20.59 | 13.40 | 19.98 | 8.79 | 0.65x | 0.97x | 0.43x | 0.66x | 262144 -> 0 |
+| `1x4096x1024` | 11.86 | 8.46 | 11.41 | 3.40 | 0.71x | 0.96x | 0.29x | 0.40x | 1048576 -> 0 |
+| `1x4096x4096` | 14.52 | 9.03 | 13.41 | 6.55 | 0.62x | 0.92x | 0.45x | 0.73x | 1048576 -> 0 |
+| `4x1024x1024` | 37.62 | 27.88 | 37.62 | 14.28 | 0.74x | 1.00x | 0.38x | 0.51x | 1048576 -> 0 |
+| `4x1024x4096` | 58.34 | 38.69 | 58.43 | 28.17 | 0.66x | 1.00x | 0.48x | 0.73x | 1048576 -> 0 |
+| `4x4096x1024` | 41.00 | 27.92 | 39.39 | 14.70 | 0.68x | 0.96x | 0.36x | 0.53x | 4194304 -> 0 |
+| `4x4096x4096` | 63.01 | 40.11 | 63.15 | 28.99 | 0.64x | 1.00x | 0.46x | 0.72x | 4194304 -> 0 |
+| `16x1024x1024` | 60.39 | 55.51 | 64.26 | 37.49 | 0.92x | 1.06x | 0.62x | 0.68x | 4194304 -> 0 |
+| `16x1024x4096` | 85.72 | 79.92 | 86.79 | 66.27 | 0.93x | 1.01x | 0.77x | 0.83x | 4194304 -> 0 |
+| `16x4096x1024` | 62.70 | 58.92 | 64.32 | 39.54 | 0.94x | 1.03x | 0.63x | 0.67x | 16777216 -> 0 |
+| `16x4096x4096` | 94.52 | 87.43 | 100.36 | 69.98 | 0.92x | 1.06x | 0.74x | 0.80x | 16777216 -> 0 |
+
+The reading the tier was built to produce: **the gap is closed.** At one and
+four rows the composition sits at 0.62--0.74 of the book while the tier sits
+at 0.92--1.00 --- noise, against the fifth-to-a-third the composition pays.
+At sixteen rows the tier edges the book itself (1.01--1.06), which is the
+decodes differing and not the gathers: the tier's codebook is a bit test, the
+book's is a 2048-byte copy of E8, and at that row count the build is the
+amortized cost either way. What did not move, on that day, is the `Bnd<1>`
+column, and it should not have: its cost was selection (no NEON bound-1 spec
+on this host yet), not the gather, and the tier changes nothing about which
+build is admissible.
+
+The `Bnd<1>` column wanted a careful reading then, and the reading dated it.
+Its build issues no multiply --- the census says so at every shape --- and it
+was still the slowest column by a wide margin. The reason was selection, not
+arithmetic: at bound 1 the only admissible spec on this host was the portable
+reference, whose gathers are the reference's own, while the `Full` column runs
+the NEON build and the NEON gathers. The adds-only build's win was real but it
+was a scalar build against a vector one, and the gathers move with the spec.
+
+The NEON bound-1 build now exists (a `neon_table_i8_i32_bound1` spec beside
+the AVX2 one, same shapes, same gathers, `((a & keep) ^ sign) - sign` with the
+masked negation computed in the `i16` lane and folded into the accumulation by
+a widening add). The first spelling computed the masks in the `i32` lane and
+measured *slower* than the reference it replaced --- 10.3 against 18.0 Gprod/s
+at a sixteen-row tile --- because the autovectorizer already writes the
+reference in NEON; the widening-add spelling is what overtook it (18.3 and
+14.8 Gprod/s at sixteen and eight rows, against the reference's 15.7 and
+11.2). Re-measured on the same host later the same day (2026-07-28), same
+discipline, two runs; the table is the first. Every figure is `open`.
+
+| `m x k x n` | `Book<256,8>` | sign, `Full` | `Sign<8>` | sign, `Bnd<1>` | sign/book | tier/book | b1/book | b1/full | build mul |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 14.75 | 10.98 | 14.99 | 4.31 | 0.74x | 1.02x | 0.29x | 0.39x | 262144 -> 0 |
+| `1x1024x4096` | 20.73 | 13.42 | 19.91 | 8.28 | 0.65x | 0.96x | 0.40x | 0.62x | 262144 -> 0 |
+| `1x4096x1024` | 11.28 | 8.34 | 11.36 | 3.27 | 0.74x | 1.01x | 0.29x | 0.39x | 1048576 -> 0 |
+| `1x4096x4096` | 14.45 | 9.49 | 14.56 | 7.04 | 0.66x | 1.01x | 0.49x | 0.74x | 1048576 -> 0 |
+| `4x1024x1024` | 37.45 | 28.65 | 37.56 | 13.36 | 0.77x | 1.00x | 0.36x | 0.47x | 1048576 -> 0 |
+| `4x1024x4096` | 61.37 | 37.85 | 58.47 | 27.09 | 0.62x | 0.95x | 0.44x | 0.72x | 1048576 -> 0 |
+| `4x4096x1024` | 41.12 | 29.58 | 39.21 | 13.23 | 0.72x | 0.95x | 0.32x | 0.45x | 4194304 -> 0 |
+| `4x4096x4096` | 62.87 | 41.68 | 66.65 | 27.52 | 0.66x | 1.06x | 0.44x | 0.66x | 4194304 -> 0 |
+| `16x1024x1024` | 58.75 | 56.00 | 60.17 | 37.40 | 0.95x | 1.02x | 0.64x | 0.67x | 4194304 -> 0 |
+| `16x1024x4096` | 82.94 | 85.13 | 94.56 | 69.35 | 1.03x | 1.14x | 0.84x | 0.81x | 4194304 -> 0 |
+| `16x4096x1024` | 61.31 | 58.49 | 66.14 | 40.03 | 0.95x | 1.08x | 0.65x | 0.68x | 16777216 -> 0 |
+| `16x4096x4096` | 74.63 | 72.38 | 93.29 | 70.51 | 0.97x | 1.25x | 0.94x | 0.97x | 16777216 -> 0 |
+
+The column now splits exactly where the spec does. At one and four rows
+nothing moved, and nothing should have: the NEON table sequences spell tiles
+of eight and sixteen rows --- the same coverage the full-alphabet spec has ---
+so below eight rows the build is still the portable one and the column
+reproduces (0.29--0.49 across both runs, against 0.29--0.48 before). At
+sixteen rows the build is the NEON one and the column moved: `b1/full` is
+0.67--0.97 where it was 0.62--0.83, with the second run putting the four
+sixteen-row cells at 0.63--0.94. The widest cell is also the noisiest --- the
+book column itself swung 74--101 across the two runs --- so the statement that
+survives the noise is the build probe's above, measured directly, not any one
+cell of this table.
 
 ### Everything between 2.95 and 28 was overhead
 

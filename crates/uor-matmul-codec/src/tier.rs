@@ -193,6 +193,13 @@ pub enum TierId {
     Packed,
     /// A codebook of any entry count and any block size.
     Book,
+    /// Weights in `{-1, +1}`, one bit per element: the codebook is the constant.
+    ///
+    /// `Sign` and the `Packed<Grid<2>,8>` spelling decode the same stream
+    /// (`CK-11`) yet carry different manifest identities --- and that is the
+    /// intended semantics of the kappa label (§"canonical weight manifest"):
+    /// two artifacts that decode alike are still two artifacts.
+    Sign,
     /// `d(c) - z`: asymmetric quantization as a codec composition.
     Offset,
     /// Sparse storage as a codec.
@@ -209,6 +216,7 @@ impl TierId {
             Self::Grid => "Grid",
             Self::Packed => "Packed",
             Self::Book => "Book",
+            Self::Sign => "Sign",
             Self::Offset => "Offset",
             Self::Runs => "Runs",
             Self::Transcode => "Transcode",

@@ -108,6 +108,14 @@ pub trait IntegerElement: Element {
     /// limitation dressed as rigour (R8).
     const FULL: u128;
 
+    /// The multiplicative identity.
+    ///
+    /// [`Element::ZERO`] exists because padding decodes to it; `ONE` is here
+    /// because a constant-table tier --- `Sign`, whose decode is `+-1` and
+    /// nothing else --- has to name it without a branch on the element type.
+    /// One fact per impl, the same discipline as every other constant here.
+    const ONE: Self;
+
     /// The magnitude of this value, for [`observe_bound`] and for the alphabet
     /// declaration check. Never used by an accumulation.
     fn magnitude(self) -> u128;
@@ -467,6 +475,7 @@ macro_rules! impl_element_for_signed {
 
         impl IntegerElement for $t {
             const FULL: u128 = 1u128 << (<$t>::BITS - 1);
+            const ONE: Self = 1;
 
             fn magnitude(self) -> u128 {
                 self.unsigned_abs() as u128
@@ -504,6 +513,7 @@ impl Element for i64 {
 
 impl IntegerElement for i64 {
     const FULL: u128 = 1u128 << 63;
+    const ONE: Self = 1;
 
     fn magnitude(self) -> u128 {
         self.unsigned_abs() as u128
@@ -592,6 +602,7 @@ macro_rules! impl_element_for_complex {
 
         impl IntegerElement for Complex<$t> {
             const FULL: u128 = 1u128 << (<$t>::BITS - 1);
+            const ONE: Self = Complex { re: 1, im: 0 };
 
             fn magnitude(self) -> u128 {
                 // The bound bounds both parts, so the magnitude of the pair is

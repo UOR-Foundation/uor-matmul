@@ -186,6 +186,18 @@ suite = "determinism"
 statement = """`Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all"""
 
 [[id]]
+id = "CD-14"
+level = "build"
+suite = "determinism"
+statement = """Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block"""
+
+[[id]]
+id = "CD-15"
+level = "build"
+suite = "determinism"
+statement = """Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer"""
+
+[[id]]
 id = "CB-01"
 level = "build"
 suite = "backends"
@@ -234,6 +246,18 @@ suite = "backends"
 statement = """Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two"""
 
 [[id]]
+id = "CB-09"
+level = "build"
+suite = "backends"
+statement = """Every modular table sequence equals the portable modular reference lane for lane"""
+
+[[id]]
+id = "CB-10"
+level = "build"
+suite = "backends"
+statement = """At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run"""
+
+[[id]]
 id = "CU-01"
 level = "build"
 suite = "purity"
@@ -274,6 +298,12 @@ id = "CU-07"
 level = "build"
 suite = "purity"
 statement = """Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked"""
+
+[[id]]
+id = "CU-08"
+level = "build"
+suite = "purity"
+statement = """The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound"""
 
 [[id]]
 id = "CK-01"
@@ -406,6 +436,18 @@ id = "CK-09"
 level = "build"
 suite = "codec"
 statement = """`Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type"""
+
+[[id]]
+id = "CK-10"
+level = "build"
+suite = "codec"
+statement = """Sign-coded weights (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) produce byte-identical output to the dense spelling of the same decoded operand, packed and tabulated, and the ternary spelling (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) likewise"""
+
+[[id]]
+id = "CK-11"
+level = "build"
+suite = "codec"
+statement = """The `Sign` tier decodes the same alphabet stream as the `Packed<Grid<2>,8>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream"""
 
 [[id]]
 id = "CG-01"
