@@ -1403,6 +1403,7 @@ pub fn available_table_i8(rows: usize, group: usize) -> impl Iterator<Item = Tab
         // bound 1 the adds-only build is the last admissible entry (CB-10).
         true => portable_table_bound1(rows, group),
         crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i8_i32_bound1(rows, group),
+        crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i8_i32_bound1(rows, group),
     ]
 }
 
