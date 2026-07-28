@@ -8,7 +8,7 @@
 use core::marker::PhantomData;
 
 use bytemuck::TransparentWrapper as _;
-use uor_matmul_core::{Alphabet, Bound, IntegerElement};
+use uor_matmul_core::{Alphabet, Bound, FloatElement, IntegerElement, Whole};
 
 use crate::tier::{Codec, Enumerable, TierId};
 
@@ -583,3 +583,125 @@ where
 // reaches the entry with `C::index_of(map(code))`. The relabelling is a property
 // of the code stream, and tabulation has already left the code stream behind by
 // the time it reads the table.
+
+// ---------------------------------------------------------------------------
+// Arena
+// ---------------------------------------------------------------------------
+
+/// A codebook of one artifact's distinct bit patterns.
+///
+/// Mechanically the arena is a one-element block grid, and its decode is the
+/// same table read. What makes it a tier rather than a [`Grid`] is the
+/// construction discipline the token carries into the kappa manifest: the
+/// table is the source stream's distinct symbols in canonical order, built by
+/// [`canonicalize`], so two artifacts holding the same values share a
+/// codebook --- and an address --- whatever order their streams stored them
+/// in (§6.4, `CK-10`).
+///
+/// The element type is a float: the symbols are bit patterns, and the bound is
+/// [`Whole`] because membership is discharged by the table's construction and
+/// no magnitude question applies to a float (§5.2b).
+#[derive(Clone, Copy, Debug)]
+pub struct Arena<'a, E: FloatElement, const N: usize> {
+    table: &'a [Alphabet<E, Whole<E>>; N],
+}
+
+impl<'a, E: FloatElement, const N: usize> Arena<'a, E, N> {
+    /// Borrow a canonical codebook. The canonicalization is [`canonicalize`]'s
+    /// discipline; like [`Grid`], the borrow itself validates nothing (§6.2).
+    pub const fn new(table: &'a [Alphabet<E, Whole<E>>; N]) -> Self {
+        Self { table }
+    }
+
+    /// The codebook.
+    pub const fn table(&self) -> &'a [Alphabet<E, Whole<E>>; N] {
+        self.table
+    }
+}
+
+impl<E: FloatElement, const N: usize> Codec<E, Whole<E>> for Arena<'_, E, N> {
+    type Code = u16;
+    const MAX_BLOCK: usize = 1;
+    const TIER: TierId = TierId::Arena;
+
+    fn decode_element(&self, code: Self::Code, _i: usize) -> Alphabet<E, Whole<E>> {
+        // The same total reduction `Grid` performs: an arbitrary `u16`
+        // indexes a table of `N` entries modulo `N` (C6).
+        self.table[(code as usize) % N]
+    }
+}
+
+impl<E: FloatElement, const N: usize> Enumerable<E, Whole<E>> for Arena<'_, E, N> {
+    // The reachable code space, as for `Grid`: the table size unless the table
+    // is wider than the code type can address.
+    const CODE_SPACE: usize = if N < U16_CODES { N } else { U16_CODES };
+
+    fn code_at(index: usize) -> Self::Code {
+        (index % Self::CODE_SPACE.max(1)) as u16
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        // The same reduction `decode_element` performs, so equal indices and
+        // equal decodes are the same relation.
+        (code as usize) % Self::CODE_SPACE.max(1)
+    }
+
+    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+        Self::CODE_SPACE.is_power_of_two().then_some(codes)
+    }
+}
+
+/// Sort `values` into canonical arena order and move the distinct symbols to
+/// the front, returning how many there are. The codebook is `&values[..n]`.
+///
+/// Canonical order is unsigned order on bit patterns, and equality is pattern
+/// equality: `-0.0` and `+0.0` are distinct symbols, two NaNs with different
+/// payloads are distinct symbols, and deciding either takes no float
+/// comparison (`CK-10`, `CU-01`). The sort is a heapsort: in place,
+/// allocation-free, and `O(n log n)` whatever the stream, so an adversarial
+/// order meets the same bound as a friendly one.
+pub fn canonicalize<E: FloatElement>(values: &mut [E]) -> usize {
+    heapsort_by_pattern(values);
+    // Equal patterns are adjacent after the sort; keep the first of each run.
+    let mut n = 0usize;
+    for i in 0..values.len() {
+        if n == 0 || values[i].symbol_bits() != values[n - 1].symbol_bits() {
+            values[n] = values[i];
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Heapsort by bit pattern: a total order with no float comparisons.
+fn heapsort_by_pattern<E: FloatElement>(values: &mut [E]) {
+    fn sift_down<E: FloatElement>(values: &mut [E], mut root: usize, end: usize) {
+        loop {
+            let child = 2 * root + 1;
+            if child >= end {
+                return;
+            }
+            let mut swap = root;
+            if values[swap].symbol_bits() < values[child].symbol_bits() {
+                swap = child;
+            }
+            if child + 1 < end && values[swap].symbol_bits() < values[child + 1].symbol_bits() {
+                swap = child + 1;
+            }
+            if swap == root {
+                return;
+            }
+            values.swap(root, swap);
+            root = swap;
+        }
+    }
+
+    let len = values.len();
+    for start in (0..len / 2).rev() {
+        sift_down(values, start, len);
+    }
+    for end in (1..len).rev() {
+        values.swap(0, end);
+        sift_down(values, 0, end);
+    }
+}

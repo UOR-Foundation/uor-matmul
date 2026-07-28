@@ -53,3 +53,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-09
     Then the claim holds byte for byte
+
+  @CK-10 @build
+  Scenario: An arena's codebook is canonical: distinct bit patterns, sorted and deduplicated
+    Given the standing corpus
+    When the suite exercises CK-10
+    Then the claim holds byte for byte

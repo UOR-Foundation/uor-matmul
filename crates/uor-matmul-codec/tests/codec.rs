@@ -5,9 +5,12 @@
 //! realize `CL-MM01`, not a proof of it. The identity itself is cited from
 //! upstream and says nothing about any binary in this repository (§2, R4).
 
-use uor_matmul_codec::{Book, Codec, CodedMatrix, Grid, Identity, Offset, Packed, Runs, Transcode};
+use uor_matmul_codec::{
+    canonicalize, Arena, Book, Codec, CodedMatrix, Grid, Identity, Offset, Packed, Runs, Transcode,
+};
 use uor_matmul_core::{
-    as_alphabet_full, dot_ref, Alphabet, Bnd, Bound, Full, IntegerElement, NotAProduct,
+    as_alphabet_full, as_alphabet_whole, dot_ref, Alphabet, Bnd, Bound, Element, FloatElement,
+    Full, IntegerElement, NotAProduct, Whole,
 };
 
 type A8 = Alphabet<i8, Full<i8>>;
@@ -425,9 +428,11 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
 
     /// Law 1 and law 2 for one codec, plus the decode agreement that makes an
     /// index a stand-in for a code at all.
-    fn laws<C, F>(name: &str, codec: &C, block: usize, every_code: F)
+    fn laws<E, Bd, C, F>(name: &str, codec: &C, block: usize, every_code: F)
     where
-        C: Enumerable<i8, Full<i8>>,
+        E: Element,
+        Bd: Bound,
+        C: Enumerable<E, Bd>,
         F: Fn(&mut dyn FnMut(C::Code)),
     {
         assert!(
@@ -561,4 +566,71 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
     laws("Offset<Grid<16>>", &offset, 1, |f: &mut dyn FnMut(u16)| {
         every_code(f)
     });
+
+    // The arena tier: a float codebook, canonical or not --- the laws are about
+    // the enumeration, not about how the table was built.
+    let arena_table: [Alphabet<f32, Whole<f32>>; 4] = [
+        Alphabet::symbol(0.0),
+        Alphabet::symbol(1.0),
+        Alphabet::symbol(-0.0),
+        Alphabet::symbol(2.5),
+    ];
+    let arena = Arena::new(&arena_table);
+    laws("Arena<4>", &arena, 1, |f: &mut dyn FnMut(u16)| {
+        every_code(f)
+    });
+}
+
+/// CK-10: an arena's codebook is canonical --- the source stream's distinct
+/// bit patterns in unsigned order, duplicates collapsed. Signed zeros and NaN
+/// payloads are distinct symbols, and the two zeros decode alike.
+#[test]
+fn arena_construction_is_canonical_ck_10() {
+    let mut values = [
+        f32::from_bits(0xC020_0000), // -2.5
+        1.0f32,                      // 0x3F80_0000
+        -0.0f32,                     // 0x8000_0000
+        0.0f32,                      // 0x0000_0000
+        f32::from_bits(0x7FC0_0001), // a NaN payload
+        1.0f32,                      // a duplicate
+        f32::from_bits(0x7FC0_0000), // the quiet NaN
+        -0.0f32,                     // a duplicate
+    ];
+    let n = canonicalize(&mut values);
+    assert_eq!(n, 6, "eight values, six distinct bit patterns");
+    let order: Vec<u32> = values[..n].iter().map(|v| v.to_bits()).collect();
+    assert_eq!(
+        order,
+        vec![
+            0x0000_0000, // +0.0
+            0x3F80_0000, // 1.0
+            0x7FC0_0000, // the quiet NaN
+            0x7FC0_0001, // NaN, payload 1
+            0x8000_0000, // -0.0
+            0xC020_0000, // -2.5
+        ],
+        "unsigned order on bit patterns, duplicates collapsed"
+    );
+
+    // Distinct symbols, equal decodes: both zeros name the same exact zero.
+    let table: &[Alphabet<f32, Whole<f32>>; 6] =
+        as_alphabet_whole(&values[..n]).try_into().unwrap();
+    let arena = Arena::new(table);
+    let pos = Codec::<f32, Whole<f32>>::decode_element(&arena, 0, 0).get();
+    let neg = Codec::<f32, Whole<f32>>::decode_element(&arena, 4, 0).get();
+    assert_eq!(pos.to_bits(), 0x0000_0000);
+    assert_eq!(neg.to_bits(), 0x8000_0000);
+    assert_eq!(
+        pos.pack(),
+        neg.pack(),
+        "-0.0 and +0.0 name the same exact zero"
+    );
+
+    // A code past the codebook indexes it modulo N, like any table tier (C6).
+    assert_eq!(
+        Codec::<f32, Whole<f32>>::decode_element(&arena, 7, 0)
+            .get()
+            .to_bits(),
+        values[1].to_bits()
+    );
 }

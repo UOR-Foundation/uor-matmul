@@ -16,7 +16,7 @@ having the most instruction support and the most external oracles.
 | Crate | Contains | `unsafe` | `alloc` | float arithmetic |
 | --- | --- | --- | --- | --- |
 | `uor-matmul-core` | alphabet, accumulator, reference accumulation, views, the error surface | forbidden | none | none |
-| `uor-matmul-codec` | the `Codec` trait, seven tiers, `CodedMatrix`, the kappa manifest, the E8 table | forbidden | none | none |
+| `uor-matmul-codec` | the `Codec` trait, eight tiers, `CodedMatrix`, the kappa manifest, the E8 table | forbidden | none | none |
 | `uor-matmul-kernels` | one module per ISA, each a `KernelSpec` value | permitted, documented | none | none |
 | `uor-matmul-gemm` | the driver: traversals, scratch, epilogue, partition | none | none | none |
 | `uor-matmul` | the facade and the raw-pointer face | the raw face only | none | none |
@@ -175,6 +175,43 @@ chunking `fits_narrow` already licenses for the tile kernels, and never a limit 
 Which lane a family uses is `Tabulated::Lane`, an associated type: which register
 holds a run of products is a property of the element type, like `AccOf<E>`. It was
 a per-shape search, which was a mechanism with one answer.
+
+### The arena tier: a float is a symbol with an address
+
+A float was always a code here --- `FloatElement::decode` reads the name of a
+dyadic rational, and the accumulation below it is the same integer accumulation
+every other element family uses. The arena tier carries that one level up: the
+distinct bit patterns of a weight artifact are its codebook, canonicalized by
+`canonicalize` into unsigned pattern order, so the artifact's identity at the
+kappa level is its manifest and its elements are `u16` indices. Two artifacts
+holding the same values share a codebook whatever order their streams stored
+them in. `CK-10` pins the construction --- signed zeros and NaN payloads are
+distinct symbols, because identity is pattern equality, not value equality ---
+and `CK-08` pins the manifest spelling, `bound` recording `Whole`'s `u128::MAX`
+because a float alphabet has no magnitude to declare.
+
+Nothing below the identity level changes. `Codec` and `CodedMatrix` are generic
+over `Element`, the arena's decode is the table read `Grid` performs, and the
+lane is the exact accumulator (`Wide<Complete<L, MIN_EXP>>`, `LANE_IS_EXACT`),
+so tabulation is exact for the same reason it is for integer codes: the table
+entries are complete accumulations and reusing them is regrouping, not
+rounding. `CD-14` asserts the whole traversal byte-equal to the dense float
+driver, forced and declined alike.
+
+What the tier does not claim is a traversal win, and the model records why.
+`MAX_BLOCK` is one --- one symbol per code --- and `tabulation_pays` refuses a
+one-element block on op count, exactly as it refuses `Grid<16>`: the table
+saves the multiply and no adds, so selection declines and the byte-identical
+dense route runs. The arena's claim is identity and residency; `CG-03` measures
+residency like any other codec's. A float block codebook, if measurements ever
+want one, is a `Book` instantiation and not a change to anything here.
+
+One implementation note is load-bearing. The portable gather staged a column
+group of lane words in a compile-time array, which pays when the words can sit
+in registers and is a frame of pure copy when they cannot --- 80 or 536 bytes
+of limbs never can. `portable_table` chooses at compile time: words of sixteen
+bytes or fewer take the staged gather, wider words accumulate in place, and
+both are the same reads and the same adds (`CB-08`).
 
 ## Borrowing instead of packing
 

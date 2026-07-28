@@ -83,3 +83,9 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-13
     Then the claim holds byte for byte
+
+  @CD-14 @build
+  Scenario: An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape
+    Given the standing corpus
+    When the suite exercises CD-14
+    Then the claim holds byte for byte

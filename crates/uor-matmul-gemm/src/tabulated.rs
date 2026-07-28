@@ -51,8 +51,8 @@
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
-    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, IntegerElement, MatView, MatViewMut,
-    NotAProduct, Shape, Traversal,
+    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, MatView, MatViewMut, NotAProduct,
+    Shape, Traversal,
 };
 
 use uor_matmul_core::{Backend, Strides, Triple};
@@ -62,6 +62,7 @@ use uor_matmul_kernels::{
 
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
+use crate::float::gemm_float;
 use crate::kernel::{gemm_packed, Kernelized};
 use crate::scratch::Scratch;
 
@@ -92,7 +93,8 @@ pub struct Census {
     pub table_reads: u64,
     /// Calls into the codec's decode.
     pub decodes: u64,
-    /// Calls into the dense tile kernels, over a decoded operand.
+    /// Calls into the dense factorization over a decoded operand --- the tile
+    /// kernels for an integer family, the exact float traversal for a float.
     ///
     /// The three factorizations are told apart by this and by `table_reads`, so
     /// "which one ran" is something a harness reads rather than something it
@@ -188,7 +190,7 @@ pub use uor_matmul_kernels::{
 #[inline]
 fn dot_lane<E, Bd, L>(a: &[Alphabet<E, Bd>], w: &[Alphabet<E, Bd>], run: usize) -> AccOf<E>
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
     L: Lane<E>,
 {
@@ -371,13 +373,13 @@ impl<'s, L: LaneWord> Table<'s, L> {
 /// is `m x n`. Reports the same two non-existences at the same moment as
 /// [`uor_matmul_core::Triple::new`] and [`crate::CodedTriple::new`], and nothing
 /// else, ever (§5.5, C6).
-pub struct TabulatedTriple<'a, 'w, 'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, O> {
+pub struct TabulatedTriple<'a, 'w, 'c, E: Element, Bd: Bound, C: Enumerable<E, Bd>, O> {
     a: MatView<'a, Alphabet<E, Bd>>,
     w: CodedMatrix<'w, E, Bd, C>,
     c: MatViewMut<'c, O>,
 }
 
-impl<'a, 'w, 'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, O>
+impl<'a, 'w, 'c, E: Element, Bd: Bound, C: Enumerable<E, Bd>, O>
     TabulatedTriple<'a, 'w, 'c, E, Bd, C, O>
 {
     /// Report non-existence once, before any arithmetic is named.
@@ -751,7 +753,14 @@ pub const fn tabulation_depth(
 /// tabulates in the exact accumulator, which is not a placeholder there but the
 /// whole of what the hardware offers --- the same status
 /// [`uor_matmul_kernels::available_i64_exact`] has for the dense tile.
-pub trait Tabulated: Kernelized {
+///
+/// The supertrait is [`Element`], not [`Kernelized`]: the tabulated traversal
+/// needs a lane, a table sequence, and a dense factorization to decline to, and
+/// a float has all three without having a single integer kernel. What it takes
+/// from the dense side it takes through [`Tabulated::dense_steps`] and
+/// [`Tabulated::dense_gemm`], which the integer families answer with the tile
+/// kernels and the float families with the exact float traversal.
+pub trait Tabulated: Element {
     /// The lane one table entry's row is held in.
     type Lane: Lane<Self>;
 
@@ -793,6 +802,83 @@ pub trait Tabulated: Kernelized {
         exact: &'s mut [AccOf<Self>],
         want: usize,
     ) -> Option<&'s mut [Self::Lane]>;
+
+    /// The dense factorization's declarations for [`tabulation_pays`]: one
+    /// issued instruction covers `dense` products when the traversal has
+    /// `dense_rows` rows of the output to amortize against. `table` is the
+    /// table's own number, which the caller has from the [`TableSpec`] it
+    /// already holds.
+    ///
+    /// Read from the sequence the dense path would run, never from a constant
+    /// standing in for it.
+    fn dense_steps(backend: Backend, bound: u128, rows: usize, table: usize) -> Steps;
+
+    /// The dense factorization, over the decoded operand: `a` against `b`,
+    /// which is `W^T` read through swapped strides, into `c`, with `rest` as
+    /// panel room. `false` when the dense triple cannot be built, which the
+    /// caller answers by streaming --- the same bytes by another walk (S13).
+    ///
+    /// One method per family, because the dense driver is one per family: the
+    /// tile kernels for an integer, the exact float traversal for a float.
+    /// There is no float tile kernel --- no float instruction is exact
+    /// (`CU-01`) --- and the two compute the same sum over the same decoded
+    /// elements, which is what `CD-13` and `CD-14` assert byte for byte.
+    fn dense_gemm<Bd, O, Ep>(
+        a: MatView<'_, Alphabet<Self, Bd>>,
+        b: MatView<'_, Alphabet<Self, Bd>>,
+        c: MatViewMut<'_, O>,
+        epilogue: &Ep,
+        options: GemmOptions,
+        rest: &mut [Alphabet<Self, Bd>],
+    ) -> bool
+    where
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<Self>>,
+        Ep: Epilogue<Self, O>;
+}
+
+/// The integer families' [`Tabulated::dense_steps`]: the tile kernel's own
+/// declarations, read from the sequence the dense path would run.
+///
+/// `dense_rows` is the *blocking* row count, not the chosen tile's `mr`.
+/// Reading `mr` says a one-row kernel wastes no lanes, which is true and is not
+/// why the dense path is weak at small `m`: it packs `n * k` elements of the
+/// operand to compute `m * n * k` products, so at `m = 1` the copy is the same
+/// order as the arithmetic. Measured, `mr` here declined the table at
+/// `1x1024x4096` where it is 5.4x the dense path.
+fn tile_steps<E: Kernelized>(backend: Backend, bound: u128, rows: usize, table: usize) -> Steps {
+    let dense = E::exact_spec(backend, bound, rows);
+    Steps {
+        table,
+        dense: dense.products_per_step,
+        dense_rows: blocking::KERNEL_ROWS,
+    }
+}
+
+/// The integer families' [`Tabulated::dense_gemm`]: the tile kernels, with what
+/// the offer left after the decoded operand as their panel room.
+fn dense_tile<E, Bd, O, Ep>(
+    a: MatView<'_, Alphabet<E, Bd>>,
+    b: MatView<'_, Alphabet<E, Bd>>,
+    c: MatViewMut<'_, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    rest: &mut [Alphabet<E, Bd>],
+) -> bool
+where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+{
+    let Ok(mut dense) = Triple::new(a, b, c) else {
+        // The shapes conformed when the `TabulatedTriple` was built and the output
+        // was checked for aliasing there, so neither failure can arise a second
+        // time. Streaming gives the same bytes, which is why this needs no report.
+        return false;
+    };
+    gemm_packed(&mut dense, epilogue, options, &mut Scratch::new(rest));
+    true
 }
 
 /// `i8`: an `i32` lane holds 133144 products of the full alphabet, which is past
@@ -819,6 +905,26 @@ impl Tabulated for i8 {
     ) -> Option<&'s mut [i32]> {
         bytemuck::cast_slice_mut::<i64, i32>(narrow).get_mut(..want)
     }
+
+    fn dense_steps(backend: Backend, bound: u128, rows: usize, table: usize) -> Steps {
+        tile_steps::<Self>(backend, bound, rows, table)
+    }
+
+    fn dense_gemm<Bd, O, Ep>(
+        a: MatView<'_, Alphabet<Self, Bd>>,
+        b: MatView<'_, Alphabet<Self, Bd>>,
+        c: MatViewMut<'_, O>,
+        epilogue: &Ep,
+        options: GemmOptions,
+        rest: &mut [Alphabet<Self, Bd>],
+    ) -> bool
+    where
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<Self>>,
+        Ep: Epilogue<Self, O>,
+    {
+        dense_tile(a, b, c, epilogue, options, rest)
+    }
 }
 
 /// `i16`: two full `i16` products already need 31 bits, so no 32-bit lane holds
@@ -844,6 +950,26 @@ impl Tabulated for i16 {
         want: usize,
     ) -> Option<&'s mut [i64]> {
         narrow.get_mut(..want)
+    }
+
+    fn dense_steps(backend: Backend, bound: u128, rows: usize, table: usize) -> Steps {
+        tile_steps::<Self>(backend, bound, rows, table)
+    }
+
+    fn dense_gemm<Bd, O, Ep>(
+        a: MatView<'_, Alphabet<Self, Bd>>,
+        b: MatView<'_, Alphabet<Self, Bd>>,
+        c: MatViewMut<'_, O>,
+        epilogue: &Ep,
+        options: GemmOptions,
+        rest: &mut [Alphabet<Self, Bd>],
+    ) -> bool
+    where
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<Self>>,
+        Ep: Epilogue<Self, O>,
+    {
+        dense_tile(a, b, c, epilogue, options, rest)
     }
 }
 
@@ -875,6 +1001,26 @@ impl Tabulated for i32 {
     ) -> Option<&'s mut [Wide<AccOf<i32>>]> {
         Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
     }
+
+    fn dense_steps(backend: Backend, bound: u128, rows: usize, table: usize) -> Steps {
+        tile_steps::<Self>(backend, bound, rows, table)
+    }
+
+    fn dense_gemm<Bd, O, Ep>(
+        a: MatView<'_, Alphabet<Self, Bd>>,
+        b: MatView<'_, Alphabet<Self, Bd>>,
+        c: MatViewMut<'_, O>,
+        epilogue: &Ep,
+        options: GemmOptions,
+        rest: &mut [Alphabet<Self, Bd>],
+    ) -> bool
+    where
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<Self>>,
+        Ep: Epilogue<Self, O>,
+    {
+        dense_tile(a, b, c, epilogue, options, rest)
+    }
 }
 
 /// `i64`: as `i32`, one width up.
@@ -901,6 +1047,153 @@ impl Tabulated for i64 {
         want: usize,
     ) -> Option<&'s mut [Wide<AccOf<i64>>]> {
         Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+
+    fn dense_steps(backend: Backend, bound: u128, rows: usize, table: usize) -> Steps {
+        tile_steps::<Self>(backend, bound, rows, table)
+    }
+
+    fn dense_gemm<Bd, O, Ep>(
+        a: MatView<'_, Alphabet<Self, Bd>>,
+        b: MatView<'_, Alphabet<Self, Bd>>,
+        c: MatViewMut<'_, O>,
+        epilogue: &Ep,
+        options: GemmOptions,
+        rest: &mut [Alphabet<Self, Bd>],
+    ) -> bool
+    where
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<Self>>,
+        Ep: Epilogue<Self, O>,
+    {
+        dense_tile(a, b, c, epilogue, options, rest)
+    }
+}
+
+/// `f32`: a float has no magnitude for a bound to measure, and the only
+/// register that holds a sum of its products exactly is the complete
+/// accumulator --- so the lane is that accumulator, with the same status
+/// `i32`'s has. There is no narrower word a float product could be accumulated
+/// in, because there is no float arithmetic in the accumulation at all (`CU-01`).
+impl Tabulated for f32 {
+    type Lane = Wide<AccOf<f32>>;
+    const LANE_IS_EXACT: bool = true;
+
+    fn table_spec(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<f32, Wide<AccOf<f32>>> {
+        // The reference is the only sequence for this family, and its `k_group`
+        // is one, which divides every block.
+        let _ = (backend, bound, block);
+        portable_table::<f32, Wide<AccOf<f32>>>(rows, group)
+    }
+
+    fn lanes<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<f32>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<f32>>]> {
+        Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+
+    fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
+        // The exact float traversal is the dense factorization here, and it is
+        // scalar: one product per step, one row of the output at a time. There
+        // is no tile kernel whose declarations could be read instead, because
+        // no float instruction is exact.
+        Steps {
+            table,
+            dense: 1,
+            dense_rows: 1,
+        }
+    }
+
+    fn dense_gemm<Bd, O, Ep>(
+        a: MatView<'_, Alphabet<Self, Bd>>,
+        b: MatView<'_, Alphabet<Self, Bd>>,
+        c: MatViewMut<'_, O>,
+        epilogue: &Ep,
+        options: GemmOptions,
+        rest: &mut [Alphabet<Self, Bd>],
+    ) -> bool
+    where
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<Self>>,
+        Ep: Epilogue<Self, O>,
+    {
+        // The float driver reads the codes themselves, so the alphabet wrapper
+        // comes off --- a relabelling, not a copy --- and it keeps no panels of
+        // its own, so the leftover offer goes unused.
+        let _ = rest;
+        let Ok(mut dense) = Triple::new(a.peeled(), b.peeled(), c) else {
+            return false;
+        };
+        gemm_float(&mut dense, epilogue, options);
+        true
+    }
+}
+
+/// `f64`: as `f32`, one width up.
+impl Tabulated for f64 {
+    type Lane = Wide<AccOf<f64>>;
+    const LANE_IS_EXACT: bool = true;
+
+    fn table_spec(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<f64, Wide<AccOf<f64>>> {
+        // The reference is the only sequence for this family, and its `k_group`
+        // is one, which divides every block.
+        let _ = (backend, bound, block);
+        portable_table::<f64, Wide<AccOf<f64>>>(rows, group)
+    }
+
+    fn lanes<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<f64>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<f64>>]> {
+        Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+
+    fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
+        // As `f32`: the scalar exact traversal, one product per step over one
+        // row of the output.
+        Steps {
+            table,
+            dense: 1,
+            dense_rows: 1,
+        }
+    }
+
+    fn dense_gemm<Bd, O, Ep>(
+        a: MatView<'_, Alphabet<Self, Bd>>,
+        b: MatView<'_, Alphabet<Self, Bd>>,
+        c: MatViewMut<'_, O>,
+        epilogue: &Ep,
+        options: GemmOptions,
+        rest: &mut [Alphabet<Self, Bd>],
+    ) -> bool
+    where
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<Self>>,
+        Ep: Epilogue<Self, O>,
+    {
+        // As `f32`: peel the wrapper, hand the decoded operand to the float
+        // driver, and leave the leftover offer unused.
+        let _ = rest;
+        let Ok(mut dense) = Triple::new(a.peeled(), b.peeled(), c) else {
+            return false;
+        };
+        gemm_float(&mut dense, epilogue, options);
+        true
     }
 }
 
@@ -1120,18 +1413,12 @@ fn run<E, Bd, C, O, Ep, Lg>(
         column_group(plan.rows),
         block,
     );
-    let dense = E::exact_spec(options.backend, Bd::VALUE, plan.rows);
-    let steps = Steps {
-        table: block.saturating_mul(table.lanes_per_add), // R3-ok: a size or cost query, not an accumulation
-        dense: dense.products_per_step,
-        // The *blocking* row count, not the chosen tile's `mr`. Reading `mr`
-        // says a one-row kernel wastes no lanes, which is true and is not why
-        // the dense path is weak at small `m`: it packs `n * k` elements of the
-        // operand to compute `m * n * k` products, so at `m = 1` the copy is the
-        // same order as the arithmetic. Measured, `mr` here declined the table
-        // at `1x1024x4096` where it is 5.4x the dense path.
-        dense_rows: blocking::KERNEL_ROWS,
-    };
+    let steps = E::dense_steps(
+        options.backend,
+        Bd::VALUE,
+        plan.rows,
+        block.saturating_mul(table.lanes_per_add), // R3-ok: a size or cost query, not an accumulation
+    );
     if !admits(options.traversal, space, block, plan, steps, lane_bytes) {
         decline(triple, epilogue, options, scratch, ledger);
         return;
@@ -1221,7 +1508,7 @@ const ROW_TILES: [usize; 5] = [16, 8, 4, 2, 1];
 /// streams --- the same rule every other offer in this library follows.
 fn decode_book<E, Bd, C, Lg>(codec: &C, panel: &mut [Alphabet<E, Bd>], ledger: &mut Lg) -> bool
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     Lg: Ledger,
@@ -1319,7 +1606,7 @@ fn distinct_columns<E, Bd, C>(
     index: &mut [usize],
 ) -> Option<usize>
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
     C: Enumerable<E, Bd>,
 {
@@ -1369,7 +1656,7 @@ where
 /// Do two columns read the same table entries in the same order?
 fn columns_equal<E, Bd, C>(a: &[C::Code], b: &[C::Code]) -> bool
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
     C: Enumerable<E, Bd>,
 {
@@ -1397,7 +1684,7 @@ const HASH_PREFIX: usize = 16;
 /// the same reason and the same shape as [`crate::collapse`]'s row hash.
 fn column_hash<E, Bd, C>(run: &[C::Code]) -> usize
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
     C: Enumerable<E, Bd>,
 {
@@ -1624,7 +1911,7 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
 }
 
 /// What one column sweep needs and does not change while it runs.
-struct Sweep<'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, L> {
+struct Sweep<'c, E: Element, Bd: Bound, C: Enumerable<E, Bd>, L> {
     wide: TableSpec<E, L>,
     single: TableSpec<E, L>,
     codes: &'c [C::Code],
@@ -1658,7 +1945,7 @@ fn sweep<const G: usize, E, Bd, C, L>(
     depth: usize,
 ) -> usize
 where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     L: Lane<E>,
@@ -1902,14 +2189,12 @@ where
     ) else {
         return false;
     };
-    let Ok(mut dense) = Triple::new(triple.a, b, triple.c.reborrow()) else {
-        // The shapes conformed when the `TabulatedTriple` was built and the output
-        // was checked for aliasing there, so neither failure can arise a second
-        // time. Streaming gives the same bytes, which is why this needs no report.
+    // The family's own dense driver over the decoded operand: the tile kernels
+    // for an integer, the exact float traversal for a float.
+    if !E::dense_gemm(triple.a, b, triple.c.reborrow(), epilogue, options, rest) {
         return false;
-    };
+    }
     ledger.kernelled();
-    gemm_packed(&mut dense, epilogue, options, &mut Scratch::new(rest));
     true
 }
 
@@ -1998,8 +2283,10 @@ mod tests {
     use crate::epilogue::Linear;
     use std::vec;
     use std::vec::Vec;
-    use uor_matmul_codec::{e8_codec, e8_table, Book, Grid, Packed};
-    use uor_matmul_core::{as_alphabet_full, EncodeMode, Full, Triple};
+    use uor_matmul_codec::{canonicalize, e8_codec, e8_table, Arena, Book, Grid, Packed};
+    use uor_matmul_core::{
+        as_alphabet_full, as_alphabet_whole, EncodeMode, FloatElement, Full, Triple, Whole,
+    };
 
     type A8 = Alphabet<i8, Full<i8>>;
 
@@ -2273,6 +2560,247 @@ mod tests {
             let stream: Vec<u8> = fill(n * (k / 2), 0xd0e, |x| x as u8);
             every_traversal_agrees("Packed<Grid<16>,2>", packed, &stream, m, k, n);
         }
+    }
+
+    /// One arena-coded float product at one traversal and one offer.
+    ///
+    /// The same shape as [`tabulated`], with one knob scaling the panel,
+    /// accumulator and index offers together so the extremes --- nothing, one
+    /// word, exactly the suggested amount, and a multiple --- are all reachable.
+    /// The lane offer is not swept because a float family has none: its lane *is*
+    /// the exact accumulator, and the words live in the accumulator offer.
+    #[allow(clippy::too_many_arguments)]
+    fn arena_tabulated<E, const D: usize>(
+        table: &[Alphabet<E, Whole<E>>; D],
+        codes: &[u16],
+        a: &[E],
+        m: usize,
+        k: usize,
+        n: usize,
+        traversal: Traversal,
+        offer: usize,
+    ) -> (Vec<E>, Census)
+    where
+        E: FloatElement + EncodeFrom<AccOf<E>> + Tabulated,
+        AccOf<E>: crate::SignedPlace,
+        Linear: Epilogue<E, E>,
+    {
+        let shape = Shape { m, k, n };
+        let space = <Arena<'_, E, D> as Enumerable<E, Whole<E>>>::CODE_SPACE;
+        let block = <Arena<'_, E, D> as uor_matmul_codec::Codec<E, Whole<E>>>::MAX_BLOCK;
+        let scale = |want: usize, offer: usize| -> usize {
+            if offer >= OFFER_STEPS {
+                want.saturating_mul(offer - OFFER_STEPS + 1) // R3-ok: a size or cost query, not an accumulation
+            } else {
+                want * offer / OFFER_STEPS
+            }
+        };
+        let mut accumulators = vec![
+            <AccOf<E> as Accumulator>::ZERO;
+            scale(
+                suggested_tabulation::<E, Whole<E>>(shape, space, block).max(1),
+                offer
+            )
+        ];
+        let mut ids = vec![0usize; scale(suggested_tabulation_index(shape), offer)];
+        // At the top of the sweep the panel holds the whole decoded operand, so
+        // the dense decline route is exercised too; below it, only the table and
+        // the stream can be reached. All three are asserted against the same bytes.
+        let want_panel =
+            suggested_tabulation_panel(space, block).max(n * k + crate::suggested_scratch(shape));
+        let mut panel = vec![Alphabet::<E, Whole<E>>::ZERO; scale(want_panel, offer)];
+        let mut c = vec![E::ZERO; m * n];
+        let mut census = Census::default();
+        {
+            let av = MatView::row_major(as_alphabet_whole(a), m, k).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let w =
+                CodedMatrix::new(Arena::new(table), n, k, codes).expect("the codes describe n x k");
+            let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            gemm_tabulated_counted(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut Tabulation::with_index(&mut [], &mut ids),
+                &mut census,
+            );
+        }
+        (c, census)
+    }
+
+    /// The dense float driver's product of the same operands, which is the
+    /// identity the arena claims to code. `W` is decoded into a dense `k x n`
+    /// matrix first, so this is the product itself and not a restatement of it.
+    fn arena_reference<E, const D: usize>(
+        table: &[Alphabet<E, Whole<E>>; D],
+        codes: &[u16],
+        a: &[E],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<E>
+    where
+        E: FloatElement + EncodeFrom<AccOf<E>>,
+        AccOf<E>: crate::SignedPlace,
+        Linear: Epilogue<E, E>,
+    {
+        let w = CodedMatrix::new(Arena::new(table), n, k, codes).expect("the codes describe n x k");
+        let mut b = vec![E::ZERO; k * n];
+        for p in 0..k {
+            for j in 0..n {
+                b[p * n + j] = w.at(j, p).get();
+            }
+        }
+        let mut c = vec![E::ZERO; m * n];
+        let av = MatView::row_major(a, m, k).unwrap();
+        let bv = MatView::row_major(&b, k, n).unwrap();
+        let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+        let mut t = Triple::new(av, bv, cv).unwrap();
+        crate::float::gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
+        c
+    }
+
+    /// Every traversal at every offer, against the dense float driver's bytes.
+    fn every_arena_traversal_agrees<E, const D: usize>(
+        label: &str,
+        table: &[Alphabet<E, Whole<E>>; D],
+        codes: &[u16],
+        a: &[E],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) where
+        E: FloatElement + EncodeFrom<AccOf<E>> + Tabulated,
+        AccOf<E>: crate::SignedPlace,
+        Linear: Epilogue<E, E>,
+    {
+        // Bit patterns, not values: a NaN in the codebook is a NaN in the
+        // output, and NaN is not `==` itself.
+        let want: Vec<u64> = arena_reference(table, codes, a, m, k, n)
+            .iter()
+            .map(|v| v.symbol_bits())
+            .collect();
+
+        // Nothing, a sliver, most of it, exactly it, and three times it.
+        let offers = [0, 1, 2, OFFER_STEPS - 1, OFFER_STEPS, OFFER_STEPS + 2];
+        for traversal in [
+            Traversal::Tabulated,
+            Traversal::Blocked,
+            Traversal::OutputMajor,
+        ] {
+            for offer in offers {
+                let (got, census) = arena_tabulated(table, codes, a, m, k, n, traversal, offer);
+                let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
+                assert_eq!(
+                    got, want,
+                    "{label} {m}x{k}x{n}: {traversal:?} at an offer of {offer} must give \
+                     the dense float driver's bytes ({census:?})"
+                );
+            }
+        }
+
+        // And the comparison is not vacuous: the forced traversal really read a
+        // table, the costed one really declined to the dense route --- a
+        // one-element block can never pay --- and an offer of nothing reached
+        // neither. The census says which ran rather than the predicate being
+        // asked to say it again.
+        let (_, tabled) =
+            arena_tabulated(table, codes, a, m, k, n, Traversal::Tabulated, OFFER_STEPS);
+        assert!(
+            tabled.table_reads > 0,
+            "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
+        );
+        let (_, declined) =
+            arena_tabulated(table, codes, a, m, k, n, Traversal::Blocked, OFFER_STEPS);
+        assert!(
+            declined.kernel_calls > 0,
+            "{label} {m}x{k}x{n}: `Blocked` must decline a one-element block to the \
+             dense route ({declined:?})"
+        );
+        let (_, without) = arena_tabulated(table, codes, a, m, k, n, Traversal::Tabulated, 0);
+        assert_eq!(
+            without.table_reads, 0,
+            "{label} {m}x{k}x{n}: an offer of nothing cannot read a table"
+        );
+    }
+
+    /// `CD-14`: an arena-coded float weight matrix gives the dense float
+    /// driver's bytes at every shape, with the table forced and declined alike,
+    /// and with no offer at all.
+    ///
+    /// The reference is `gemm_float` over the decoded weights, not another
+    /// tabulated run: an agreement between two tabulations would say nothing
+    /// about whether either computes the product.
+    #[test]
+    fn an_arena_coded_float_matrix_matches_the_dense_driver_cd_14() {
+        // The distinct symbols one artifact's weights can hold. `-0.0` and
+        // `+0.0` are distinct symbols with equal decodes, and an infinity and a
+        // NaN are codes like any other (`CT-03`): the exact accumulator carries
+        // them as flags and the encode step writes them once. `canonicalize`
+        // orders by unsigned bit pattern, so the small tables hold the low
+        // patterns and the zeros, the infinity, and the NaN enter at `d = 6, 4,
+        // 5` respectively.
+        let mut pool32 = [0.5f32, 1.0, f32::INFINITY, f32::NAN, -0.0, -1.5, -2.5, 0.0];
+        assert_eq!(canonicalize(&mut pool32), 8, "eight distinct bit patterns");
+        let mut pool64 = [0.5f64, 1.0, f64::INFINITY, f64::NAN, -0.0, -1.5, -2.5, 0.0];
+        assert_eq!(canonicalize(&mut pool64), 8, "eight distinct bit patterns");
+
+        macro_rules! sweep {
+            ($d:literal) => {{
+                let t32: &[Alphabet<f32, Whole<f32>>; $d] =
+                    as_alphabet_whole(&pool32[..$d]).try_into().unwrap();
+                let t64: &[Alphabet<f64, Whole<f64>>; $d] =
+                    as_alphabet_whole(&pool64[..$d]).try_into().unwrap();
+                for &(m, k, n) in &[
+                    (1usize, 1usize, 1usize),
+                    (2, 3, 5),
+                    (5, 17, 7),
+                    (13, 11, 3),
+                    (7, 40, 9),
+                ] {
+                    // Codes past the table on purpose: the enumeration reduces
+                    // them modulo `D`, and the reference decodes them the same way.
+                    let codes: Vec<u16> = fill(n * k, 0xa4ea, |x| (x % (2 * $d as u64 + 1)) as u16);
+                    // A zero among the activations, so `inf * 0` is a product
+                    // someone computes and clause 7.2 has to answer for.
+                    let a32: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
+                    let a64: Vec<f64> = fill(m * k, 0xac7, |x| (x % 7) as f64 * 0.5 - 1.5);
+                    every_arena_traversal_agrees(
+                        concat!("Arena<", $d, "> f32"),
+                        t32,
+                        &codes,
+                        &a32,
+                        m,
+                        k,
+                        n,
+                    );
+                    every_arena_traversal_agrees(
+                        concat!("Arena<", $d, "> f64"),
+                        t64,
+                        &codes,
+                        &a64,
+                        m,
+                        k,
+                        n,
+                    );
+                }
+            }};
+        }
+        // Two to eight distinct symbols: below two there is no codebook to speak
+        // of, and eight is where every non-finite symbol above is in play. The
+        // odd counts take the offset-run gather, the powers of two the borrowed
+        // index stream (`CB-08`).
+        sweep!(2);
+        sweep!(3);
+        sweep!(4);
+        sweep!(5);
+        sweep!(6);
+        sweep!(7);
+        sweep!(8);
     }
 
     /// `CT-07`: tabulation is total. Every value the code type can hold indexes a

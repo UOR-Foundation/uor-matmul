@@ -1,6 +1,6 @@
 //! The one trait every tier instantiates (§6.1).
 
-use uor_matmul_core::{Alphabet, Bound, IntegerElement};
+use uor_matmul_core::{Alphabet, Bound, Element};
 
 /// A decode from a stored code to alphabet elements.
 ///
@@ -8,7 +8,12 @@ use uor_matmul_core::{Alphabet, Bound, IntegerElement};
 /// type-level fact the kernels can rely on without rechecking: a codec's table
 /// is `&[Alphabet<E, Bd>]`, so its image is in the alphabet by construction and
 /// there is nothing for a constructor to validate or reject (§6.2).
-pub trait Codec<E: IntegerElement, Bd: Bound>: Send + Sync {
+///
+/// `E` is any element type. An integer codec's alphabet is a magnitude bound;
+/// a float codec's is the codebook itself, declared as `Whole<E>` --- the
+/// arena tier is the one instantiation of that, and no tier branches on the
+/// difference.
+pub trait Codec<E: Element, Bd: Bound>: Send + Sync {
     /// The stored code type.
     ///
     /// Any `Copy` type: `i8` for identity, `u8` for a nibble pair or an E8
@@ -127,7 +132,7 @@ pub trait Codec<E: IntegerElement, Bd: Bound>: Send + Sync {
 /// the enumeration is a property of the code *space* and not of any particular
 /// table. A composing tier defers to its inner codec's enumeration without
 /// holding an instance of it.
-pub trait Enumerable<E: IntegerElement, Bd: Bound>: Codec<E, Bd> {
+pub trait Enumerable<E: Element, Bd: Bound>: Codec<E, Bd> {
     /// The number of distinct codes.
     ///
     /// `N` for an `N`-entry [`crate::Grid`] or [`crate::Book`], and the product
@@ -199,6 +204,8 @@ pub enum TierId {
     Runs,
     /// The composite of two codecs.
     Transcode,
+    /// A codebook of one artifact's distinct bit patterns, canonicalized.
+    Arena,
 }
 
 impl TierId {
@@ -212,6 +219,7 @@ impl TierId {
             Self::Offset => "Offset",
             Self::Runs => "Runs",
             Self::Transcode => "Transcode",
+            Self::Arena => "Arena",
         }
     }
 }

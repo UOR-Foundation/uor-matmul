@@ -4,7 +4,7 @@
 //! only the traversal differs. There is no scratch error in the library's error
 //! surface, because there is no scratch condition to report.
 
-use uor_matmul_core::{AccOf, Accumulator, Alphabet, Bound, IntegerElement, Shape};
+use uor_matmul_core::{AccOf, Accumulator, Alphabet, Bound, Element, Shape};
 
 /// A panel offer cut in two. Named because the pair is a return type and
 /// `(&mut [Alphabet<E, Bd>], &mut [Alphabet<E, Bd>])` written out says nothing the
@@ -45,12 +45,12 @@ pub type PanelSplit<'s, E, Bd> = (&'s mut [Alphabet<E, Bd>], &'s mut [Alphabet<E
 /// Offering one is optional, like every other offer. Offering none gives the same
 /// bytes from the full-depth traversal (`CD-04`, `CD-10`).
 #[derive(Debug)]
-pub struct Scratch<'s, E: IntegerElement, Bd: Bound> {
+pub struct Scratch<'s, E: Element, Bd: Bound> {
     buffer: &'s mut [Alphabet<E, Bd>],
     accumulators: &'s mut [AccOf<E>],
 }
 
-impl<'s, E: IntegerElement, Bd: Bound> Scratch<'s, E, Bd> {
+impl<'s, E: Element, Bd: Bound> Scratch<'s, E, Bd> {
     /// Offer a panel buffer.
     pub fn new(buffer: &'s mut [Alphabet<E, Bd>]) -> Self {
         Self {

@@ -56,6 +56,10 @@ of these has been checked by planting the defect it exists to catch:
 | `just miri` | the raw face's window made one element too long: passes the native run, Undefined Behaviour under Miri | yes |
 | the raw-window tests (`CS-05`) | the same window made one element too short, caught by all three | yes |
 | `CU-07` | `-p uor-matmul-kernels` dropped from the job, from the recipe, and from both --- the last is the defect this workspace actually shipped | yes |
+| `CK-10` (arena canonicalization) | duplicates not collapsed by `canonicalize`; a sign-masked comparison is *not* reported --- pattern order never makes `-0.0`/`+0.0` adjacent, and the row says so | yes |
+| `CK-09` on the arena tier | an off-by-one `index_of` | yes |
+| the `CK-08` arena spelling | `Arena` spelled `Grid` in the canonical manifest | yes |
+| `CD-14` | rows and column group swapped in the wide-lane gather | yes |
 
 `audit-disassembly` deliberately does *not* catch a float add the optimizer
 removed, because such an add is not in the shipped kernel. The gate reports the

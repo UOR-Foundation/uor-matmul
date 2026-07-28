@@ -70,6 +70,15 @@ table = "delegated"
 note = "the upstream transcode_decode composite"
 honesty = "build"
 
+[[tier]]
+id = "Arena"
+rust = "Arena<'a, E, N>"
+code = "index"
+block = 1
+table = "borrowed [Alphabet<E, Whole<E>>; N]"
+note = "a codebook of one artifact's distinct float bit patterns, canonicalized by `canonicalize` (CK-10). The symbols are the identity level; the decode is the same table read as Grid."
+honesty = "build"
+
 # --------------------------------------------------------------------------
 # Tabulation. One row per *enumerable* codec: a codec whose code space can be
 # enumerated, which is what a table indexed by code requires.
@@ -162,6 +171,15 @@ block = 1
 rows = 16
 lanes_per_add = 8
 note = "a zero point relabels the image, never the code space, so an asymmetric quantization tabulates exactly as its inner codec does."
+honesty = "build"
+
+[[tabulation]]
+codec = "Arena<4>"
+code_space = 4
+block = 1
+rows = 16
+lanes_per_add = 8
+note = "the float arena, at one representative code space --- the space is per-artifact, and at block = 1 the conclusion is the Grid<16> one: the table saves the multiply and no adds, so selection declines it and the byte-identical dense route runs (CD-14). The tier's claim is identity and residency, not a traversal win."
 honesty = "build"
 
 # --------------------------------------------------------------------------
