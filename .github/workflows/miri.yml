@@ -41,6 +41,9 @@ name: miri
 on:
   push: { branches: [main] }
   pull_request:
+  # The merge queue runs the required checks on its merge group; without
+  # this trigger the group reports nothing and the queue ejects the PR.
+  merge_group:
   schedule: [{ cron: "0 4 * * 1" }]
 
 jobs:
