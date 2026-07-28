@@ -256,7 +256,10 @@ pub trait Lane<E: Element>: LaneWord {
     /// licenses for the tile kernels.
     fn capacity(b: u128) -> Option<usize>;
 
-    /// Accumulate one exact product. The only multiply the table issues.
+    /// Accumulate one exact product. The only multiply the table issues ---
+    /// and at bound 1 not even this one: [`portable_table_bound1`] fills the
+    /// same slot with adds and subtracts, because there every product is
+    /// `+-a` or `0` (`CB-10`).
     fn mac(self, a: E, w: E) -> Self;
 
     /// Place a completed run into the exact accumulator.
@@ -382,6 +385,134 @@ impl<E: Element> Lane<E> for Wide<E::Acc> {
     #[inline]
     fn place(self, acc: E::Acc) -> E::Acc {
         acc.combine(self.0)
+    }
+}
+
+/// A lane word in `Z/2^32`: the wrap is the encode, not an overflow.
+///
+/// The newtype exists because the blanket `impl<E: Element> Lane<E> for i32`
+/// above already speaks for `i32`-as-lane with *exact* semantics --- one
+/// product of the full `i32` alphabet and no more. The same bits read as a
+/// quotient are a different lane: wrapping arithmetic, unbounded depth, and a
+/// placement that is congruent mod `2^32` rather than equal. Admissibility is
+/// the driver's question (`CU-08`); this type only states what the ring does.
+///
+/// Legitimate exactly when the caller asked to encode by wrapping into an
+/// output no wider than 32 bits, because then the lane's own wrap *is* the
+/// encode and nothing is lost that the caller did not ask to lose --- the same
+/// argument [`crate::available_i32_modular`] makes for the dense tile.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Mod32(pub i32);
+
+impl Mod32 {
+    /// A buffer of `i128` accumulators, read as a buffer of modular lanes.
+    ///
+    /// Four lanes per accumulator, so an offer sized for the exact lane holds
+    /// the same table four times over. This is a relabelling, never a copy.
+    pub fn wrap_i128s_mut(words: &mut [i128]) -> &mut [Mod32] {
+        let (ptr, len) = (words.as_mut_ptr(), words.len());
+        // SAFETY: `i128` is sixteen bytes aligned to sixteen and `Mod32` is
+        // `#[repr(transparent)]` over `i32`, so the buffer is a valid buffer of
+        // four times as many `Mod32`, and the borrow is moved rather than
+        // duplicated.
+        unsafe { core::slice::from_raw_parts_mut(ptr.cast::<Mod32>(), len * 4) }
+    }
+}
+
+impl LaneWord for Mod32 {
+    const ZERO: Self = Mod32(0);
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        // The ring's own addition: wrapping here is the quotient's arithmetic,
+        // reached at every depth rather than only within a capacity.
+        Mod32(self.0.wrapping_add(other.0))
+    }
+}
+
+impl Lane<i32> for Mod32 {
+    #[inline]
+    fn capacity(_: u128) -> Option<usize> {
+        // Unbounded at every bound: reduction mod `2^32` commutes with `+` and
+        // `*`, so no depth can make the lane disagree with the encode. The
+        // table-side form of `Factorization::Modular` (`KernelSpec::lane_depth`
+        // returns `usize::MAX` for the same reason).
+        None
+    }
+
+    #[inline(always)]
+    fn mac(self, a: i32, w: i32) -> Self {
+        // The only multiply the table issues, in the ring: `mullo` semantics.
+        Mod32(self.0.wrapping_add(a.wrapping_mul(w)))
+    }
+
+    #[inline]
+    fn place(self, acc: i128) -> i128 {
+        // Congruent mod `2^32` to the exact sum, and the `Wrapping` encode
+        // into a <= 32-bit output reads only the low limb --- the argument
+        // `Kernelized::modular_as_acc` records on the dense side. With the
+        // capacity unbounded a run is the whole column block, so this is
+        // reached once per output element and `acc` cannot outgrow the exact
+        // sum the width derivation sized it for.
+        acc + i128::from(self.0)
+    }
+}
+
+/// A lane word in `Z/2^64`, one width up from [`Mod32`] and portable-only.
+///
+/// The build's multiply is the table's only one, and no SIMD integer multiply
+/// reaches an `i64` lane --- the same reason [`crate::available_i64_modular`]
+/// lists the reference alone. The lane is still worth naming: the gather is
+/// the column loop's whole arithmetic, and in the quotient it needs no exact
+/// accumulator until placement.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Mod64(pub i64);
+
+impl Mod64 {
+    /// A buffer of three-limb accumulators, read as a buffer of modular lanes.
+    ///
+    /// Three lanes per accumulator, for the same reason and in the same way as
+    /// [`Mod32::wrap_i128s_mut`]: an offer sized for the exact lane relabelled,
+    /// never copied.
+    pub fn wrap_limbs_mut(words: &mut [uor_matmul_core::acc::Limbs<3>]) -> &mut [Mod64] {
+        let (ptr, len) = (words.as_mut_ptr(), words.len());
+        // SAFETY: `Limbs<3>` is twenty-four bytes aligned to eight --- one
+        // `[u64; 3]` --- and `Mod64` is `#[repr(transparent)]` over `i64`, so
+        // the buffer is a valid buffer of three times as many `Mod64`, and the
+        // borrow is moved rather than duplicated.
+        unsafe { core::slice::from_raw_parts_mut(ptr.cast::<Mod64>(), len * 3) }
+    }
+}
+
+impl LaneWord for Mod64 {
+    const ZERO: Self = Mod64(0);
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        Mod64(self.0.wrapping_add(other.0))
+    }
+}
+
+impl Lane<i64> for Mod64 {
+    #[inline]
+    fn capacity(_: u128) -> Option<usize> {
+        // Unbounded at every bound, as `Mod32`'s: the wrap is the encode.
+        None
+    }
+
+    #[inline(always)]
+    fn mac(self, a: i64, w: i64) -> Self {
+        Mod64(self.0.wrapping_add(a.wrapping_mul(w)))
+    }
+
+    #[inline]
+    fn place(self, acc: uor_matmul_core::acc::Limbs<3>) -> uor_matmul_core::acc::Limbs<3> {
+        // The low limb *is* the value in `Z/2^64`, which is what the `Wrapping`
+        // encode reads; the placement is congruent mod `2^64` to the exact sum
+        // for the same reason `Mod32`'s is mod `2^32`.
+        acc.add_i128(i128::from(self.0))
     }
 }
 
@@ -522,6 +653,13 @@ pub struct TableSpec<E, L> {
     /// the same reason: a sequence with an intermediate narrower than its lane
     /// is wrong past a magnitude however shallow the chunk.
     pub max_bound: u128,
+    /// Whether [`Self::build`] issues multiplies.
+    ///
+    /// Every build but the bound-1 one does. At bound 1 every product is
+    /// `+-a` or `0`, so the build that declares it is adds and subtracts, and
+    /// the driver's census charges it as such (`CB-10`) rather than as the
+    /// products it computes.
+    pub build_multiplies: bool,
     /// Fill one slot.
     pub build: TableBuild<E, L>,
     /// Reduce one column group from an index stream the driver built.
@@ -589,9 +727,120 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
         // The reference multiplies in the lane's own width, so there is no
         // intermediate to outgrow and no alphabet it is inexact on.
         max_bound: u128::MAX,
+        build_multiplies: true,
         build: portable_build::<E, L>,
         gather,
         gather_codes,
+    }
+}
+
+/// The bound-1 build: the table's only multiply, absent.
+///
+/// At bound 1 every book word is in `{-1, 0, +1}`, so `T[c][i] = sum_t
+/// +-A[i][t]` is adds and subtracts and the multiply [`portable_build`] issues
+/// has nothing left to do. Listed after every full-alphabet sequence, so
+/// [`choose_table`] hands it exactly the alphabet it declares and no other ---
+/// selection by declaration, the same rule the `madd` pair follows on the
+/// dense side (R13).
+///
+/// Only the build differs; the gathers are bound-independent and are the
+/// reference's own, shared rather than duplicated.
+///
+/// Concrete over `i8` rather than generic like [`portable_table`]: the
+/// bound-1 spelling is the sign tier's, which `CK-13` declared over `i8`, and
+/// a generic negation is not an operation [`Element`] names.
+pub const fn portable_table_bound1(rows: usize, group: usize) -> TableSpec<i8, i32> {
+    TableSpec {
+        backend: Backend::Portable,
+        rows,
+        group,
+        k_group: 1,
+        lanes_per_add: 1,
+        build_products_per_step: 1,
+        lane_cap: u128::MAX,
+        // Exact exactly when every book word is in `{-1, 0, +1}`: the whole of
+        // what the sequence assumes, stated as the declaration `choose_table`
+        // reads.
+        max_bound: 1,
+        build_multiplies: false,
+        build: portable_build_bound1,
+        gather: portable_gather::<i32>,
+        gather_codes: portable_gather_codes::<i32>,
+    }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract, with every element of `book` in `{-1, 0, +1}` ---
+/// which the caller's bound-1 alphabet has already established at the boundary.
+unsafe fn portable_build_bound1(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller guaranteed the three extents, as in `portable_build`.
+    let (book, acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(book, space * block),
+            core::slice::from_raw_parts(acts, block * rows),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    // The same compile-time tile heights as the reference build, for the same
+    // reason: one entry's words live in registers for its whole codeword.
+    match rows {
+        1 => build_run_bound1::<1>(block, book, acts, out),
+        2 => build_run_bound1::<2>(block, book, acts, out),
+        4 => build_run_bound1::<4>(block, book, acts, out),
+        8 => build_run_bound1::<8>(block, book, acts, out),
+        16 => build_run_bound1::<16>(block, book, acts, out),
+        _ => build_any_bound1(rows, block, book, acts, out),
+    }
+}
+
+/// The bound-1 build at a compile-time tile height: [`build_run`]'s loop nest,
+/// with the product read as an add, a subtract, or nothing.
+#[inline(always)]
+fn build_run_bound1<const R: usize>(block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(R).zip(book.chunks_exact(block)) {
+        let mut acc = [0i32; R];
+        for (&w, col) in word.iter().zip(acts.chunks_exact(R)) {
+            for (cell, &a) in acc.iter_mut().zip(&col[..R]) {
+                // `w` is in `{-1, 0, +1}`: the product is the activation, its
+                // negation, or zero, and there is nothing to multiply.
+                let a = i32::from(a);
+                *cell += if w == 1 {
+                    a
+                } else if w == -1 {
+                    -a
+                } else {
+                    0
+                };
+            }
+        }
+        entry.copy_from_slice(&acc);
+    }
+}
+
+/// The same, at a row count no shipped tile uses.
+fn build_any_bound1(rows: usize, block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(rows).zip(book.chunks_exact(block)) {
+        entry.fill(0);
+        for (&w, col) in word.iter().zip(acts.chunks_exact(rows)) {
+            for (cell, &a) in entry.iter_mut().zip(col) {
+                let a = i32::from(a);
+                *cell += if w == 1 {
+                    a
+                } else if w == -1 {
+                    -a
+                } else {
+                    0
+                };
+            }
+        }
     }
 }
 
@@ -1149,6 +1398,12 @@ pub fn available_table_i8(rows: usize, group: usize) -> impl Iterator<Item = Tab
         crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i8_i32(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i8_i32(rows, group),
         crate::isa::wasm::simd128_available() => crate::isa::wasm::simd128_table_i8_i32(rows, group),
+        // The bound-1 builds, last so `Auto` hands them exactly the alphabet
+        // they declare: a full-alphabet sequence is never shadowed, and at
+        // bound 1 the adds-only build is the last admissible entry (CB-10).
+        true => portable_table_bound1(rows, group),
+        crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i8_i32_bound1(rows, group),
+        crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i8_i32_bound1(rows, group),
     ]
 }
 
@@ -1164,6 +1419,41 @@ pub fn available_table_i16(rows: usize, group: usize) -> impl Iterator<Item = Ta
         crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i16_i64(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i16_i64(rows, group),
         crate::isa::wasm::simd128_available() => crate::isa::wasm::simd128_table_i16_i64(rows, group),
+    ]
+}
+
+/// The `i32` table sequences in `Z/2^32` this build can run, reference first.
+///
+/// The lane is [`Mod32`]. Legitimate exactly when the caller asked to encode by
+/// wrapping into an output no wider than the lane, because then the lane's own
+/// wrap *is* the encode --- the same declaration [`crate::available_i32_modular`]
+/// cashes in on the dense side. *Whether* it may run is the driver's question
+/// (`CU-08`); this list only answers what the host can run.
+#[inline]
+pub fn available_table_i32_modular(
+    rows: usize,
+    group: usize,
+) -> impl Iterator<Item = TableSpec<i32, Mod32>> {
+    collect_table![
+        true => portable_table::<i32, Mod32>(rows, group),
+        crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i32_mod32(rows, group),
+    ]
+}
+
+/// The `i64` table sequences in `Z/2^64` this build can run: the reference
+/// alone.
+///
+/// The build's multiply is the table's only one, and no SIMD integer multiply
+/// reaches an `i64` lane --- the same reason [`crate::available_i64_modular`]
+/// is portable-only. The reference is not a placeholder here but the whole of
+/// what the hardware offers.
+#[inline]
+pub fn available_table_i64_modular(
+    rows: usize,
+    group: usize,
+) -> impl Iterator<Item = TableSpec<i64, Mod64>> {
+    collect_table![
+        true => portable_table::<i64, Mod64>(rows, group),
     ]
 }
 
@@ -1189,7 +1479,10 @@ impl<E, L> IntoSpec<E, L> for Option<TableSpec<E, L>> {
 ///
 /// Last, not first, because the list is written reference-first and every entry
 /// after it issues fewer instructions for the same integer. `Backend::Portable`
-/// pins the reference, which is what the parity tests compare against.
+/// pins a portable sequence --- the reference, or at bound 1 the portable
+/// bound-1 build listed after it, which computes the same integer by the
+/// declaration it carries (`CB-10`). The parity tests compare against the
+/// list's first entry either way.
 ///
 /// **Selection cannot fail**, exactly as [`crate::choose`] cannot, and for the
 /// same reason: a named backend this host has no sequence for yields the first

@@ -63,6 +63,8 @@ returns an error the model does not sanction.
 | `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room |
 | `CD-12` | `build` | Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer |
 | `CD-13` | `build` | `Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all |
+| `CD-15` | `build` | Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer |
+| `CD-16` | `build` | Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block |
 | `CD-14` | `build` | An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
@@ -77,6 +79,8 @@ returns an error the model does not sanction.
 | `CB-06` | `build` | Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes |
 | `CB-07` | `build` | Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet |
 | `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two |
+| `CB-09` | `build` | Every modular table sequence equals the portable modular reference lane for lane |
+| `CB-10` | `build` | At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run |
 
 ## `CU-*` --- Purity: one method, no classical path, no fallback
 
@@ -89,6 +93,7 @@ returns an error the model does not sanction.
 | `CU-05` | `build` | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph |
 | `CU-06` | `build` | The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop |
 | `CU-07` | `build` | Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked |
+| `CU-08` | `build` | The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound |
 
 ## `CK-*` --- Codec: tier equivalence, transcode, kappa addressing
 
@@ -102,6 +107,8 @@ returns an error the model does not sanction.
 | `CK-06` | `build` | A run codec's returned counts sum to the declared row width on every row |
 | `CK-08` | `build` | The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected |
 | `CK-09` | `build` | `Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type |
+| `CK-11` | `build` | The `Sign` tier decodes the same alphabet stream as the `Packed<Grid<2>,8>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream |
+| `CK-13` | `build` | Sign-coded weights (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) produce byte-identical output to the dense spelling of the same decoded operand, packed and tabulated, and the ternary spelling (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) likewise |
 | `CK-10` | `build` | An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols |
 
 ## `CX-*` --- Cross-library agreement against an external library

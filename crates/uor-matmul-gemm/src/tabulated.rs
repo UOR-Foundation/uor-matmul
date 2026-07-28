@@ -51,15 +51,17 @@
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
-    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, MatView, MatViewMut, NotAProduct,
-    Shape, Traversal,
+    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, EncodeMode, MatView, MatViewMut,
+    NotAProduct, Shape, Traversal,
 };
 
 use uor_matmul_core::{Backend, Strides, Triple};
 use uor_matmul_kernels::{
-    available_table_i16, available_table_i8, choose_table, packed_slot, portable_table,
+    available_table_i16, available_table_i32_modular, available_table_i64_modular,
+    available_table_i8, choose_table, packed_slot, portable_table, Mod32, Mod64,
 };
 
+use crate::collapse::{compact, distinct_rows, expand, Collapse};
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
 use crate::float::gemm_float;
@@ -87,7 +89,8 @@ use crate::scratch::Scratch;
 pub struct Census {
     /// Widening multiply-accumulates. Zero in the column loop, by construction.
     pub multiplies: u64,
-    /// Accumulator combines: exact adds at the accumulator's full width.
+    /// Accumulator combines: exact adds at the accumulator's full width, and
+    /// the bound-1 build's products, which are issued as signed adds (`CB-10`).
     pub adds: u64,
     /// Reads of a tabulated partial sum.
     pub table_reads: u64,
@@ -324,7 +327,10 @@ impl<'s, L: LaneWord> Table<'s, L> {
     /// Every entry of one block of the reduction, into stack slot `slot`.
     ///
     /// `code_space * block * rows` products, and the only multiplies the
-    /// tabulated traversal issues at all.
+    /// tabulated traversal issues at all --- unless the spec's build declares
+    /// it does not multiply: at bound 1 every product is `+-a` or `0`, the
+    /// build is adds and subtracts, and the census is charged what was issued
+    /// (`CB-10`).
     ///
     /// The sequence is the spec's. The reduction's step is the inner loop and
     /// the code space the outer, so one entry's `rows` words stay in registers
@@ -354,7 +360,14 @@ impl<'s, L: LaneWord> Table<'s, L> {
             acts,
             &mut self.words[start..start + live],
         );
-        ledger.multiplied((self.code_space * block * self.rows) as u64);
+        let products = (self.code_space * block * self.rows) as u64;
+        if spec.build_multiplies {
+            ledger.multiplied(products);
+        } else {
+            // The census counts what was issued, and the bound-1 build issues
+            // the products as adds and subtracts (CB-10).
+            ledger.added(products);
+        }
     }
 
     /// The stack itself, one slab per block held.
@@ -451,7 +464,9 @@ impl<'s> Tabulation<'s> {
     /// With it the traversal charges per *distinct* column of the coded operand
     /// instead of per column --- the same move [`crate::collapse`] makes on the
     /// rows of `A` and the same move tabulation itself makes on the codes. A cost
-    /// that tracks meanings rather than expressions.
+    /// that tracks meanings rather than expressions. The collapse applies at any
+    /// column-block width: a class spread across blocks is charged once per block
+    /// it appears in, which is the most a narrow offer can extract (`CD-16`).
     ///
     /// See [`suggested_tabulation_index`] for the size. An operand that repeats no
     /// column pays one pass over its code stream for the question, and `CG-10`
@@ -486,7 +501,9 @@ impl<'s> Tabulation<'s> {
 ///
 /// One entry per output column, plus an open-addressed dictionary at least twice
 /// as wide so a probe stays short --- the same sizing
-/// [`crate::suggested_collapse_index`] uses on the row side.
+/// [`crate::suggested_collapse_index`] uses on the row side. Once the classes are
+/// known the dictionary is dead, and the block-local first-occurrence map is
+/// derived into it, so this size serves both passes.
 ///
 /// A *query*. Offering none gives the same bytes from the uncollapsed traversal,
 /// which is the rule every other offer in this library follows (`CD-13`).
@@ -537,8 +554,9 @@ pub fn suggested_tabulation_lanes<E: Tabulated, Bd: Bound>(
 /// output width for this shape and this codec.
 ///
 /// A *query*, like [`crate::suggested_scratch`]. Offering less narrows the column
-/// block; offering none gives the same bytes from the streaming traversal
-/// (`CD-13`). It does not grow with `k`.
+/// block --- the column collapse still applies, at one charge per distinct column
+/// per block (`CD-16`) --- and offering none gives the same bytes from the
+/// streaming traversal (`CD-13`). It does not grow with `k`.
 ///
 /// When the element type has no narrow register this covers the table stack and
 /// the column accumulation too, because there is then nowhere else for them to
@@ -764,6 +782,20 @@ pub trait Tabulated: Element {
     /// The lane one table entry's row is held in.
     type Lane: Lane<Self>;
 
+    /// The lane the same table runs in when the caller asked to wrap into an
+    /// output no wider than it: `Z/2^w`, where the lane's own wrap *is* the
+    /// encode. Which lane runs is a function of two declarations --- the
+    /// encode mode and the output type --- decided once at the traversal
+    /// boundary, exactly as the dense side decides it in
+    /// [`uor_matmul_kernels::KernelSpec::lane_depth`]'s `Factorization::Modular`
+    /// arm (`CU-08`).
+    ///
+    /// `Self::Lane` for a family that offers no quotient (`i8`, `i16`): their
+    /// exact lane already holds every depth a weight row reaches, so a
+    /// quotient read would buy nothing, and [`Self::modular_table_admitted`]
+    /// is `false` there.
+    type ModLane: Lane<Self>;
+
     /// Bytes one lane word occupies. The column loop's traffic is this divided
     /// by the codec's block, per product, which is the whole of why it is here.
     const LANE_BYTES: usize = core::mem::size_of::<Self::Lane>();
@@ -772,8 +804,19 @@ pub trait Tabulated: Element {
     /// the narrow one?
     ///
     /// True exactly when the lane *is* the exact accumulator, which is where a
-    /// word that wide already lives.
+    /// word that wide already lives. The family's modular lane is read out of
+    /// the same offer, relabelled --- an offer sized for the exact lane holds
+    /// the same table several times over in a narrower quotient.
     const LANE_IS_EXACT: bool;
+
+    /// Is the modular lane admissible for an output of `out_bits` bits?
+    ///
+    /// The width half of the dense side's rule ([`Kernelized::modular_spec`]):
+    /// reduction modulo `2^w` is a ring homomorphism, so `Z/2^w` refines
+    /// `Z/2^out_bits` exactly when `out_bits <= w`, and nothing is lost that
+    /// the caller did not ask to lose. The other half --- the encode mode ---
+    /// is asked at the traversal boundary, where `options` lives.
+    fn modular_table_admitted(out_bits: u32) -> bool;
 
     /// The sequence for this backend, at this tile height and column group.
     ///
@@ -786,6 +829,17 @@ pub trait Tabulated: Element {
         group: usize,
         block: usize,
     ) -> TableSpec<Self, Self::Lane>;
+
+    /// The same, in the modular lane. Always present for the same reason, and
+    /// reached only where [`Self::modular_table_admitted`] has said the output
+    /// width admits the lane.
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<Self, Self::ModLane>;
 
     /// Borrow `want` lane words out of whichever offer this family's lane lives
     /// in.
@@ -835,6 +889,33 @@ pub trait Tabulated: Element {
         Bd: Bound,
         O: Element + EncodeFrom<AccOf<Self>>,
         Ep: Epilogue<Self, O>;
+
+    /// The same borrow, of the modular lane. Reached only from the boundary's
+    /// modular arm, and `None` under the same rule.
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<Self>],
+        want: usize,
+    ) -> Option<&'s mut [Self::ModLane]>;
+
+    /// Number the rows of `a` by equality, writing each row's representative
+    /// into `index` and returning how many are distinct --- the row half of
+    /// the collapse (`CD-15`). `None` when the offer cannot hold the answer.
+    ///
+    /// The default is always `None`: the pass hashes, and a family whose
+    /// elements have no `Hash` --- a float --- never row-collapses. That is
+    /// the uncollapsed traversal, at the same bytes, which is the rule every
+    /// declined offer in this library follows.
+    fn distinct_a_rows<Bd>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize>
+    where
+        Bd: Bound,
+    {
+        let _ = (a, index);
+        None
+    }
 }
 
 /// The integer families' [`Tabulated::dense_steps`]: the tile kernel's own
@@ -885,7 +966,14 @@ where
 /// every depth a weight row reaches, so the whole reduction is one run.
 impl Tabulated for i8 {
     type Lane = i32;
+    type ModLane = i32;
     const LANE_IS_EXACT: bool = false;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // The exact lane already holds every depth a weight row reaches, so a
+        // quotient read buys no depth and no instructions, and none is offered.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -896,6 +984,20 @@ impl Tabulated for i8 {
     ) -> TableSpec<i8, i32> {
         choose_table(available_table_i8(rows, group), backend, bound, block)
             .expect("the reference sequence is always present")
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i8, i32> {
+        // Never reached: `modular_table_admitted` is `false`, so the boundary
+        // never selects this lane. Written as the exact sequence rather than a
+        // panic because the exact `i32` lane is congruent mod `2^32` anyway ---
+        // if it ever ran, the bytes would still be the caller's.
+        Self::table_spec(backend, bound, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -925,13 +1027,35 @@ impl Tabulated for i8 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<i8>],
+        want: usize,
+    ) -> Option<&'s mut [i32]> {
+        // Never reached, as `table_spec_modular`.
+        Self::lanes(narrow, exact, want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
 /// `i16`: two full `i16` products already need 31 bits, so no 32-bit lane holds
 /// an entry of any block longer than one.
 impl Tabulated for i16 {
     type Lane = i64;
+    type ModLane = i64;
     const LANE_IS_EXACT: bool = false;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // As `i8`: the exact lane already reaches every depth there is.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -942,6 +1066,17 @@ impl Tabulated for i16 {
     ) -> TableSpec<i16, i64> {
         choose_table(available_table_i16(rows, group), backend, bound, block)
             .expect("the reference sequence is always present")
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i16, i64> {
+        // Never reached, as `i8`'s.
+        Self::table_spec(backend, bound, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -971,15 +1106,43 @@ impl Tabulated for i16 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<i16>],
+        want: usize,
+    ) -> Option<&'s mut [i64]> {
+        // Never reached, as `i8`'s.
+        Self::lanes(narrow, exact, want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
 /// `i32`: the product of two `i32` needs 62 bits and a run of them needs more, so
-/// the lane is the exact accumulator. Nothing narrower is a lane here --- an
-/// `i64` would hold two products --- and that is a fact about the width, not a
-/// gap in the sequence table.
+/// the lane is the exact accumulator. Nothing narrower is an *exact* lane here
+/// --- an `i64` would hold two products --- and that is a fact about the width,
+/// not a gap in the sequence table.
+///
+/// In the quotient there is a narrower lane: `Z/2^32` needs only the low half
+/// of each product, so a `Mod32` word serves at any depth, admissible exactly
+/// when the caller encodes by wrapping into an output no wider than it
+/// (`CU-08`). It is read out of the accumulator offer, four words to the word,
+/// so an offer sized for the exact lane already holds it.
 impl Tabulated for i32 {
     type Lane = Wide<AccOf<i32>>;
+    type ModLane = Mod32;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(out_bits: u32) -> bool {
+        // `Z/2^32` refines `Z/2^out_bits` exactly here.
+        out_bits <= 32
+    }
 
     fn table_spec(
         backend: Backend,
@@ -992,6 +1155,22 @@ impl Tabulated for i32 {
         // is one, which divides every block.
         let _ = (backend, bound, block);
         portable_table::<i32, Wide<AccOf<i32>>>(rows, group)
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i32, Mod32> {
+        choose_table(
+            available_table_i32_modular(rows, group),
+            backend,
+            bound,
+            block,
+        )
+        .expect("the reference sequence is always present")
     }
 
     fn lanes<'s>(
@@ -1021,12 +1200,36 @@ impl Tabulated for i32 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<i32>],
+        want: usize,
+    ) -> Option<&'s mut [Mod32]> {
+        // The family's lanes live in the accumulator offer, as the exact one
+        // does; the relabelling is four modular words to the accumulator.
+        Mod32::wrap_i128s_mut(exact).get_mut(..want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
-/// `i64`: as `i32`, one width up.
+/// `i64`: as `i32`, one width up. The build's multiply has no SIMD instruction
+/// at this width, so the modular lane is the portable sequence alone --- the
+/// same reason the dense `i64` modular family is portable-only.
 impl Tabulated for i64 {
     type Lane = Wide<AccOf<i64>>;
+    type ModLane = Mod64;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(out_bits: u32) -> bool {
+        out_bits <= 64
+    }
 
     fn table_spec(
         backend: Backend,
@@ -1039,6 +1242,22 @@ impl Tabulated for i64 {
         // is one, which divides every block.
         let _ = (backend, bound, block);
         portable_table::<i64, Wide<AccOf<i64>>>(rows, group)
+    }
+
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<i64, Mod64> {
+        choose_table(
+            available_table_i64_modular(rows, group),
+            backend,
+            bound,
+            block,
+        )
+        .expect("the reference sequence is always present")
     }
 
     fn lanes<'s>(
@@ -1068,6 +1287,22 @@ impl Tabulated for i64 {
     {
         dense_tile(a, b, c, epilogue, options, rest)
     }
+
+    fn lanes_modular<'s>(
+        _: &'s mut [i64],
+        exact: &'s mut [AccOf<i64>],
+        want: usize,
+    ) -> Option<&'s mut [Mod64]> {
+        // Three modular words to the three-limb accumulator, as `i32`'s four.
+        Mod64::wrap_limbs_mut(exact).get_mut(..want)
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        distinct_rows(a, index)
+    }
 }
 
 /// `f32`: a float has no magnitude for a bound to measure, and the only
@@ -1077,7 +1312,14 @@ impl Tabulated for i64 {
 /// in, because there is no float arithmetic in the accumulation at all (`CU-01`).
 impl Tabulated for f32 {
     type Lane = Wide<AccOf<f32>>;
+    type ModLane = Wide<AccOf<f32>>;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // There is no quotient a float wraps into: the exact accumulator is
+        // the only lane, as the impl's note above says.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -1092,12 +1334,32 @@ impl Tabulated for f32 {
         portable_table::<f32, Wide<AccOf<f32>>>(rows, group)
     }
 
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<f32, Wide<AccOf<f32>>> {
+        // Never reached, as `i8`'s.
+        Self::table_spec(backend, bound, rows, group, block)
+    }
+
     fn lanes<'s>(
         _: &'s mut [i64],
         exact: &'s mut [AccOf<f32>],
         want: usize,
     ) -> Option<&'s mut [Wide<AccOf<f32>>]> {
         Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<f32>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<f32>>]> {
+        // Never reached, as `i8`'s.
+        Self::lanes(narrow, exact, want)
     }
 
     fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
@@ -1140,7 +1402,13 @@ impl Tabulated for f32 {
 /// `f64`: as `f32`, one width up.
 impl Tabulated for f64 {
     type Lane = Wide<AccOf<f64>>;
+    type ModLane = Wide<AccOf<f64>>;
     const LANE_IS_EXACT: bool = true;
+
+    fn modular_table_admitted(_: u32) -> bool {
+        // As `f32`: no quotient to wrap into, no modular lane.
+        false
+    }
 
     fn table_spec(
         backend: Backend,
@@ -1155,12 +1423,32 @@ impl Tabulated for f64 {
         portable_table::<f64, Wide<AccOf<f64>>>(rows, group)
     }
 
+    fn table_spec_modular(
+        backend: Backend,
+        bound: u128,
+        rows: usize,
+        group: usize,
+        block: usize,
+    ) -> TableSpec<f64, Wide<AccOf<f64>>> {
+        // Never reached, as `f32`'s.
+        Self::table_spec(backend, bound, rows, group, block)
+    }
+
     fn lanes<'s>(
         _: &'s mut [i64],
         exact: &'s mut [AccOf<f64>],
         want: usize,
     ) -> Option<&'s mut [Wide<AccOf<f64>>]> {
         Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    }
+
+    fn lanes_modular<'s>(
+        narrow: &'s mut [i64],
+        exact: &'s mut [AccOf<f64>],
+        want: usize,
+    ) -> Option<&'s mut [Wide<AccOf<f64>>]> {
+        // Never reached, as `f32`'s.
+        Self::lanes(narrow, exact, want)
     }
 
     fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
@@ -1296,20 +1584,31 @@ impl Plan {
 /// `C := epilogue(A * W^T, C)`, with the table when the offers admit one.
 ///
 /// Returns `()`, for the same reason [`crate::gemm`] does.
+///
+/// `collapse` is the row side of the same offer [`Tabulation::with_index`] is
+/// the column side of: room to number the rows of `A` and hold the distinct
+/// ones, so the table is built once per *distinct* row rather than once per
+/// row (`CD-15`). It is the [`crate::Collapse`] buffer, unchanged --- `A` is
+/// dense here, so the pass, the compaction, and the expansion are literally
+/// [`crate::collapse`]'s. Offering none, or too little for what the pass
+/// finds, gives the same bytes from the uncollapsed traversal; and an
+/// epilogue that reads `C` declines it outright, because two rows with equal
+/// rows of `A` still have different outputs when the `C` they read differs.
 pub fn gemm_tabulated<E, Bd, C, O, Ep>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
+    collapse: &mut Collapse<'_, E, Bd>,
 ) where
     E: Tabulated,
     Bd: Bound,
-    C: Enumerable<E, Bd>,
+    C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    run(triple, epilogue, options, scratch, lanes, &mut ());
+    run(triple, epilogue, options, scratch, lanes, collapse, &mut ());
 }
 
 /// The same traversal, with the operation census written out.
@@ -1323,28 +1622,31 @@ pub fn gemm_tabulated_counted<E, Bd, C, O, Ep>(
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
+    collapse: &mut Collapse<'_, E, Bd>,
     census: &mut Census,
 ) where
     E: Tabulated,
     Bd: Bound,
-    C: Enumerable<E, Bd>,
+    C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    run(triple, epilogue, options, scratch, lanes, census);
+    run(triple, epilogue, options, scratch, lanes, collapse, census);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run<E, Bd, C, O, Ep, Lg>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     lanes: &mut Tabulation<'_>,
+    collapse: &mut Collapse<'_, E, Bd>,
     ledger: &mut Lg,
 ) where
     E: Tabulated,
     Bd: Bound,
-    C: Enumerable<E, Bd>,
+    C: Enumerable<E, Bd> + Copy,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
     Lg: Ledger,
@@ -1354,6 +1656,50 @@ fn run<E, Bd, C, O, Ep, Lg>(
         // Nothing to write. Not a special case: the loops below would do the same
         // thing, and saying so costs one comparison.
         return;
+    }
+
+    // The row collapse, before any traversal choice: two equal rows of `A`
+    // name the same sum against every column of `W`, so the product is
+    // computed once per *distinct* row and then expanded --- the same pass,
+    // compaction, and expansion [`crate::collapse`] runs, on an `A` that is
+    // always dense here (`CD-15`, mirroring `CD-12`). Every decline of the
+    // offer falls through to the ordinary path, at the same bytes.
+    //
+    // An epilogue that reads `C` gives two rows different answers from the
+    // same row of `A`, so there is no shared meaning to find. A declaration,
+    // read once.
+    if !epilogue.reads_c() {
+        let found = E::distinct_a_rows(&triple.a, collapse.index)
+            .filter(|&d| d < shape.m)
+            .filter(|&d| compact(&triple.a, collapse.index, collapse.rows, d));
+        if let Some(d) = found {
+            // The compacted product is a product in its own right: `d x k`
+            // against the same `W`, written to the first `d` rows of the same
+            // `C`. The recursion plans at `m = d` --- offer checks and the
+            // column collapse included --- and is offered no row collapse: the
+            // compacted rows are pairwise distinct, so a second pass could
+            // find nothing.
+            let compacted = {
+                let a = MatView::row_major(&collapse.rows[..d * shape.k], d, shape.k);
+                match (a, triple.c.top_rows(d)) {
+                    (Some(a), Some(c)) => TabulatedTriple::new(a, triple.w, c).ok(),
+                    _ => None,
+                }
+            };
+            if let Some(mut compacted) = compacted {
+                run(
+                    &mut compacted,
+                    epilogue,
+                    options,
+                    scratch,
+                    lanes,
+                    &mut Collapse::none(),
+                    ledger,
+                );
+                expand(&mut triple.c, &collapse.index[..shape.m], shape.m, shape.n);
+                return;
+            }
+        }
     }
 
     let space = C::CODE_SPACE;
@@ -1380,15 +1726,95 @@ fn run<E, Bd, C, O, Ep, Lg>(
     // Only when it saves work. An operand with no repeated column has paid one
     // pass over its code stream for the question and must not also pay for a
     // traversal shaped around an answer of "none".
-    let index = distinct.filter(|&d| d < shape.n).map(|_| &index[..shape.n]);
+    let repeated = matches!(distinct, Some(d) if d < shape.n);
 
-    let lane_bytes = E::LANE_BYTES;
+    // The modular lane is admissible exactly when the caller asked to wrap into
+    // an output no wider than it: a question about two declarations --- the
+    // encode mode and the output type --- asked once, here, at the boundary,
+    // mirroring the dense side (`kernel.rs`). The row-collapse recursion above
+    // re-runs this body with the same `options` and the same `O`, so both
+    // levels of it decide identically (`CU-08`). One branch, and none in the
+    // loops: the chosen lane is a type from here down.
+    if matches!(options.encode, EncodeMode::Wrapping) && E::modular_table_admitted(O::BITS) {
+        run_lane::<E, Bd, C, O, Ep, Lg, E::ModLane>(
+            triple,
+            epilogue,
+            options,
+            scratch,
+            words,
+            index,
+            repeated,
+            E::table_spec_modular,
+            E::lanes_modular,
+            ledger,
+        );
+    } else {
+        run_lane::<E, Bd, C, O, Ep, Lg, E::Lane>(
+            triple,
+            epilogue,
+            options,
+            scratch,
+            words,
+            index,
+            repeated,
+            E::table_spec,
+            E::lanes,
+            ledger,
+        );
+    }
+}
+
+/// The sequence lookup for one lane, as a function pointer: the family's own
+/// [`Tabulated::table_spec`] or [`Tabulated::table_spec_modular`], named at the
+/// boundary because the two lanes are two types.
+type SpecOf<E, L> = fn(Backend, u128, usize, usize, usize) -> TableSpec<E, L>;
+
+/// The offer-relabelling half of a lane, likewise: [`Tabulated::lanes`] or
+/// [`Tabulated::lanes_modular`].
+type LanesOf<E, L> = for<'s> fn(&'s mut [i64], &'s mut [AccOf<E>], usize) -> Option<&'s mut [L]>;
+
+/// The table traversal in the lane the boundary chose.
+///
+/// Written once, generic over the lane: the exact accumulator and the modular
+/// word are two types, and the two `fn` pointers are how the boundary's
+/// declaration reaches the two places a type cannot be threaded --- the
+/// sequence lookup and the offer relabelling, both of which are the family's
+/// own associated functions.
+#[allow(clippy::too_many_arguments)]
+fn run_lane<E, Bd, C, O, Ep, Lg, L>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    words: &mut [i64],
+    index: &mut [usize],
+    repeated: bool,
+    spec_of: SpecOf<E, L>,
+    lanes_of: LanesOf<E, L>,
+    ledger: &mut Lg,
+) where
+    E: Tabulated,
+    Bd: Bound,
+    C: Enumerable<E, Bd> + Copy,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: Ledger,
+    L: Lane<E>,
+{
+    let shape = triple.shape();
+    let space = C::CODE_SPACE;
+    let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
+    let lane_bytes = core::mem::size_of::<L>();
     let exact_offer = scratch.accumulators();
-    // The lane offer is `i64`-shaped, read as however many lane words fit in the
-    // same bytes; a family whose lane *is* the exact accumulator reads that
-    // offer instead, because that is where a word so wide already lives.
+    // Where the lane lives. A family whose lane *is* the exact accumulator
+    // reads that offer, because that is where a word so wide already lives ---
+    // and its modular lane reads the same words, relabelled, so a narrower
+    // lane simply fits more of them into the offer. Every other family's lane
+    // offer is `i64`-shaped, read as however many lane words fit in the same
+    // bytes.
     let offered = if E::LANE_IS_EXACT {
-        exact_offer
+        let per_word = core::mem::size_of::<AccOf<E>>() / lane_bytes;
+        exact_offer.saturating_mul(per_word) // R3-ok: a size query, not an accumulation
     } else {
         core::mem::size_of_val(&*words) / lane_bytes
     };
@@ -1399,14 +1825,26 @@ fn run<E, Bd, C, O, Ep, Lg>(
         exact_offer,
         offered,
         block,
-        <E::Lane as Lane<E>>::capacity(Bd::VALUE),
+        <L as Lane<E>>::capacity(Bd::VALUE),
     ) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
+    // The classes `distinct_columns` found are global, and a global first
+    // occurrence is no use to a column block narrower than the output: the
+    // class's representative may sit in an earlier block whose accumulator was
+    // encoded and `exact` reused before this block began. The map is rewritten
+    // block-relative here, once per call, where the block width is known ---
+    // and into the dictionary region `distinct_columns` is finished with, so
+    // the offer's size and layout are unchanged.
+    let collapse = if repeated {
+        ColumnMap::derive(index, shape.n, plan.cols)
+    } else {
+        None
+    };
     // Both declarations come from the sequences that will run, at the tile the
     // plan resolved to --- never from a constant standing in for them.
-    let table = E::table_spec(
+    let table = spec_of(
         options.backend,
         Bd::VALUE,
         plan.rows,
@@ -1426,7 +1864,13 @@ fn run<E, Bd, C, O, Ep, Lg>(
 
     let want = plan.lane_words(space);
     let tile = plan.rows * plan.cols;
-    let take = if E::LANE_IS_EXACT { tile + want } else { tile };
+    // The accumulator words the lane words occupy: one each when the lane *is*
+    // the accumulator, fewer for a modular lane reading the same offer.
+    let take = if E::LANE_IS_EXACT {
+        tile + want.div_ceil(core::mem::size_of::<AccOf<E>>() / lane_bytes)
+    } else {
+        tile
+    };
     if take > exact_offer {
         decline(triple, epilogue, options, scratch, ledger);
         return;
@@ -1437,12 +1881,12 @@ fn run<E, Bd, C, O, Ep, Lg>(
         return;
     }
     let (exact, rest) = accumulators.split_at_mut(tile);
-    let Some(lanes) = E::lanes(words, rest, want) else {
+    let Some(lanes) = lanes_of(words, rest, want) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
-    tabulate::<E, Bd, C, O, Ep, Lg>(
-        triple, epilogue, options, exact, lanes, panel, index, plan, ledger,
+    tabulate::<E, Bd, C, O, Ep, Lg, L>(
+        triple, epilogue, options, exact, lanes, panel, collapse, plan, spec_of, ledger,
     );
 }
 
@@ -1727,6 +2171,69 @@ where
     (x ^ (x >> 31)) as usize
 }
 
+/// The column collapse, made block-local.
+///
+/// `first[j]` is the first occurrence of column `j`'s equivalence class
+/// *inside `j`'s column block*, relative to the block's start. It has to be
+/// block-local: a first occurrence in an earlier block no longer has an
+/// accumulator to copy from --- that block was encoded and the `exact` buffer
+/// reused before this one began. A class spread across blocks is therefore
+/// charged once per block it appears in, which is the most a narrow offer can
+/// extract.
+///
+/// `identity[b]` is nonzero when block `b` repeats nothing, and such a block
+/// takes the consecutive loop: an indexed load per column just to learn there
+/// is nothing to skip halved every shape it was measured on (ANALYSIS.md).
+#[derive(Clone, Copy)]
+struct ColumnMap<'a> {
+    first: &'a [usize],
+    identity: &'a [usize],
+}
+
+impl<'a> ColumnMap<'a> {
+    /// Rewrite the global classes in `index[..n]` block-relative, one pass,
+    /// into the dictionary region `distinct_columns` is finished with.
+    ///
+    /// The region-reuse invariant: `distinct_columns` laid the offer out as
+    /// `position[n] | slot[table] | key[table]` with
+    /// `table = next_power_of_two(2n) >= 2n`, so past `position` there are at
+    /// least `4n` dead words and this derivation needs `3n + ceil(n / cols)`.
+    /// The offer's size and layout are unchanged. `mark` is zeroed rather than
+    /// trusted: the region's prior contents are dictionary probes, which read
+    /// as plausible first occurrences.
+    fn derive(index: &'a mut [usize], n: usize, cols: usize) -> Option<Self> {
+        let blocks = n.div_ceil(cols);
+        // Unreachable from `run` --- `distinct_columns` returned only with the
+        // region behind it --- but a short offer means the uncollapsed
+        // traversal at the same bytes, not a report (C6).
+        if index.len() < n.checked_mul(3)?.checked_add(blocks)? {
+            return None;
+        }
+        let (position, rest) = index.split_at_mut(n);
+        let (first, rest) = rest.split_at_mut(n);
+        let (mark, rest) = rest.split_at_mut(n);
+        let (identity, _) = rest.split_at_mut(blocks);
+        mark.fill(0);
+        identity.fill(1);
+        for (j, &rep) in position.iter().enumerate() {
+            let start = j / cols * cols;
+            let seen = mark[rep];
+            // `seen` is a global first occurrence plus one, and `j` rises, so
+            // it names this block exactly when it does not predate the block.
+            first[j] = if seen > start {
+                seen - 1 - start
+            } else {
+                mark[rep] = j + 1;
+                j - start
+            };
+            if first[j] != j - start {
+                identity[j / cols] = 0;
+            }
+        }
+        Some(Self { first, identity })
+    }
+}
+
 /// One row tile: build the stack, reduce every distinct column into a lane, and
 /// encode once.
 ///
@@ -1753,16 +2260,17 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     lane: &mut [L],
     table: &mut Table<'_, L>,
     spec: &TableSpec<E, L>,
+    spec_of: SpecOf<E, L>,
     book: &[E],
     acts: &mut [E],
-    index: Option<&[usize]>,
+    collapse: Option<ColumnMap<'_>>,
     plan: Plan,
     rows: usize,
     group: usize,
     row0: usize,
     ledger: &mut Lg,
 ) where
-    E: Tabulated<Lane = L>,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     O: Element + EncodeFrom<AccOf<E>>,
@@ -1794,16 +2302,17 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         single: if group == 1 {
             *spec
         } else {
-            E::table_spec(options.backend, Bd::VALUE, rows, 1, block)
+            spec_of(options.backend, Bd::VALUE, rows, 1, block)
         },
         codes,
         stream: C::as_index_stream(codes),
         codes_per_row,
-        // Set per column block, from `collapsed` rather than from `index`. The
-        // sweep *skips* a repeated column and the expansion below *fills* it,
-        // and the two have to be reading the same decision: a sweep that skips
-        // on `index` while the expansion fills on `collapsed` leaves every
-        // repeat of a narrowed block holding whatever was in the accumulator.
+        // Set per column block, from `collapsed` --- the block's own slice of
+        // the map --- rather than from the map itself. The sweep *skips* a
+        // repeated column and the expansion below *fills* it, and the two have
+        // to be reading the same decision: a sweep that skips on the whole map
+        // while the expansion fills on `collapsed` leaves every repeat of a
+        // narrowed block holding whatever was in the accumulator.
         index: None,
         rows,
         slab,
@@ -1822,14 +2331,15 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         // computed column by `place`, a repeated one by the expansion below.
         let mut placed = false;
 
-        // The collapse applies when this block is the whole output width, because
-        // a repeat's first occurrence has to be inside the block to be copied
-        // from. A caller whose offer forces narrower blocks gets the uncollapsed
-        // traversal, at the same bytes.
-        let collapsed = if col0 == 0 && cols == shape.n {
-            index
-        } else {
-            None
+        // A repeat is collapsed only against a first occurrence *inside this
+        // block*, which is why the map is block-local: a representative in an
+        // earlier block no longer has an accumulator --- that block was encoded
+        // and `exact` reused before this one began. A block that repeats
+        // nothing takes the consecutive loop and pays no indexed load for the
+        // answer.
+        let collapsed = match collapse {
+            Some(map) if map.identity[col0 / plan.cols] == 0 => Some(&map.first[col0..col0 + cols]),
+            _ => None,
         };
         // One decision, read in both places. `sweep` consults this to skip a
         // repeat; the expansion below consults it to fill one.
@@ -1920,6 +2430,8 @@ struct Sweep<'c, E: Element, Bd: Bound, C: Enumerable<E, Bd>, L> {
     /// [`uor_matmul_core::MatView::row_block`] follows on the dense side.
     stream: Option<&'c [u16]>,
     codes_per_row: usize,
+    /// The block's first-occurrence map, block-relative like the lane words it
+    /// indexes into, or `None` when the block repeats nothing.
     index: Option<&'c [usize]>,
     rows: usize,
     slab: usize,
@@ -1960,7 +2472,7 @@ where
         // adjacent in `carried`, so a group is a run of consecutive columns and
         // a skipped one ends the run.
         let present = |u: usize| match arg.index {
-            Some(of) => of[col0 + j + u] == col0 + j + u,
+            Some(of) => of[j + u] == j + u,
             None => true,
         };
         if !present(0) {
@@ -2037,15 +2549,16 @@ fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc], onto: bool)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tabulate<E, Bd, C, O, Ep, Lg>(
+fn tabulate<E, Bd, C, O, Ep, Lg, L>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
     options: GemmOptions,
     exact: &mut [AccOf<E>],
-    lanes: &mut [E::Lane],
+    lanes: &mut [L],
     panel: &mut [Alphabet<E, Bd>],
-    index: Option<&[usize]>,
+    collapse: Option<ColumnMap<'_>>,
     plan: Plan,
+    spec_of: SpecOf<E, L>,
     ledger: &mut Lg,
 ) where
     E: Tabulated,
@@ -2054,6 +2567,7 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
     Lg: Ledger,
+    L: Lane<E>,
 {
     let shape = triple.shape();
     let space = C::CODE_SPACE;
@@ -2073,7 +2587,7 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
         // register file, not a different function, and the reference carries
         // every height no vector sequence has (R13).
         let group = column_group(rows);
-        let spec = E::table_spec(options.backend, Bd::VALUE, rows, group, block);
+        let spec = spec_of(options.backend, Bd::VALUE, rows, group, block);
         let Some(mut table) = Table::new(stack, space, rows, plan.depth) else {
             // `Plan::choose` sized the offer for the widest tile it admits and
             // `rows` is never wider, so this cannot be reached. It is written as
@@ -2089,9 +2603,9 @@ fn tabulate<E, Bd, C, O, Ep, Lg>(
         let (book, acts) = panel.split_at_mut(space * block);
         let book: &[E] = bytemuck::TransparentWrapper::peel_slice(book);
         let acts: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(acts);
-        row_tile::<E, Bd, C, O, Ep, E::Lane, Lg>(
-            triple, epilogue, options, exact, columns, &mut table, &spec, book, acts, index, plan,
-            rows, group, row0, ledger,
+        row_tile::<E, Bd, C, O, Ep, L, Lg>(
+            triple, epilogue, options, exact, columns, &mut table, &spec, spec_of, book, acts,
+            collapse, plan, rows, group, row0, ledger,
         );
         row0 += rows;
     }
@@ -2279,13 +2793,15 @@ fn stream<E, Bd, C, O, Ep, Lg>(
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use crate::collapse::suggested_collapse_index;
     use crate::driver::gemm;
     use crate::epilogue::Linear;
     use std::vec;
     use std::vec::Vec;
-    use uor_matmul_codec::{canonicalize, e8_codec, e8_table, Arena, Book, Grid, Packed};
+    use uor_matmul_codec::{canonicalize, e8_codec, e8_table, Arena, Book, Grid, Packed, Sign};
     use uor_matmul_core::{
-        as_alphabet_full, as_alphabet_whole, EncodeMode, FloatElement, Full, Triple, Whole,
+        as_alphabet, as_alphabet_full, as_alphabet_whole, Bnd, EncodeMode, FloatElement, Full,
+        Triple, Whole,
     };
 
     type A8 = Alphabet<i8, Full<i8>>;
@@ -2316,8 +2832,8 @@ mod tests {
     ///
     /// `W` is decoded into a `k x n` dense matrix first, so this is the identity
     /// tabulation claims to compute and not a restatement of it.
-    fn reference<C: Enumerable<i8, Full<i8>> + Copy>(
-        w: &CodedMatrix<'_, i8, Full<i8>, C>,
+    fn reference<Bd: Bound, C: Enumerable<i8, Bd> + Copy>(
+        w: &CodedMatrix<'_, i8, Bd, C>,
         a: &[i8],
         m: usize,
         k: usize,
@@ -2330,8 +2846,21 @@ mod tests {
             }
         }
         let mut c = vec![0i32; m * n];
-        let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
-        let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+        // A validating wrap rather than the transmute, so the one helper serves
+        // any declared bound: at `Full` the check cannot fail, and at a named
+        // bound it re-checks the caller's premise at the boundary.
+        let av = MatView::row_major(
+            as_alphabet::<i8, Bd>(a).expect("the activations fit the declared bound"),
+            m,
+            k,
+        )
+        .unwrap();
+        let bv = MatView::row_major(
+            as_alphabet::<i8, Bd>(&b).expect("decoded weights are in the alphabet by construction"),
+            k,
+            n,
+        )
+        .unwrap();
         let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
         let mut t = Triple::new(av, bv, cv).unwrap();
         gemm(
@@ -2352,21 +2881,22 @@ mod tests {
     /// scaled them together left the disagreeing case unreachable, and a
     /// narrowed column block that skipped a repeated column without filling it
     /// lived there --- silently, at 896 wrong cells out of 1024.
-    fn tabulated<C: Enumerable<i8, Full<i8>> + Copy>(
-        w: &CodedMatrix<'_, i8, Full<i8>, C>,
+    #[allow(clippy::too_many_arguments)]
+    fn tabulated<Bd: Bound, C: Enumerable<i8, Bd> + Copy>(
+        w: &CodedMatrix<'_, i8, Bd, C>,
         a: &[i8],
         m: usize,
         n: usize,
         traversal: Traversal,
         acc_offer: usize,
         aux_offer: usize,
+        collapse_offer: usize,
     ) -> (Vec<i32>, Census) {
         let k = w.cols();
         let shape = Shape { m, k, n };
-        let block = <C as uor_matmul_codec::Codec<i8, Full<i8>>>::MAX_BLOCK;
-        let want_acc = suggested_tabulation::<i8, Full<i8>>(shape, C::CODE_SPACE, block).max(1);
-        let want_lanes =
-            suggested_tabulation_lanes::<i8, Full<i8>>(shape, C::CODE_SPACE, block).max(1);
+        let block = <C as uor_matmul_codec::Codec<i8, Bd>>::MAX_BLOCK;
+        let want_acc = suggested_tabulation::<i8, Bd>(shape, C::CODE_SPACE, block).max(1);
+        let want_lanes = suggested_tabulation_lanes::<i8, Bd>(shape, C::CODE_SPACE, block).max(1);
         // `offer` is a numerator over the suggested amount, so one knob sweeps
         // both buffers and the extremes -- nothing, one word, exactly enough --
         // are all reachable.
@@ -2385,19 +2915,44 @@ mod tests {
         // stream can be reached. All three are asserted against the same bytes.
         let want_panel = suggested_tabulation_panel(C::CODE_SPACE, block)
             .max(n * k + crate::suggested_scratch(shape));
-        let mut panel = vec![A8::ZERO; scale(want_panel, aux_offer)];
+        let mut panel = vec![Alphabet::<i8, Bd>::ZERO; scale(want_panel, aux_offer)];
+        // The row-collapse offer is a third knob, and not a fraction like the
+        // other two: `0` offers nothing and anything else is the exact number
+        // of `Alphabet` elements the distinct rows are allowed to occupy, with
+        // the index sized for the pass. A short rows offer is how the decline
+        // is exercised (`CD-15`).
+        let mut collapse_index = vec![
+            0usize;
+            if collapse_offer == 0 {
+                0
+            } else {
+                suggested_collapse_index(m)
+            }
+        ];
+        let mut collapse_rows = vec![Alphabet::<i8, Bd>::ZERO; collapse_offer];
         let mut c = vec![0i32; m * n];
         let mut census = Census::default();
         {
-            let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+            let av = MatView::row_major(
+                as_alphabet::<i8, Bd>(a).expect("the activations fit the declared bound"),
+                m,
+                k,
+            )
+            .unwrap();
             let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
             let mut tr = TabulatedTriple::new(av, *w, cv).unwrap();
+            let mut collapse = if collapse_offer == 0 {
+                Collapse::none()
+            } else {
+                Collapse::new(&mut collapse_index, &mut collapse_rows)
+            };
             gemm_tabulated_counted(
                 &mut tr,
                 &Linear::OVERWRITE,
                 options(traversal),
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
                 &mut Tabulation::with_index(&mut lane_words, &mut ids),
+                &mut collapse,
                 &mut census,
             );
         }
@@ -2430,7 +2985,7 @@ mod tests {
             Traversal::OutputMajor,
         ] {
             for offer in offers {
-                let (got, census) = tabulated(&w, &a, m, n, traversal, offer, offer);
+                let (got, census) = tabulated(&w, &a, m, n, traversal, offer, offer, 0);
                 assert_eq!(
                     got, want,
                     "{label} {m}x{k}x{n}: {traversal:?} at an offer of {offer} \
@@ -2453,7 +3008,7 @@ mod tests {
         for acc_offer in 1..=OFFER_STEPS {
             for aux_offer in 1..=OFFER_STEPS {
                 let (got, census) =
-                    tabulated(&w, &a, m, n, Traversal::Tabulated, acc_offer, aux_offer);
+                    tabulated(&w, &a, m, n, Traversal::Tabulated, acc_offer, aux_offer, 0);
                 assert_eq!(
                     got, want,
                     "{label} {m}x{k}x{n}: accumulators at {acc_offer}/{OFFER_STEPS} and \
@@ -2466,15 +3021,33 @@ mod tests {
         // The collapse is reached and is not vacuous: an operand whose columns
         // repeat is charged for the ones it has.
         if C::CODE_SPACE > 0 {
-            let (_, full) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
+            let (_, full) = tabulated(
+                &w,
+                &a,
+                m,
+                n,
+                Traversal::Tabulated,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
             assert!(full.table_reads > 0 || full.kernel_calls > 0);
         }
 
         // And the comparison is not vacuous: each of the three factorizations is
         // reached by some offer, and the census says which ran rather than the
         // predicate being asked to say it again.
-        let (_, with) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
-        let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0, 0);
+        let (_, with) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        let (_, without) = tabulated(&w, &a, m, n, Traversal::Tabulated, 0, 0, 0);
         assert!(
             with.table_reads > 0,
             "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
@@ -2493,6 +3066,7 @@ mod tests {
             Traversal::OutputMajor,
             OFFER_STEPS,
             OFFER_STEPS,
+            0,
         );
         assert_eq!(streamed.table_reads, 0);
         assert_eq!(streamed.multiplies, (m * k * n) as u64);
@@ -2626,6 +3200,7 @@ mod tests {
                 },
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
                 &mut Tabulation::with_index(&mut [], &mut ids),
+                &mut Collapse::none(),
                 &mut census,
             );
         }
@@ -2803,6 +3378,808 @@ mod tests {
         sweep!(8);
     }
 
+    /// `CK-13`: the sign and ternary tiers are spellings of codec compositions
+    /// that already exist, not new arithmetic. Weights in `{-1, +1}` stored as
+    /// one-bit codes (`Packed<Grid<2>, 8>`, table `[-1, +1]`) give the dense
+    /// spelling's bytes through the packed route and through the table, and the
+    /// ternary spelling (`Packed<Grid<4>, 4>`, table `[-1, 0, +1, dead]`)
+    /// likewise --- at shapes on both sides of each tier's recorded break-even.
+    ///
+    /// Because the composition predates this ID, the byte assertions alone would
+    /// pass against a table that was silently declined. What makes them a gate
+    /// is what they are paired with: the census (`every_traversal_agrees` fails
+    /// unless a full offer reads the table and an empty one cannot), and the
+    /// `[[tabulation]]` rows in `model/tiers.toml`, whose break-evens `CM-04`
+    /// recomputes from the codec's own consts. Note what the byte assertions do
+    /// *not* watch: the decode itself, which every route here shares, so a wrong
+    /// table would move all of them together --- decode order is `CK-03`'s and
+    /// `CK-09`'s ground. What they watch is the traversal: a planted drop of one
+    /// block word in the portable table build was seen to fail this test before
+    /// it was accepted.
+    #[test]
+    fn sign_and_ternary_spellings_match_the_dense_spelling_ck_13() {
+        // The sign tier: one-bit codes, eight to a byte. `code_space = 256` and
+        // `block = 8` are E8's numbers, so the break-even is 683 too --- the
+        // shapes straddle it.
+        let sign_table: [A8; 2] = [Alphabet::of(-1), Alphabet::of(1)];
+        let sign =
+            Packed::<_, 8>::new(Grid::<i8, Full<i8>, 2>::new(&sign_table)).expect("8 divides 8");
+        for &(m, k, n) in &[
+            (1usize, 8usize, 1usize),
+            (5, 24, 683),
+            (3, 8, 684),
+            (4, 16, 700),
+        ] {
+            let stream: Vec<u8> = fill(n * (k / 8), 0x516, |x| x as u8);
+            every_traversal_agrees("Packed<Grid<2>,8>", sign, &stream, m, k, n);
+        }
+
+        // The ternary tier: two-bit codes over `[-1, 0, +1, dead]`. The fourth
+        // entry is one no ternary encoder emits; it decodes to 0 here, which is
+        // what "dead" means --- a priced duplicate, not an error (the ratio is
+        // `CG-10`'s to report). The full-range streams hit it on purpose; the
+        // restricted streams spell what an encoder would actually write.
+        let ternary_table: [A8; 4] = [
+            Alphabet::of(-1),
+            Alphabet::of(0),
+            Alphabet::of(1),
+            Alphabet::of(0),
+        ];
+        let ternary =
+            Packed::<_, 4>::new(Grid::<i8, Full<i8>, 4>::new(&ternary_table)).expect("4 divides 8");
+        for &(m, k, n) in &[(1usize, 4usize, 1usize), (5, 12, 1025), (4, 16, 1100)] {
+            let stream: Vec<u8> = fill(n * (k / 4), 0x7e7, |x| x as u8);
+            every_traversal_agrees(
+                "Packed<Grid<4>,4> with the dead entry",
+                ternary,
+                &stream,
+                m,
+                k,
+                n,
+            );
+            let live: Vec<u8> = fill(n * (k / 4), 0x11e, |x| {
+                (0..4).fold(0u8, |b, s| b | (((x >> (2 * s)) % 3) as u8) << (2 * s))
+            });
+            every_traversal_agrees("Packed<Grid<4>,4> ternary", ternary, &live, m, k, n);
+        }
+
+        // The bound the claim names, exercised literally: at `Bnd<1>` the
+        // weights *and* the activations are signs, so the products are `+-1`
+        // and the table's entries are small sums of them. One route decodes
+        // the operand and runs the tile kernels, the other reads the table;
+        // the census says the second really did.
+        fn check_bound_one<C: Enumerable<i8, Bnd<1>> + Copy>(
+            label: &str,
+            w: &CodedMatrix<'_, i8, Bnd<1>, C>,
+            m: usize,
+            n: usize,
+        ) {
+            let k = w.cols();
+            let a: Vec<i8> = fill(m * k, 0xac7, |x| if x & 1 == 0 { -1 } else { 1 });
+            let want = reference(w, &a, m, k, n);
+            let (packed, _) =
+                tabulated(w, &a, m, n, Traversal::Blocked, OFFER_STEPS, OFFER_STEPS, 0);
+            let (tabled, census) = tabulated(
+                w,
+                &a,
+                m,
+                n,
+                Traversal::Tabulated,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
+            assert_eq!(
+                packed, want,
+                "{label} {m}x{k}x{n}: the packed route must give the dense driver's bytes"
+            );
+            assert_eq!(
+                tabled, want,
+                "{label} {m}x{k}x{n}: the tabulated route must give the dense driver's bytes"
+            );
+            assert!(
+                census.table_reads > 0,
+                "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
+            );
+        }
+
+        let sign_one: [Alphabet<i8, Bnd<1>>; 2] = [
+            Alphabet::new(-1).expect("|-1| <= 1"),
+            Alphabet::new(1).expect("|1| <= 1"),
+        ];
+        let sign_b1 =
+            Packed::<_, 8>::new(Grid::<i8, Bnd<1>, 2>::new(&sign_one)).expect("8 divides 8");
+        for &(m, k, n) in &[(4usize, 16usize, 700), (3, 8, 96)] {
+            let stream: Vec<u8> = fill(n * (k / 8), 0xb1d, |x| x as u8);
+            let w = CodedMatrix::new(sign_b1, n, k, &stream).expect("the codes describe n x k");
+            check_bound_one("Packed<Grid<2>,8> at Bnd<1>", &w, m, n);
+        }
+
+        let ternary_one: [Alphabet<i8, Bnd<1>>; 4] = [
+            Alphabet::new(-1).expect("|-1| <= 1"),
+            Alphabet::new(0).expect("|0| <= 1"),
+            Alphabet::new(1).expect("|1| <= 1"),
+            Alphabet::new(0).expect("|0| <= 1"),
+        ];
+        let ternary_b1 =
+            Packed::<_, 4>::new(Grid::<i8, Bnd<1>, 4>::new(&ternary_one)).expect("4 divides 8");
+        for &(m, k, n) in &[(4usize, 16usize, 1100), (3, 8, 96)] {
+            let stream: Vec<u8> = fill(n * (k / 4), 0x7e9, |x| x as u8);
+            let w = CodedMatrix::new(ternary_b1, n, k, &stream).expect("the codes describe n x k");
+            check_bound_one("Packed<Grid<4>,4> at Bnd<1>", &w, m, n);
+        }
+    }
+
+    /// `CK-11`: the `Sign` tier and the `Packed<Grid<2>,8>` spelling are two
+    /// manifests for one decode. The gemm output is byte-identical through the
+    /// packed route and through the table, at the shapes `CK-13` straddles the
+    /// shared break-even with --- and the tier is run through the same
+    /// every-offer gate the composition is.
+    ///
+    /// What the tier adds over the composition is not a different answer but
+    /// the index stream: a `Sign` code addresses its enumeration directly, so
+    /// the tabulated run gathers from the operand's own memory instead of a
+    /// stream it built. That is asserted where the claim lives, at the codec
+    /// (`as_index_stream` answers the same slice it was handed); what this
+    /// test watches is that the answer does not move with the spelling.
+    #[test]
+    fn the_sign_tier_matches_the_composition_byte_for_byte_ck_11() {
+        let sign_table: [A8; 2] = [Alphabet::of(-1), Alphabet::of(1)];
+        let composition =
+            Packed::<_, 8>::new(Grid::<i8, Full<i8>, 2>::new(&sign_table)).expect("8 divides 8");
+        let tier = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
+
+        for &(m, k, n) in &[
+            (1usize, 8usize, 1usize),
+            (5, 24, 683),
+            (3, 8, 684),
+            (4, 16, 700),
+        ] {
+            // One stream, two spellings: the composition stores the byte, the
+            // tier the same value zero-extended to a `u16` code.
+            let bytes: Vec<u8> = fill(n * (k / 8), 0x516, |x| x as u8);
+            let codes: Vec<u16> = bytes.iter().map(|&b| u16::from(b)).collect();
+
+            // The tier against the dense driver's bytes at every offer --- the
+            // gate `CK-13` runs the composition through, unchanged.
+            every_traversal_agrees("Sign<8>", tier, &codes, m, k, n);
+
+            // And the two spellings against each other directly: equal decodes
+            // under different kappa labels, so identical bytes (`CK-05`
+            // restated for this pair), through the packed route and through
+            // the table.
+            let a: Vec<i8> = fill(m * k, 0xa11, |x| ((x % 255) as i64 - 127) as i8);
+            let w_packed =
+                CodedMatrix::new(composition, n, k, &bytes).expect("the codes describe n x k");
+            let w_tier = CodedMatrix::new(tier, n, k, &codes).expect("the codes describe n x k");
+            for traversal in [Traversal::Tabulated, Traversal::Blocked] {
+                let (from_composition, _) =
+                    tabulated(&w_packed, &a, m, n, traversal, OFFER_STEPS, OFFER_STEPS, 0);
+                let (from_tier, census) =
+                    tabulated(&w_tier, &a, m, n, traversal, OFFER_STEPS, OFFER_STEPS, 0);
+                assert_eq!(
+                    from_composition, from_tier,
+                    "Sign<8> {m}x{k}x{n} at {traversal:?}: the two spellings of one \
+                     decode must give the same bytes"
+                );
+                if traversal == Traversal::Tabulated {
+                    assert!(
+                        census.table_reads > 0,
+                        "Sign<8> {m}x{k}x{n}: the offer was sized for a table and none \
+                         was read ({census:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `CB-10`, counted: a bound-1 tabulated run issues no multiply at all.
+    ///
+    /// `CU-06` counts the tabulated traversal at the full alphabet, where the
+    /// build is the table's only multiply; this is the same census at bound 1,
+    /// where the build is adds and subtracts and the census's multiply count
+    /// is zero. The shape is one column of one block, so the collapse has
+    /// nothing to do and the closed forms are exact. That the census *moves*
+    /// is also the selection witness: only the adds-only build charges zero
+    /// multiplies, so a zero here is `Backend::Auto` having selected it ---
+    /// and this test failed with `multiplies: 2048` while the build still
+    /// multiplied.
+    #[test]
+    fn the_bound1_table_build_issues_no_multiply_cb_10() {
+        let sign_one: [Alphabet<i8, Bnd<1>>; 2] = [
+            Alphabet::new(-1).expect("|-1| <= 1"),
+            Alphabet::new(1).expect("|1| <= 1"),
+        ];
+        let sign = Packed::<_, 8>::new(Grid::<i8, Bnd<1>, 2>::new(&sign_one)).expect("8 divides 8");
+
+        // One column of one block: every closed form is exact.
+        let (m, k, n) = (1usize, 8usize, 1usize);
+        let space = 256usize;
+        let stream: Vec<u8> = fill(n * (k / 8), 0xc10, |x| x as u8);
+        let w = CodedMatrix::new(sign, n, k, &stream).expect("the codes describe n x k");
+        let a: Vec<i8> = fill(m * k, 0xa10, |x| if x & 1 == 0 { -1 } else { 1 });
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        assert_eq!(
+            got,
+            reference(&w, &a, m, k, n),
+            "and it is still the product"
+        );
+        assert_eq!(
+            census.multiplies, 0,
+            "at bound 1 the build is adds and subtracts: {census:?}"
+        );
+        assert_eq!(
+            census.table_reads, 1,
+            "one read per code per row: {census:?}"
+        );
+        assert_eq!(
+            census.adds,
+            1 + (m * k * space) as u64,
+            "one add per read, and the build's `m * k * code_space` products charged as the \
+             signed adds they are: {census:?}"
+        );
+
+        // A tile tall enough for the widest sequence, so the build that runs
+        // is the ISA's where the host has one --- the census asks the same
+        // question of it.
+        let (m, k, n) = (16usize, 64usize, 3usize);
+        let stream: Vec<u8> = fill(n * (k / 8), 0xc11, |x| x as u8);
+        let w = CodedMatrix::new(sign, n, k, &stream).expect("the codes describe n x k");
+        let a: Vec<i8> = fill(m * k, 0xa11, |x| if x & 1 == 0 { -1 } else { 1 });
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        assert_eq!(
+            got,
+            reference(&w, &a, m, k, n),
+            "and it is still the product"
+        );
+        assert_eq!(
+            census.multiplies, 0,
+            "at bound 1 the widest build is adds and subtracts too: {census:?}"
+        );
+        assert!(
+            census.table_reads > 0,
+            "the offer was sized for a table and none was read: {census:?}"
+        );
+    }
+
+    /// `CD-16`: the column collapse applies at every column-block width, not
+    /// only when the block is the whole output width.
+    ///
+    /// The accumulator offer is halved (and quartered) so `Plan::choose`
+    /// resolves a column block narrower than `n`, and for `d` in `{1, 3}` the
+    /// class representatives all sit in the *first* block --- so a later block
+    /// can collapse only if its first occurrences are block-local. Two
+    /// assertions:
+    ///
+    /// - the bytes are the dense driver's, at every width; and
+    /// - the census is strictly below `m * n * (k / Bk)`, the count the
+    ///   uncollapsed traversal issues and `CU-06` pins in closed form ---
+    ///   because a repeated column is never charged twice within its block.
+    ///
+    /// Without the second assertion this test passed with the collapse
+    /// silently disabled, which is exactly what it did before this ID existed.
+    /// For `d = n` there is nothing to collapse and the count must be the
+    /// closed form itself: nothing may be skipped either.
+    #[test]
+    fn collapsing_equal_columns_at_any_block_width_cannot_change_a_byte_cd_16() {
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        let block = 8usize;
+        for &(m, k, n) in &[(16usize, 64usize, 512usize), (8, 32, 512), (16, 64, 293)] {
+            let a: Vec<i8> = fill(m * k, activation_salt(), |x| ((x % 255) as i64 - 127) as i8);
+            let uncollapsed = (m * n * (k / block)) as u64;
+            for d in [1usize, 3, n] {
+                let d = d.min(n);
+                let base: Vec<u16> = fill(d * (k / 8), 0xd0b, |x| (x % 400) as u16);
+                let repeated: Vec<u16> = (0..n * (k / 8))
+                    .map(|x| base[(x / (k / 8) % d) * (k / 8) + x % (k / 8)])
+                    .collect();
+                let w = CodedMatrix::new(book, n, k, &repeated).expect("the codes describe n x k");
+                let want = reference(&w, &a, m, k, n);
+                for acc_offer in [OFFER_STEPS / 2, OFFER_STEPS / 4] {
+                    let (got, census) = tabulated(
+                        &w,
+                        &a,
+                        m,
+                        n,
+                        Traversal::Tabulated,
+                        acc_offer,
+                        OFFER_STEPS,
+                        0,
+                    );
+                    assert_eq!(
+                        got, want,
+                        "{m}x{k}x{n} d={d}: a column block narrower than the output must give \
+                         the dense driver's bytes ({census:?})"
+                    );
+                    assert!(
+                        census.table_reads > 0,
+                        "{m}x{k}x{n} d={d}: the offer was sized for a table and none was read"
+                    );
+                    if d < n {
+                        assert!(
+                            census.table_reads < uncollapsed,
+                            "{m}x{k}x{n} d={d} at an accumulator offer of \
+                             {acc_offer}/{OFFER_STEPS}: a repeated column must not be charged \
+                             twice within its block ({census:?} against {uncollapsed})"
+                        );
+                    } else {
+                        assert_eq!(
+                            census.table_reads, uncollapsed,
+                            "{m}x{k}x{n} d={d}: nothing repeats, so nothing may be skipped"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `CD-15`: collapsing equal rows of `A` in the tabulated traversal cannot
+    /// change a byte, at every degeneracy and every offer.
+    ///
+    /// Row `i` of `A` is row `i % d`, so the operand has exactly `d` distinct
+    /// rows and the table build may be charged `d * k * code_space` instead of
+    /// `m * k * code_space` --- the closed form `CU-06` pins at `d = m`, which
+    /// is also the charge when the collapse is offered nothing or finds
+    /// nothing. Two assertions per case: the bytes are the dense driver's, and
+    /// the census is the charge the offer admits. Without the second this test
+    /// passed with the collapse silently inert, which is what it was before
+    /// this ID existed.
+    #[test]
+    fn collapsing_equal_rows_of_a_cannot_change_a_byte_cd_15() {
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        let space = 256usize;
+        let block = 8usize;
+        for &(m, k, n) in &[(8usize, 32usize, 64usize), (16, 64, 512), (7, 24, 40)] {
+            let stream: Vec<u16> = fill(n * (k / block), 0xb00c, |x| (x % 400) as u16);
+            let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+            for d in [1usize, 2, m / 2, m] {
+                let d = d.max(1).min(m);
+                // `d` distinct rows, numbered by first occurrence: row `i` is
+                // row `i % d`, and the first `d` are pairwise distinct.
+                let a: Vec<i8> = (0..m * k)
+                    .map(|x| {
+                        let (row, col) = (x / k, x % k);
+                        (((row % d) * 31 + col * 17) % 251) as i8
+                    })
+                    .collect();
+                let want = reference(&w, &a, m, k, n);
+                // No offer, a rows offer too short for the distinct rows,
+                // exactly enough, and the worst case.
+                for rows_offer in [0usize, k / 2, d * k, m * k] {
+                    let (got, census) = tabulated(
+                        &w,
+                        &a,
+                        m,
+                        n,
+                        Traversal::Tabulated,
+                        OFFER_STEPS,
+                        OFFER_STEPS,
+                        rows_offer,
+                    );
+                    assert_eq!(
+                        got, want,
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the collapse must give \
+                         the dense driver's bytes ({census:?})"
+                    );
+                    assert!(
+                        census.table_reads > 0,
+                        "{m}x{k}x{n} d={d}: the offer was sized for a table and none was read"
+                    );
+                    // The build charges per *distinct* row when the collapse
+                    // ran, and per row when anything declined it.
+                    let charged = if rows_offer >= d * k && d < m { d } else { m };
+                    assert_eq!(
+                        census.multiplies,
+                        (charged * k * space) as u64,
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the build must charge \
+                         per distinct row ({census:?})"
+                    );
+                }
+            }
+        }
+
+        // Both collapse axes at once: two distinct rows of `A` against a `W`
+        // with four distinct columns. The two expansions read their own
+        // indices, and the census says so from both sides at once.
+        let (m, k, n) = (16usize, 64usize, 512usize);
+        let (rows_d, cols_d) = (2usize, 4usize);
+        let a: Vec<i8> = (0..m * k)
+            .map(|x| {
+                let (row, col) = (x / k, x % k);
+                (((row % rows_d) * 31 + col * 17) % 251) as i8
+            })
+            .collect();
+        let base: Vec<u16> = fill(cols_d * (k / block), 0xd0b, |x| (x % 400) as u16);
+        let stream: Vec<u16> = (0..n * (k / block))
+            .map(|x| base[(x / (k / block) % cols_d) * (k / block) + x % (k / block)])
+            .collect();
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let want = reference(&w, &a, m, k, n);
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            rows_d * k,
+        );
+        assert_eq!(
+            got, want,
+            "both axes: the dense driver's bytes ({census:?})"
+        );
+        assert_eq!(
+            census.multiplies,
+            (rows_d * k * space) as u64,
+            "both axes: the build charges per distinct row ({census:?})"
+        );
+        assert_eq!(
+            census.table_reads,
+            (rows_d * cols_d * (k / block)) as u64,
+            "both axes: the column loop charges per distinct column ({census:?})"
+        );
+    }
+
+    /// One `i32` tabulated product at one encode mode and one accumulator
+    /// offer, with the panel holding the decoded codebook and nothing more.
+    ///
+    /// The `i32` lanes --- the exact accumulator and the modular word alike ---
+    /// live in the accumulator offer, so there is one knob and the census says
+    /// which lane it admitted.
+    fn tabulated_i32<C: Enumerable<i32, Full<i32>> + Copy>(
+        w: &CodedMatrix<'_, i32, Full<i32>, C>,
+        a: &[i32],
+        m: usize,
+        n: usize,
+        encode: EncodeMode,
+        acc_offer: usize,
+    ) -> (Vec<i32>, Census) {
+        let k = w.cols();
+        let block = <C as uor_matmul_codec::Codec<i32, Full<i32>>>::MAX_BLOCK;
+        let mut panel = vec![
+            Alphabet::<i32, Full<i32>>::ZERO;
+            suggested_tabulation_panel(C::CODE_SPACE, block)
+        ];
+        let mut accumulators = vec![<AccOf<i32> as Accumulator>::ZERO; acc_offer];
+        let mut c = vec![0i32; m * n];
+        let mut census = Census::default();
+        {
+            let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, *w, cv).unwrap();
+            gemm_tabulated_counted(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    encode,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+        (c, census)
+    }
+
+    /// The dense product of the same `i32` operands at the same encode mode,
+    /// by the driver whose bytes every other traversal is measured against.
+    fn reference_i32<C: Enumerable<i32, Full<i32>> + Copy>(
+        w: &CodedMatrix<'_, i32, Full<i32>, C>,
+        a: &[i32],
+        m: usize,
+        k: usize,
+        n: usize,
+        encode: EncodeMode,
+    ) -> Vec<i32> {
+        let mut b = vec![0i32; k * n];
+        for p in 0..k {
+            for j in 0..n {
+                b[p * n + j] = w.at(j, p).get();
+            }
+        }
+        let mut c = vec![0i32; m * n];
+        let av = MatView::row_major(as_alphabet_full(a), m, k).unwrap();
+        let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+        let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+        let mut t = Triple::new(av, bv, cv).unwrap();
+        gemm(
+            &mut t,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                traversal: Traversal::Blocked,
+                encode,
+                ..Default::default()
+            },
+            &mut Scratch::none(),
+        );
+        c
+    }
+
+    /// The shape, codec, operands, and offer the two modular-lane tests share.
+    ///
+    /// The offer is the point of the fixture. The exact `i32` lane *is* the
+    /// accumulator, so a table in it costs one accumulator per lane word ---
+    /// `slab * rows * depth` of them past the `rows * n` tile. The modular
+    /// lane is four lane words per accumulator, so the same stack costs a
+    /// quarter as many, and the offer below covers the modular stack and not
+    /// the exact one. The census then says which lane ran, rather than the
+    /// predicate being asked to say it again.
+    #[allow(clippy::type_complexity)]
+    fn modular_i32_fixture() -> (
+        [[Alphabet<i32, Full<i32>>; 4]; 16],
+        Vec<u16>,
+        Vec<i32>,
+        usize,
+    ) {
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (space, block) = (16usize, 4usize);
+        let rows = 16usize;
+        assert!(
+            tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<Mod32>()) >= rows
+                && tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<i128>()) >= rows,
+            "the fixture's row tile fits L1 in either lane"
+        );
+        let slab = slab_codes(space);
+        let tile = rows * n;
+        // `tile + ceil((tile + slab * rows * blocks) / 4)`: the modular take,
+        // derived in the doc comment above. The exact take at this offer is
+        // `tile + tile + slab * rows` --- one slot deep, which is all the
+        // remainder buys at one accumulator per word --- and it exceeds the
+        // offer, so the exact lane must decline.
+        let offer = tile + (tile + slab * rows * (k / block)).div_ceil(4);
+        let flat: Vec<i32> = fill(space * block, 0xb32c, |x| {
+            (x as i32).wrapping_mul(0x9E37_79B9u32 as i32)
+        });
+        let cells: [[Alphabet<i32, Full<i32>>; 4]; 16] =
+            core::array::from_fn(|c| core::array::from_fn(|t| Alphabet::of(flat[c * block + t])));
+        // Full-range activations: the modular lane declares no bound, so the
+        // extremes of the alphabet are ordinary inputs and a product of two of
+        // them wraps on purpose.
+        let a: Vec<i32> = fill(m * k, 0xa32c, |x| {
+            (x as i32).wrapping_mul(0x85EB_CA6Bu32 as i32)
+        });
+        let stream: Vec<u16> = fill(n * (k / block), 0xc32c, |x| (x % 16) as u16);
+        (cells, stream, a, offer)
+    }
+
+    /// `CU-08`: the modular table lane runs exactly when the encode is
+    /// `Wrapping` and the output is no wider than the lane, and its depth is
+    /// unbounded at every bound.
+    ///
+    /// The depth half is the table-side form of what `CU-02` pins for the
+    /// dense lane: the wrap *is* the encode, so there is nothing to chunk.
+    #[test]
+    fn the_modular_table_lane_runs_exactly_when_the_encode_admits_it_cu_08() {
+        for bound in [0u128, 1, 1 << 10, 1 << 31, u128::MAX] {
+            assert_eq!(<Mod32 as Lane<i32>>::capacity(bound), None);
+        }
+        for bound in [0u128, 1, 1 << 10, 1 << 63, u128::MAX] {
+            assert_eq!(<Mod64 as Lane<i64>>::capacity(bound), None);
+        }
+        // The specs say the same, at every tile the driver walks: the lane's
+        // depth is `usize::MAX` at every bound, exactly as
+        // `Factorization::Modular` declares on the dense side.
+        for &(rows, group) in &[(16usize, 1usize), (8, 2), (1, 1)] {
+            let spec32 = choose_table(
+                available_table_i32_modular(rows, group),
+                Backend::Auto,
+                1 << 31,
+                4,
+            )
+            .expect("the reference sequence is always present");
+            assert_eq!(spec32.lane_depth(1 << 31), usize::MAX);
+            assert_eq!(spec32.lane_depth(1), usize::MAX);
+            let spec64 = choose_table(
+                available_table_i64_modular(rows, group),
+                Backend::Auto,
+                1 << 63,
+                4,
+            )
+            .expect("the reference sequence is always present");
+            assert_eq!(spec64.lane_depth(1 << 63), usize::MAX);
+            assert_eq!(spec64.lane_depth(1), usize::MAX);
+        }
+
+        // The width half of admissibility, per family: an output no wider than
+        // the lane. `i8` and `i16` offer no modular table lane at all --- their
+        // exact lane already holds every depth a weight row reaches, so a
+        // quotient read would buy nothing.
+        assert!(<i32 as Tabulated>::modular_table_admitted(8));
+        assert!(<i32 as Tabulated>::modular_table_admitted(16));
+        assert!(<i32 as Tabulated>::modular_table_admitted(32));
+        assert!(!<i32 as Tabulated>::modular_table_admitted(64));
+        assert!(<i64 as Tabulated>::modular_table_admitted(32));
+        assert!(<i64 as Tabulated>::modular_table_admitted(64));
+        assert!(!<i64 as Tabulated>::modular_table_admitted(128));
+        assert!(!<i8 as Tabulated>::modular_table_admitted(32));
+        assert!(!<i16 as Tabulated>::modular_table_admitted(32));
+
+        // The encode-mode half, behaviourally. At the fixture's offer the
+        // modular lane holds a table and the exact lane cannot (see
+        // `modular_i32_fixture`), so which traversal ran is the census's to
+        // say: under `Wrapping` the table runs, under `Saturating` the same
+        // call streams --- and both give the dense driver's bytes at their own
+        // encode mode.
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (cells, stream, a, offer) = modular_i32_fixture();
+        let book = Book::new(&cells);
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let (wrapped, wrap_census) = tabulated_i32(&w, &a, m, n, EncodeMode::Wrapping, offer);
+        assert_eq!(
+            wrapped,
+            reference_i32(&w, &a, m, k, n, EncodeMode::Wrapping),
+            "the modular table must give the dense driver's bytes"
+        );
+        assert_eq!(
+            wrap_census.table_reads,
+            (m * n * (k / 4)) as u64,
+            "under `Wrapping` the modular table ran, one read per code per row: {wrap_census:?}"
+        );
+        for mode in [EncodeMode::Nearest, EncodeMode::Saturating] {
+            let (got, census) = tabulated_i32(&w, &a, m, n, mode, offer);
+            assert_eq!(
+                got,
+                reference_i32(&w, &a, m, k, n, mode),
+                "under {mode:?} the stream must give the dense driver's bytes"
+            );
+            assert_eq!(
+                census.table_reads, 0,
+                "under {mode:?} no modular lane is admitted and the exact one cannot fit \
+                 this offer, so the call streams: {census:?}"
+            );
+        }
+    }
+
+    /// `CB-09`, end to end: through the driver, the modular table lane gives
+    /// the dense modular traversal's bytes.
+    ///
+    /// The parity half in `uor-matmul-kernels` reads every modular sequence
+    /// against the model lane for lane; this half reads the *dispatch*. At
+    /// every offer --- nothing, a fraction, the fixture's sized offer, and
+    /// beyond it --- the bytes are the dense driver's, and at the sized offer
+    /// the census says the table, not the stream, produced them.
+    #[test]
+    fn the_modular_table_lane_gives_the_dense_drivers_bytes_cb_09() {
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (cells, stream, a, offer) = modular_i32_fixture();
+        let book = Book::new(&cells);
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let want = reference_i32(&w, &a, m, k, n, EncodeMode::Wrapping);
+        for offer in [0usize, offer / 2, offer, offer * 2] {
+            let (got, census) = tabulated_i32(&w, &a, m, n, EncodeMode::Wrapping, offer);
+            assert_eq!(
+                got, want,
+                "an accumulator offer of {offer} must give the dense driver's bytes ({census:?})"
+            );
+        }
+        let (_, census) = tabulated_i32(&w, &a, m, n, EncodeMode::Wrapping, offer);
+        assert_eq!(
+            census.table_reads,
+            (m * n * (k / 4)) as u64,
+            "the offer was sized for the modular table and none was read: {census:?}"
+        );
+    }
+
+    /// The `i64` half of `CB-09`'s dispatch read: the portable-only lane,
+    /// through the same boundary.
+    ///
+    /// The lane is three `Mod64` words to the three-limb accumulator, so the
+    /// sizing argument is `modular_i32_fixture`'s with a third in place of a
+    /// quarter. Without this half `Mod64::place` is code no test can fail.
+    #[test]
+    fn the_modular_i64_table_lane_gives_the_dense_drivers_bytes_cb_09() {
+        let (m, k, n) = (16usize, 8usize, 64usize);
+        let (space, block) = (16usize, 4usize);
+        let rows = 16usize;
+        assert!(
+            tabulation_rows(space, blocking::L1_BYTES, core::mem::size_of::<Mod64>()) >= rows
+                && tabulation_rows(
+                    space,
+                    blocking::L1_BYTES,
+                    core::mem::size_of::<AccOf<i64>>()
+                ) >= rows,
+            "the fixture's row tile fits L1 in either lane"
+        );
+        let slab = slab_codes(space);
+        let tile = rows * n;
+        let offer = tile + (tile + slab * rows * (k / block)).div_ceil(3);
+        let flat: Vec<i64> = fill(space * block, 0xb64c, |x| {
+            (x as i64).wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64)
+        });
+        let cells: [[Alphabet<i64, Full<i64>>; 4]; 16] =
+            core::array::from_fn(|c| core::array::from_fn(|t| Alphabet::of(flat[c * block + t])));
+        let a: Vec<i64> = fill(m * k, 0xa64c, |x| {
+            (x as i64).wrapping_mul(0x2545_F491_4F6C_DD1Du64 as i64)
+        });
+        let stream: Vec<u16> = fill(n * (k / block), 0xc64c, |x| (x % 16) as u16);
+        let book = Book::new(&cells);
+        let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+
+        // The dense product at the same encode mode, by the same driver the
+        // `i32` half is read against.
+        let want = {
+            let mut b = vec![0i64; k * n];
+            for p in 0..k {
+                for j in 0..n {
+                    b[p * n + j] = w.at(j, p).get();
+                }
+            }
+            let mut c = vec![0i64; m * n];
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let bv = MatView::row_major(as_alphabet_full(&b), k, n).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            gemm(
+                &mut t,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Blocked,
+                    encode: EncodeMode::Wrapping,
+                    ..Default::default()
+                },
+                &mut Scratch::none(),
+            );
+            c
+        };
+
+        let mut panel =
+            vec![Alphabet::<i64, Full<i64>>::ZERO; suggested_tabulation_panel(space, block)];
+        let mut accumulators = vec![<AccOf<i64> as Accumulator>::ZERO; offer];
+        let mut c = vec![0i64; m * n];
+        let mut census = Census::default();
+        {
+            let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            gemm_tabulated_counted(
+                &mut tr,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    encode: EncodeMode::Wrapping,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+        assert_eq!(
+            c, want,
+            "the modular i64 table must give the dense driver's bytes ({census:?})"
+        );
+        assert_eq!(
+            census.table_reads,
+            (m * n * (k / block)) as u64,
+            "the offer was sized for the modular table and none was read: {census:?}"
+        );
+    }
+
     /// `CT-07`: tabulation is total. Every value the code type can hold indexes a
     /// live table entry, so no code stream can produce a miss or a panic.
     ///
@@ -2819,7 +4196,16 @@ mod tests {
         let w = CodedMatrix::new(book, n, k, &stream).expect("65536 rows of one code");
         let a: Vec<i8> = fill(k, 0xfeed, |x| ((x % 255) as i64 - 127) as i8);
 
-        let (got, census) = tabulated(&w, &a, 1, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            1,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
         assert!(census.table_reads > 0, "the table must have been read");
         assert_eq!(got, reference(&w, &a, 1, k, n));
 
@@ -2880,7 +4266,16 @@ mod tests {
         // right, and it made this test fail on whichever CI runner happened to
         // have VNNI while passing on the ones that did not. The predicate's own
         // claim is `CM-04`'s, and it asserts that VNNI case directly.
-        let (got, census) = tabulated(&w, &a, m, n, Traversal::Tabulated, OFFER_STEPS, OFFER_STEPS);
+        let (got, census) = tabulated(
+            &w,
+            &a,
+            m,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
         assert_eq!(
             got,
             reference(&w, &a, m, k, n),
@@ -2932,6 +4327,7 @@ mod tests {
             Traversal::OutputMajor,
             OFFER_STEPS,
             OFFER_STEPS,
+            0,
         );
         assert_eq!(streamed, got);
         assert_eq!(plain.multiplies, dense);

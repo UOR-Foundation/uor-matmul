@@ -436,6 +436,63 @@ pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         // nothing narrower than the lane is held and no alphabet is out of
         // reach --- the same statement `NEON_I8_I32` makes.
         max_bound: u128::MAX,
+        build_multiplies: true,
+        build,
+        gather,
+        gather_codes,
+    })
+}
+
+/// The bound-1 `i8` table sequence at `rows` rows and `group` columns.
+///
+/// The same shapes and the same gathers as [`neon_table_i8_i32`] --- the
+/// gathers are bound-independent, so they are shared, not duplicated. Only the
+/// build differs: at bound 1 the widening multiply has nothing left to do, and
+/// the slot is a sign mask, an XOR and a subtract (`CB-10`).
+pub fn neon_table_i8_i32_bound1(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
+    let (build, gather, gather_codes): (
+        crate::table::TableBuild<i8, i32>,
+        crate::table::TableGather<i32>,
+        crate::table::TableGatherCodes<i32>,
+    ) = match (rows, group) {
+        (16, 1) => (
+            neon_table_build_bound1_v4,
+            neon_gather_v4_u1,
+            neon_codes_v4_u1,
+        ),
+        (16, 2) => (
+            neon_table_build_bound1_v4,
+            neon_gather_v4_u2,
+            neon_codes_v4_u2,
+        ),
+        (8, 1) => (
+            neon_table_build_bound1_v2,
+            neon_gather_v2_u1,
+            neon_codes_v2_u1,
+        ),
+        (8, 2) => (
+            neon_table_build_bound1_v2,
+            neon_gather_v2_u2,
+            neon_codes_v2_u2,
+        ),
+        _ => return None,
+    };
+    Some(TableSpec {
+        backend: Backend::Neon,
+        rows,
+        group,
+        // Nothing is paired: one block step is one sign mask, so an odd block
+        // packs as well as an even one and there is no tail.
+        k_group: 1,
+        lanes_per_add: NEON_TABLE_LANES,
+        // One XOR, one subtract and one add per four lanes and one block step.
+        build_products_per_step: NEON_TABLE_LANES,
+        lane_cap: i32::MAX as u128,
+        // Exact exactly when every book word is in `{-1, 0, +1}`: the sign
+        // mask is the whole of the arithmetic, and this is the declaration
+        // `choose_table` reads.
+        max_bound: 1,
+        build_multiplies: false,
         build,
         gather,
         gather_codes,
@@ -472,6 +529,7 @@ pub fn neon_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
         build_products_per_step: NEON_TABLE_LANES_64,
         lane_cap: i64::MAX as u128,
         max_bound: u128::MAX,
+        build_multiplies: true,
         build,
         gather,
         gather_codes,
@@ -754,6 +812,69 @@ unsafe fn neon_table_build<const V: usize>(
     }
 }
 
+/// One slot of the table at bound 1, at `V` registers: no multiply.
+///
+/// `T[c][i] = sum_t +-acts[t][i]`: the book word is in `{-1, 0, +1}`, so the
+/// product is a masked negation. Two masks per block step, broadcast into the
+/// lane's width --- `keep`, all-ones unless the word is zero, and `sign`,
+/// all-ones when it is `-1` --- and `((a & keep) ^ sign) - sign` is the
+/// product: in two's complement the XOR with all-ones is the one's complement,
+/// and subtracting the mask back adds the one that makes it the negation. No
+/// instruction in the loop multiplies.
+///
+/// The masked negation is computed in the `i16` the widening load produces ---
+/// `|a| <= 128`, so the negation is exact there --- and the widening add
+/// (`vaddw`) folds the move to the `i32` lane into the accumulation. Measured
+/// against computing the masks in the `i32` lane directly (two more widening
+/// steps and three more vector ops per eight rows), that is the difference
+/// between this sequence and the autovectorized reference at parity, and the
+/// reason the reference was the faster of the two.
+///
+/// # Safety
+///
+/// [`crate::table::TableBuild`]'s contract, with `rows == V * 4`, `V` even, and
+/// every element of `book` in `{-1, 0, +1}` --- which the caller's bound-1
+/// alphabet has already established at the boundary.
+#[target_feature(enable = "neon")]
+unsafe fn neon_table_build_bound1<const V: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    debug_assert_eq!(rows, V * NEON_TABLE_LANES);
+    debug_assert!(V.is_multiple_of(2));
+    // SAFETY: the caller established every extent.
+    unsafe {
+        for c in 0..space {
+            let d = book.add(c * block);
+            let mut entry = [vdupq_n_s32(0); V];
+            for t in 0..block {
+                let w = *d.add(t);
+                // `w >> 7` is the arithmetic shift: all-ones exactly when the
+                // word is -1, and `keep` is all-ones exactly when it is not 0.
+                let sign = vdupq_n_s16(i16::from(w >> 7));
+                let keep = vdupq_n_s16(-i16::from(w != 0));
+                let a = acts.add(t * rows);
+                // Eight activations per widening load, which is two lanes'
+                // worth of `i32` register, as in `neon_table_build`.
+                for pair in 0..V / 2 {
+                    let x = vmovl_s8(vld1_s8(a.add(pair * 8)));
+                    let z = vsubq_s16(veorq_s16(vandq_s16(x, keep), sign), sign);
+                    entry[pair * 2] = vaddw_s16(entry[pair * 2], vget_low_s16(z));
+                    entry[pair * 2 + 1] = vaddw_high_s16(entry[pair * 2 + 1], z);
+                }
+            }
+            let o = out.add(c * rows);
+            for (v, cell) in entry.iter().enumerate() {
+                vst1q_s32(o.add(v * NEON_TABLE_LANES), *cell);
+            }
+        }
+    }
+}
+
 /// One column group over a run of slots, at `V` registers of `i32` per column.
 ///
 /// # Safety
@@ -893,6 +1014,43 @@ unsafe fn neon_table_build_v2(
 ) {
     // SAFETY: as [`neon_table_build_v4`], at a narrower tile.
     unsafe { neon_table_build::<2>(rows, space, block, book, acts, out) }
+}
+
+/// Build one slot at bound 1, at `rows == 16`.
+///
+/// # Safety
+///
+/// [`crate::table::TableBuild`]'s contract at `rows == 16`, every book word in
+/// `{-1, 0, +1}`.
+unsafe fn neon_table_build_bound1_v4(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: NEON is mandatory on this target and the caller forwarded the
+    // extents.
+    unsafe { neon_table_build_bound1::<4>(rows, space, block, book, acts, out) }
+}
+
+/// Build one slot at bound 1, at `rows == 8`.
+///
+/// # Safety
+///
+/// [`crate::table::TableBuild`]'s contract at `rows == 8`, every book word in
+/// `{-1, 0, +1}`.
+unsafe fn neon_table_build_bound1_v2(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: as [`neon_table_build_bound1_v4`], at a narrower tile.
+    unsafe { neon_table_build_bound1::<2>(rows, space, block, book, acts, out) }
 }
 
 /// Generate the four `(rows, group)` gather entry points, each a named

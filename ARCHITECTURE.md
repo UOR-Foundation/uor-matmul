@@ -107,6 +107,36 @@ The op counts follow from the two shapes: `m*k*S + m*k*n/Bk` against `m*k*n`, so
 tabulation is cheaper exactly when `n * (Bk - 1) > S * Bk`. For `Book<256,8>` that
 is `n > 292`, which `model/tiers.toml` records and `CM-04` recomputes.
 
+The build is the one place a multiply remains, and at bound 1 not even there.
+The sign spelling (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) and the
+ternary one (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) --- both declared by
+`CK-13` as compositions of codecs that already existed --- put every book word
+in `{-1, 0, +1}`, where the product is the activation, its negation, or zero:
+`T[c][i]` is adds and subtracts, with the negation an XOR against the sign mask
+and the mask subtracted back, two's complement's own spelling of `-a`. So the
+builds that declare `max_bound = 1` issue no multiply at all. This is selection
+by declaration, not a second method: the bound-1 builds sit after every
+full-alphabet sequence in the available list, `choose_table` hands them exactly
+the alphabet they declare, and only the build differs --- the gathers are
+bound-independent and are the same function pointers, shared rather than
+duplicated. `CB-10` pins every bound-1 build to the model slot for slot and the
+census to what was issued: zero multiplies on a bound-1 tabulated run.
+
+The table is not the only sharing in this driver, and the other two axes are
+the collapse traversal's own move applied to its two operands. Two equal rows
+of `A` name the same sum against every column of `W`, and two equal columns of
+`W` read the same table entries in the same order, so with the caller's offers
+the driver charges per *distinct* row and per *distinct* column. The row side
+is literally `collapse.rs`'s pass, compaction, and expansion --- `A` is always
+dense here, so nothing about them changes --- with the compacted `d x k`
+product planned as a product in its own right and then expanded into the full
+output; the column side is a first-occurrence map over the code stream, made
+block-local so it holds at any column-block width. Both follow the offer
+discipline of the dense collapse: an epilogue that reads `C` declines the row
+side outright, and a short offer, or an operand with nothing to share, gives
+the same bytes from the uncollapsed traversal. `CD-15` and `CD-16` assert the
+bytes at every degeneracy, and the census asserts the charge actually moved.
+
 Three things make this a factorization of the same identity rather than a
 different algorithm:
 
@@ -130,7 +160,7 @@ different algorithm:
 `TableSpec` is `KernelSpec`'s shape for the two things a table needs --- fill one
 slot, reduce one column group --- and it lives in `uor-matmul-kernels` for the same
 reason every other sequence does: it is the only crate that writes
-`#[target_feature]` --- 39 of them, against none anywhere else --- and that
+`#[target_feature]` --- 40 of them, against none anywhere else --- and that
 attribute requires `unsafe`, which the other numerical crates forbid outright.
 A sequence written
 anywhere else compiles at the target's baseline. Measured, that was the whole
@@ -212,6 +242,23 @@ in registers and is a frame of pure copy when they cannot --- 80 or 536 bytes
 of limbs never can. `portable_table` chooses at compile time: words of sixteen
 bytes or fewer take the staged gather, wider words accumulate in place, and
 both are the same reads and the same adds (`CB-08`).
+There is a second lane, chosen by declaration rather than by shape. When the
+caller asks to encode by wrapping into an output no wider than `w` bits, the
+table can run in `Z/2^w` --- the same ring-homomorphism factorization the dense
+side cashes in (`ANALYSIS.md` §"The modular factorization"), with the same
+two-declaration admissibility: the encode mode is asked at the traversal
+boundary, the output width is `Tabulated::modular_table_admitted`. For `i32`
+the `Mod32` word replaces scalar widening macs with eight-wide `mullo_epi32` on
+the build and scalar 128-bit gather adds with `vpaddd` on the column loop, at a
+quarter of the lane traffic; `CB-09` pins every modular sequence to the
+portable modular reference lane for lane, and `CU-08` pins when the lane may
+run and that its depth is unbounded at every bound. The lane is read out of the
+accumulator offer, relabelled several words to the word, so an offer sized for
+the exact lane already holds it. For `i64` the build's multiply has no SIMD
+instruction, so the modular lane is the portable sequence alone --- the same
+reason the dense `i64` modular family is portable-only. `i8` and `i16` offer
+none: their exact lane already holds every depth a weight row reaches, so a
+quotient read would buy nothing.
 
 ## Borrowing instead of packing
 

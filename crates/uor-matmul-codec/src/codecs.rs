@@ -315,6 +315,96 @@ impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Enumerable<
 }
 
 // ---------------------------------------------------------------------------
+// Sign
+// ---------------------------------------------------------------------------
+
+/// Weights in `{-1, +1}`, one bit per element, with no table at all.
+///
+/// The `Packed<Grid<2>,8>` spelling of the same decode (`CK-13`) tabulates but
+/// can never answer [`Enumerable::as_index_stream`]: a packed byte's index is
+/// a mixed-radix decomposition of it, so the tabulated traversal builds the
+/// index stream it gathers from. Measured, that build is a fifth to a third of
+/// the work at a one-row tile (ANALYSIS.md, "What the missing index stream
+/// costs the sign composition"). This tier spells the same decode with the
+/// code *being* the index --- `Code = u16`, one bit per element of the block
+/// --- so the operand's own memory is the stream and there is nothing to
+/// build. `CK-11` pins the two spellings byte for byte.
+///
+/// The codebook is the constant `{-1, +1}`, so there is nothing to borrow and
+/// no lifetime: the decode is a bit test. **Bit `t` of the code is element
+/// `t`; set is `+1`, clear is `-1`, low bit first** --- the order `Packed`
+/// reads its sub-codes in (`CK-03`), so a `Sign` code spells the block the
+/// composition spells from the same byte value. The convention is normative:
+/// the encoder side is out of tree, and this decode is the whole contract
+/// with it.
+#[derive(Clone, Copy, Debug)]
+pub struct Sign<E: IntegerElement, Bd: Bound, const BLK: usize> {
+    _marker: PhantomData<fn() -> (E, Bd)>,
+}
+
+impl<E: IntegerElement, Bd: Bound, const BLK: usize> Sign<E, Bd, BLK> {
+    /// The one non-existence check: an alphabet that does not admit `+-1` has
+    /// no sign codec. Decided at construction, before any arithmetic, like
+    /// every other non-existence in this library (C6).
+    pub const fn new() -> Option<Self> {
+        if Bd::VALUE < 1 || E::FULL < 1 {
+            return None;
+        }
+        Some(Self {
+            _marker: PhantomData,
+        })
+    }
+}
+
+impl<E: IntegerElement, Bd: Bound, const BLK: usize> Codec<E, Bd> for Sign<E, Bd, BLK> {
+    type Code = u16;
+    const MAX_BLOCK: usize = BLK;
+    const TIER: TierId = TierId::Sign;
+
+    fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd> {
+        let bit = i % BLK;
+        // The `bit < 16` guard keeps the shift total past the code type's own
+        // width: at `BLK > 16` a code holds no bit for those positions, and
+        // they decode to `-1` like any clear bit.
+        let v = if bit < u16::BITS as usize && (code >> bit) & 1 == 1 {
+            E::ONE
+        } else {
+            // `0 - 1`: exact for every integer element, never a wrap.
+            E::ZERO.sub(E::ONE)
+        };
+        // `new` established that the declared alphabet admits `+-1`, so the
+        // wrap cannot put a value outside its bound: it is that O(1) check
+        // being cashed in, exactly as `Offset`'s decode cashes in its own.
+        Alphabet::wrap(v)
+    }
+}
+
+impl<E: IntegerElement, Bd: Bound, const BLK: usize> Enumerable<E, Bd> for Sign<E, Bd, BLK> {
+    // Every bit pattern of the block, capped at what a `u16` can address ---
+    // the same honesty about the code type's width as `Grid`'s.
+    const CODE_SPACE: usize = if BLK < 16 { 1 << BLK } else { U16_CODES };
+
+    fn code_at(index: usize) -> Self::Code {
+        (index % Self::CODE_SPACE.max(1)) as u16
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        // A mask, not a remainder: the space is a power of two at every block
+        // width, and the stored code *is* the index, which is the whole point
+        // of the tier.
+        (code as usize) & (Self::CODE_SPACE - 1)
+    }
+
+    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+        // Always --- not at the power-of-two entry counts, as `Grid` and
+        // `Book` answer, but at every block width, because the code addresses
+        // the enumeration unconditionally. This is the answer `Packed` can
+        // never give, and the gap this tier exists to close.
+        Some(codes)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Offset
 // ---------------------------------------------------------------------------
 
