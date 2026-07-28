@@ -276,8 +276,8 @@ fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
     println!();
     println!("## Distinct columns");
     println!();
-    println!("| `d` | degeneracy | collapsed | uncollapsed | speedup |");
-    println!("| --- | --- | --- | --- | --- |");
+    println!("| `d` | degeneracy | collapsed | uncollapsed | narrow block | speedup |");
+    println!("| --- | --- | --- | --- | --- | --- |");
 
     let mut d = 1usize;
     loop {
@@ -292,6 +292,9 @@ fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
 
         let offer = suggested_tabulation::<i8, Full<i8>>(shape, space, block);
         let mut accumulators = vec![<AccOf<i8> as Accumulator>::ZERO; offer];
+        // Half the suggestion narrows the column block below the output width,
+        // which is where `CD-14`'s block-local collapse is the only collapse.
+        let mut accumulators_half = vec![<AccOf<i8> as Accumulator>::ZERO; offer / 2];
         let mut words = vec![0i64; suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block)];
         let mut ids = vec![0usize; suggested_tabulation_index(shape)];
         let mut lanes =
@@ -365,12 +368,27 @@ fn degeneracy(book: &Book<'_>, space: usize, block: usize) {
             "the collapse must not change a byte at d = {d}"
         );
 
+        let t_narrow = time(
+            true,
+            &mut c,
+            &mut lanes,
+            &mut accumulators_half,
+            &mut words,
+            &mut ids,
+            &mut run,
+        );
+        assert_eq!(
+            collapsed, c,
+            "the collapse must not change a byte at a narrowed column block, d = {d}"
+        );
+
         let g = |t: f64| macs / t / 1e9;
         println!(
-            "| {d} | {:.0}x | {:.2} | {:.2} | {:.2}x |",
+            "| {d} | {:.0}x | {:.2} | {:.2} | {:.2} | {:.2}x |",
             n as f64 / d as f64,
             g(t_on),
             g(t_off),
+            g(t_narrow),
             t_off / t_on,
         );
         if d >= n {

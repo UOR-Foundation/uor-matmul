@@ -48,6 +48,8 @@
 //! and it is the orientation in which a code names `Bk` consecutive *outputs*.
 //! Tabulation simply has nothing to sum there.
 
+use core::hash::Hash;
+
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
@@ -449,7 +451,9 @@ impl<'s> Tabulation<'s> {
     /// With it the traversal charges per *distinct* column of the coded operand
     /// instead of per column --- the same move [`crate::collapse`] makes on the
     /// rows of `A` and the same move tabulation itself makes on the codes. A cost
-    /// that tracks meanings rather than expressions.
+    /// that tracks meanings rather than expressions. The collapse applies at any
+    /// column-block width: a class spread across blocks is charged once per block
+    /// it appears in, which is the most a narrow offer can extract (`CD-14`).
     ///
     /// See [`suggested_tabulation_index`] for the size. An operand that repeats no
     /// column pays one pass over its code stream for the question, and `CG-10`
@@ -484,7 +488,9 @@ impl<'s> Tabulation<'s> {
 ///
 /// One entry per output column, plus an open-addressed dictionary at least twice
 /// as wide so a probe stays short --- the same sizing
-/// [`crate::suggested_collapse_index`] uses on the row side.
+/// [`crate::suggested_collapse_index`] uses on the row side. Once the classes are
+/// known the dictionary is dead, and the block-local first-occurrence map is
+/// derived into it, so this size serves both passes.
 ///
 /// A *query*. Offering none gives the same bytes from the uncollapsed traversal,
 /// which is the rule every other offer in this library follows (`CD-13`).
@@ -535,8 +541,9 @@ pub fn suggested_tabulation_lanes<E: Tabulated, Bd: Bound>(
 /// output width for this shape and this codec.
 ///
 /// A *query*, like [`crate::suggested_scratch`]. Offering less narrows the column
-/// block; offering none gives the same bytes from the streaming traversal
-/// (`CD-13`). It does not grow with `k`.
+/// block --- the column collapse still applies, at one charge per distinct column
+/// per block (`CD-14`) --- and offering none gives the same bytes from the
+/// streaming traversal (`CD-13`). It does not grow with `k`.
 ///
 /// When the element type has no narrow register this covers the table stack and
 /// the column accumulation too, because there is then nowhere else for them to
@@ -1440,6 +1447,69 @@ where
     (x ^ (x >> 31)) as usize
 }
 
+/// The column collapse, made block-local.
+///
+/// `first[j]` is the first occurrence of column `j`'s equivalence class
+/// *inside `j`'s column block*, relative to the block's start. It has to be
+/// block-local: a first occurrence in an earlier block no longer has an
+/// accumulator to copy from --- that block was encoded and the `exact` buffer
+/// reused before this one began. A class spread across blocks is therefore
+/// charged once per block it appears in, which is the most a narrow offer can
+/// extract.
+///
+/// `identity[b]` is nonzero when block `b` repeats nothing, and such a block
+/// takes the consecutive loop: an indexed load per column just to learn there
+/// is nothing to skip halved every shape it was measured on (ANALYSIS.md).
+#[derive(Clone, Copy)]
+struct ColumnMap<'a> {
+    first: &'a [usize],
+    identity: &'a [usize],
+}
+
+impl<'a> ColumnMap<'a> {
+    /// Rewrite the global classes in `index[..n]` block-relative, one pass,
+    /// into the dictionary region `distinct_columns` is finished with.
+    ///
+    /// The region-reuse invariant: `distinct_columns` laid the offer out as
+    /// `position[n] | slot[table] | key[table]` with
+    /// `table = next_power_of_two(2n) >= 2n`, so past `position` there are at
+    /// least `4n` dead words and this derivation needs `3n + ceil(n / cols)`.
+    /// The offer's size and layout are unchanged. `mark` is zeroed rather than
+    /// trusted: the region's prior contents are dictionary probes, which read
+    /// as plausible first occurrences.
+    fn derive(index: &'a mut [usize], n: usize, cols: usize) -> Option<Self> {
+        let blocks = n.div_ceil(cols);
+        // Unreachable from `run` --- `distinct_columns` returned only with the
+        // region behind it --- but a short offer means the uncollapsed
+        // traversal at the same bytes, not a report (C6).
+        if index.len() < n.checked_mul(3)?.checked_add(blocks)? {
+            return None;
+        }
+        let (position, rest) = index.split_at_mut(n);
+        let (first, rest) = rest.split_at_mut(n);
+        let (mark, rest) = rest.split_at_mut(n);
+        let (identity, _) = rest.split_at_mut(blocks);
+        mark.fill(0);
+        identity.fill(1);
+        for (j, &rep) in position.iter().enumerate() {
+            let start = j / cols * cols;
+            let seen = mark[rep];
+            // `seen` is a global first occurrence plus one, and `j` rises, so
+            // it names this block exactly when it does not predate the block.
+            first[j] = if seen > start {
+                seen - 1 - start
+            } else {
+                mark[rep] = j + 1;
+                j - start
+            };
+            if first[j] != j - start {
+                identity[j / cols] = 0;
+            }
+        }
+        Some(Self { first, identity })
+    }
+}
+
 /// One row tile: build the stack, reduce every distinct column into a lane, and
 /// encode once.
 ///
@@ -1535,14 +1605,15 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         // computed column by `place`, a repeated one by the expansion below.
         let mut placed = false;
 
-        // The collapse applies when this block is the whole output width, because
-        // a repeat's first occurrence has to be inside the block to be copied
-        // from. A caller whose offer forces narrower blocks gets the uncollapsed
-        // traversal, at the same bytes.
-        let collapsed = if col0 == 0 && cols == shape.n {
-            index
-        } else {
-            None
+        // A repeat is collapsed only against a first occurrence *inside this
+        // block*, which is why the map is block-local: a representative in an
+        // earlier block no longer has an accumulator --- that block was encoded
+        // and `exact` reused before this one began. A block that repeats
+        // nothing takes the consecutive loop and pays no indexed load for the
+        // answer.
+        let collapsed = match collapse {
+            Some(map) if map.identity[col0 / plan.cols] == 0 => Some(&map.first[col0..col0 + cols]),
+            _ => None,
         };
         // One decision, read in both places. `sweep` consults this to skip a
         // repeat; the expansion below consults it to fill one.
@@ -1633,6 +1704,8 @@ struct Sweep<'c, E: IntegerElement, Bd: Bound, C: Enumerable<E, Bd>, L> {
     /// [`uor_matmul_core::MatView::row_block`] follows on the dense side.
     stream: Option<&'c [u16]>,
     codes_per_row: usize,
+    /// The block's first-occurrence map, block-relative like the lane words it
+    /// indexes into, or `None` when the block repeats nothing.
     index: Option<&'c [usize]>,
     rows: usize,
     slab: usize,
@@ -1673,7 +1746,7 @@ where
         // adjacent in `carried`, so a group is a run of consecutive columns and
         // a skipped one ends the run.
         let present = |u: usize| match arg.index {
-            Some(of) => of[col0 + j + u] == col0 + j + u,
+            Some(of) => of[j + u] == j + u,
             None => true,
         };
         if !present(0) {
@@ -2272,6 +2345,78 @@ mod tests {
         for &(m, k, n) in &[(1usize, 2usize, 1usize), (4, 6, 600), (6, 10, 13)] {
             let stream: Vec<u8> = fill(n * (k / 2), 0xd0e, |x| x as u8);
             every_traversal_agrees("Packed<Grid<16>,2>", packed, &stream, m, k, n);
+        }
+    }
+
+    /// `CD-14`: the column collapse applies at every column-block width, not
+    /// only when the block is the whole output width.
+    ///
+    /// The accumulator offer is halved (and quartered) so `Plan::choose`
+    /// resolves a column block narrower than `n`, and for `d` in `{1, 3}` the
+    /// class representatives all sit in the *first* block --- so a later block
+    /// can collapse only if its first occurrences are block-local. Two
+    /// assertions:
+    ///
+    /// - the bytes are the dense driver's, at every width; and
+    /// - the census is strictly below `m * n * (k / Bk)`, the count the
+    ///   uncollapsed traversal issues and `CU-06` pins in closed form ---
+    ///   because a repeated column is never charged twice within its block.
+    ///
+    /// Without the second assertion this test passed with the collapse
+    /// silently disabled, which is exactly what it did before this ID existed.
+    /// For `d = n` there is nothing to collapse and the count must be the
+    /// closed form itself: nothing may be skipped either.
+    #[test]
+    fn collapsing_equal_columns_at_any_block_width_cannot_change_a_byte_cd_14() {
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        let block = 8usize;
+        for &(m, k, n) in &[(16usize, 64usize, 512usize), (8, 32, 512), (16, 64, 293)] {
+            let a: Vec<i8> = fill(m * k, activation_salt(), |x| ((x % 255) as i64 - 127) as i8);
+            let uncollapsed = (m * n * (k / block)) as u64;
+            for d in [1usize, 3, n] {
+                let d = d.min(n);
+                let base: Vec<u16> = fill(d * (k / 8), 0xd0b, |x| (x % 400) as u16);
+                let repeated: Vec<u16> = (0..n * (k / 8))
+                    .map(|x| base[(x / (k / 8) % d) * (k / 8) + x % (k / 8)])
+                    .collect();
+                let w = CodedMatrix::new(book, n, k, &repeated).expect("the codes describe n x k");
+                let want = reference(&w, &a, m, k, n);
+                for acc_offer in [OFFER_STEPS / 2, OFFER_STEPS / 4] {
+                    let (got, census) = tabulated(
+                        &w,
+                        &a,
+                        m,
+                        n,
+                        Traversal::Tabulated,
+                        acc_offer,
+                        OFFER_STEPS,
+                        0,
+                    );
+                    assert_eq!(
+                        got, want,
+                        "{m}x{k}x{n} d={d}: a column block narrower than the output must give \
+                         the dense driver's bytes ({census:?})"
+                    );
+                    assert!(
+                        census.table_reads > 0,
+                        "{m}x{k}x{n} d={d}: the offer was sized for a table and none was read"
+                    );
+                    if d < n {
+                        assert!(
+                            census.table_reads < uncollapsed,
+                            "{m}x{k}x{n} d={d} at an accumulator offer of \
+                             {acc_offer}/{OFFER_STEPS}: a repeated column must not be charged \
+                             twice within its block ({census:?} against {uncollapsed})"
+                        );
+                    } else {
+                        assert_eq!(
+                            census.table_reads, uncollapsed,
+                            "{m}x{k}x{n} d={d}: nothing repeats, so nothing may be skipped"
+                        );
+                    }
+                }
+            }
         }
     }
 

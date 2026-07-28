@@ -63,6 +63,7 @@ returns an error the model does not sanction.
 | `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room |
 | `CD-12` | `build` | Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer |
 | `CD-13` | `build` | `Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all |
+| `CD-14` | `build` | Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
 
