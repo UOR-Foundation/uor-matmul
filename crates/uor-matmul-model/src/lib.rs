@@ -244,21 +244,24 @@ impl Model {
             }
         }
 
-        // `CM-04`: every recorded break-even is the derivation, recomputed.
+        // `CM-04`: every recorded break-even is the derivation, recomputed ---
+        // at the row's own pair of sequences, because both sides of the count
+        // are ISA declarations and a host is priced at its own.
         for t in &self.tiers.tabulation {
             let expect = derive::tabulation_break_even(
                 t.code_space,
                 t.block,
                 t.rows,
                 t.block.saturating_mul(t.lanes_per_add),
-                self.constants.blocking.kernel_products_per_step,
+                t.kernel_products_per_step
+                    .unwrap_or(self.constants.blocking.kernel_products_per_step),
                 self.constants.blocking.kernel_rows,
             );
             if expect != t.break_even_n {
                 return Err(bad(format!(
-                    "tabulation {}: break-even of code_space {} over block {} at {} rows is \
-                     {:?}, but tiers.toml says {:?}",
-                    t.codec, t.code_space, t.block, t.rows, expect, t.break_even_n
+                    "tabulation {} ({}): break-even of code_space {} over block {} at {} rows \
+                     is {:?}, but tiers.toml says {:?}",
+                    t.codec, t.isa, t.code_space, t.block, t.rows, expect, t.break_even_n
                 )));
             }
             if t.code_space == 0 {
