@@ -126,7 +126,12 @@ The table is not the only sharing in this driver, and the other two axes are
 the collapse traversal's own move applied to its two operands. Two equal rows
 of `A` name the same sum against every column of `W`, and two equal columns of
 `W` read the same table entries in the same order, so with the caller's offers
-the driver charges per *distinct* row and per *distinct* column. The row side
+the driver charges per *distinct* row and per *distinct* column. For the float
+families the row side reads *bit*-distinct: the symbol is the bit pattern ---
+the arena tier's canonical-codebook semantics (`CK-10`) applied to `A` --- so
+two rows that differ only in the sign of a zero or in a NaN payload are
+charged as the two rows they are, and rows identical bit for bit, NaNs
+included, are charged once (`CD-17`). The row side
 is literally `collapse.rs`'s pass, compaction, and expansion --- `A` is always
 dense here, so nothing about them changes --- with the compacted `d x k`
 product planned as a product in its own right and then expanded into the full
@@ -134,7 +139,8 @@ output; the column side is a first-occurrence map over the code stream, made
 block-local so it holds at any column-block width. Both follow the offer
 discipline of the dense collapse: an epilogue that reads `C` declines the row
 side outright, and a short offer, or an operand with nothing to share, gives
-the same bytes from the uncollapsed traversal. `CD-15` and `CD-16` assert the
+the same bytes from the uncollapsed traversal. `CD-15`, `CD-16`, and `CD-17`
+assert the
 bytes at every degeneracy, and the census asserts the charge actually moved.
 
 Three things make this a factorization of the same identity rather than a

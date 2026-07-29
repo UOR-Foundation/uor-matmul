@@ -101,3 +101,9 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-15
     Then the claim holds byte for byte
+
+  @CD-17 @build
+  Scenario: Collapsing bit-identical rows of A in the float tabulated traversal cannot change a byte, at every degeneracy and every offer; rows differing only in the sign of zero or in a NaN payload are distinct
+    Given the standing corpus
+    When the suite exercises CD-17
+    Then the claim holds byte for byte

@@ -65,6 +65,7 @@ returns an error the model does not sanction.
 | `CD-13` | `build` | `Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all |
 | `CD-15` | `build` | Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer |
 | `CD-16` | `build` | Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block |
+| `CD-17` | `build` | Collapsing bit-identical rows of A in the float tabulated traversal cannot change a byte, at every degeneracy and every offer; rows differing only in the sign of zero or in a NaN payload are distinct |
 | `CD-14` | `build` | An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
