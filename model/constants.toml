@@ -187,9 +187,10 @@ l2_bytes = 524288
 # shipped predicate --- that reads the `KernelSpec` of the sequence that will
 # actually run, so a host with VNNI is priced at VNNI's density and not at this
 # one. It is here because `model/tiers.toml`'s recorded break-evens are a
-# derivation for one named pair of sequences, and this is that pair's dense half.
-# Like the five above it can change which traversal produces an output byte and
-# never which byte.
+# derivation for one named pair of sequences, and this is that pair's dense
+# half; rows written for another pair carry their own
+# `kernel_products_per_step` on the row. Like the five above it can change
+# which traversal produces an output byte and never which byte.
 kernel_products_per_step = 16
 # Rows of the output the dense traversal needs to amortize against. With fewer it
 # pays twice: for lanes the tile does not fill, and --- the larger cost --- for a

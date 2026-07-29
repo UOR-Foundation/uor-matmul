@@ -121,11 +121,22 @@ honesty = "build"
 # both numbers off the two specs at run time; the rows below are the same
 # derivation for one named pair.
 #
-# `lanes_per_add` is the register width the row is written for: 8 is a 256-bit
-# register of `i32`, which is `AVX2_TABLE`'s and the widest this workspace ships.
-# The reference sequence is 1, and the break-even against a dense tile is then
-# far larger --- which is the honest statement that a table without vector adds
-# is not worth building.
+# `lanes_per_add` is the register width the row is written for, and the row
+# names its instruction set. The first-recorded rows are the AVX2 pair ---
+# `AVX2_TABLE`'s eight lanes, a 256-bit register of `i32`, against
+# `AVX2_I8_I32`'s sixteen products a step --- and the per-ISA sections after
+# the AVX2 rows are the same derivation at the pairs the other shipped
+# sequences declare: sixteen lanes at 512 bits, four at 128. The reference
+# sequence is 1, and the break-even against a dense tile is then far larger ---
+# which is the honest statement that a table without vector adds is not worth
+# building.
+#
+# The dense side is per-ISA too. A row's `kernel_products_per_step` is the
+# `products_per_step` of the tile kernel the dense path would run on that ISA;
+# the AVX2 rows omit it because the model's `kernel_products_per_step` *is*
+# `AVX2_I8_I32`'s declaration. The dense row count is the blocking constant
+# `kernel_rows` on every ISA, because the shipped predicate reads it rather
+# than the chosen tile's `mr`.
 #
 # The block is also the *density* knob, and that is the claim worth reading twice.
 # One 256-bit add covers `8 * block` products at a 32-bit lane: eight output rows,
@@ -138,11 +149,11 @@ honesty = "build"
 #
 # `break_even_n` is the first `n` at which the table wins, and it is absent when no
 # `n` does --- either because `block = 1` names one element per code, or because
-# `block * rows` does not even reach what one dense instruction covers.
+# `block * lanes_per_add` does not even reach what one dense instruction covers.
 #
-# CM-04 recomputes every `break_even_n` here from `code_space`, `block`, `rows`,
-# `lanes_per_add` and the model's dense-tile declarations, and checks the first
-# three against the codec's own `Enumerable` and `Codec` consts.
+# CM-04 recomputes every `break_even_n` here from `code_space`, `block`,
+# `rows`, `lanes_per_add` and the row's dense-tile declaration, and checks the
+# first three against the codec's own `Enumerable` and `Codec` consts.
 # --------------------------------------------------------------------------
 
 [[tabulation]]
@@ -228,6 +239,240 @@ block = 1
 rows = 16
 lanes_per_add = 8
 note = "the float arena, at one representative code space --- the space is per-artifact, and at block = 1 the conclusion is the Grid<16> one: the table saves the multiply and no adds, so selection declines it and the byte-identical dense route runs (CD-14). The tier's claim is identity and residency, not a traversal win."
+honesty = "build"
+
+# --------------------------------------------------------------------------
+# The same derivation at the other pairs this workspace ships. Each section
+# names its two sequences; the numbers are declarations read off the specs,
+# and CM-04 recomputes them exactly as it does the AVX2 rows'. Only the codecs
+# with `block > 1` are repeated --- at `block = 1` no pair has an `n`, which is
+# the Grid<16> conclusion and does not move with the instruction set.
+# --------------------------------------------------------------------------
+
+# NEON: `NEON_TABLE_LANES`, four `i32` lanes to a 128-bit add, against
+# `NEON_DOTPROD_I8_I32`'s sixteen products a step --- the dense tile an
+# aarch64 host with the ARMv8.2-A dot-product extension runs. A NEON host
+# without the extension prices the dense side at `NEON_I8_I32`'s eight and
+# lands on the wasm rows' numbers. The pair is the one the measurement host
+# (an Apple M4 Max) runs, and the `Book<256, 8>` row carries what it measured.
+
+[[tabulation]]
+codec = "Packed<Grid<16>, 2>"
+isa = "neon"
+code_space = 256
+block = 2
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 16
+note = "a nibble pair covers eight products per issued instruction at this pair, half of what one dot-product instruction covers, so no n makes it pay."
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<4>, 4>"
+isa = "neon"
+code_space = 256
+block = 4
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 16
+note = "one table instruction covers exactly what one dot-product instruction covers at this block, so the build is never repaid --- the AVX2 row's 1025 does not transfer to this pair."
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<2>, 8>"
+isa = "neon"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 16
+break_even_n = 2049
+note = "the sign tier's composition spelling at this pair. The same code space and block as E8's book, so the same break-even."
+honesty = "build"
+
+[[tabulation]]
+codec = "Book<256, 8>"
+isa = "neon"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 16
+break_even_n = 2049
+note = "E8 at the pair this host runs. Measured on an Apple M4 Max (aarch64, NEON with the dot-product extension), 2026-07-29, `tabulation_breakeven`: the shipped predicate flips from the kernels to the table between n = 2048 and 2049, exactly the derived crossing --- while the clock has the table ahead from n = 512 on, so the count is the conservative claim. The timing is `open` (CG-10); the crossing is this row."
+honesty = "build"
+
+[[tabulation]]
+codec = "Sign<8>"
+isa = "neon"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 16
+break_even_n = 2049
+note = "the sign tier as its own codec at this pair. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even."
+honesty = "build"
+
+[[tabulation]]
+codec = "Ternary<4>"
+isa = "neon"
+code_space = 256
+block = 4
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 16
+note = "the ternary tier as its own codec at this pair. The same code space and block as the Packed<Grid<4>,4> spelling, so the same conclusion: one table instruction covers exactly what one dot-product instruction covers, and no n repays the build."
+honesty = "build"
+
+# AVX-512 with VNNI: `A5_TABLE_LANES`, sixteen `i32` lanes to a 512-bit add,
+# against `AVX512_DPBUSD_I8_I32`'s 64 products a step --- the densest integer
+# sequence this workspace ships. Derived from the declarations and unmeasured:
+# no VNNI host was available, which is what the notes below keep saying.
+
+[[tabulation]]
+codec = "Packed<Grid<16>, 2>"
+isa = "avx512"
+code_space = 256
+block = 2
+rows = 16
+lanes_per_add = 16
+kernel_products_per_step = 64
+note = "thirty-two products per issued instruction against the dense sixty-four: no n makes it pay."
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<4>, 4>"
+isa = "avx512"
+code_space = 256
+block = 4
+rows = 16
+lanes_per_add = 16
+kernel_products_per_step = 64
+note = "one 512-bit table instruction covers exactly what one `vpdpbusd` covers at this block, so the build is never repaid. Unmeasured: no VNNI host here."
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<2>, 8>"
+isa = "avx512"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 16
+kernel_products_per_step = 64
+break_even_n = 2049
+note = "the sign tier's composition spelling at this pair. The same code space and block as E8's book, so the same break-even. Unmeasured: no VNNI host here."
+honesty = "build"
+
+[[tabulation]]
+codec = "Book<256, 8>"
+isa = "avx512"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 16
+kernel_products_per_step = 64
+break_even_n = 2049
+note = "E8 on a VNNI host. The AVX2 table against this dense tile is the pair that never pays --- sixty-four against sixty-four, which CM-04's gemm half asserts --- but a VNNI host's table at a sixteen-row tile is the 512-bit one, twice the density of the dense instruction, and it wins from 2049. Unmeasured: no VNNI host here."
+honesty = "build"
+
+[[tabulation]]
+codec = "Sign<8>"
+isa = "avx512"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 16
+kernel_products_per_step = 64
+break_even_n = 2049
+note = "the sign tier as its own codec at this pair. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even. Unmeasured: no VNNI host here."
+honesty = "build"
+
+[[tabulation]]
+codec = "Ternary<4>"
+isa = "avx512"
+code_space = 256
+block = 4
+rows = 16
+lanes_per_add = 16
+kernel_products_per_step = 64
+note = "the ternary tier as its own codec at this pair. The same code space and block as the Packed<Grid<4>,4> spelling, so the same conclusion. Unmeasured: no VNNI host here."
+honesty = "build"
+
+# wasm SIMD128: `SIMD_TABLE_LANES`, four `i32` lanes to a 128-bit add, against
+# `SIMD128_I8_I32`'s eight products a step (`i32x4_dot_i16x8`). The same ratio
+# as the AVX2 pair, so the same numbers. Derived from the declarations and
+# unmeasured: the wasm sequences run under wasmtime in `just cross-run` for
+# correctness (CB-05), not for time.
+
+[[tabulation]]
+codec = "Packed<Grid<16>, 2>"
+isa = "wasm"
+code_space = 256
+block = 2
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 8
+note = "a nibble pair covers eight products per issued instruction, exactly what one dense instruction covers, so no n makes it pay --- the AVX2 conclusion at half the widths."
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<4>, 4>"
+isa = "wasm"
+code_space = 256
+block = 4
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 8
+break_even_n = 1025
+honesty = "build"
+
+[[tabulation]]
+codec = "Packed<Grid<2>, 8>"
+isa = "wasm"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 8
+break_even_n = 683
+note = "the sign tier's composition spelling at this pair. The same code space and block as E8's book, so the same break-even."
+honesty = "build"
+
+[[tabulation]]
+codec = "Book<256, 8>"
+isa = "wasm"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 8
+break_even_n = 683
+note = "E8 at the wasm pair: half the table width and half the dense width of the AVX2 row, which cancel, so the AVX2 number."
+honesty = "build"
+
+[[tabulation]]
+codec = "Sign<8>"
+isa = "wasm"
+code_space = 256
+block = 8
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 8
+break_even_n = 683
+note = "the sign tier as its own codec at this pair. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even."
+honesty = "build"
+
+[[tabulation]]
+codec = "Ternary<4>"
+isa = "wasm"
+code_space = 256
+block = 4
+rows = 16
+lanes_per_add = 4
+kernel_products_per_step = 8
+break_even_n = 1025
+note = "the ternary tier as its own codec at this pair. The same code space and block as the Packed<Grid<4>,4> spelling, so the same break-even."
 honesty = "build"
 
 # --------------------------------------------------------------------------

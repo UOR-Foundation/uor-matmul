@@ -972,6 +972,26 @@ Both numbers are read off the two specs at run time, so a host is priced at its
 own sequences. The recorded rows in `model/tiers.toml` carry the register width
 they are written for, because a break-even without one is a number about nothing.
 
+The rows are now recorded per pair, and one non-AVX2 pair is measured.
+`model/tiers.toml` carries a row per enumerable codec per instruction set ---
+the AVX2 pair first, then NEON (four lanes against `NEON_DOTPROD_I8_I32`'s
+sixteen), AVX-512 VNNI (sixteen lanes against `vpdpbusd`'s sixty-four) and
+wasm SIMD128 (four against eight) --- each recomputed by `CM-04` from the
+declarations. The crossings move with the pair: at NEON, `Book<256,8>` pays
+from `n = 2049` rather than 683, and the block-4 codecs never pay at all,
+because one 128-bit table add covers exactly what one `sdot` covers. Measured
+on an Apple M4 Max (aarch64, NEON with the dot-product extension), 2026-07-29,
+two runs of the `tabulation_breakeven` example: the shipped predicate flips
+from the kernels to the table between `n = 2048` and `n = 2049` at a
+sixteen-row tile --- exactly the derived crossing --- and between 512 and 683
+at a one-row tile, where no shipped ISA has a vector table sequence and the
+reference gather's own 683 is the right number again. The clock tells its own
+story: the tabulated traversal is ahead of the packed kernels at every width
+measured (1.2x at `n = 512`, rising to about 3x at 8192), so on this host the
+instruction count is the conservative claim, and the timing figures are `open`.
+The VNNI and wasm rows remain derived-only --- neither host was available to
+measure --- and the model's notes say so.
+
 One term was tried in the honest direction and put back. Reading the *chosen
 tile's* `mr` for the dense row count says a one-row kernel wastes no lanes, which
 is true --- and it declined the table at `1x1024x4096`, where the table is 7.2x

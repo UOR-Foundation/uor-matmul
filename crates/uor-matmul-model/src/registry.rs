@@ -269,7 +269,14 @@ pub struct Tier {
     pub honesty: Level,
 }
 
-/// One enumerable codec, with the break-even the op counts put it at.
+/// The pair the first-recorded rows are written for: `AVX2_TABLE`'s eight
+/// lanes against `AVX2_I8_I32`'s sixteen products a step.
+fn default_isa() -> String {
+    "avx2".to_string()
+}
+
+/// One enumerable codec at one named pair of sequences, with the break-even
+/// the op counts put it at.
 ///
 /// The numbers here are *derivations*, not measurements: `break_even_n` is where
 /// the tabulated op count crosses the dense one, and `CM-04` recomputes it rather
@@ -278,6 +285,12 @@ pub struct Tier {
 pub struct Tabulation {
     /// The codec, spelled as the caller writes it.
     pub codec: String,
+    /// The instruction set the row's pair of sequences is written for. Both
+    /// sides are declarations a sequence makes about itself, so a break-even
+    /// without one is a number about nothing. Rows that name nothing are the
+    /// AVX2 pair the table was first recorded for.
+    #[serde(default = "default_isa")]
+    pub isa: String,
     /// Distinct codes: `Enumerable::CODE_SPACE`.
     pub code_space: usize,
     /// Alphabet elements one code names: `Codec::MAX_BLOCK`.
@@ -288,6 +301,15 @@ pub struct Tabulation {
     /// Lane words one issued add covers: the register width the recorded
     /// break-even is written for.
     pub lanes_per_add: usize,
+    /// Products one instruction of the dense tile issues on this row's ISA:
+    /// the `products_per_step` of the `KernelSpec` the dense path would run
+    /// there. Absent on the AVX2 rows, which read the model's
+    /// `kernel_products_per_step` --- that constant *is* `AVX2_I8_I32`'s
+    /// declaration. The dense row count is the blocking constant
+    /// `kernel_rows` on every ISA, because the shipped predicate reads it
+    /// rather than the chosen tile's `mr`.
+    #[serde(default)]
+    pub kernel_products_per_step: Option<usize>,
     /// The first `n` at which tabulation issues fewer operations than blocking.
     ///
     /// Absent when `block == 1`, where no such `n` exists: one code names one

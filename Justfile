@@ -225,3 +225,10 @@ oracles:
 # The tabulated traversal against the packed kernels. Minutes.
 tabulation:
     cargo run --release -p uor-matmul-validate --example tabulation_sweep
+
+# The recorded break-even against the clock and the census, on this host.
+# Minutes, and every figure is `open`.
+#
+# The tabulation break-even, measured. Minutes.
+breakeven:
+    cargo run --release -p uor-matmul-validate --example tabulation_breakeven
