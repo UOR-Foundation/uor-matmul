@@ -47,6 +47,7 @@ use uor_matmul_core::EncodeMode;
 
 pub mod corpus;
 pub mod counting;
+pub mod float_tab;
 pub mod oracle;
 pub mod scaling;
 
