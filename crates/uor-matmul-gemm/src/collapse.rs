@@ -49,10 +49,10 @@
 //! reports the throughput at degeneracy one beside the throughput at the
 //! degeneracies it exists for.
 
-use core::hash::{Hash, Hasher};
+use core::hash::Hasher;
 
 use uor_matmul_core::{
-    AccOf, Alphabet, Bound, Element, EncodeFrom, IntegerElement, MatView, MatViewMut, Shape, Triple,
+    AccOf, Alphabet, Bound, Element, EncodeFrom, MatView, MatViewMut, Shape, Triple,
 };
 
 use crate::driver::GemmOptions;
@@ -173,7 +173,7 @@ pub fn gemm_collapsed<E, Bd, O, Ep>(
     scratch: &mut Scratch<'_, E, Bd>,
     collapse: &mut Collapse<'_, E, Bd>,
 ) where
-    E: Kernelized + Hash,
+    E: Kernelized + RowIdentity,
     Bd: Bound,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
@@ -280,6 +280,88 @@ pub(crate) fn expand<O: Element>(c: &mut MatViewMut<'_, O>, index: &[usize], m: 
     }
 }
 
+/// Which element *is* which symbol: the identity the pass numbers rows by.
+///
+/// For an integer the symbol is the value, so this trait says what `Hash` and
+/// `==` already said. It exists because a float has neither to borrow: `Hash`
+/// is the orphan rule's, and `==` is the wrong relation --- `NaN != NaN`
+/// would refuse to collapse a row with a bit-identical repeat of itself, and
+/// `+0.0 == -0.0` would collapse two rows the canonical codebook holds apart.
+/// The arena tier's semantics are the law here (`CK-10`): the bit pattern is
+/// the symbol, so `-0.0` and `+0.0` are distinct symbols with equal decodes
+/// and NaN payloads are distinct symbols (`CD-17`). A row that differs from
+/// another only in the sign of a zero must not share that row's sum:
+/// downstream of any later symbolic transform the two are different symbols,
+/// and a sum shared between different symbols is a wrong answer that merely
+/// looks right today.
+pub trait RowIdentity: Element {
+    /// Feed the symbol to the row hash. Candidate selection only --- which
+    /// rows are *equal* is [`RowIdentity::identical`]'s verdict, never the
+    /// hash's, exactly as [`distinct_rows`] documents.
+    fn hash_identity<H: Hasher>(&self, state: &mut H);
+
+    /// Are two elements the same symbol?
+    fn identical(&self, other: &Self) -> bool;
+
+    /// The verdict on two contiguous runs, for when the operand's strides lay
+    /// both rows out that way. The primitives override with the machine's own
+    /// block comparison, which is where the comparison costing a tenth of the
+    /// hash comes from; the default walks the elements.
+    fn runs_identical(x: &[Self], y: &[Self]) -> bool {
+        x.len() == y.len() && x.iter().zip(y.iter()).all(|(x, y)| x.identical(y))
+    }
+}
+
+/// Implement [`RowIdentity`] for a signed machine integer: the value is the
+/// symbol, one fixed-width word of it per element.
+macro_rules! impl_row_identity_for_signed {
+    ($($t:ty => $write:ident),* $(,)?) => { $(
+        impl RowIdentity for $t {
+            fn hash_identity<H: Hasher>(&self, state: &mut H) {
+                // Byte for byte what `Hash` wrote when the pass hashed the
+                // element directly, so the integer rows' addresses are
+                // unchanged by this trait existing.
+                state.$write(*self);
+            }
+
+            fn identical(&self, other: &Self) -> bool {
+                self == other
+            }
+
+            fn runs_identical(x: &[Self], y: &[Self]) -> bool {
+                x == y
+            }
+        }
+    )* };
+}
+
+impl_row_identity_for_signed!(i8 => write_i8, i16 => write_i16, i32 => write_i32, i64 => write_i64);
+
+/// Implement [`RowIdentity`] for a float: the bit pattern is the symbol
+/// (`CK-10`), at both widths (`CD-17`).
+macro_rules! impl_row_identity_for_float {
+    ($($t:ty => $bits:ty => $write:ident),* $(,)?) => { $(
+        impl RowIdentity for $t {
+            fn hash_identity<H: Hasher>(&self, state: &mut H) {
+                state.$write(self.to_bits());
+            }
+
+            fn identical(&self, other: &Self) -> bool {
+                self.to_bits() == other.to_bits()
+            }
+
+            fn runs_identical(x: &[Self], y: &[Self]) -> bool {
+                // Bit patterns, so the block comparison still serves: the
+                // floats' own `==` would call the two zeros one symbol and a
+                // NaN unequal to itself.
+                bytemuck::cast_slice::<$t, $bits>(x) == bytemuck::cast_slice::<$t, $bits>(y)
+            }
+        }
+    )* };
+}
+
+impl_row_identity_for_float!(f32 => u32 => write_u32, f64 => u64 => write_u64);
+
 /// Number each row of `A` by the *first* row equal to it, and count how many
 /// distinct rows there are.
 ///
@@ -287,6 +369,9 @@ pub(crate) fn expand<O: Element>(c: &mut MatViewMut<'_, O>, index: &[usize], m: 
 /// an operand whose rows are pairwise distinct pays one pass over `A` and no
 /// writes at all, which is what makes the price of looking a share of the
 /// product rather than a multiple of the operand.
+///
+/// What *equal* means is the element's symbolic identity ([`RowIdentity`]):
+/// the value for an integer, the bit pattern for a float (`CD-17`).
 ///
 /// The hash decides who is *compared*; it never decides who is equal. Every
 /// match is confirmed element by element against the operand itself, so a
@@ -298,7 +383,7 @@ pub(crate) fn distinct_rows<E, Bd>(
     index: &mut [usize],
 ) -> Option<usize>
 where
-    E: IntegerElement + Hash,
+    E: RowIdentity,
     Bd: Bound,
 {
     let (m, k) = (a.rows(), a.cols());
@@ -346,21 +431,24 @@ where
 
 /// Are rows `x` and `y` of `A` the same row?
 ///
-/// The verdict, never the hash. When the operand's strides hand both rows back
-/// as runs this is one slice comparison, which for a primitive element type is
-/// the machine's own `memcmp` --- and measured that is the difference between
-/// the comparison costing as much as the hash and costing a tenth of it.
+/// The verdict, never the hash, and symbolic identity ([`RowIdentity`]) all
+/// the way down: when the operand's strides hand both rows back as runs this
+/// is one block comparison, which for a primitive element type is the
+/// machine's own `memcmp` --- and measured that is the difference between the
+/// comparison costing as much as the hash and costing a tenth of it. A
+/// float's bits compare the same way, which numeric `==` could not be trusted
+/// to do (`CD-17`).
 fn rows_equal<E, Bd>(a: &MatView<'_, Alphabet<E, Bd>>, x: usize, y: usize, k: usize) -> bool
 where
-    E: Element,
+    E: RowIdentity,
     Bd: Bound,
 {
     match (row_run(a, x, k), row_run(a, y, k)) {
-        (Some(x), Some(y)) => x == y,
+        (Some(x), Some(y)) => E::runs_identical(x, y),
         _ => a
             .row_walk(x, 0, k)
             .zip(a.row_walk(y, 0, k))
-            .all(|(x, y)| x.get() == y.get()),
+            .all(|(x, y)| x.get().identical(&y.get())),
     }
 }
 
@@ -446,7 +534,7 @@ where
 /// compared; [`rows_equal`] decides who is equal.
 fn row_hash<E, Bd>(a: &MatView<'_, Alphabet<E, Bd>>, i: usize, k: usize) -> usize
 where
-    E: IntegerElement + Hash,
+    E: RowIdentity,
     Bd: Bound,
 {
     const SEED: u64 = 0xcbf2_9ce4_8422_2325;
@@ -468,7 +556,7 @@ where
 
     let mix = |lane: u64, x: E| {
         let mut f = Fnv(lane);
-        x.hash(&mut f);
+        x.hash_identity(&mut f);
         f.0
     };
 
@@ -495,9 +583,9 @@ where
             }
         }
         None => {
-            // The element rather than the wrapper: `Alphabet`'s derived `Hash`
-            // asks for one on the *bound*, which is a marker with nothing to
-            // hash.
+            // The element rather than the wrapper: the symbol is a property of
+            // the value the code decodes to, not of the bound declared over it,
+            // so `hash_identity` is the element's and the wrapper comes off.
             for (p, x) in a.row_walk(i, 0, k).enumerate() {
                 let lane = p & 7;
                 h[lane] = mix(h[lane], x.get());
@@ -545,7 +633,7 @@ mod tests {
     use crate::epilogue::Linear;
     use std::vec;
     use std::vec::Vec;
-    use uor_matmul_core::{as_alphabet_full, Full, MatViewMut};
+    use uor_matmul_core::{as_alphabet_full, as_alphabet_whole, Full, MatViewMut, Strides};
 
     /// `A` with `m` rows drawn from `meanings` distinct ones.
     fn operands(m: usize, k: usize, n: usize, meanings: usize) -> (Vec<i8>, Vec<i8>) {
@@ -640,6 +728,114 @@ mod tests {
                 assert!(at <= i, "row {i} resolves forwards");
             }
         }
+    }
+
+    /// `CD-17`: the pass numbers float rows by bit pattern, at both widths.
+    /// `d` distinct patterns give `d` distinct rows, with both zeros and two
+    /// NaN payloads among the patterns.
+    #[test]
+    fn the_float_pass_finds_exactly_the_bit_distinct_rows_cd_17() {
+        let (m, k) = (8, 4);
+        // Distinct bit patterns, so row `r` of `symbols[r..r + k]` differs from
+        // every other row in its first element.
+        let symbols32: [f32; 11] = [
+            0.5,
+            1.0,
+            -0.0,
+            0.0,
+            f32::from_bits(0x7fc0_0001),
+            f32::from_bits(0x7fc0_0002),
+            -1.5,
+            2.5,
+            f32::INFINITY,
+            -2.5,
+            3.75,
+        ];
+        let symbols64: [f64; 11] = [
+            0.5,
+            1.0,
+            -0.0,
+            0.0,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::from_bits(0x7ff8_0000_0000_0002),
+            -1.5,
+            2.5,
+            f64::INFINITY,
+            -2.5,
+            3.75,
+        ];
+        for d in [1usize, 2, m / 2, m] {
+            // `d` distinct rows: row `i` is row `i % d`.
+            let a32: Vec<f32> = (0..m * k).map(|x| symbols32[(x / k % d) + x % k]).collect();
+            let a64: Vec<f64> = (0..m * k).map(|x| symbols64[(x / k % d) + x % k]).collect();
+            let mut index = vec![0usize; suggested_collapse_index(m)];
+            let av = MatView::row_major(as_alphabet_whole(&a32), m, k).unwrap();
+            assert_eq!(
+                distinct_rows(&av, &mut index).unwrap(),
+                d,
+                "f32, {d} distinct rows"
+            );
+            let av = MatView::row_major(as_alphabet_whole(&a64), m, k).unwrap();
+            assert_eq!(
+                distinct_rows(&av, &mut index).unwrap(),
+                d,
+                "f64, {d} distinct rows"
+            );
+        }
+    }
+
+    /// `CD-17`: the sign of a zero and the payload of a NaN are the symbol.
+    ///
+    /// Six rows, four symbols: rows 0 and 1 differ only in the sign of a
+    /// zero, rows 2 and 3 only in a NaN payload, and rows 4 and 5 repeat rows
+    /// 0 and 2 bit for bit. Numeric `==` would merge the first pair and refuse
+    /// the repeats; bit identity collapses exactly the repeats. The
+    /// column-major spelling walks the strided comparison, which has to
+    /// answer the same way.
+    #[test]
+    fn sign_of_zero_and_nan_payload_are_distinct_rows_cd_17() {
+        let (m, k) = (6, 4);
+        let nan1 = f32::from_bits(0x7fc0_0001);
+        let nan2 = f32::from_bits(0x7fc0_0002);
+        let rows: [[f32; 4]; 6] = [
+            [1.0, -0.0, 0.5, -1.5], // row 0
+            [1.0, 0.0, 0.5, -1.5],  // row 1: the sign of a zero, and nothing else
+            [nan1, 1.0, 0.5, -1.5], // row 2
+            [nan2, 1.0, 0.5, -1.5], // row 3: a NaN payload, and nothing else
+            [1.0, -0.0, 0.5, -1.5], // row 4: row 0's bits again
+            [nan1, 1.0, 0.5, -1.5], // row 5: row 2's bits again
+        ];
+
+        // Row-major: the contiguous-run comparison.
+        let a: Vec<f32> = rows.iter().flatten().copied().collect();
+        let av = MatView::row_major(as_alphabet_whole(&a), m, k).unwrap();
+        let mut index = vec![0usize; suggested_collapse_index(m)];
+        let d = distinct_rows(&av, &mut index).unwrap();
+        assert_eq!(d, 4, "four symbols, not five and not three");
+        // The repeats resolve to the rows whose bits they carry.
+        assert_eq!(index[4], 0, "row 4 is row 0's bits");
+        assert_eq!(index[5], 2, "row 5 is row 2's bits");
+
+        // Column-major: the same answer from the strided comparison.
+        let a: Vec<f32> = (0..k)
+            .flat_map(|j| rows.iter().map(move |r| r[j]))
+            .collect();
+        let av = MatView::new(as_alphabet_whole(&a), m, k, Strides::col_major(m)).unwrap();
+        let mut index = vec![0usize; suggested_collapse_index(m)];
+        let d = distinct_rows(&av, &mut index).unwrap();
+        assert_eq!(d, 4, "the strided comparison sees the same four symbols");
+        assert_eq!(index[4], 0, "row 4 is row 0's bits");
+        assert_eq!(index[5], 2, "row 5 is row 2's bits");
+
+        // f64: the sign of a zero decides there too.
+        let a = [1.0f64, -0.0, 1.0, 0.0];
+        let av = MatView::row_major(as_alphabet_whole(&a), 2, 2).unwrap();
+        let mut index = vec![0usize; suggested_collapse_index(2)];
+        assert_eq!(
+            distinct_rows(&av, &mut index).unwrap(),
+            2,
+            "-0.0 and +0.0 are distinct symbols"
+        );
     }
 
     /// Equal *columns* of `B`, collapsed by the same traversal on the

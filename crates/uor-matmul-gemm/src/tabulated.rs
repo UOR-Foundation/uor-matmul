@@ -898,14 +898,15 @@ pub trait Tabulated: Element {
         want: usize,
     ) -> Option<&'s mut [Self::ModLane]>;
 
-    /// Number the rows of `a` by equality, writing each row's representative
-    /// into `index` and returning how many are distinct --- the row half of
-    /// the collapse (`CD-15`). `None` when the offer cannot hold the answer.
+    /// Number the rows of `a` by symbolic identity, writing each row's
+    /// representative into `index` and returning how many are distinct ---
+    /// the row half of the collapse (`CD-15`, and `CD-17` for the float
+    /// families). `None` when the offer cannot hold the answer.
     ///
-    /// The default is always `None`: the pass hashes, and a family whose
-    /// elements have no `Hash` --- a float --- never row-collapses. That is
-    /// the uncollapsed traversal, at the same bytes, which is the rule every
-    /// declined offer in this library follows.
+    /// The default is always `None`: a family whose elements have no declared
+    /// symbolic identity never row-collapses. That is the uncollapsed
+    /// traversal, at the same bytes, which is the rule every declined offer
+    /// in this library follows.
     fn distinct_a_rows<Bd>(
         a: &MatView<'_, Alphabet<Self, Bd>>,
         index: &mut [usize],
@@ -1397,6 +1398,15 @@ impl Tabulated for f32 {
         gemm_float(&mut dense, epilogue, options);
         true
     }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        // Bit-pattern identity (`CD-17`): two rows share a sum exactly when
+        // they are the same symbols, and the symbol is the bits (`CK-10`).
+        distinct_rows(a, index)
+    }
 }
 
 /// `f64`: as `f32`, one width up.
@@ -1482,6 +1492,14 @@ impl Tabulated for f64 {
         };
         gemm_float(&mut dense, epilogue, options);
         true
+    }
+
+    fn distinct_a_rows<Bd: Bound>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        index: &mut [usize],
+    ) -> Option<usize> {
+        // As `f32`: the bit pattern is the symbol (`CD-17`, `CK-10`).
+        distinct_rows(a, index)
     }
 }
 
@@ -1590,7 +1608,9 @@ impl Plan {
 /// ones, so the table is built once per *distinct* row rather than once per
 /// row (`CD-15`). It is the [`crate::Collapse`] buffer, unchanged --- `A` is
 /// dense here, so the pass, the compaction, and the expansion are literally
-/// [`crate::collapse`]'s. Offering none, or too little for what the pass
+/// [`crate::collapse`]'s; for the float families the pass numbers rows by bit
+/// pattern, the arena tier's canonical-symbol semantics (`CD-17`, `CK-10`).
+/// Offering none, or too little for what the pass
 /// finds, gives the same bytes from the uncollapsed traversal; and an
 /// epilogue that reads `C` declines it outright, because two rows with equal
 /// rows of `A` still have different outputs when the `C` they read differs.
@@ -3155,6 +3175,7 @@ mod tests {
         n: usize,
         traversal: Traversal,
         offer: usize,
+        collapse_offer: usize,
     ) -> (Vec<E>, Census)
     where
         E: FloatElement + EncodeFrom<AccOf<E>> + Tabulated,
@@ -3185,6 +3206,19 @@ mod tests {
         let want_panel =
             suggested_tabulation_panel(space, block).max(n * k + crate::suggested_scratch(shape));
         let mut panel = vec![Alphabet::<E, Whole<E>>::ZERO; scale(want_panel, offer)];
+        // The row-collapse offer, as the integer helper's: `0` offers nothing
+        // and anything else is the exact number of `Alphabet` elements the
+        // distinct rows are allowed to occupy, with the index sized for the
+        // pass (`CD-17`).
+        let mut collapse_index = vec![
+            0usize;
+            if collapse_offer == 0 {
+                0
+            } else {
+                suggested_collapse_index(m)
+            }
+        ];
+        let mut collapse_rows = vec![Alphabet::<E, Whole<E>>::ZERO; collapse_offer];
         let mut c = vec![E::ZERO; m * n];
         let mut census = Census::default();
         {
@@ -3193,6 +3227,11 @@ mod tests {
             let w =
                 CodedMatrix::new(Arena::new(table), n, k, codes).expect("the codes describe n x k");
             let mut tr = TabulatedTriple::new(av, w, cv).unwrap();
+            let mut collapse = if collapse_offer == 0 {
+                Collapse::none()
+            } else {
+                Collapse::new(&mut collapse_index, &mut collapse_rows)
+            };
             gemm_tabulated_counted(
                 &mut tr,
                 &Linear::OVERWRITE,
@@ -3202,7 +3241,7 @@ mod tests {
                 },
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
                 &mut Tabulation::with_index(&mut [], &mut ids),
-                &mut Collapse::none(),
+                &mut collapse,
                 &mut census,
             );
         }
@@ -3270,7 +3309,7 @@ mod tests {
             Traversal::OutputMajor,
         ] {
             for offer in offers {
-                let (got, census) = arena_tabulated(table, codes, a, m, k, n, traversal, offer);
+                let (got, census) = arena_tabulated(table, codes, a, m, k, n, traversal, offer, 0);
                 let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
                 assert_eq!(
                     got, want,
@@ -3285,20 +3324,29 @@ mod tests {
         // one-element block can never pay --- and an offer of nothing reached
         // neither. The census says which ran rather than the predicate being
         // asked to say it again.
-        let (_, tabled) =
-            arena_tabulated(table, codes, a, m, k, n, Traversal::Tabulated, OFFER_STEPS);
+        let (_, tabled) = arena_tabulated(
+            table,
+            codes,
+            a,
+            m,
+            k,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            0,
+        );
         assert!(
             tabled.table_reads > 0,
             "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
         );
         let (_, declined) =
-            arena_tabulated(table, codes, a, m, k, n, Traversal::Blocked, OFFER_STEPS);
+            arena_tabulated(table, codes, a, m, k, n, Traversal::Blocked, OFFER_STEPS, 0);
         assert!(
             declined.kernel_calls > 0,
             "{label} {m}x{k}x{n}: `Blocked` must decline a one-element block to the \
              dense route ({declined:?})"
         );
-        let (_, without) = arena_tabulated(table, codes, a, m, k, n, Traversal::Tabulated, 0);
+        let (_, without) = arena_tabulated(table, codes, a, m, k, n, Traversal::Tabulated, 0, 0);
         assert_eq!(
             without.table_reads, 0,
             "{label} {m}x{k}x{n}: an offer of nothing cannot read a table"
@@ -3378,6 +3426,188 @@ mod tests {
         sweep!(6);
         sweep!(7);
         sweep!(8);
+    }
+
+    /// `CD-17`: collapsing bit-identical rows of `A` in the float tabulated
+    /// traversal cannot change a byte, at every degeneracy and every offer ---
+    /// and rows that differ only in the sign of a zero or in a NaN payload are
+    /// distinct rows, charged as such.
+    ///
+    /// The census is what keeps this from passing with the collapse silently
+    /// declined, as it does for `CD-15`: the build charges per *distinct* row
+    /// when the collapse ran and per row when anything declined it, and the
+    /// closed form `CU-06` pins says which happened. The bit cases are the
+    /// arena tier's canonical-codebook semantics (`CK-10`) read onto the
+    /// collapse: the bit pattern is the symbol, so a sign of zero or a NaN
+    /// payload makes two rows where numeric `==` would see one --- and a NaN
+    /// row is a repeat of itself, which numeric `==` cannot see at all.
+    #[test]
+    fn collapsing_bit_identical_float_rows_cannot_change_a_byte_cd_17() {
+        // The whole pool in the codebook, as `CD-14`'s: the weights carry an
+        // infinity, a NaN, and both zeros.
+        let mut pool32 = [0.5f32, 1.0, f32::INFINITY, f32::NAN, -0.0, -1.5, -2.5, 0.0];
+        assert_eq!(canonicalize(&mut pool32), 8, "eight distinct bit patterns");
+        let mut pool64 = [0.5f64, 1.0, f64::INFINITY, f64::NAN, -0.0, -1.5, -2.5, 0.0];
+        assert_eq!(canonicalize(&mut pool64), 8, "eight distinct bit patterns");
+
+        macro_rules! case {
+            ($t:ty, $label:expr, $pool:expr, $nan1:expr, $nan2:expr) => {{
+                let label = $label;
+                let table: &[Alphabet<$t, Whole<$t>>; 8] =
+                    as_alphabet_whole(&$pool).try_into().unwrap();
+                let (k, n) = (4usize, 9usize);
+                // Codes past the table on purpose: the enumeration reduces them
+                // modulo `D`, and the reference decodes them the same way.
+                let codes: Vec<u16> = fill(n * k, 0xa4ea, |x| (x % 17) as u16);
+                // Distinct bit patterns, so row `r` of `symbols[r..r + k]`
+                // differs from every other row in its first element. Both zeros
+                // and two NaN payloads are among them.
+                let symbols: [$t; 11] = [
+                    0.5,
+                    1.0,
+                    -0.0,
+                    0.0,
+                    $nan1,
+                    $nan2,
+                    -1.5,
+                    2.5,
+                    <$t>::INFINITY,
+                    -2.5,
+                    3.75,
+                ];
+                let m = 8usize;
+                for d in [1usize, 2, m / 2, m] {
+                    // `d` distinct rows, numbered by first occurrence: row `i`
+                    // is row `i % d`, and the first `d` are pairwise distinct.
+                    let a: Vec<$t> = (0..m * k).map(|x| symbols[(x / k % d) + x % k]).collect();
+                    let want: Vec<u64> = arena_reference(table, &codes, &a, m, k, n)
+                        .iter()
+                        .map(|v| v.symbol_bits())
+                        .collect();
+                    // No offer, a rows offer too short for the distinct rows,
+                    // exactly enough, and the worst case.
+                    for collapse_offer in [0usize, k / 2, d * k, m * k] {
+                        let (got, census) = arena_tabulated(
+                            table,
+                            &codes,
+                            &a,
+                            m,
+                            k,
+                            n,
+                            Traversal::Tabulated,
+                            OFFER_STEPS,
+                            collapse_offer,
+                        );
+                        let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
+                        assert_eq!(
+                            got, want,
+                            "{label} {m}x{k}x{n} d={d} rows offer {collapse_offer}: the collapse \
+                             must give the dense float driver's bytes ({census:?})"
+                        );
+                        // The build charges per *distinct* row when the collapse
+                        // ran, and per row when anything declined it.
+                        let charged = if collapse_offer >= d * k && d < m {
+                            d
+                        } else {
+                            m
+                        };
+                        assert_eq!(
+                            census.multiplies,
+                            (charged * k * 8) as u64,
+                            "{label} {m}x{k}x{n} d={d} rows offer {collapse_offer}: the build \
+                             must charge per distinct row ({census:?})"
+                        );
+                    }
+
+                    // The collapse runs before any traversal choice, so the
+                    // recursion's own declines --- the costed traversal
+                    // refusing the table, the streaming one refusing it by
+                    // name --- walk the compacted product and the expansion
+                    // too. The bytes are the witness here; the census of a
+                    // decline has no closed form in `d`.
+                    for traversal in [Traversal::Blocked, Traversal::OutputMajor] {
+                        let (got, census) = arena_tabulated(
+                            table,
+                            &codes,
+                            &a,
+                            m,
+                            k,
+                            n,
+                            traversal,
+                            OFFER_STEPS,
+                            d * k,
+                        );
+                        let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
+                        assert_eq!(
+                            got, want,
+                            "{label} {m}x{k}x{n} d={d}: {traversal:?} under a full rows offer \
+                             must give the dense float driver's bytes ({census:?})"
+                        );
+                    }
+                }
+
+                // The witness that bit identity and not numeric equality
+                // decides: six rows, four symbols. Rows 0 and 1 differ only in
+                // the sign of a zero; rows 2 and 3 only in a NaN payload; rows
+                // 4 and 5 repeat rows 0 and 2 bit for bit. Numeric `==` would
+                // merge the first pair and refuse the repeats --- five rows it
+                // can call distinct, where bit identity sees four.
+                let m = 6usize;
+                let a: Vec<$t> = vec![
+                    1.0, -0.0, 0.5, -1.5, // row 0
+                    1.0, 0.0, 0.5, -1.5, // row 1: the sign of a zero, and nothing else
+                    $nan1, 1.0, 0.5, -1.5, // row 2
+                    $nan2, 1.0, 0.5, -1.5, // row 3: a NaN payload, and nothing else
+                    1.0, -0.0, 0.5, -1.5, // row 4: row 0's bits again
+                    $nan1, 1.0, 0.5, -1.5, // row 5: row 2's bits again
+                ];
+                let d = 4usize;
+                let want: Vec<u64> = arena_reference(table, &codes, &a, m, k, n)
+                    .iter()
+                    .map(|v| v.symbol_bits())
+                    .collect();
+                for collapse_offer in [0usize, d * k] {
+                    let (got, census) = arena_tabulated(
+                        table,
+                        &codes,
+                        &a,
+                        m,
+                        k,
+                        n,
+                        Traversal::Tabulated,
+                        OFFER_STEPS,
+                        collapse_offer,
+                    );
+                    let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
+                    assert_eq!(
+                        got, want,
+                        "{label} bit cases, rows offer {collapse_offer}: the collapse must give \
+                         the dense float driver's bytes ({census:?})"
+                    );
+                    let charged = if collapse_offer >= d * k { d } else { m };
+                    assert_eq!(
+                        census.multiplies,
+                        (charged * k * 8) as u64,
+                        "{label} bit cases, rows offer {collapse_offer}: `-0.0` beside `+0.0` \
+                         and one NaN payload beside another are distinct rows ({census:?})"
+                    );
+                }
+            }};
+        }
+        case!(
+            f32,
+            "Arena<8> f32",
+            pool32,
+            f32::from_bits(0x7fc0_0001),
+            f32::from_bits(0x7fc0_0002)
+        );
+        case!(
+            f64,
+            "Arena<8> f64",
+            pool64,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::from_bits(0x7ff8_0000_0000_0002)
+        );
     }
 
     /// `CK-13`: the sign and ternary tiers are spellings of codec compositions
