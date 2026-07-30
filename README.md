@@ -9,11 +9,15 @@ for. The codec is not an argument of the arithmetic, which is why the same
 result survives a change of tier, a change of reduction schedule, and a change
 of substrate.
 
-There is one method and it is used everywhere. Not one method for integers and
-another for floats; not a fast path and a careful path; not a SIMD kernel and a
-scalar fallback. Every entry point is that sentence at a different
-instantiation, and the library holds nothing in reserve for cases it finds hard,
-because the exact accumulation has no hard cases.
+There is one answer, and it has many factorizations. Not one method for
+integers and another for floats; not a fast path and a careful path; not a SIMD
+kernel and a scalar fallback. Every entry point is that sentence at a different
+instantiation, and the tree is full of legitimate reorganizations of it ---
+three lanes, three traversals, tile and reduce kernels, narrow and wide panels,
+table and dense sequences. What makes them one method rather than many is that
+they all produce the same bytes, which the `CD-*` gates assert rather than
+argue. The library holds nothing in reserve for cases it finds hard, because
+the exact accumulation has no hard cases.
 
 In the shape every GEMM is spelled --- `(m, k, n)`, leading dimensions, `alpha`
 and `beta`:
@@ -69,7 +73,7 @@ assert_eq!(c, [19, 22, 43, 50]);
 | C2 | The UTQC method informs the implementation: docs-as-code, BDD-first, committed oracles, a three-level honesty ledger with a meta-gate |
 | C3 | Scaling is compared against the oracle's scaling, as a fitted exponent with a confidence interval |
 | C4 | No arbitrary limitations; completely parametric; arbitrary sizes and inputs |
-| C5 | Purely UOR; no classical approach and no fallback to a lesser method |
+| C5 | One answer, many factorizations; no classical approach and no fallback to a lesser method |
 | C6 | Never errors on valid input; arbitrary means arbitrary |
 
 ## The library has no envelope

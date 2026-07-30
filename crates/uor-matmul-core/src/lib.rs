@@ -1,10 +1,13 @@
 //! The parametric core of `uor-matmul`.
 //!
-//! One method, used everywhere: **decode, accumulate exactly, encode once.**
-//! Every entry point in the library is that sentence at a different
-//! instantiation. There is no fast path and no careful path, no SIMD kernel and
-//! no scalar fallback, and nothing held in reserve for cases the library finds
-//! hard --- because the exact accumulation has no hard cases (R13, C5).
+//! One answer, many factorizations of it: **decode, accumulate exactly, encode
+//! once.** Every entry point in the library is that sentence at a different
+//! instantiation --- lane, traversal, kernel shape, panel width --- and what
+//! makes the factorizations one method is that they all produce the same
+//! bytes, which the `CD-*` gates assert. There is no fast path and no careful
+//! path, no SIMD kernel and a scalar fallback, and nothing held in reserve for
+//! cases the library finds hard --- because the exact accumulation has no hard
+//! cases (R13, C5).
 //!
 //! # What this crate contains
 //!
@@ -24,9 +27,13 @@
 //!
 //! # What this crate does not contain
 //!
-//! No `f32` or `f64` token appears anywhere in it (R2). A float is a code, and
+//! No float *arithmetic* appears anywhere in it (R2). A float is a code, and
 //! its codec --- the decode from a bit pattern to the exact dyadic rational it
-//! names --- lives in `uor-matmul-float`. The accumulator that receives the
+//! names --- is here: [`FloatElement::decode`] is bit manipulation on
+//! `to_bits()` output, and the `f32` and `f64` tokens that appear do so as
+//! element types being decoded and as the target of the encode step, never as
+//! operands of an arithmetic operator. The driver that walks the decode lives
+//! in `uor-matmul-gemm`'s `float` module. The accumulator that receives the
 //! products of that decode, [`Complete`], is here, because it is a fixed-point
 //! integer register and contains no float arithmetic. The library never
 //! executes a float addition (§3.3, `CU-01`).
@@ -54,7 +61,7 @@ pub use alphabet::{
     Alphabet, Bnd, Bound, Complex, ComplexAcc, Decoded, Element, FloatElement, Full,
     IntegerElement, ObservedBound, PackedCode, Whole, NARROW_CAP,
 };
-pub use bounds::{acc_bits, narrow_cap_for, NARROW_CAPS};
+pub use bounds::{acc_bits, narrow_cap_for, F64Exact, NARROW_CAPS};
 pub use dot::{dot_instrumented, dot_ref, dot_wide};
 pub use error::NotAProduct;
 pub use layout::{MatView, MatViewMut, Shape, Strides, Triple, Walk};

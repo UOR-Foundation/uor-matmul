@@ -778,6 +778,79 @@ where
 // Arena
 // ---------------------------------------------------------------------------
 
+/// A code type a borrowed symbol table can be addressed by.
+///
+/// `u16` and `u8`, and nothing else: the width is a fact about the artifact's
+/// storage, and the two widths are the two residencies a one-element block has
+/// a use for --- two bytes a symbol where the dense float is four, and one.
+///
+/// The trait exists so that [`Arena`] is one tier at two widths rather than
+/// two tiers with one decode: the table read, the enumeration, and the
+/// canonicalization are written once, against these methods.
+pub trait SymbolCode: Copy + Send + Sync + 'static {
+    /// How many distinct codes the type holds.
+    const CODES: usize;
+
+    /// The code at `index` in the type's own order. Total below `CODES`.
+    fn at(index: usize) -> Self;
+
+    /// Where `code` sits in the type's own order.
+    fn index(code: Self) -> usize;
+
+    /// The stored code stream read as the `u16` index stream it already is,
+    /// when it is one.
+    ///
+    /// The tabulated traversal's gather reads a `*const u16`, so a `u16`
+    /// stream at a power-of-two code space *is* the index stream and is
+    /// borrowed, and a `u8` stream never is: the narrow spelling answers
+    /// `None` and the traversal re-spells the codes as indices, at the same
+    /// bytes.
+    fn index_stream(codes: &[Self], space: usize) -> Option<&[u16]>;
+}
+
+impl SymbolCode for u16 {
+    const CODES: usize = U16_CODES;
+
+    fn at(index: usize) -> Self {
+        // `index < CODE_SPACE <= CODES` at every call site, so the cast is the
+        // identity on the enumeration's own domain.
+        index as u16
+    }
+
+    fn index(code: Self) -> usize {
+        code as usize
+    }
+
+    fn index_stream(codes: &[Self], space: usize) -> Option<&[u16]> {
+        // `index_of` is `% space`, which is `& (space - 1)` exactly when the
+        // space is a power of two --- and then the stored `u16` is the index,
+        // masked. At any other entry count the two differ and the traversal
+        // builds the stream, at the same bytes.
+        space.is_power_of_two().then_some(codes)
+    }
+}
+
+impl SymbolCode for u8 {
+    const CODES: usize = u8::MAX as usize + 1;
+
+    fn at(index: usize) -> Self {
+        // As `u16`'s: total on the enumeration's own domain.
+        index as u8
+    }
+
+    fn index(code: Self) -> usize {
+        code as usize
+    }
+
+    fn index_stream(_: &[Self], _: usize) -> Option<&[u16]> {
+        // A `u8` stream is not the `u16` index stream whatever the space, so
+        // there is nothing to borrow. The gather's index type being `u16` is
+        // the reason, and re-spelling costs the traversal one pass it was
+        // already paying for any code space that is not a power of two.
+        None
+    }
+}
+
 /// A codebook of one artifact's distinct bit patterns.
 ///
 /// Mechanically the arena is a one-element block grid, and its decode is the
@@ -791,16 +864,28 @@ where
 /// The element type is a float: the symbols are bit patterns, and the bound is
 /// [`Whole`] because membership is discharged by the table's construction and
 /// no magnitude question applies to a float (§5.2b).
+///
+/// The code width is a parameter, `u16` by default and `u8` where the
+/// artifact's distinct patterns fit a byte (`CK-14`): one type at two
+/// residencies, not two tiers. A `u8` stream is never the index stream the
+/// tabulated gather borrows --- the gather's index type is `u16` --- so the
+/// narrow spelling re-spells its codes as indices, at the same bytes.
 #[derive(Clone, Copy, Debug)]
-pub struct Arena<'a, E: FloatElement, const N: usize> {
+pub struct Arena<'a, E: FloatElement, const N: usize, K: SymbolCode = u16> {
     table: &'a [Alphabet<E, Whole<E>>; N],
+    // The width is a parameter of the decode, not of the table: the struct
+    // stores nothing of it.
+    _code: PhantomData<fn() -> K>,
 }
 
-impl<'a, E: FloatElement, const N: usize> Arena<'a, E, N> {
+impl<'a, E: FloatElement, const N: usize, K: SymbolCode> Arena<'a, E, N, K> {
     /// Borrow a canonical codebook. The canonicalization is [`canonicalize`]'s
     /// discipline; like [`Grid`], the borrow itself validates nothing (§6.2).
     pub const fn new(table: &'a [Alphabet<E, Whole<E>>; N]) -> Self {
-        Self { table }
+        Self {
+            table,
+            _code: PhantomData,
+        }
     }
 
     /// The codebook.
@@ -809,35 +894,37 @@ impl<'a, E: FloatElement, const N: usize> Arena<'a, E, N> {
     }
 }
 
-impl<E: FloatElement, const N: usize> Codec<E, Whole<E>> for Arena<'_, E, N> {
-    type Code = u16;
+impl<E: FloatElement, const N: usize, K: SymbolCode> Codec<E, Whole<E>> for Arena<'_, E, N, K> {
+    type Code = K;
     const MAX_BLOCK: usize = 1;
     const TIER: TierId = TierId::Arena;
 
     fn decode_element(&self, code: Self::Code, _i: usize) -> Alphabet<E, Whole<E>> {
-        // The same total reduction `Grid` performs: an arbitrary `u16`
-        // indexes a table of `N` entries modulo `N` (C6).
-        self.table[(code as usize) % N]
+        // The same total reduction `Grid` performs: an arbitrary code indexes
+        // a table of `N` entries modulo `N` (C6).
+        self.table[K::index(code) % N]
     }
 }
 
-impl<E: FloatElement, const N: usize> Enumerable<E, Whole<E>> for Arena<'_, E, N> {
+impl<E: FloatElement, const N: usize, K: SymbolCode> Enumerable<E, Whole<E>>
+    for Arena<'_, E, N, K>
+{
     // The reachable code space, as for `Grid`: the table size unless the table
     // is wider than the code type can address.
-    const CODE_SPACE: usize = if N < U16_CODES { N } else { U16_CODES };
+    const CODE_SPACE: usize = if N < K::CODES { N } else { K::CODES };
 
     fn code_at(index: usize) -> Self::Code {
-        (index % Self::CODE_SPACE.max(1)) as u16
+        K::at(index % Self::CODE_SPACE.max(1))
     }
 
     fn index_of(code: Self::Code) -> usize {
         // The same reduction `decode_element` performs, so equal indices and
         // equal decodes are the same relation.
-        (code as usize) % Self::CODE_SPACE.max(1)
+        K::index(code) % Self::CODE_SPACE.max(1)
     }
 
-    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
-        Self::CODE_SPACE.is_power_of_two().then_some(codes)
+    fn as_index_stream(codes: &[K]) -> Option<&[u16]> {
+        K::index_stream(codes, Self::CODE_SPACE)
     }
 }
 

@@ -7,7 +7,7 @@ Feature: Purity
   ID here has no register row, or a register row has no scenario (CM-02).
 
   @CU-01 @build
-  Scenario: No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target
+  Scenario: No float arithmetic opcode in any shipped kernel's disassembly, except where the F64Exact witness proves the opcode exact
     Given the standing corpus
     When the suite exercises CU-01
     Then the claim holds byte for byte

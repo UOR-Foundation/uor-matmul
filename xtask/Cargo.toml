@@ -9,6 +9,10 @@ publish = false
 
 [dependencies]
 uor-matmul-model = { workspace = true }
+# The census prints demangled sequence names: a mangled symbol is a name only
+# a linker loves, and the artifact is read by people. xtask is CI
+# infrastructure, so a dependency here costs a shipped crate nothing.
+rustc-demangle = "0.1"
 
 [lints]
 workspace = true

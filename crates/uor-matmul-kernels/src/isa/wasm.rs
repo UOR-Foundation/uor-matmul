@@ -190,6 +190,203 @@ unsafe fn simd128_r_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
 }
 
 // ---------------------------------------------------------------------------
+// The SWAR broadcast sequence
+// ---------------------------------------------------------------------------
+
+const SWAR_MR: usize = 4;
+const SWAR_NR: usize = 12;
+
+crate::tile_fits!(SWAR_MR, SWAR_NR);
+
+/// The field spacing, in bits: three fields to a 64-bit lane, five guard bits
+/// a field over the widest biased product.
+const SWAR_SPACING: u32 = 21;
+
+/// The fields per 64-bit lane.
+const SWAR_T: usize = 3;
+
+/// The deepest run of products one field absorbs before extraction. Derived,
+/// not chosen: a field is `SWAR_SPACING` bits and a biased product reaches
+/// `255 * 255`, so the run is `floor(((1 << SWAR_SPACING) - 1) / (255 * 255))`.
+/// The model's `wasm_swar_field_w8a8` row records the same derivation.
+const SWAR_CHUNK: usize = 32;
+
+// R1: the field-capacity threshold, pinned. This is the one place in the
+// shipped crates the derivation's numeral may appear.
+const _: () = assert!(SWAR_CHUNK as u128 == ((1u128 << SWAR_SPACING) - 1) / (255 * 255));
+
+/// The wasm SIMD128 SWAR broadcast spec: three `B` elements packed at 21-bit
+/// spacing in each 64-bit lane, multiplied by one broadcast scalar.
+///
+/// Kronecker substitution over the integers: a plain identity, available to
+/// any library, exact by construction rather than by anything this library
+/// adds. Both operands are biased to unsigned --- the same `+128` offset
+/// identity `AVX512_DPBUSD_I8_I32` uses, applied on both sides here, with the
+/// compensation paid at extraction --- so a product reaches `255 * 255`,
+/// three fields at [`SWAR_SPACING`]-bit spacing sit in one 64-bit lane with
+/// five guard bits a field, and one `i64x2.mul` against a splatted scalar
+/// produces six products with no cross terms. The guard bits absorb a chunk
+/// of [`SWAR_CHUNK`] products a field before the fields are extracted and
+/// corrected into the `i32` lanes; a deeper `k` is more chunks. That *is* the
+/// guard-bits-with-periodic-extraction mechanism, and the driver's lane
+/// capacity sits on top of it unchanged.
+///
+/// Why this sequence exists on baseline SIMD128 and nowhere else: the ISA has
+/// `i64x2.mul` and no byte-width dot product. relaxed-simd's
+/// `i8x16.dot_i8x16_i7x8_s` is specified non-deterministic --- its
+/// intermediate precision is implementation-defined --- so this library cannot
+/// use it regardless of availability (C3: the schedule cannot change the
+/// answer), and the choice on baseline SIMD128 is this or the extending dot.
+/// On x86 `vpdpbusd` does the multiplexing in silicon and on thumbv7em
+/// `SMLAD` does; neither gets a SWAR sequence.
+///
+/// Measured under wasmtime (`CG-17`, `just swar-sweep`): 0.32--0.38x of the
+/// extending dot sequence it would displace, at every depth and both bounds
+/// --- the field packing costs more than the extends it saves, the same
+/// reason OpenBLAS declines the trick for throughput rather than numerics. So
+/// no family list carries it: a listed sequence is one `Auto` may select, and
+/// selecting this one would be a measured regression. The spec stays exported
+/// and `CB-12`-pinned --- the bytes, and the absence from every availability
+/// list, which is what keeps the decline a decision rather than an accident.
+pub const SIMD128_SWAR_I8_I32: KernelSpec<i8, i32> = KernelSpec {
+    backend: Backend::WasmSimd128,
+    factorization: Factorization::Exact,
+    mr: SWAR_MR,
+    nr: SWAR_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // The plain `k`-major layout: one step of the pack is one byte from each
+    // column, contiguous in the panel. The chunking is internal, so there is
+    // no group for the driver to pad to and no tail (S8).
+    k_group: 1,
+    products_per_step: 2 * SWAR_T,
+    lane_cap: i32::MAX as u128,
+    // The biased-field construction is exact at every `i8` alphabet: the
+    // biased operands are bytes whatever the declared bound, so no alphabet
+    // outgrows a field.
+    max_bound: u128::MAX,
+    mac_tile: simd128_swar_i8,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `12 * kc`, and `acc` 48
+/// writable lanes.
+unsafe fn simd128_swar_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
+    // SAFETY: the caller guaranteed the three extents. One conversion here
+    // keeps every panel read below safe.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, SWAR_MR * kc),
+            core::slice::from_raw_parts(pb, SWAR_NR * kc),
+            core::slice::from_raw_parts_mut(acc, SWAR_MR * SWAR_NR),
+        )
+    };
+    // The field constants, derived from the spacing. A byte moves to a 21-bit
+    // field with one mask and one shift per field past the first, and the bias
+    // and its mask are one splat each: `(raw + 128) & 0xFF` is the biased
+    // element `b + 128` exactly, in two's complement and at any `i8`.
+    let byte1 = i64x2_splat(0xFF00);
+    let byte2 = i64x2_splat(0xFF_0000);
+    let bias = i64x2_splat(128 * ((1i64 << 42) + (1 << 21) + 1));
+    let field_mask = i64x2_splat(0xFF * ((1i64 << 42) + (1 << 21) + 1));
+    let lane_mask = i64x2_splat((1i64 << SWAR_SPACING) - 1);
+
+    // The tile is written, not accumulated into: what was in `acc` is the
+    // caller's business, the same contract the other kernels keep.
+    acc.fill(0);
+
+    let mut k = 0;
+    while k < kc {
+        let d = SWAR_CHUNK.min(kc - k);
+        let mut packed = [i64x2_splat(0); SWAR_MR * 2];
+        let mut bsum = [i64x2_splat(0); 2];
+        let mut asum = [0i64; SWAR_MR];
+        for kk in 0..d {
+            let row = k + kk;
+            // The biased scalar, one per row: `a + 128` as a 64-bit lane, and
+            // its sum for the compensation.
+            let mut avec = [i64x2_splat(0); SWAR_MR];
+            for (i, (av, s)) in avec.iter_mut().zip(asum.iter_mut()).enumerate() {
+                let a = i64::from(pa[row * SWAR_MR + i]) + 128;
+                *s += a;
+                *av = i64x2_splat(a);
+            }
+            for g in 0..2 {
+                // Six columns to a register, lane 0 holding columns `6g..6g+3`
+                // and lane 1 `6g+3..6g+6`. Both eight-byte reads stay inside
+                // the panel at every `row < kc` --- the second block reads
+                // columns 4..12 and uses the last six --- where a six-byte
+                // read at the last row of the second block would not.
+                let base = row * SWAR_NR + g * 4;
+                // SAFETY: `base + 8 <= row * 12 + 12 <= kc * 12`.
+                let raw = unsafe { v128_load64_zero(pb.as_ptr().add(base).cast::<u64>()) };
+                let y = if g == 0 {
+                    i8x16_shuffle::<0, 1, 2, 0, 0, 0, 0, 0, 3, 4, 5, 0, 0, 0, 0, 0>(raw, raw)
+                } else {
+                    i8x16_shuffle::<2, 3, 4, 0, 0, 0, 0, 0, 5, 6, 7, 0, 0, 0, 0, 0>(raw, raw)
+                };
+                let spread = v128_or(
+                    v128_or(
+                        v128_and(y, i64x2_splat(0xFF)),
+                        i64x2_shl(v128_and(y, byte1), 13),
+                    ),
+                    i64x2_shl(v128_and(y, byte2), 26),
+                );
+                let b = v128_and(i64x2_add(spread, bias), field_mask);
+                bsum[g] = i64x2_add(bsum[g], b);
+                for (i, av) in avec.iter().enumerate() {
+                    let cell = &mut packed[i * 2 + g];
+                    *cell = i64x2_add(*cell, i64x2_mul(*av, b));
+                }
+            }
+        }
+        // Extraction and the compensation, the two-sided form of the `dpbusd`
+        // offset identity:
+        //
+        // ```text
+        // sum(a*b) = sum(a'*b') - 128 * sum(a') - 128 * sum(b') + 16384 * d
+        // ```
+        //
+        // Every term is an exact integer and the chunk bounds keep every
+        // intermediate inside its lane: a field holds at most
+        // `CHUNK * 255 * 255 < 2^21`, a biased column sum at most
+        // `CHUNK * 255`, and the corrected chunk sum at most
+        // `CHUNK * 128 * 128 < 2^31`, so the low four bytes of each corrected
+        // lane are the `i32` to accumulate, sign included.
+        let step_bias = (d as i64) << 14;
+        for g in 0..2 {
+            let c = [
+                i64x2_shl(v128_and(bsum[g], lane_mask), 7),
+                i64x2_shl(v128_and(i64x2_shr(bsum[g], SWAR_SPACING), lane_mask), 7),
+                i64x2_shl(i64x2_shr(bsum[g], 2 * SWAR_SPACING), 7),
+            ];
+            for i in 0..SWAR_MR {
+                let p = packed[i * 2 + g];
+                let f = [
+                    v128_and(p, lane_mask),
+                    v128_and(i64x2_shr(p, SWAR_SPACING), lane_mask),
+                    i64x2_shr(p, 2 * SWAR_SPACING),
+                ];
+                let rv = i64x2_splat((asum[i] << 7) - step_bias);
+                let mut lanes = [0i64; 2];
+                for (field, (fv, cv)) in f.iter().zip(c.iter()).enumerate() {
+                    let t = i64x2_sub(i64x2_sub(*fv, rv), *cv);
+                    // SAFETY: a sixteen-byte store into a sixteen-byte stack
+                    // slot.
+                    unsafe { v128_store(lanes.as_mut_ptr().cast(), t) };
+                    for (half, x) in lanes.iter().enumerate() {
+                        let col = g * 6 + half * SWAR_T + field;
+                        let cell = &mut acc[i * SWAR_NR + col];
+                        *cell = cell.wrapping_add(*x as i32);
+                    }
+                }
+            }
+        }
+        k += d;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The table sequences (§7.3)
 // ---------------------------------------------------------------------------
 

@@ -43,7 +43,7 @@ use uor_matmul_core::{
     as_alphabet_full, as_alphabet_full_mut, AccOf, Element, EncodeFrom, FloatElement,
     IntegerElement, MatView, MatViewMut, NotAProduct, PackedCode, Strides, Triple,
 };
-use uor_matmul_gemm::epilogue::{AbsorbPrior, ScaleExact};
+use uor_matmul_gemm::epilogue::{AbsorbPrior, PlaceAt, ScaleExact};
 use uor_matmul_gemm::float::SignedPlace;
 use uor_matmul_gemm::{gemm as view_gemm, gemm_float_packed, GemmOptions, Linear, Scratch};
 
@@ -183,9 +183,14 @@ where
 /// end. That is why this is *not* bit-identical to a classical `sgemm` (N1) --- it
 /// is the correctly-rounded value of the exact sum.
 ///
-/// `pa` and `pb` are decode panels, the float analogue of `scratch`: `&mut []`
-/// runs the streaming traversal at the same bytes, and `k` and `k * n` elements
-/// respectively let each operand be decoded once instead of once per row.
+/// `pa` and `pb` are decode panels, the float analogue of `scratch`, and the
+/// offer decides which factorization of the one identity runs --- never what
+/// the bytes are (`CD-19`). `&mut []` runs the streaming traversal. `k` and
+/// `k * n` elements let each operand be decoded once instead of once per row.
+/// [`uor_matmul_gemm::suggested_float_panels`] names the offer that also
+/// admits the float placement bridge, which hands the reduction to the
+/// integer kernel table; it is the fast path a caller who follows the
+/// suggestion gets.
 ///
 /// # Errors and panics
 ///
@@ -208,8 +213,8 @@ pub fn gemm_float_ex<E, O>(
 ) -> Result<(), NotAProduct>
 where
     E: FloatElement,
-    O: EncodeFrom<AccOf<E>> + Copy,
-    AccOf<E>: SignedPlace + ScaleExact + AbsorbPrior<O>,
+    O: Element + EncodeFrom<AccOf<E>> + EncodeFrom<i128> + Copy,
+    AccOf<E>: SignedPlace + PlaceAt + ScaleExact + AbsorbPrior<O>,
 {
     let (a_len, b_len, c_len) = (a.len(), b.len(), c.len());
     let av = MatView::new(a, m, k, ld(lda))
@@ -246,8 +251,8 @@ pub fn gemm_float<E, O>(
 ) -> Result<(), NotAProduct>
 where
     E: FloatElement,
-    O: EncodeFrom<AccOf<E>> + Copy,
-    AccOf<E>: SignedPlace + ScaleExact + AbsorbPrior<O>,
+    O: Element + EncodeFrom<AccOf<E>> + EncodeFrom<i128> + Copy,
+    AccOf<E>: SignedPlace + PlaceAt + ScaleExact + AbsorbPrior<O>,
 {
     gemm_float_ex(m, k, n, 1, a, k, b, n, 0, c, n, pa, pb)
 }

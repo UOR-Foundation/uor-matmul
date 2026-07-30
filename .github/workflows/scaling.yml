@@ -18,6 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-wasip1 }
       - uses: extractions/setup-just@v2
       - uses: Swatinem/rust-cache@v2
       - name: fitted exponents, ours and every oracle's
@@ -27,3 +28,54 @@ jobs:
       # measured only when somebody remembered to.
       - name: CT-06, CG-08, super-massive input
         run: just massive
+      # The representation-width phase's measurements, on the x86 runner. Every
+      # figure these print is `open`, and every one asserts byte-identity inside
+      # its timed region, so a red step is a correctness failure and never a
+      # slow day. The logs are the artifact the measurement log references ---
+      # an x86 pass is exactly what this host class is for.
+      - name: CG-12, the sub-cubic recursion against the cubic walk
+        run: |
+          mkdir -p target/measurements
+          just strassen-sweep | tee target/measurements/strassen-x86.txt
+      - name: CG-15, the float placement bridge
+        run: just bridge-sweep | tee target/measurements/bridge-x86.txt
+      - name: CG-14, the symbol path against the bus
+        run: just symbol-bandwidth | tee target/measurements/symbol-bandwidth-x86.txt
+      - name: CG-16, the symbol table in the scaled lane
+        run: just symbol-tabulated | tee target/measurements/symbol-tabulated-x86.txt
+      # CG-17 is a wasm measurement, so it is architecture-independent by
+      # construction; it lives here because this is the measurements workflow.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+      - name: CG-17, the SWAR broadcast against the dot incumbent
+        run: just swar-sweep | tee target/measurements/swar-wasm.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: measurements-x86
+          path: target/measurements/
+
+  measurements-aarch64:
+    # The same sweeps on a native aarch64 runner: the NEON sequences run for
+    # real, and the figures are the closest CI gets to the Apple dev machines
+    # the phase was measured on. Same discipline: `open`, never a gate.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v2
+      - uses: Swatinem/rust-cache@v2
+      - name: CG-12, the sub-cubic recursion against the cubic walk
+        run: |
+          mkdir -p target/measurements
+          just strassen-sweep | tee target/measurements/strassen-aarch64.txt
+      - name: CG-15, the float placement bridge
+        run: just bridge-sweep | tee target/measurements/bridge-aarch64.txt
+      - name: CG-14, the symbol path against the bus
+        run: just symbol-bandwidth | tee target/measurements/symbol-bandwidth-aarch64.txt
+      - name: CG-16, the symbol table in the scaled lane
+        run: just symbol-tabulated | tee target/measurements/symbol-tabulated-aarch64.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: measurements-aarch64
+          path: target/measurements/

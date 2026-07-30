@@ -10,8 +10,8 @@ edition = "2021"
 # cannot actually build on.
 rust-version = "1.89"
 license = "Apache-2.0"
-repository = "https://github.com/UOR-Foundation/matmul"
-homepage = "https://github.com/UOR-Foundation/matmul"
+repository = "https://github.com/UOR-Foundation/uor-matmul"
+homepage = "https://github.com/UOR-Foundation/uor-matmul"
 authors = ["UOR Foundation"]
 keywords = ["matmul", "gemm", "quantization", "no-std", "exact"]
 categories = ["mathematics", "no-std", "science"]

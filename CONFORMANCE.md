@@ -66,7 +66,11 @@ returns an error the model does not sanction.
 | `CD-15` | `build` | Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer |
 | `CD-16` | `build` | Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block |
 | `CD-17` | `build` | Collapsing bit-identical rows of A in the float tabulated traversal cannot change a byte, at every degeneracy and every offer; rows differing only in the sign of zero or in a NaN payload are distinct |
+| `CD-21` | `build` | The sub-cubic recursion (Winograd's form of Strassen's) is byte-identical to the cubic packed walk at every shape, depth, requested level count, and offer including none, and to the `CX-01` wrapping oracle at every corpus size; a level the shape, the bound's headroom, or the offer does not admit is declined, and declining changes no byte |
 | `CD-14` | `build` | An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all |
+| `CD-18` | `build` | A u8-symbol-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, at every offer including none, and under an epilogue that reads `C` |
+| `CD-19` | `build` | The float driver's scaled lanes give byte-identical output whether the integer dot product runs as the scalar loop or on the integer kernel table, at every shape and every offer, including none |
+| `CD-20` | `build` | A u8-symbol-coded float weight matrix tabulated in the scaled integer lane gives byte-identical output to the dense float driver at every shape and every offer, including none, with the span walk admitted and declined alike, and a depth past the lane's run is chunked exactly |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
 
@@ -82,12 +86,13 @@ returns an error the model does not sanction.
 | `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two |
 | `CB-09` | `build` | Every modular table sequence equals the portable modular reference lane for lane |
 | `CB-10` | `build` | At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run |
+| `CB-12` | `build` | The wasm SIMD128 SWAR sequence --- three B-row elements packed at 21-bit spacing in each 64-bit lane, multiplied by one broadcast scalar --- equals the portable reference lane for lane at every packed depth, at the alphabet's extremes, and at the W4A8 bound; selection offers it nowhere, because CG-17 measured it slower than the dot sequence it would displace |
 
-## `CU-*` --- Purity: one method, no classical path, no fallback
+## `CU-*` --- Purity: one answer, many factorizations; no classical path, no fallback
 
 | ID | Level | Statement |
 | --- | --- | --- |
-| `CU-01` | `build` | No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target |
+| `CU-01` | `build` | No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target --- except inside a function holding the `F64Exact` witness, where the declared alphabet bound and panel depth keep every product and every partial sum below 2^53, so the opcode computes the same integer the exact accumulator does. The witness's only constructor is a compile-time proof of that bound; the gates check the type, not a comment |
 | `CU-02` | `build` | The instrumented count of narrow-path tiles matches `fits_narrow` exactly, so no tile takes an unintended path |
 | `CU-03` | `build` | Every instruction sequence agrees at depths straddling its own threshold |
 | `CU-04` | `build` | Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases |
@@ -112,6 +117,7 @@ returns an error the model does not sanction.
 | `CK-12` | `build` | The `Ternary` tier decodes the same alphabet stream as the `Packed<Grid<4>,4>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream |
 | `CK-13` | `build` | Sign-coded weights (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) produce byte-identical output to the dense spelling of the same decoded operand, packed and tabulated, and the ternary spelling (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) likewise |
 | `CK-10` | `build` | An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols |
+| `CK-14` | `build` | The arena tier at a `u8` code width decodes the same alphabet stream as its `u16` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its codebook is borrowed, never owned |
 
 ## `CX-*` --- Cross-library agreement against an external library
 
@@ -156,6 +162,13 @@ returns an error the model does not sanction.
 | `CG-09` | `open` | Throughput against the degeneracy of the operand, including the price of looking when there is none |
 | `CG-07` | `open` | Small-shape latency, where a heavyweight prologue costs more than an asymptote |
 | `CG-10` | `open` | Operation census and wall time for `Tabulated` against `Blocked` and against every oracle, swept over `n` through the derived break-even, with the duplicate-entry ratio of the enumeration reported |
+| `CG-11` | `build` | Static issue analysis (`llvm-mca`) over the emitted inner loops reports, for each kernel sequence, per-port occupancy, the critical path, predicted throughput, and a named bottleneck resource --- scheduling-model predictions, reported, never asserted as measurements |
+| `CG-12` | `open` | Achieved MACs per second of the sub-cubic recursion against the cubic packed walk on the i32-exact lane, swept through the crossover with the fitted exponent's interval and sample count and the host's fastest sustained product rate on the same axes, with byte-identity asserted inside the timed region |
+| `CG-13` | `build` | The resolved kernel sequence is cached per element family; a cached selection returns the same sequence the full walk returns (asserted), and the latency this buys is reported under CG-07 and never asserted |
+| `CG-14` | `open` | Achieved bytes per second for a u8-symbol-coded gemv and skinny GEMM, and for an f32 oracle, against the host's STREAM triad number measured in the same harness, with byte-identity asserted inside the timed region |
+| `CG-15` | `open` | Achieved MACs per second of the float placement bridge --- the default driver's auto-selected lane against the explicit entry's richer offers, with the decline fills pricing the scalar lanes both fall to --- measured on the shapes ANALYSIS tables, with byte-identity asserted inside the timed region |
+| `CG-16` | `open` | Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes, with byte-identity asserted inside the timed region |
+| `CG-17` | `open` | Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime, per panel depth and bound, with byte-identity asserted inside the timed region |
 
 ## `CM-*` --- Model integrity: the model is the single source of every constant
 
@@ -197,3 +210,13 @@ Never re-derived, vendored, or gated on.
 | `OPEN-CODEBOOK-QUALITY` | `open` | the reconstruction quality of any codebook, including E8, is measured per (model, codebook) and reported, never asserted (N3). |
 | `OPEN-ORACLE-ULPS` | `open` | each classical float oracle's rounding error against the exact value this library holds, in ulps. Reported by CX-05 through CX-09. |
 | `OPEN-RESIDENCY` | `open` | the residency collapse of the coded tiers, measured as a scaling constant against the oracle (CG-03), never asserted. |
+
+## Suspended rules
+
+A working rule suspended for one named scope. What each suspension admits is
+read from `model/ledger.toml` by the gate it exempts, so the exemption is model
+data and not a constant inside the gate.
+
+| ID | Rule | Scope | Admits | Ends |
+| --- | --- | --- | --- | --- |
+| `SUSP-R15-WIDTH-PHASE` | R15 | the representation-width performance phase | `MEASUREMENT-LOG.md` | the phase closes: the log's open items have each either shipped with their IDs and gates, or been measured and recorded as results, and this row and the exemption are removed together. |

@@ -212,12 +212,25 @@ fuzz duration="60":
     cargo +nightly fuzz run float_decode -- -max_total_time={{duration}}
     cargo +nightly fuzz run codec_shapes -- -max_total_time={{duration}}
 
-# Regenerate the NumPy oracle artifacts. Run only when the corpus changes; the
-# outputs are committed and their digests are recorded.
+# Regenerate the committed oracle and corpus artifacts. Run only when a corpus
+# changes; the outputs are committed and their digests are recorded.
 #
-# Regenerate the NumPy oracle artifacts. Only when the corpus changes.
+# Regenerate the NumPy oracle and symbol-corpus artifacts. Only when a corpus changes.
 oracles:
     python3 oracles/numpy/generate.py
+    python3 oracles/symbols/generate.py
+
+# CG-11: the static issue census --- llvm-mca over the emitted inner loops, one
+# named bottleneck per kernel sequence, reported as scheduling-model predictions
+# and never asserted as measurements. Not part of `just vv`: a Rust toolchain
+# does not ship llvm-mca, so a gate that required it would fail on a clean
+# checkout for a reason that has nothing to do with the code --- the same
+# reason `just miri` and `just fuzz` are their own recipes.
+#
+# Static issue analysis over the emitted inner loops. Needs llvm-mca.
+census:
+    cargo run -q -p xtask -- issue-census
+    cargo test -p uor-matmul-conformance --test issue_census -- --ignored --nocapture
 
 # CG-10: the tabulated traversal against this library's own packed kernels, over
 # shapes large enough for the table to amortize. Minutes.
@@ -232,3 +245,58 @@ tabulation:
 # The tabulation break-even, measured. Minutes.
 breakeven:
     cargo run --release -p uor-matmul-validate --example tabulation_breakeven
+
+# CG-14: the u8 symbol path's achieved bytes/second on gemv and skinny GEMM,
+# against the host's own STREAM triad number measured in the same harness, with
+# byte-identity asserted inside every timed run. Minutes, and every figure is
+# `open`. `--release` is not optional: a throughput figure from an unoptimised
+# build is not a figure.
+#
+# The symbol path against the bus, measured. Minutes.
+symbol-bandwidth:
+    cargo test --release -p uor-matmul-validate --test symbol_bandwidth -- \
+        --ignored --nocapture --test-threads=1
+
+# CG-15: the float placement bridge against the scalar scaled lanes it
+# factorizes, on the shapes ANALYSIS tables, with byte-identity asserted
+# inside every timed run. Minutes, and every figure is `open`. `--release` is
+# not optional: a throughput figure from an unoptimised build is not a figure.
+#
+# The bridge against the scalar lanes, measured. Minutes.
+bridge-sweep:
+    cargo test --release -p uor-matmul-validate --test bridge_sweep -- \
+        --ignored --nocapture --test-threads=1
+
+# CG-16: the symbol tabulated traversal in the scaled integer lane against the
+# float placement bridge, the dense float driver, and the oracle, on gemv,
+# skinny, and tabulation-sweep shapes, with byte-identity asserted inside
+# every timed run. Minutes, and every figure is `open`. `--release` is not
+# optional: a throughput figure from an unoptimised build is not a figure.
+#
+# The narrow lane against the bridge and the bus, measured. Minutes.
+symbol-tabulated:
+    cargo test --release -p uor-matmul-validate --test symbol_tabulated_sweep -- \
+        --ignored --nocapture --test-threads=1
+
+# CG-12: the sub-cubic recursion against the cubic packed walk on the
+# i32-exact lane, swept through the crossover, with the host's fastest
+# sustained product rate on the same axes and byte-identity asserted inside
+# every timed run. Minutes, and every figure is `open`. `--release` is not
+# optional: a throughput figure from an unoptimised build is not a figure.
+#
+# The recursion against the cubic walk, measured. Minutes.
+strassen-sweep:
+    cargo test --release -p uor-matmul-validate --test strassen_sweep -- \
+        --ignored --nocapture --test-threads=1
+
+# CG-17: the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends
+# sequence and the portable reference, on wasm32-wasip1 under wasmtime, per
+# panel depth and bound, with byte-identity asserted inside every timed run.
+# Every figure is `open`. `--release` is not optional: a throughput figure
+# from an unoptimised build is not a figure.
+#
+# The SWAR sequence against the dot incumbent, measured under wasmtime.
+swar-sweep:
+    RUSTFLAGS="-C target-feature=+simd128" \
+        cargo test --release --target wasm32-wasip1 -p uor-matmul-kernels --test swar_sweep -- \
+        --ignored --nocapture

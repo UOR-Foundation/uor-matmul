@@ -2,7 +2,10 @@
 #
 # Nothing in this file is a limit on the library. Every entry is either a
 # property of a machine integer type, or a property of a *caller's chosen
-# instantiation*, or a tuning parameter explicitly allowlisted out of R1.
+# instantiation*, or a constant discovered by measurement and recorded here ---
+# with what measured it --- under the R1 allowlist. A prefetch distance or a
+# blocking factor has no derivation, and a derivation story invented for one is
+# fiction; the honest record is the measurement.
 #
 # `xtask check-model` regenerates the Rust consts from this file and fails if
 # the generated values and the model disagree (CM-01).
@@ -150,10 +153,20 @@ per_step = 16129
 k_max = 2 # 3 * 127^2 = 48387 > i16::MAX; never accumulate more than two.
 cap_override = 32767
 
+[[narrow.threshold]]
+name = "wasm_swar_field_w8a8"
+sequence = "i64x2 SWAR broadcast: three biased fields at 21-bit spacing, |sum((a+128)*(b+128))| <= 255 * 255 a field"
+per_step = 65025
+k_max = 32 # the packed accumulator's chunk: 33 * 255^2 = 2145825 carries into the next field
+cap_override = 2097151 # (1 << 21) - 1: sixteen product bits and five guard bits
+
 # --------------------------------------------------------------------------
-# Blocking parameters. Tuning data, one table, explicitly allowlisted out of R1
-# (§5.1): these are cache-shaped, not derived, and changing one cannot change
-# any output byte --- only which traversal produces it.
+# Constants discovered by measurement. Tuning data, one table, explicitly
+# allowlisted out of R1 (§5.1): these are cache-shaped, found empirically, and
+# changing one cannot change any output byte --- only which traversal produces
+# it. The table is named for its first members; any constant discovered by
+# measurement belongs here with its `reason`, because a derivation story for
+# such a constant is fiction.
 # --------------------------------------------------------------------------
 
 [blocking]
@@ -203,3 +216,10 @@ kernel_products_per_step = 16
 # for the same reason, because a one-row kernel wastes no lanes and still pays
 # for the copy.
 kernel_rows = 6
+# The smallest base-case extent at which one level of the sub-cubic recursion
+# pays on the i32-exact lane, on an Apple M4 Max (aarch64-apple-darwin),
+# measured by `just strassen-sweep` (CG-12, 2026-07-30): at 512 a level costs
+# more than its (7/8) product count saves, at 768 it wins. Like the rest of
+# the table it can change which traversal produces an output byte and never
+# which byte (CD-21).
+strassen_min_extent = 384

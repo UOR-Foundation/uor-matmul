@@ -95,6 +95,10 @@ pub mod narrow {
     pub const NEON_VMULL_S16_W8A8_PER_STEP: u128 = 16129;
     /// `floor(32767 / 16129)`.
     pub const NEON_VMULL_S16_W8A8_K_MAX: u128 = 2;
+    /// Worst-case magnitude of one step of: i64x2 SWAR broadcast: three biased fields at 21-bit spacing, |sum((a+128)*(b+128))| <= 255 * 255 a field.
+    pub const WASM_SWAR_FIELD_W8A8_PER_STEP: u128 = 65025;
+    /// `floor(2097151 / 65025)`.
+    pub const WASM_SWAR_FIELD_W8A8_K_MAX: u128 = 32;
 }
 
 /// Canonical instantiations (§1.1).
@@ -111,7 +115,7 @@ pub mod instantiation {
     pub const W16A16_BOUND: u128 = 32767;
 }
 
-/// Cache-shaped blocking parameters.
+/// Constants discovered by measurement.
 ///
 /// Explicitly allowlisted out of R1: changing one cannot change any output
 /// byte, only which traversal produces it, which is what `CD-01` asserts.
@@ -132,6 +136,8 @@ pub mod blocking {
     pub const KERNEL_PRODUCTS_PER_STEP: usize = 16;
     /// Rows of the output a dense tile kernel produces per call.
     pub const KERNEL_ROWS: usize = 6;
+    /// The smallest base-case extent at which a level of the sub-cubic recursion pays on the i32-exact lane.
+    pub const STRASSEN_MIN_EXTENT: usize = 384;
 }
 
 // R1: the W8A8 threshold, pinned. This is the one place in the shipped

@@ -77,3 +77,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-12
     Then the claim holds byte for byte
+
+  @CK-14 @build
+  Scenario: The arena tier at a u8 code width decodes the u16 spelling's stream byte-identically, and its codebook is borrowed, never owned
+    Given the standing corpus
+    When the suite exercises CK-14
+    Then the claim holds byte for byte

@@ -218,7 +218,7 @@ pub fn render(model: &Model) -> String {
     let _ = writeln!(w, "}}");
 
     let _ = writeln!(w);
-    let _ = writeln!(w, "/// Cache-shaped blocking parameters.");
+    let _ = writeln!(w, "/// Constants discovered by measurement.");
     let _ = writeln!(w, "///");
     let _ = writeln!(
         w,
@@ -290,6 +290,15 @@ pub fn render(model: &Model) -> String {
         w,
         "    pub const KERNEL_ROWS: usize = {};",
         model.constants.blocking.kernel_rows
+    );
+    let _ = writeln!(
+        w,
+        "    /// The smallest base-case extent at which a level of the sub-cubic recursion pays on the i32-exact lane."
+    );
+    let _ = writeln!(
+        w,
+        "    pub const STRASSEN_MIN_EXTENT: usize = {};",
+        model.constants.blocking.strassen_min_extent
     );
     let _ = writeln!(w, "}}");
 
@@ -403,7 +412,10 @@ pub fn render_conformance(model: &Model) -> String {
             "CB-",
             "Backend parity: every backend equals the portable reference",
         ),
-        ("CU-", "Purity: one method, no classical path, no fallback"),
+        (
+            "CU-",
+            "Purity: one answer, many factorizations; no classical path, no fallback",
+        ),
         (
             "CK-",
             "Codec: tier equivalence, transcode, kappa addressing",
@@ -489,6 +501,43 @@ pub fn render_conformance(model: &Model) -> String {
             c.level.as_str(),
             statement.trim()
         );
+    }
+
+    if !model.ledger.suspension.is_empty() {
+        let _ = writeln!(w);
+        let _ = writeln!(w, "## Suspended rules");
+        let _ = writeln!(w);
+        let _ = writeln!(
+            w,
+            "A working rule suspended for one named scope. What each suspension admits is"
+        );
+        let _ = writeln!(
+            w,
+            "read from `model/ledger.toml` by the gate it exempts, so the exemption is model"
+        );
+        let _ = writeln!(w, "data and not a constant inside the gate.");
+        let _ = writeln!(w);
+        let _ = writeln!(w, "| ID | Rule | Scope | Admits | Ends |");
+        let _ = writeln!(w, "| --- | --- | --- | --- | --- |");
+        for s in &model.ledger.suspension {
+            let scope = s.scope.replace('\n', " ").replace('|', "\\|");
+            let ends = s.ends.replace('\n', " ").replace('|', "\\|");
+            let admits = s
+                .admits
+                .iter()
+                .map(|p| format!("`{p}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(
+                w,
+                "| `{}` | {} | {} | {} | {} |",
+                s.id,
+                s.rule,
+                scope.trim(),
+                admits,
+                ends.trim()
+            );
+        }
     }
 
     out

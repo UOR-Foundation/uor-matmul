@@ -439,10 +439,10 @@ impl_encode_from_limbs!(i8, i16, i32, i64, i128);
 /// can perturb it (§3.3).
 ///
 /// This is the Kulisch construction, and it is the same object as the integer
-/// accumulator above, sized differently. It contains no float arithmetic and no
-/// float token: the decode from an IEEE bit pattern to the exact dyadic
-/// rational it names lives in `uor-matmul-float`, and what arrives here is an
-/// integer magnitude, a binary exponent, and a sign.
+/// accumulator above, sized differently. It contains no float arithmetic: the
+/// decode from an IEEE bit pattern to the exact dyadic rational it names is
+/// [`FloatElement::decode`](crate::FloatElement::decode), and what arrives here
+/// is an integer magnitude, a binary exponent, and a sign.
 ///
 /// `L` is the limb count and `MIN_EXP` is the binary exponent of bit 0, both
 /// derived from the element type in `model/widths.toml`. The plan writes
@@ -1027,3 +1027,28 @@ macro_rules! impl_encode_into_float {
 
 impl_encode_into_float!(f32, u32, 23, 8);
 impl_encode_into_float!(f64, u64, 52, 11);
+
+/// An exact integer sum encoding into a float.
+///
+/// An `i128` accumulator is a dyadic rational at exponent zero, and the float
+/// placement bridge is what produces one for a float output: the scaled
+/// panels' product is an integer dot product, computed by the integer kernel
+/// table and placed into the format's complete accumulator at a declared
+/// scale by the epilogue. This impl is the scale-zero placement the traversal
+/// bound asks for (`CD-19`). It enters the register through the decode's own
+/// primitive, [`Complete::add_scaled`], so nothing is rounded on the way in;
+/// the register spans the format's whole product exponent range and then
+/// some, so no `i128` is too wide for it.
+macro_rules! impl_encode_from_i128_into_float {
+    ($($t:ty),* $(,)?) => { $(
+        impl EncodeFrom<i128> for $t {
+            fn encode_from(acc: i128, mode: EncodeMode) -> Self {
+                let mut placed = <$t as Element>::Acc::ZERO;
+                placed.add_scaled(acc.unsigned_abs(), 0, acc < 0);
+                <$t as EncodeFrom<<$t as Element>::Acc>>::encode_from(placed, mode)
+            }
+        }
+    )* };
+}
+
+impl_encode_from_i128_into_float!(f32, f64);

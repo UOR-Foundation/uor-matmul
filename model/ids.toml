@@ -204,6 +204,12 @@ suite = "determinism"
 statement = """Collapsing bit-identical rows of A in the float tabulated traversal cannot change a byte, at every degeneracy and every offer; rows differing only in the sign of zero or in a NaN payload are distinct"""
 
 [[id]]
+id = "CD-21"
+level = "build"
+suite = "determinism"
+statement = """The sub-cubic recursion (Winograd's form of Strassen's) is byte-identical to the cubic packed walk at every shape, depth, requested level count, and offer including none, and to the `CX-01` wrapping oracle at every corpus size; a level the shape, the bound's headroom, or the offer does not admit is declined, and declining changes no byte"""
+
+[[id]]
 id = "CB-01"
 level = "build"
 suite = "backends"
@@ -264,10 +270,16 @@ suite = "backends"
 statement = """At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run"""
 
 [[id]]
+id = "CB-12"
+level = "build"
+suite = "backends"
+statement = """The wasm SIMD128 SWAR sequence --- three B-row elements packed at 21-bit spacing in each 64-bit lane, multiplied by one broadcast scalar --- equals the portable reference lane for lane at every packed depth, at the alphabet's extremes, and at the W4A8 bound; selection offers it nowhere, because CG-17 measured it slower than the dot sequence it would displace"""
+
+[[id]]
 id = "CU-01"
 level = "build"
 suite = "purity"
-statement = """No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target"""
+statement = """No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target --- except inside a function holding the `F64Exact` witness, where the declared alphabet bound and panel depth keep every product and every partial sum below 2^53, so the opcode computes the same integer the exact accumulator does. The witness's only constructor is a compile-time proof of that bound; the gates check the type, not a comment"""
 
 [[id]]
 id = "CU-02"
@@ -522,6 +534,24 @@ suite = "scaling"
 statement = """Operation census and wall time for `Tabulated` against `Blocked` and against every oracle, swept over `n` through the derived break-even, with the duplicate-entry ratio of the enumeration reported"""
 
 [[id]]
+id = "CG-11"
+level = "build"
+suite = "scaling"
+statement = """Static issue analysis (`llvm-mca`) over the emitted inner loops reports, for each kernel sequence, per-port occupancy, the critical path, predicted throughput, and a named bottleneck resource --- scheduling-model predictions, reported, never asserted as measurements"""
+
+[[id]]
+id = "CG-12"
+level = "open"
+suite = "scaling"
+statement = """Achieved MACs per second of the sub-cubic recursion against the cubic packed walk on the i32-exact lane, swept through the crossover with the fitted exponent's interval and sample count and the host's fastest sustained product rate on the same axes, with byte-identity asserted inside the timed region"""
+
+[[id]]
+id = "CG-13"
+level = "build"
+suite = "scaling"
+statement = """The resolved kernel sequence is cached per element family; a cached selection returns the same sequence the full walk returns (asserted), and the latency this buys is reported under CG-07 and never asserted"""
+
+[[id]]
 id = "CM-01"
 level = "build"
 suite = "model"
@@ -556,3 +586,51 @@ id = "CD-14"
 level = "build"
 suite = "determinism"
 statement = """An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all"""
+
+[[id]]
+id = "CK-14"
+level = "build"
+suite = "codec"
+statement = """The arena tier at a `u8` code width decodes the same alphabet stream as its `u16` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its codebook is borrowed, never owned"""
+
+[[id]]
+id = "CD-18"
+level = "build"
+suite = "determinism"
+statement = """A u8-symbol-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, at every offer including none, and under an epilogue that reads `C`"""
+
+[[id]]
+id = "CD-19"
+level = "build"
+suite = "determinism"
+statement = """The float driver's scaled lanes give byte-identical output whether the integer dot product runs as the scalar loop or on the integer kernel table, at every shape and every offer, including none"""
+
+[[id]]
+id = "CD-20"
+level = "build"
+suite = "determinism"
+statement = """A u8-symbol-coded float weight matrix tabulated in the scaled integer lane gives byte-identical output to the dense float driver at every shape and every offer, including none, with the span walk admitted and declined alike, and a depth past the lane's run is chunked exactly"""
+
+[[id]]
+id = "CG-14"
+level = "open"
+suite = "scaling"
+statement = """Achieved bytes per second for a u8-symbol-coded gemv and skinny GEMM, and for an f32 oracle, against the host's STREAM triad number measured in the same harness, with byte-identity asserted inside the timed region"""
+
+[[id]]
+id = "CG-15"
+level = "open"
+suite = "scaling"
+statement = """Achieved MACs per second of the float placement bridge --- the default driver's auto-selected lane against the explicit entry's richer offers, with the decline fills pricing the scalar lanes both fall to --- measured on the shapes ANALYSIS tables, with byte-identity asserted inside the timed region"""
+
+[[id]]
+id = "CG-16"
+level = "open"
+suite = "scaling"
+statement = """Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes, with byte-identity asserted inside the timed region"""
+
+[[id]]
+id = "CG-17"
+level = "open"
+suite = "scaling"
+statement = """Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime, per panel depth and bound, with byte-identity asserted inside the timed region"""

@@ -193,12 +193,15 @@ fn working_set_scaling_cg_04() {
         previous = want;
     }
 
-    // The suggestion asks for one block of each operand at the full depth, so it
-    // grows with `k` --- and the bound that matters is that it is never more
+    // The suggestion is the larger of two wants. The cubic walk's is one block
+    // of each operand at the full depth, so it grows with `k` and is never more
     // than the operands themselves, because `MC <= m` and `NC <= n` after the
-    // clamps. A caller who wants less offers less and gets the same bytes from
-    // the chunked traversal (`CD-04`, `CD-10`), which is what makes this a query
-    // and not a requirement.
+    // clamps. The recursion's is its block sums: a quarter of the level above's
+    // at each level, so at most `4/3` of the operands in the limit, plus the
+    // base case's own panel. Twice the operands covers both with room, and a
+    // caller who wants less offers less and gets the same bytes (`CD-04`,
+    // `CD-10`, `CD-21`), which is what makes this a query and not a
+    // requirement.
     for (m, k, n) in [
         (1usize, 1usize << 30, 1usize),
         (1 << 20, 1 << 20, 1 << 20),
@@ -209,8 +212,8 @@ fn working_set_scaling_cg_04() {
         let operands = k.saturating_mul(m) + k.saturating_mul(n);
         eprintln!("CG-04 (open): {m}x{k}x{n} suggests {want}, operands are {operands}");
         assert!(
-            want <= operands,
-            "the suggestion never exceeds the operands it packs from"
+            want <= 2 * operands,
+            "the suggestion stays within twice the operands it packs from"
         );
     }
 }

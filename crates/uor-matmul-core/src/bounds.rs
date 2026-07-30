@@ -5,7 +5,7 @@
 //! `133144` anywhere, and neither does a user who instantiates `(i8, 127)` with
 //! `k = 10^9` (R1, R8).
 
-use crate::alphabet::IntegerElement;
+use crate::alphabet::{Bound, IntegerElement};
 
 /// Bits sufficient for any accumulation *any addressable machine* can express:
 ///
@@ -126,6 +126,85 @@ pub const fn narrow_cap_for(b: u128, k: usize) -> Option<u128> {
     None
 }
 
+/// Witness that an f64 arithmetic lane computes the same integer the exact
+/// accumulator does, for a declared alphabet bound and a declared depth.
+///
+/// IEEE 754 binary64 holds every integer up to `2^53` exactly, and an add,
+/// subtract, multiply, or FMA whose operands and result are integers inside
+/// that range *is* the integer operation --- exact, and independent of
+/// schedule, because an exact result has no schedule. So a float opcode is not
+/// forbidden by what it is; it is forbidden where it can round, and permitted
+/// where it cannot. Where it cannot is a fact about two numbers: the alphabet
+/// bound, and the deepest run of products the lane accumulates before it is
+/// folded into the exact accumulator. A product of two alphabet elements has
+/// magnitude at most `Bd::VALUE^2`, and a run of at most `DEPTH` of them at
+/// most `DEPTH * Bd::VALUE^2`, so the lane is exact exactly while that total is
+/// at most `2^53`.
+///
+/// That fact is checked *here*, at compile time, by the type system and not by
+/// a reviewer: [`F64Exact::new`] is the only constructor, and it does not
+/// compile outside the bound. This is the shape `CU-01` takes after its
+/// restatement --- the property is exactness and schedule independence, not the
+/// absence of an opcode --- and it is what the gates key on: the disassembly
+/// gate permits a float opcode only in a function named for this witness, and
+/// the source gate requires every such function to mention the witness, so a
+/// float opcode in shipped code implies a proof the compiler has already
+/// checked. An fp64 FMA on integer operands below `2^26` is exact; a gate that
+/// forbids it is forbidding a factorization, not a defect.
+#[derive(Clone, Copy, Debug)]
+pub struct F64Exact<Bd: Bound, const DEPTH: u64> {
+    // Private, so the only way to hold one is `new`, and `new` is the proof.
+    // `Bd` is carried for the type-level fact, not for anything to store.
+    proof: core::marker::PhantomData<Bd>,
+}
+
+impl<Bd: Bound, const DEPTH: u64> F64Exact<Bd, DEPTH> {
+    /// The precondition, as a const. Referencing it is what forces the
+    /// compiler to evaluate it; an associated const that nothing references is
+    /// never evaluated, which is why [`F64Exact::new`] names it.
+    const EXACT: () = {
+        // Checked, for the same reason `fits_narrow` is: `Bnd<{1 << 64}>` is a
+        // legitimate bound, its square is not a `u128`, and the honest answer
+        // there is that no f64 lane is exact --- which `panic!` says here by
+        // refusing to compile the witness at all.
+        let Some(per_step) = Bd::VALUE.checked_mul(Bd::VALUE) else {
+            panic!("an f64 lane is exact only while every product is an integer below 2^53")
+        };
+        let Some(total) = per_step.checked_mul(DEPTH as u128) else {
+            panic!("an f64 lane is exact only while every partial sum is an integer below 2^53")
+        };
+        // `MANTISSA_DIGITS` is the language's own spelling of the binary64
+        // significand width --- 53, counting the implicit leading bit. Every
+        // integer up to `2^53` is exactly representable, and arithmetic on
+        // integers inside that range is the integer arithmetic (IEEE-754-2019,
+        // §3.3 and §5: the format names exact values and the operations are
+        // correctly rounded, so an exactly representable result is the exact
+        // result).
+        assert!(
+            total <= 1u128 << f64::MANTISSA_DIGITS,
+            "an f64 lane computes the same integer only while DEPTH * Bd::VALUE^2 <= 2^53"
+        );
+    };
+
+    /// Construct the witness. Compiles exactly when the declared bound and
+    /// depth keep every product and every partial sum below `2^53`; outside
+    /// that, this function does not exist for the instantiation, which is the
+    /// property being proved.
+    #[must_use]
+    pub const fn new() -> Self {
+        let () = Self::EXACT;
+        Self {
+            proof: core::marker::PhantomData,
+        }
+    }
+}
+
+impl<Bd: Bound, const DEPTH: u64> Default for F64Exact<Bd, DEPTH> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +276,30 @@ mod tests {
             "the case has to be out of reach of the widest candidate to test it"
         );
         assert_eq!(narrow_cap_for(wide, 4), None);
+    }
+
+    /// `CU-01`: the f64-lane witness compiles exactly inside its precondition.
+    ///
+    /// The failing direction cannot be a runtime test, because it is a
+    /// compile-time fact: `F64Exact::<Bnd<128>, 512>` has no constructor. What
+    /// a test can pin is the boundary the assertion computes --- the largest
+    /// admissible depth at a bound, and one past it, evaluated by the same
+    /// arithmetic the const uses.
+    #[test]
+    fn the_f64_lane_witness_holds_at_its_boundary_cu_01() {
+        use crate::alphabet::Bnd;
+        // W8A8 at a panel depth: 512 * 127^2 = 8258048 << 2^53.
+        let _w = F64Exact::<Bnd<127>, 512>::new();
+        // The boundary itself: bound 2^26, whose square is 2^52, admits a depth
+        // of two and not three. The `new` calls below are the admissible side;
+        // the inadmissible side is witnessed by `EXACT` evaluating to the same
+        // comparison this test recomputes.
+        let _w = F64Exact::<Bnd<{ 1 << 26 }>, 2>::new();
+        let cap = 1u128 << f64::MANTISSA_DIGITS;
+        assert!((1u128 << 26) * (1u128 << 26) * 2 <= cap);
+        assert!((1u128 << 26) * (1u128 << 26) * 3 > cap);
+        // A bound of zero is an alphabet containing only zero; every depth is
+        // exact.
+        let _w = F64Exact::<Bnd<0>, { u64::MAX }>::new();
     }
 }

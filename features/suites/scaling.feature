@@ -72,3 +72,47 @@ Feature: Scaling
     Given the standing corpus
     When the suite exercises CG-10
     Then the figure is reported and not asserted
+
+  @CG-11 @build
+  Scenario: Static issue analysis over the emitted inner loops names a bottleneck resource for every kernel sequence
+    Given the emitted assembly of the kernels crate and llvm-mca's scheduling models
+    When the suite exercises CG-11
+    Then every analysed sequence is reported with a named bottleneck
+    And the figures are scheduling-model predictions, never asserted as measurements
+
+  @CG-12 @open
+  Scenario: Achieved MACs per second of the sub-cubic recursion against the cubic packed walk on the i32-exact lane, swept through the crossover, with the host's fastest sustained product rate on the same axes
+    Given the standing sweep and its recorded seed
+    When the harness measures CG-12
+    Then the figure is reported and not asserted
+
+  @CG-13 @build
+  Scenario: The resolved kernel sequence is cached per element family, and a cached selection returns the sequence the full walk returns
+    Given the kernel table and a host whose feature bits cannot change while it runs
+    When the suite exercises CG-13
+    Then a cached selection equals the full walk for every family, bound, and panel height
+    And the latency this buys is reported under CG-07 and never asserted
+
+  @CG-14 @open
+  Scenario: Achieved bytes per second for a u8-symbol-coded gemv and skinny GEMM against an f32 oracle and the host's measured STREAM number
+    Given the standing sweep and its recorded seed
+    When the harness measures CG-14
+    Then the figure is reported and not asserted
+
+  @CG-15 @open
+  Scenario: Achieved MACs per second of the float placement bridge, the default auto-selection against the explicit entry, on the shapes ANALYSIS tables
+    Given the standing sweep and its recorded seed
+    When the harness measures CG-15
+    Then the figure is reported and not asserted
+
+  @CG-16 @open
+  Scenario: Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes
+    Given the standing sweep and its recorded seed
+    When the harness measures CG-16
+    Then the figure is reported and not asserted
+
+  @CG-17 @open
+  Scenario: Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime
+    Given the standing sweep and its recorded seed
+    When the harness measures CG-17
+    Then the figure is reported and not asserted

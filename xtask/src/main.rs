@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use uor_matmul_model::{codegen, Model};
 
 mod audit;
+mod census;
 
 fn main() -> ExitCode {
     let task = std::env::args()
@@ -26,6 +27,7 @@ fn main() -> ExitCode {
         "audit-purity" => audit::audit_purity(&root),
         "audit-disassembly" => audit::audit_disassembly(&root),
         "audit-deferral" => audit::audit_deferral(&root),
+        "issue-census" => census::issue_census(&root),
         "verify-oracles" => verify_oracles(&root),
         "validate" => validate(&root),
         _ => {
@@ -33,11 +35,12 @@ fn main() -> ExitCode {
                 "cargo xtask <task>\n\
                  \n\
                  check-model       R10: model/*.toml is the single source; regenerate and diff\n\
-                 check-constants   R1:  every constant derives; no magic numeral\n\
+                 check-constants   R1:  every constant derives or is measured; no magic numeral\n\
                  audit-limits      R8:  no bound that cannot be traced to a parameter\n\
                  audit-purity      R13: one method; no float addition, no fallback\n\
                  audit-disassembly CU-01: no float arithmetic opcode in any shipped kernel\n\
                  audit-deferral    R15: no TODO, no stub, no 'later version'\n\
+                 issue-census      CG-11: a named bottleneck for every emitted inner loop\n\
                  verify-oracles    R11: every external claim is bound to a committed artifact\n\
                  validate          run every gate above\n\
                  \n\

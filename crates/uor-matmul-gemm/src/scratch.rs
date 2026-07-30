@@ -163,11 +163,21 @@ impl<'s, E: Element, Bd: Bound> Scratch<'s, E, Bd> {
 /// from a shorter panel, and a caller who offers none gets the same bytes from
 /// the streaming traversal (`CD-04`).
 ///
-/// This is the amount the *full-depth* traversal wants, and measured it is the
-/// faster of the two wherever a caller can afford it. A caller who cannot ---
-/// because it grows with `k` --- offers instead
-/// `KC * (MC + NC)` here together with [`suggested_accumulators`], which is
-/// bounded, and gets the depth-chunked traversal at the same bytes.
+/// This is the larger of two wants. The first is the full-depth traversal's:
+/// one block of each operand at the full depth, `MC` rows of `A` and `NC`
+/// columns of `B`. That is what the blocked traversal reuses --- the `B` block
+/// across every row block, and the `A` block across every column panel --- and
+/// it is never more than the operands themselves. A caller who wants less
+/// offers less and gets the chunked traversal, at the same bytes (`CD-04`,
+/// `CD-10`).
+///
+/// The second is the sub-cubic recursion's, when the shape's size and
+/// evenness admit a level: the block sums it materializes plus the base
+/// case's own panel. The query cannot see the declared bound, so it cannot
+/// know whether the alphabet leaves the sums headroom; where it does not ---
+/// and on every lane but `i32`, which is the only lane with a measured
+/// crossover --- the recursion declines and the offer buys the same bytes
+/// from the cubic walk (`CD-10`, `CD-21`).
 pub fn suggested_scratch(shape: Shape) -> usize {
     use uor_matmul_core::generated::blocking;
     // One block of each operand at the full depth: `MC` rows of A and `NC`
@@ -180,9 +190,11 @@ pub fn suggested_scratch(shape: Shape) -> usize {
     // after the clamps, so this is at most `k * (m + n)`. A caller who wants
     // less offers less and gets the chunked traversal, at the same bytes
     // (`CD-04`, `CD-10`).
-    shape
+    let cubic = shape
         .k
-        .saturating_mul(shape.m.min(blocking::MC) + shape.n.min(blocking::NC)) // R3-ok: a scratch size query
+        .saturating_mul(shape.m.min(blocking::MC) + shape.n.min(blocking::NC)); // R3-ok: a scratch size query
+    let recursion = crate::strassen::wants(shape).0.min(usize::MAX as u128) as usize;
+    cubic.max(recursion)
 }
 
 /// How many exact accumulators would let the chunked-depth traversal run at its
@@ -191,22 +203,32 @@ pub fn suggested_scratch(shape: Shape) -> usize {
 /// A *query*, like [`suggested_scratch`]. Zero is a valid offer and gives the
 /// same bytes.
 ///
-/// The product is the output block the traversal keeps exact partial sums for:
-/// `MC` rows by `NC` columns, clamped to the shape. It does not grow with `k`,
-/// which is the whole point --- a caller with an astronomical depth offers this
-/// once and the depth is chunked to fit the cache rather than the buffer.
+/// This is the larger of two wants. The first is the depth-chunked
+/// traversal's: the output block it keeps exact partial sums for, `MC` rows
+/// by `NC` columns clamped to the shape, which does not grow with `k` --- the
+/// whole point, since a caller with an astronomical depth offers this once
+/// and the depth is chunked to fit the cache rather than the buffer.
+///
+/// The second is the sub-cubic recursion's: its product temporaries are exact
+/// sums, held in the accumulator's width while the level below runs. The same
+/// bound-blindness applies as in [`suggested_scratch`]: where the declared
+/// alphabet admits no level, the offer buys the same bytes from the cubic
+/// walk (`CD-21`).
 pub fn suggested_accumulators(shape: Shape) -> usize {
     use uor_matmul_core::generated::blocking;
-    if shape.k <= blocking::KC {
-        // Nothing to chunk: the full-depth traversal already holds every partial
-        // sum in a register.
-        return 0;
-    }
     // Paired with a panel offer of `KC * (MC + NC)` rather than the full-depth
     // one, this is the whole of what the depth-chunked traversal needs --- and
     // neither term grows with `k`.
-    shape
-        .m
-        .min(blocking::MC)
-        .saturating_mul(shape.n.min(blocking::NC)) // R3-ok: a scratch size query
+    let chunked = if shape.k <= blocking::KC {
+        // Nothing to chunk: the full-depth traversal already holds every partial
+        // sum in a register.
+        0
+    } else {
+        shape
+            .m
+            .min(blocking::MC)
+            .saturating_mul(shape.n.min(blocking::NC)) // R3-ok: a scratch size query
+    };
+    let recursion = crate::strassen::wants(shape).1.min(usize::MAX as u128) as usize;
+    chunked.max(recursion)
 }

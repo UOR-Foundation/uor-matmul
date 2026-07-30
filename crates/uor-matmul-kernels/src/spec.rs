@@ -24,6 +24,9 @@
 //! Which one runs is decided by the caller's *declarations* --- the alphabet
 //! bound and the encode mode --- never by a heuristic and never by the data.
 
+#[cfg(feature = "std")]
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use uor_matmul_core::Backend;
 
 /// Where element `p` of lane `l` sits inside a packed panel of `lanes` lanes
@@ -231,6 +234,79 @@ macro_rules! collect {
     }};
 }
 
+/// How many availability lists this process has materialized into the cache.
+///
+/// Instrumentation for `CG-13`, and cold-path only: the increment runs inside
+/// `OnceLock::get_or_init`, which happens once per family per process. The
+/// selection path itself is one acquire load.
+#[cfg(feature = "std")]
+static RESOLUTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// The number of entries in a family's list, as a const.
+#[cfg(feature = "std")]
+macro_rules! count {
+    ($($spec:expr),*) => { <[()]>::len(&[$(count!(@one $spec)),*]) };
+    (@one $spec:expr) => { () };
+}
+
+/// One family's list, in two forms generated from one entry list so they
+/// cannot drift: the full walk, which evaluates every availability predicate
+/// on every call, and the cached walk, which materializes the list once per
+/// process and hands out the resolved slice after.
+///
+/// What the cache fixes is the only host-fixed part of selection --- which
+/// sequences this host can run. The bound filter and the panel-height choice
+/// are the caller's declarations and are still answered per call, by
+/// [`choose_for_rows`], over whichever list it is given. Measured, the
+/// per-call walk was twenty nanoseconds per family at `n = 1`, on a call whose
+/// whole cost was a hundred and forty.
+///
+/// The cache exists only under `std`, because runtime detection does: without
+/// `std` every predicate answers from the build's target features, the walk is
+/// folded at compile time, and a cache would be machinery around nothing ---
+/// which is why an embedded build has nothing to detect (C1). Under `std` the
+/// resolved list is a plain slice, so a selection reads contiguous memory
+/// rather than re-running a chain of predicates; on a host where the
+/// predicates *are* compile-time constants the two forms measure the same.
+macro_rules! family {
+    ($(#[$meta:meta])* $name:ident, $cached:ident, $cache:ident, $E:ty, $L:ty;
+     $($cond:expr => $spec:expr),* $(,)?) => {
+        #[cfg(feature = "std")]
+        static $cache: std::sync::OnceLock<(
+            [Option<KernelSpec<$E, $L>>; count!($($spec),*)],
+            usize,
+        )> = std::sync::OnceLock::new();
+
+        $(#[$meta])*
+        #[inline]
+        pub fn $name() -> impl Iterator<Item = KernelSpec<$E, $L>> {
+            collect![$($cond => $spec),*]
+        }
+
+        #[doc(hidden)]
+        #[inline]
+        pub fn $cached() -> impl Iterator<Item = KernelSpec<$E, $L>> {
+            #[cfg(feature = "std")]
+            let list = {
+                let (slots, len) = $cache.get_or_init(|| {
+                    let mut slots = [None; count!($($spec),*)];
+                    let mut len = 0;
+                    for spec in $name() {
+                        slots[len] = Some(spec);
+                        len += 1;
+                    }
+                    RESOLUTIONS.fetch_add(1, Ordering::Relaxed);
+                    (slots, len)
+                });
+                slots[..*len].iter().flatten().copied()
+            };
+            #[cfg(not(feature = "std"))]
+            let list = $name();
+            list
+        }
+    };
+}
+
 /// The largest `mr * nr` any shipped kernel produces.
 ///
 /// Derived rather than chosen: every kernel below carries a `const` assertion
@@ -251,233 +327,260 @@ macro_rules! tile_fits {
     };
 }
 
-/// Every `i8 x i8 -> i32` kernel this build can run, portable first.
-#[inline]
-pub fn available_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
-    collect![
-        true => crate::isa::portable::I8_I32,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32,
-        crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPWSSD_I8_I32,
-        crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPBUSD_I8_I32,
-        crate::isa::arm::neon_available() => crate::isa::arm::NEON_I8_I32,
-        crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_I8_I32,
-        crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_I8_I32,
-    ]
+family! {
+    /// Every `i8 x i8 -> i32` kernel this build can run, portable first.
+    available_i8, cached_i8, I8_TILE, i8, i32;
+    true => crate::isa::portable::I8_I32,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32,
+    crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPWSSD_I8_I32,
+    crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPBUSD_I8_I32,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_I8_I32,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_I8_I32,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_I8_I32,
 }
 
-/// Every `i16 x i16 -> i64` kernel this build can run.
+family! {
+    /// Every `i16 x i16 -> i64` kernel this build can run.
+    ///
+    /// Two AVX2 sequences, and which is admissible is a question about the declared
+    /// alphabet. `_mm256_madd_epi16` is this family's arithmetic in one instruction
+    /// but sums its pair into an `i32`, so it is exact only up to a bound of
+    /// `32767`; the widening sequence is exact at every `i16` and issues more
+    /// instructions. The paired one is listed last so that a declaration admitting
+    /// it gets it.
+    available_i16, cached_i16, I16_TILE, i16, i64;
+    true => crate::isa::portable::I16_I64,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64,
+}
+
+family! {
+    /// Every exact `i32 x i32 -> i64` kernel this build can run.
+    ///
+    /// The product of two `i32` needs 62 bits, so the lane must be 64.
+    /// `_mm256_mul_epi32` is a signed `32x32 -> 64` multiply, which is this
+    /// family's whole arithmetic in one instruction.
+    available_i32_exact, cached_i32_exact, I32_EXACT, i32, i64;
+    true => crate::isa::portable::I32_I64,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64,
+}
+
+family! {
+    /// Every modular `i32 x i32 -> i32` kernel this build can run.
+    ///
+    /// The lane is `Z/2^32`. Legitimate exactly when the caller asked to encode by
+    /// wrapping into a 32-bit output, because then the lane's own wrap *is* the
+    /// encode and nothing is lost that the caller did not ask to lose.
+    available_i32_modular, cached_i32_modular, I32_MODULAR, i32, i32;
+    true => crate::isa::portable::I32_MOD,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD,
+}
+
+family! {
+    /// Every exact `i64 x i64 -> i128` kernel this build can run.
+    ///
+    /// The product of two `i64` needs 128 bits, so the lane is an `i128`. No SIMD
+    /// integer multiply reaches that width on any target this crate supports, so
+    /// the portable kernel is not a placeholder here --- it is the whole of what
+    /// the hardware offers, and packing still buys it the locality every other
+    /// family gets.
+    available_i64_exact, cached_i64_exact, I64_EXACT, i64, i128;
+    true => crate::isa::portable::I64_I128,
+}
+
+family! {
+    /// Every modular `i16 x i16 -> i32` kernel this build can run.
+    ///
+    /// Twice the lanes of the exact `i16` kernel, because in `Z/2^32` there is
+    /// nothing to widen to: `madd` already lands in `i32` and the accumulation
+    /// stays there.
+    available_i16_modular, cached_i16_modular, I16_MODULAR, i16, i32;
+    true => crate::isa::portable::I16_MOD,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD,
+}
+
+family! {
+    /// Every modular `i64 x i64 -> i64` kernel this build can run.
+    ///
+    /// A single `i64 x i64` product needs 128 bits, so there is no exact 64-bit
+    /// lane and no SIMD integer multiply that reaches it. In the quotient there is:
+    /// `Z/2^64` needs only the low half of each product, which is what a plain
+    /// `wrapping_mul` gives.
+    available_i64_modular, cached_i64_modular, I64_MODULAR, i64, i64;
+    true => crate::isa::portable::I64_MOD,
+}
+
+family! {
+    /// The `i8` tile sequences over a *narrow* panel: half the columns.
+    ///
+    /// A tile panel wider than the output is zero-padded and the kernel does that
+    /// padding's arithmetic, so at `n = 8` a sixteen-column panel is twice the work
+    /// the product needs --- measured, that made `i8` at `n = 8` slower than the same
+    /// kernel at `n = 16`.
+    ///
+    /// Its own list rather than more entries in [`available_i8`], because the driver
+    /// only asks when the shape is narrower than the tile it already has. Adding
+    /// them to the ordinary list lengthened every selection, including the calls
+    /// that could never use one: measured, a hundred nanoseconds on a shape whose
+    /// whole cost is a hundred and twenty.
+    available_i8_narrow, cached_i8_narrow, I8_NARROW, i8, i32;
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1_N8,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_N8,
+}
+
+family! {
+    /// Every `i8` *reduce* sequence this build can run.
+    ///
+    /// The reduce factorization puts the vector lanes on `k` rather than on the
+    /// columns of `C`. It is the one to use when the output is narrower than a tile:
+    /// a tile kernel produces `nr` columns per call whether they exist or not, so a
+    /// single dot product fills one lane in ninety-six, while there is always more
+    /// `k` to fill a lane with.
+    ///
+    /// Not a special case and not a fallback --- the same identity, with the
+    /// reduction factored across lanes instead of the output. `CB-06` asserts it
+    /// agrees with the reference byte for byte, and the driver chooses between the
+    /// two by comparing the shape against the tile, which is a declaration.
+    available_reduce_i8, cached_reduce_i8, REDUCE_I8, i8, i32;
+    true => crate::isa::portable::R1_I8_I32,
+    true => crate::isa::portable::R_I8_I32,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32_1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32_1,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32_1,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32_1,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32,
+}
+
+family! {
+    /// Every exact `i16` reduce sequence. See [`available_reduce_i8`].
+    available_reduce_i16, cached_reduce_i16, REDUCE_I16, i16, i64;
+    true => crate::isa::portable::R1_I16_I64,
+    true => crate::isa::portable::R_I16_I64,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_I64_1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_I64,
+}
+
+family! {
+    /// Every modular `i16` reduce sequence. See [`available_reduce_i8`].
+    available_reduce_i16_modular, cached_reduce_i16_modular, REDUCE_I16_MODULAR, i16, i32;
+    true => crate::isa::portable::R1_I16_MOD,
+    true => crate::isa::portable::R_I16_MOD,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_MOD_1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_MOD,
+}
+
+family! {
+    /// Every exact `i32` reduce sequence. See [`available_reduce_i8`].
+    available_reduce_i32_exact, cached_reduce_i32_exact, REDUCE_I32_EXACT, i32, i64;
+    true => crate::isa::portable::R1_I32_I64,
+    true => crate::isa::portable::R_I32_I64,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_I64_1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_I64,
+}
+
+family! {
+    /// Every modular `i32` reduce sequence. See [`available_reduce_i8`].
+    available_reduce_i32_modular, cached_reduce_i32_modular, REDUCE_I32_MODULAR, i32, i32;
+    true => crate::isa::portable::R1_I32_MOD,
+    true => crate::isa::portable::R_I32_MOD,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_MOD_1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_MOD,
+}
+
+family! {
+    /// Every exact `i64` reduce sequence.
+    ///
+    /// An `i64 x i64` product needs 128 bits and no SIMD multiply reaches that width
+    /// on any supported target, so the reference is the whole of what the hardware
+    /// offers --- but the reduce *traversal* still buys this family what it buys
+    /// every other: a narrow output stops paying for columns that are not there.
+    available_reduce_i64_exact, cached_reduce_i64_exact, REDUCE_I64_EXACT, i64, i128;
+    true => crate::isa::portable::R1_I64_I128,
+    true => crate::isa::portable::R_I64_I128,
+}
+
+family! {
+    /// Every modular `i64` reduce sequence. See [`available_reduce_i64_exact`].
+    available_reduce_i64_modular, cached_reduce_i64_modular, REDUCE_I64_MODULAR, i64, i64;
+    true => crate::isa::portable::R1_I64_MOD,
+    true => crate::isa::portable::R_I64_MOD,
+}
+
+/// The same lists, with each family's resolved once per process instead of
+/// once per call.
 ///
-/// Two AVX2 sequences, and which is admissible is a question about the declared
-/// alphabet. `_mm256_madd_epi16` is this family's arithmetic in one instruction
-/// but sums its pair into an `i32`, so it is exact only up to a bound of
-/// `32767`; the widening sequence is exact at every `i16` and issues more
-/// instructions. The paired one is listed last so that a declaration admitting
-/// it gets it.
-#[inline]
-pub fn available_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
-    collect![
-        true => crate::isa::portable::I16_I64,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL_M1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_M1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64,
-    ]
-}
-
-/// Every exact `i32 x i32 -> i64` kernel this build can run.
+/// Which sequences a host can run is fixed while it runs --- the predicates
+/// are CPU feature bits --- so reading them anew on every selection is a cost
+/// with no information in it. Measured, that was twenty nanoseconds per family
+/// at `n = 1`, and a narrow shape asks two or three families. Under `std` each
+/// family's list is materialized into a `OnceLock` on first use and handed out
+/// as a plain slice after; without `std` every predicate is a build-time
+/// constant and the functions here are the full walk, which folds to nothing.
+/// The driver (`uor_matmul_gemm::kernel`) selects from here; the full walk
+/// above remains the reference, and `CG-13` asserts the two agree in every
+/// family.
 ///
-/// The product of two `i32` needs 62 bits, so the lane must be 64.
-/// `_mm256_mul_epi32` is a signed `32x32 -> 64` multiply, which is this
-/// family's whole arithmetic in one instruction.
-#[inline]
-pub fn available_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
-    collect![
-        true => crate::isa::portable::I32_I64,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64_M1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64,
-    ]
-}
+/// Adding a sequence is still one line, in the family's `family!` invocation:
+/// both forms are generated from it.
+pub mod cached {
+    /// The `i16 x i16 -> i64` tile list, resolved once per process.
+    pub use super::cached_i16 as available_i16;
+    /// The modular `i16` list, resolved once per process.
+    pub use super::cached_i16_modular as available_i16_modular;
+    /// The exact `i32` list, resolved once per process.
+    pub use super::cached_i32_exact as available_i32_exact;
+    /// The modular `i32` list, resolved once per process.
+    pub use super::cached_i32_modular as available_i32_modular;
+    /// The exact `i64` list, resolved once per process.
+    pub use super::cached_i64_exact as available_i64_exact;
+    /// The modular `i64` list, resolved once per process.
+    pub use super::cached_i64_modular as available_i64_modular;
+    /// The `i8 x i8 -> i32` tile list, resolved once per process.
+    pub use super::cached_i8 as available_i8;
+    /// The `i8` narrow-panel list, resolved once per process.
+    pub use super::cached_i8_narrow as available_i8_narrow;
+    /// The exact `i16` reduce list, resolved once per process.
+    pub use super::cached_reduce_i16 as available_reduce_i16;
+    /// The modular `i16` reduce list, resolved once per process.
+    pub use super::cached_reduce_i16_modular as available_reduce_i16_modular;
+    /// The exact `i32` reduce list, resolved once per process.
+    pub use super::cached_reduce_i32_exact as available_reduce_i32_exact;
+    /// The modular `i32` reduce list, resolved once per process.
+    pub use super::cached_reduce_i32_modular as available_reduce_i32_modular;
+    /// The exact `i64` reduce list, resolved once per process.
+    pub use super::cached_reduce_i64_exact as available_reduce_i64_exact;
+    /// The modular `i64` reduce list, resolved once per process.
+    pub use super::cached_reduce_i64_modular as available_reduce_i64_modular;
+    /// The `i8` reduce list, resolved once per process.
+    pub use super::cached_reduce_i8 as available_reduce_i8;
 
-/// Every modular `i32 x i32 -> i32` kernel this build can run.
-///
-/// The lane is `Z/2^32`. Legitimate exactly when the caller asked to encode by
-/// wrapping into a 32-bit output, because then the lane's own wrap *is* the
-/// encode and nothing is lost that the caller did not ask to lose.
-#[inline]
-pub fn available_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
-    collect![
-        true => crate::isa::portable::I32_MOD,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD_M1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD,
-    ]
-}
-
-/// Every exact `i64 x i64 -> i128` kernel this build can run.
-///
-/// The product of two `i64` needs 128 bits, so the lane is an `i128`. No SIMD
-/// integer multiply reaches that width on any target this crate supports, so
-/// the portable kernel is not a placeholder here --- it is the whole of what
-/// the hardware offers, and packing still buys it the locality every other
-/// family gets.
-#[inline]
-pub fn available_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
-    collect![
-        true => crate::isa::portable::I64_I128,
-    ]
-}
-
-/// Every modular `i16 x i16 -> i32` kernel this build can run.
-///
-/// Twice the lanes of the exact `i16` kernel, because in `Z/2^32` there is
-/// nothing to widen to: `madd` already lands in `i32` and the accumulation
-/// stays there.
-#[inline]
-pub fn available_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
-    collect![
-        true => crate::isa::portable::I16_MOD,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD_M1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD,
-    ]
-}
-
-/// Every modular `i64 x i64 -> i64` kernel this build can run.
-///
-/// A single `i64 x i64` product needs 128 bits, so there is no exact 64-bit
-/// lane and no SIMD integer multiply that reaches it. In the quotient there is:
-/// `Z/2^64` needs only the low half of each product, which is what a plain
-/// `wrapping_mul` gives.
-#[inline]
-pub fn available_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
-    collect![
-        true => crate::isa::portable::I64_MOD,
-    ]
-}
-
-/// Every `i8` *reduce* sequence this build can run.
-///
-/// The reduce factorization puts the vector lanes on `k` rather than on the
-/// columns of `C`. It is the one to use when the output is narrower than a tile:
-/// a tile kernel produces `nr` columns per call whether they exist or not, so a
-/// single dot product fills one lane in ninety-six, while there is always more
-/// `k` to fill a lane with.
-///
-/// Not a special case and not a fallback --- the same identity, with the
-/// reduction factored across lanes instead of the output. `CB-06` asserts it
-/// agrees with the reference byte for byte, and the driver chooses between the
-/// two by comparing the shape against the tile, which is a declaration.
-#[inline]
-/// The `i8` tile sequences over a *narrow* panel: half the columns.
-///
-/// A tile panel wider than the output is zero-padded and the kernel does that
-/// padding's arithmetic, so at `n = 8` a sixteen-column panel is twice the work
-/// the product needs --- measured, that made `i8` at `n = 8` slower than the same
-/// kernel at `n = 16`.
-///
-/// Its own list rather than more entries in [`available_i8`], because the driver
-/// only asks when the shape is narrower than the tile it already has. Adding
-/// them to the ordinary list lengthened every selection, including the calls
-/// that could never use one: measured, a hundred nanoseconds on a shape whose
-/// whole cost is a hundred and twenty.
-pub fn available_i8_narrow() -> impl Iterator<Item = KernelSpec<i8, i32>> {
-    collect![
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1_N8,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_N8,
-    ]
-}
-
-/// Every `i8` *reduce* sequence this build can run.
-///
-/// The reduce factorization puts the vector lanes on `k` rather than on the
-/// columns of `C`. It is the one to use when the output is narrower than a tile:
-/// a tile kernel produces `nr` columns per call whether they exist or not, so a
-/// single dot product fills one lane in ninety-six, while there is always more
-/// `k` to fill a lane with.
-///
-/// Not a special case and not a fallback --- the same identity, with the
-/// reduction factored across lanes instead of the output. `CB-06` asserts it
-/// agrees with the reference byte for byte, and the driver chooses between the
-/// two by comparing the shape against the tile, which is a declaration.
-pub fn available_reduce_i8() -> impl Iterator<Item = KernelSpec<i8, i32>> {
-    collect![
-        true => crate::isa::portable::R1_I8_I32,
-        true => crate::isa::portable::R_I8_I32,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32_1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32,
-        crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32_1,
-        crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32,
-        crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32_1,
-        crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32,
-        crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32_1,
-        crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32,
-    ]
-}
-
-/// Every exact `i16` reduce sequence. See [`available_reduce_i8`].
-#[inline]
-pub fn available_reduce_i16() -> impl Iterator<Item = KernelSpec<i16, i64>> {
-    collect![
-        true => crate::isa::portable::R1_I16_I64,
-        true => crate::isa::portable::R_I16_I64,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_I64_1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_I64,
-    ]
-}
-
-/// Every modular `i16` reduce sequence. See [`available_reduce_i8`].
-#[inline]
-pub fn available_reduce_i16_modular() -> impl Iterator<Item = KernelSpec<i16, i32>> {
-    collect![
-        true => crate::isa::portable::R1_I16_MOD,
-        true => crate::isa::portable::R_I16_MOD,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_MOD_1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_MOD,
-    ]
-}
-
-/// Every exact `i32` reduce sequence. See [`available_reduce_i8`].
-#[inline]
-pub fn available_reduce_i32_exact() -> impl Iterator<Item = KernelSpec<i32, i64>> {
-    collect![
-        true => crate::isa::portable::R1_I32_I64,
-        true => crate::isa::portable::R_I32_I64,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_I64_1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_I64,
-    ]
-}
-
-/// Every modular `i32` reduce sequence. See [`available_reduce_i8`].
-#[inline]
-pub fn available_reduce_i32_modular() -> impl Iterator<Item = KernelSpec<i32, i32>> {
-    collect![
-        true => crate::isa::portable::R1_I32_MOD,
-        true => crate::isa::portable::R_I32_MOD,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_MOD_1,
-        crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_MOD,
-    ]
-}
-
-/// Every exact `i64` reduce sequence.
-///
-/// An `i64 x i64` product needs 128 bits and no SIMD multiply reaches that width
-/// on any supported target, so the reference is the whole of what the hardware
-/// offers --- but the reduce *traversal* still buys this family what it buys
-/// every other: a narrow output stops paying for columns that are not there.
-#[inline]
-pub fn available_reduce_i64_exact() -> impl Iterator<Item = KernelSpec<i64, i128>> {
-    collect![
-        true => crate::isa::portable::R1_I64_I128,
-        true => crate::isa::portable::R_I64_I128,
-    ]
-}
-
-/// Every modular `i64` reduce sequence. See [`available_reduce_i64_exact`].
-#[inline]
-pub fn available_reduce_i64_modular() -> impl Iterator<Item = KernelSpec<i64, i64>> {
-    collect![
-        true => crate::isa::portable::R1_I64_MOD,
-        true => crate::isa::portable::R_I64_MOD,
-    ]
+    /// How many availability lists this process has materialized.
+    ///
+    /// Instrumentation for `CG-13`: a test reads it to show the cache is
+    /// consulted --- that a repeat selection resolves nothing --- rather than
+    /// to assume it. It counts `OnceLock` initializations, so it moves once
+    /// per family per process and never on the selection path. Without `std`
+    /// there is nothing to resolve --- every predicate is a build-time
+    /// constant --- and the count is zero.
+    pub fn resolutions() -> usize {
+        #[cfg(feature = "std")]
+        {
+            super::RESOLUTIONS.load(core::sync::atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            0
+        }
+    }
 }
 
 /// Choose a sequence whose panel `rows` actually fills: the tallest such, and

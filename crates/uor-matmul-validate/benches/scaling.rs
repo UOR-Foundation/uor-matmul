@@ -19,7 +19,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use uor_matmul::prelude::*;
-use uor_matmul::{suggested_scratch, Shape};
+use uor_matmul::{suggested_float_panels, suggested_scratch, Shape};
 use uor_matmul_core::{Alphabet, EncodeMode, Full, PackedCode};
 use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 
@@ -149,11 +149,16 @@ fn vs_oracles(c: &mut Criterion) {
 
         f32_group.bench_function(format!("uor-matmul/{shape}"), |bench| {
             let mut out = vec![0.0f32; m * n];
-            // The packed float path and its caller-held panels, which is what
-            // the library runs; the generic driver would time a factorization
-            // no caller gets, and it reads several times slower.
-            let mut pa = vec![PackedCode::default(); k];
-            let mut pb = vec![PackedCode::default(); k * n];
+            // The packed float path, offered what `suggested_float_panels`
+            // names for the shape, because that is what a caller who follows
+            // the suggestion holds: the offer admits the float placement
+            // bridge where the shape does, so this times the kernel-table
+            // lane a real caller gets, not the decline a hand-sized offer
+            // would price. The generic driver would time a factorization no
+            // caller gets, and it reads several times slower.
+            let (pa_len, pb_len) = suggested_float_panels(Shape { m, k, n });
+            let mut pa = vec![PackedCode::default(); pa_len];
+            let mut pb = vec![PackedCode::default(); pb_len];
             bench.iter(|| {
                 let av = MatView::row_major(&a, m, k).expect("A fits");
                 let bv = MatView::row_major(&b, k, n).expect("B fits");

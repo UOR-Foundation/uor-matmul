@@ -35,7 +35,7 @@
 //! Every buffer is the caller's. These functions take pointers and lengths and
 //! own nothing.
 
-use uor_matmul_core::{Accumulator, Backend, Element};
+use uor_matmul_core::{Accumulator, Backend, Element, FloatElement};
 
 /// The sequences a build can run, reference first.
 ///
@@ -264,6 +264,20 @@ pub trait Lane<E: Element>: LaneWord {
 
     /// Place a completed run into the exact accumulator.
     fn place(self, acc: E::Acc) -> E::Acc;
+
+    /// Place a completed run into the exact accumulator, at `2^exponent`.
+    ///
+    /// The scale channel for a lane whose products were built from pre-scaled
+    /// elements: the run holds an exact integer at one declared scale, and
+    /// placing it is the accumulator's own `add_scaled` --- the decode's own
+    /// primitive, so nothing is rounded on the way in. Every lane whose
+    /// products are the elements' own is placed at `2^0`, which is what the
+    /// default says; a nonzero exponent reaching it is a driver bug, asserted
+    /// rather than dropped.
+    fn place_scaled(self, acc: E::Acc, exponent: i32) -> E::Acc {
+        debug_assert_eq!(exponent, 0, "a lane with no scale channel is placed at 2^0");
+        self.place(acc)
+    }
 }
 
 impl LaneWord for i32 {
@@ -513,6 +527,113 @@ impl Lane<i64> for Mod64 {
         // encode reads; the placement is congruent mod `2^64` to the exact sum
         // for the same reason `Mod32`'s is mod `2^32`.
         acc.add_i128(i128::from(self.0))
+    }
+}
+
+/// The float symbol lane: an `i64` word over pre-scaled `f32` significands.
+///
+/// The newtype exists for the reason [`Mod32`]'s does: the blanket
+/// `impl<E: Element> Lane<E> for i64` above already speaks for `i64`-as-lane
+/// with *exact full-alphabet* semantics, and for a float that reading is a
+/// stub --- a float has no magnitude for its bound to measure. This lane is a
+/// different contract on the same register width. The driver pre-scales the
+/// codebook and the activation tile to the panels' measured base exponents
+/// (the placement bridge's span walk, the same declaration discipline), so
+/// what `mac` receives are honest `f32` values that are exact integers below
+/// `2^31`; the product of two is an exact integer below `2^62`; and a run of
+/// them is exact for the depth the walk's per-side bounds declare. Placement
+/// is the accumulator's own `add_scaled` at `base_a + base_b`, reached through
+/// [`Lane::place_scaled`] --- the identity the bridge cashes, with the table
+/// doing the reduction: scaled significands are exact integers, tabulation is
+/// regrouping, and the sum is placed once per run (`CD-20`).
+///
+/// Admission is the driver's, asked once per call and never by this type: a
+/// non-finite code, a span past seven binades, or an `f64` significand is not
+/// this lane's alphabet, and those calls tabulate in no lane at all --- the
+/// dense float factorization answers for them, at the same bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+pub struct Scaled64(pub i64);
+
+impl Scaled64 {
+    /// A buffer of `i64` words, read as a buffer of scaled lanes.
+    ///
+    /// One lane per word, so the narrow offer the traversal accepts *is* a
+    /// lane buffer. This is a relabelling, never a copy --- the same move
+    /// [`Mod32::wrap_i128s_mut`] makes on the accumulator offer.
+    pub fn wrap_i64s_mut(words: &mut [i64]) -> &mut [Scaled64] {
+        let (ptr, len) = (words.as_mut_ptr(), words.len());
+        // SAFETY: `Scaled64` is `#[repr(transparent)]` over `i64`, so the two
+        // have the same size, alignment and validity, and the borrow is moved
+        // rather than duplicated.
+        unsafe { core::slice::from_raw_parts_mut(ptr.cast::<Scaled64>(), len) }
+    }
+}
+
+impl LaneWord for Scaled64 {
+    const ZERO: Self = Scaled64(0);
+
+    #[inline(always)]
+    fn add(self, other: Self) -> Self {
+        // Exact within the run the driver derived from the measured spans,
+        // which is the only place the gather runs: the same discipline the
+        // integer lanes state above, with the bound coming from the panels
+        // rather than the alphabet's declaration.
+        Scaled64(self.0.wrapping_add(other.0))
+    }
+}
+
+impl Lane<f32> for Scaled64 {
+    #[inline]
+    fn capacity(b: u128) -> Option<usize> {
+        // Reached by the driver only with the span walk's per-side bound, and
+        // by the sizing queries with the alphabet's `u128::MAX` --- where the
+        // honest data-free answer is one product, which is why the queries
+        // plan against the caches instead (`Tabulated::probe_capacity`).
+        capacity_of(i64::MAX as u128, b)
+    }
+
+    #[inline(always)]
+    fn mac(self, a: f32, w: f32) -> Self {
+        let (pa, pw) = (a.pack(), w.pack());
+        if pa.mantissa == 0 || pw.mantissa == 0 {
+            return self;
+        }
+        // Each operand is a pre-scaled significand: an exact integer below
+        // `2^31`, spelled `mantissa * 2^exp`. The exponents may be negative
+        // --- a significand with fewer than 24 significant bits is stored
+        // normalized, carrying trailing zeros where the value's low bits are
+        // --- so the right shift below drops only zero bits, which is the
+        // integer the product is. The left shift cannot lose a bit either:
+        // admission bounds each panel's span to seven binades, so the sum of
+        // the two exponents is at most fourteen and the product below `2^48`
+        // lands below `2^62`.
+        let product = pa.mantissa * pw.mantissa;
+        let shift = pa.exp.wrapping_add(pw.exp); // R3-ok: an exponent sum, bounded above
+        let placed = if shift >= 0 {
+            product << shift
+        } else {
+            product >> shift.wrapping_neg()
+        };
+        Scaled64(self.0.wrapping_add(placed))
+    }
+
+    #[inline]
+    fn place(self, acc: <f32 as Element>::Acc) -> <f32 as Element>::Acc {
+        // The trait's exponent-free form is placement at `2^0`, and the
+        // driver never reaches it for this lane: the traversal places through
+        // `place_scaled`, and the streaming decline accumulates raw elements
+        // in the family's wide lane. Written out so the contract has no hole.
+        self.place_scaled(acc, 0)
+    }
+
+    #[inline]
+    fn place_scaled(self, mut acc: <f32 as Element>::Acc, exponent: i32) -> <f32 as Element>::Acc {
+        // The run is an exact integer at the declared scale; placing it is
+        // the decode's own primitive, so nothing is rounded on the way in ---
+        // the same sentence `PlaceAt` tells for the bridge's `i128` sum.
+        acc.add_scaled(self.0.unsigned_abs() as u128, exponent, self.0 < 0);
+        acc
     }
 }
 

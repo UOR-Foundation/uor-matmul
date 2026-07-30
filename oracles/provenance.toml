@@ -124,3 +124,22 @@ kernel author with this library, so agreement among them is weaker evidence
 than it looks. The artifacts are committed with a per-file SHA-256 recorded in
 manifest.json, so the claim reproduces without a Python toolchain, and the
 harness verifies each digest before believing the bytes."""
+
+[[record]]
+id = "CK-14"
+oracle = "none: a self-describing artifact, not an outside witness"
+kind = "committed artifact"
+entry = "dequantized-8-bit-style f32 weights, <= 256 distinct bit patterns"
+harness = "crates/uor-matmul-validate/tests/symbol_corpus.rs::the_committed_symbol_corpus_fits_a_byte"
+version_pin = "oracles/symbols/manifest.json"
+exactness = "exact"
+status = "reproduced"
+generator = "oracles/symbols/generate.py"
+note = """The realistic case the u8 arena width exists for: an f32 weight
+artifact whose values are drawn from at most 256 distinct bit patterns. The
+codebook is the distinct patterns in canonical arena order (CK-10); the codes
+address it one byte a symbol; the dense spelling is committed beside them, so
+the fixture's reference is the artifact itself. Per-file SHA-256 lives in
+manifest.json and the harness verifies each digest before believing the
+bytes. No quality claim attaches to the codebook (N3): it is an input the
+library consumes, and fitting one beyond this trivial case is out of scope."""

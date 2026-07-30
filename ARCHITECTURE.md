@@ -13,16 +13,16 @@ having the most instruction support and the most external oracles.
 
 ## The crates, and why they are separate
 
-| Crate | Contains | `unsafe` | `alloc` | float arithmetic |
-| --- | --- | --- | --- | --- |
-| `uor-matmul-core` | alphabet, accumulator, reference accumulation, views, the error surface | forbidden | none | none |
-| `uor-matmul-codec` | the `Codec` trait, ten tiers, `CodedMatrix`, the kappa manifest, the E8 table | forbidden | none | none |
-| `uor-matmul-kernels` | one module per ISA, each a `KernelSpec` value | permitted, documented | none | none |
-| `uor-matmul-gemm` | the driver: traversals, scratch, epilogue, partition | none | none | none |
-| `uor-matmul` | the facade and the raw-pointer face | the raw face only | none | none |
-| `uor-matmul-model` | the typed model and the generators | none | freely | n/a |
-| `uor-matmul-validate` | oracle adapters, corpus, scaling harness | documented | freely | n/a |
-| `uor-matmul-conformance` | the BDD runner and the honesty meta-gate | none | freely | n/a |
+| Crate                    | Contains                                                                      | `unsafe`              | `alloc` | float arithmetic |
+| ------------------------ | ----------------------------------------------------------------------------- | --------------------- | ------- | ---------------- |
+| `uor-matmul-core`        | alphabet, accumulator, reference accumulation, views, the error surface       | forbidden             | none    | none             |
+| `uor-matmul-codec`       | the `Codec` trait, ten tiers, `CodedMatrix`, the kappa manifest, the E8 table | forbidden             | none    | none             |
+| `uor-matmul-kernels`     | one module per ISA, each a `KernelSpec` value                                 | permitted, documented | none    | none             |
+| `uor-matmul-gemm`        | the driver: traversals, scratch, epilogue, partition                          | none                  | none    | none             |
+| `uor-matmul`             | the facade and the raw-pointer face                                           | the raw face only     | none    | none             |
+| `uor-matmul-model`       | the typed model and the generators                                            | none                  | freely  | n/a              |
+| `uor-matmul-validate`    | oracle adapters, corpus, scaling harness                                      | documented            | freely  | n/a              |
+| `uor-matmul-conformance` | the BDD runner and the honesty meta-gate                                      | none                  | freely  | n/a              |
 
 The split is not organizational. `uor-matmul-kernels` is separate because it is
 where `#[target_feature]` is written, which requires `unsafe`; the three
@@ -45,14 +45,14 @@ from the host. So:
 acc_bits(E) = 1 + MAX_K_BITS + 2 * (E::BITS - 1) + log2(products per mac)
 ```
 
-| `E` | bits | accumulator |
-| --- | --- | --- |
-| `i8` | 79 | `i128` |
-| `i16` | 95 | `i128` |
-| `i32` | 127 | `i128` |
-| `i64` | 191 | `Limbs<3>` |
-| `Complex<i32>` | 128 | pair of `i128` |
-| `Complex<i64>` | 192 | pair of `Limbs<3>` |
+| `E`            | bits | accumulator        |
+| -------------- | ---- | ------------------ |
+| `i8`           | 79   | `i128`             |
+| `i16`          | 95   | `i128`             |
+| `i32`          | 127  | `i128`             |
+| `i64`          | 191  | `Limbs<3>`         |
+| `Complex<i32>` | 128  | pair of `i128`     |
+| `Complex<i64>` | 192  | pair of `Limbs<3>` |
 
 Declaring `MAX_K_BITS` rather than probing it is what makes this one table
 rather than one per target. A 32-bit host cannot reach that depth, so the width
@@ -63,10 +63,10 @@ For a float element the accumulator is `Complete<L, MIN_EXP>`: a fixed-point
 register spanning the entire product exponent range, plus sticky flags for the
 non-finite states.
 
-| `E` | product exponent span | limbs | bytes |
-| --- | --- | --- | --- |
-| `f32` | `2^-298 .. 2^256` | 10 | 80 |
-| `f64` | `2^-2148 .. 2^2048` | 67 | 536 |
+| `E`   | product exponent span | limbs | bytes |
+| ----- | --------------------- | ----- | ----- |
+| `f32` | `2^-298 .. 2^256`     | 10    | 80    |
+| `f64` | `2^-2148 .. 2^2048`   | 67    | 536   |
 
 The non-finite state is a *flag*, not a value. A value would have to take part
 in the fixed-point addition, and then the answer would depend on where in the
@@ -228,19 +228,53 @@ because a float alphabet has no magnitude to declare.
 
 Nothing below the identity level changes. `Codec` and `CodedMatrix` are generic
 over `Element`, the arena's decode is the table read `Grid` performs, and the
-lane is the exact accumulator (`Wide<Complete<L, MIN_EXP>>`, `LANE_IS_EXACT`),
-so tabulation is exact for the same reason it is for integer codes: the table
-entries are complete accumulations and reusing them is regrouping, not
-rounding. `CD-14` asserts the whole traversal byte-equal to the dense float
-driver, forced and declined alike.
+table's lane is a register that holds the products exactly, so tabulation is
+exact for the same reason it is for integer codes: the table entries are exact
+partial sums and reusing them is regrouping, not rounding. Which register ---
+the complete accumulator, or the scaled integer word the next paragraph names
+--- is the family's declaration, and `CD-14` asserts the whole traversal
+byte-equal to the dense float driver, forced and declined alike.
 
 What the tier does not claim is a traversal win, and the model records why.
 `MAX_BLOCK` is one --- one symbol per code --- and `tabulation_pays` refuses a
 one-element block on op count, exactly as it refuses `Grid<16>`: the table
 saves the multiply and no adds, so selection declines and the byte-identical
 dense route runs. The arena's claim is identity and residency; `CG-03` measures
-residency like any other codec's. A float block codebook, if measurements ever
-want one, is a `Book` instantiation and not a change to anything here.
+residency like any other codec's, and `CG-14` reports what the residency buys
+against the bus.
+
+The code width is a parameter of the one tier, not a second tier:
+`Arena<'_, E, N>` addresses the codebook with a `u16`, and
+`Arena<'_, E, N, u8>` with a byte (`CK-14`). At the byte width a codebook of
+256 distinct patterns stores one byte a symbol against the dense float's four,
+and the coded operand drives the same exact accumulation: the traversal
+declines the one-element block, as it always does, and the stream below the
+decline is the coded float path --- `CD-18` pins it byte-identical to
+`gemm_float` at every shape and every offer, under both epilogues. A `u8`
+stream is never the index stream the gather borrows --- the gather's index
+type is `u16` --- so the narrow spelling re-spells its codes as indices
+wherever the traversal builds one, at the same bytes.
+
+What the byte width does not buy by itself is the table's arithmetic: a table
+entry is `rows` lane words, and over the 80-byte complete accumulator a
+256-entry table holds no L1 slab at any tile. The lane question is answered
+one level up, not in the codec: `f32`'s table lane is `Scaled64`, an `i64` of
+significands pre-scaled to the panels' measured base exponents --- the
+placement bridge's span walk and admission, over `A` and over the codebook,
+asked once per call and only when the table was selected. At eight bytes a
+word the same slab holds at a four-row tile, and the forced traversal
+tabulates: the build decodes each symbol into the scaled alphabet once, the
+gather accumulates the narrow words, and the exact sum is placed at
+`2^(base_a + base_b)` through the accumulator's own `add_scaled` (`CD-20`).
+The exact accumulator is still the lane the streaming decline accumulates
+in, because the stream walks raw elements with no walk ahead of them; and it
+is still the whole answer for `f64`, whose 53-bit significand is not an
+`i32` at any span. Selection is a separate question, and `CG-16` measured
+it: the win is an op-kind one the instruction-count predicate cannot see,
+so the costed traversal still declines the one-element block. A float block
+codebook --- `MAX_BLOCK` past one --- remains a further step: `Book` is
+bounded to integer elements, so such a codebook would be a generalization of
+`Book`, not an instantiation of anything here.
 
 One implementation note is load-bearing. The portable gather staged a column
 group of lane words in a compile-time array, which pays when the words can sit

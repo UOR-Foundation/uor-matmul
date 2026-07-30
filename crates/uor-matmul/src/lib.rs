@@ -116,11 +116,13 @@ pub use uor_matmul_core::{
     Strides, Traversal, Triple,
 };
 pub use uor_matmul_gemm::{
-    coded_gemm, gemm, gemm_collapsed, gemm_float, gemm_float_packed, gemm_packed, gemm_tabulated,
-    gemm_tabulated_counted, suggested_accumulators, suggested_collapse_index,
-    suggested_collapse_rows, suggested_scratch, suggested_tabulation, tabulation_fits,
-    tabulation_pays, tabulation_rows, Bias, Census, CodedTriple, Collapse, Epilogue, GemmOptions,
-    Kernelized, Ledger, Linear, Partition, Scratch, SignedPlace, Table, TabulatedTriple, Tile,
+    coded_gemm, gemm, gemm_collapsed, gemm_float, gemm_float_bridged, gemm_float_packed,
+    gemm_packed, gemm_strassen, gemm_tabulated, gemm_tabulated_counted, strassen_levels,
+    strassen_scratch, suggested_accumulators, suggested_bridge_scaled, suggested_collapse_index,
+    suggested_collapse_rows, suggested_float_panels, suggested_scratch, suggested_tabulation,
+    tabulation_fits, tabulation_pays, tabulation_rows, Bias, Census, CodedTriple, Collapse,
+    Epilogue, GemmOptions, Kernelized, Ledger, Linear, Partition, PlaceAt, Scaled, Scratch,
+    SignedPlace, Table, TabulatedTriple, Tile,
 };
 pub use uor_matmul_kernels as kernels;
 
