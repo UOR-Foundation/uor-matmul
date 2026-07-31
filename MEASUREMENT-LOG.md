@@ -33,14 +33,15 @@ gates, or by being measured and recorded below as a result.
 The phase's eight items are all landed. What remains are the follow-ups the
 measurements named:
 
-1. **The multi-host pass.** Wired, not yet read: the `scaling` workflow now
-   runs the phase sweeps (CG-12, CG-14, CG-15, CG-16, and CG-17 under
-   wasmtime) on the x86 runner and on a native aarch64 runner, publishing the
-   logs as the `measurements-x86` and `measurements-aarch64` artifacts. What
-   remains is reading a run: the Strassen crossover, the bridge factor, and
-   the SWAR co-issue experiment (the CG-11 census has the AVX2 i8 tile bound
-   on Zn4FP2 with scalar ports idle in the model) are x86 questions this host
-   cannot answer locally.
+1. **The multi-host remainder.** The first pass is read (the entry below);
+   what it did not cover: the x86 CG-17 figure (the first run's swar step
+   failed on a missing wasip1 std and the pipe hid it --- fixed in this
+   branch, so the next scheduled run answers it), the VNNI break-even rows,
+   which stay `Unmeasured` until the breakeven instrument is wired into the
+   workflow and the runner's VNNI is confirmed, and the scalar-port co-issue
+   experiment, which is still unwritten (the CG-11 census's prediction ---
+   AVX2 i8 tile bound on Zn4FP2, scalar ports idle in the model --- is what
+   it would test).
 2. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
    §"Mantissa slicing, and the RNS beside it") is recorded: nine 8-bit
    passes, shift recombination, a wash where the narrow-to-wide ratio is
@@ -52,6 +53,39 @@ measurements named:
    not fire here.
 
 ## Measurements
+
+**The multi-host pass, first read (CG-12, CG-14, CG-15, CG-16 on the CI
+runners; figures `open`).** The `scaling` workflow's first measurement run
+(`#30657176730`, 2026-07-31, artifacts `measurements-x86` and
+`measurements-aarch64`), read against the single-host figures above. The
+sub-cubic recursion, three host classes now: the x86 runner crosses at
+`n = 1024` (`L=1` 15.522 against the cubic walk's 15.157), inside the work
+order's priced 1024--2048, where the M4 Max crossed at 768; the fitted
+exponent against `n` is `2.9042 +/- 0.0211` on x86 and `2.8767 +/- 0.0099`
+on the CI aarch64 runner, both intervals excluding `3.0`, so `CG-12`'s
+honesty condition now holds on three host classes. The recursion's margin
+over its own lane at `L=3`, `4096`: +30% on x86, +40% on the CI aarch64,
++56% on the M4 Max --- and it crosses the *modular* lane only on the M4 Max
+(29.4 against 22.0), which is a property of that machine's NEON lane, not
+of the recursion. The bridge: x86 explicit `1024` cubed 9.696 Gmac/s
+against matrixmultiply's 43.2 (a 4.5x gap), CI aarch64 5.911 against 25.1
+(4.2x), M4 Max 13.15 against 39.6 (3.0x) --- the work order's 4--7x factor
+over the scalar lanes remains an M4 Max measurement (3.0--3.5x pre-NEON),
+because the sweep's columns no longer print the scalar baseline, and that
+is noted rather than re-derived. The symbol path against the bus on x86
+(`CG-14`): STREAM 31.79 GB/s, the symbol walk at 0--1% of it --- the
+decode-bound finding, not the bandwidth one, on a second host. The symbol
+table's boundary on x86 (`CG-16`): the same shape as the M4 Max's --- a
+2.45x win at `1x1024x1024`, 1.7x at the `64x4096` shapes, catastrophic
+losses at the same one-column shapes --- so the `op-cost-fit` verdict above
+is not one machine's weather. Two harness defects the first run exposed,
+fixed in this branch: the swar step's toolchain had no wasip1 std (the
+pinned channel's target list does not name it and the action's `targets:`
+installs for stable), and the step's pipe swallowed the failure, so the
+artifact was empty and the job green; the workflow now adds the target
+explicitly and every measurement step runs under `pipefail`, which is the
+honesty rule applied to a workflow --- a measurement that cannot fail is
+not a measurement. `CG-17`'s x86 figure lands with the next scheduled run.
 
 **The quiet-host batch: the M1 gemv, the Strassen A/B, and the op-cost
 feasibility fit (CG-12, CG-16; figures `open`).** Three deferred measurements
