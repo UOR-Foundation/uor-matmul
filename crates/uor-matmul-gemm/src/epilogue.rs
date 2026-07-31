@@ -12,6 +12,8 @@ use uor_matmul_core::{
     AccOf, Accumulator, Complete, Element, EncodeFrom, EncodeMode, FloatElement, Limbs,
 };
 
+use core::marker::PhantomData;
+
 /// What to do with a finished accumulator and the value already in `C`.
 ///
 /// The trait takes the *exact* accumulator, not a narrowed one, so a user
@@ -216,5 +218,72 @@ impl<const L: usize> ScaleExact for uor_matmul_core::Limbs<L> {
 
     fn from_i128(v: i128) -> Self {
         Self::ZERO.add_i128(v)
+    }
+}
+
+/// An accumulator that can take an exact integer at a dyadic scale.
+///
+/// [`ScaleExact::from_i128`] is this at exponent zero. The general form is the
+/// float placement bridge's channel: the integer kernel table's exact sum
+/// arrives at the scale the panels were scaled to, and placing it there is
+/// [`Complete::add_scaled`] --- the decode's own primitive, so nothing is
+/// rounded on the way in (`CD-19`).
+pub trait PlaceAt: Accumulator {
+    /// Accumulate exactly `v * 2^exponent`.
+    fn place_at(&mut self, v: i128, exponent: i32);
+}
+
+impl<const L: usize, const MIN_EXP: i32> PlaceAt for Complete<L, MIN_EXP> {
+    fn place_at(&mut self, v: i128, exponent: i32) {
+        self.add_scaled(v.unsigned_abs(), exponent, v < 0);
+    }
+}
+
+/// The scale channel between the integer kernel table and a float output.
+///
+/// The float driver's scaled panels are exact integers, so their product is an
+/// exact integer dot product at one known scale --- `2^-(base_a + base_b)`,
+/// where the bases are the panels' measured exponent minima. The kernel table
+/// computes that integer; this epilogue is the far end of the bridge: the
+/// table's exact `i128` sum is placed into the float accumulator at the
+/// declared scale, exactly, and the inner epilogue runs on the placed value
+/// precisely as if the float driver had accumulated it there itself. Which is
+/// the same sentence the modular factorization tells for integers: an
+/// identity, not an approximation, and `CD-19` asserts the bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct Scaled<'e, F: FloatElement, Ep> {
+    /// The epilogue that runs on the placed accumulator.
+    inner: &'e Ep,
+    /// The exponent of bit 0 of every integer sum: `base_a + base_b`.
+    base: i32,
+    float: PhantomData<F>,
+}
+
+impl<'e, F: FloatElement, Ep> Scaled<'e, F, Ep> {
+    /// Wrap `inner`, placing each exact integer sum at `2^base` first.
+    pub fn new(inner: &'e Ep, base: i32) -> Self {
+        Self {
+            inner,
+            base,
+            float: PhantomData,
+        }
+    }
+}
+
+impl<F, O, Ep> Epilogue<i32, O> for Scaled<'_, F, Ep>
+where
+    F: FloatElement,
+    Ep: Epilogue<F, O>,
+    AccOf<F>: PlaceAt,
+{
+    fn reads_c(&self) -> bool {
+        // A property of the inner epilogue, unchanged by the placement.
+        self.inner.reads_c()
+    }
+
+    fn finish(&self, acc: i128, prior: Option<O>, mode: EncodeMode) -> O {
+        let mut placed = <AccOf<F> as Accumulator>::ZERO;
+        placed.place_at(acc, self.base);
+        self.inner.finish(placed, prior, mode)
     }
 }

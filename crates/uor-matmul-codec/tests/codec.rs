@@ -594,6 +594,15 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
     laws("Arena<4>", &arena, 1, |f: &mut dyn FnMut(u16)| {
         every_code(f)
     });
+
+    // The same tier at a `u8` code width (`CK-14`): the same table, the same
+    // laws, one byte a symbol.
+    let narrow = Arena::<'_, f32, 4, u8>::new(&arena_table);
+    laws("Arena<4, u8>", &narrow, 1, |f: &mut dyn FnMut(u8)| {
+        for c in 0..=u8::MAX {
+            f(c)
+        }
+    });
 }
 
 /// CK-10: an arena's codebook is canonical --- the source stream's distinct
@@ -630,7 +639,7 @@ fn arena_construction_is_canonical_ck_10() {
     // Distinct symbols, equal decodes: both zeros name the same exact zero.
     let table: &[Alphabet<f32, Whole<f32>>; 6] =
         as_alphabet_whole(&values[..n]).try_into().unwrap();
-    let arena = Arena::new(table);
+    let arena: Arena<'_, f32, 6> = Arena::new(table);
     let pos = Codec::<f32, Whole<f32>>::decode_element(&arena, 0, 0).get();
     let neg = Codec::<f32, Whole<f32>>::decode_element(&arena, 4, 0).get();
     assert_eq!(pos.to_bits(), 0x0000_0000);
@@ -647,6 +656,65 @@ fn arena_construction_is_canonical_ck_10() {
             .get()
             .to_bits(),
         values[1].to_bits()
+    );
+}
+
+/// `CK-14`: the arena tier at a `u8` code width decodes the same alphabet
+/// stream as its `u16` spelling --- exhaustively over the code space the two
+/// share --- and its codebook is borrowed, never owned: the table below is a
+/// `static`, which an owned table could not be.
+///
+/// The width is a parameter of the one tier rather than a second tier,
+/// because the decode, the enumeration, and the canonicalization are the same
+/// at either width. What changes is the residency --- one byte a symbol
+/// against the dense four --- which `CG-03` records as a ratio and `CG-14`
+/// measures against the bus.
+#[test]
+fn the_u8_arena_decodes_the_u16_spellings_stream_ck_14() {
+    // In canonical order already: `canonicalize`'s discipline is the caller's,
+    // and a `static` is where a borrowed codebook lives (R7, C1). Signed zeros
+    // and a NaN are symbols like any other (`CK-10`).
+    static TABLE: [Alphabet<f32, Whole<f32>>; 6] = [
+        Alphabet::symbol(0.0),      // 0x0000_0000
+        Alphabet::symbol(0.5),      // 0x3F00_0000
+        Alphabet::symbol(1.0),      // 0x3F80_0000
+        Alphabet::symbol(f32::NAN), // 0x7FC0_0000
+        Alphabet::symbol(-0.0),     // 0x8000_0000
+        Alphabet::symbol(-1.5),     // 0xBFC0_0000
+    ];
+    let wide: Arena<'_, f32, 6> = Arena::new(&TABLE);
+    let narrow: Arena<'_, f32, 6, u8> = Arena::new(&TABLE);
+
+    // Exhaustive over the narrow code space: every `u8` decodes as its `u16`
+    // widening does, codes past the table reducing modulo it on both (C6).
+    for c in 0..=u8::MAX {
+        let by_byte = Codec::<f32, Whole<f32>>::decode_element(&narrow, c, 0).get();
+        let by_word = Codec::<f32, Whole<f32>>::decode_element(&wide, u16::from(c), 0).get();
+        assert_eq!(
+            by_byte.to_bits(),
+            by_word.to_bits(),
+            "code {c:#04x} decodes differently at the two widths"
+        );
+    }
+
+    // The reachable space is the table unless the table is wider than the
+    // code type can address --- the same rule the `u16` spelling follows, at
+    // the byte's own ceiling.
+    assert_eq!(
+        <Arena<'_, f32, 6, u8> as Enumerable<f32, Whole<f32>>>::CODE_SPACE,
+        6
+    );
+    assert_eq!(
+        <Arena<'_, f32, 256, u8> as Enumerable<f32, Whole<f32>>>::CODE_SPACE,
+        256
+    );
+
+    // A `u8` stream is not the `u16` index stream the tabulated gather reads,
+    // so the narrow spelling never borrows it: the traversal re-spells the
+    // codes as indices and reads the same table entries, at the same bytes.
+    let codes: Vec<u8> = (0..=u8::MAX).collect();
+    assert!(
+        <Arena<'_, f32, 6, u8> as Enumerable<f32, Whole<f32>>>::as_index_stream(&codes).is_none()
     );
 }
 

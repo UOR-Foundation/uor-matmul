@@ -13,17 +13,28 @@ sentence". Everything else follows from those two.
 1. **The model is the single source (R10).** Every constant lives in
    `model/*.toml`. `crates/uor-matmul-core/src/generated.rs` and
    `CONFORMANCE.md` are *generated*; editing either is a mistake the gate
-   catches. Run `just model-write` after changing the model.
+   catches. Run `just model-write` after changing the model. Constants have two
+   honest kinds: derived, and discovered by measurement. A measured constant (a
+   blocking factor, a prefetch distance) is recorded with what measured it;
+   inventing a derivation for one is fiction (R1's allowlist).
 
 2. **Nothing is deferred (R15).** No `TODO`, no stub, no placeholder section, no
    capability behind a flag that turns it off. If a change cannot be finished,
    it should not be started --- and `cargo xtask audit-deferral` will say so.
+   Suspended for the representation-width performance phase: the phase's
+   measurement log (`MEASUREMENT-LOG.md`) may name next steps, because a rule
+   forbidding that makes the log unwritable. The suspension is recorded in
+   `model/ledger.toml` (`SUSP-R15-WIDTH-PHASE`), the gate reads its exemption
+   from there, and it ends when the phase closes.
 
-3. **One method (R13).** There is no fast path and no careful path. If a change
-   introduces a second way of computing the same thing, it is wrong even if both
-   ways agree, because agreement today is not agreement tomorrow. Backends and
-   traversals are *factorizations*: they must be differentially tested against
-   the portable reference, and the reference is never optimized (R6).
+3. **One answer, many factorizations (R13, C5).** There is no fast path and no
+   careful path. Lanes, traversals, tile and reduce kernels, narrow and wide
+   panels, table and dense sequences are *factorizations* of one identity: they
+   must be differentially tested against the portable reference, and the
+   reference is never optimized (R6). What makes them one method is that they
+   produce the same bytes, which the `CD-*` gates assert. If a change
+   introduces a second way of computing the same thing that can give a
+   different answer, it is wrong even if both ways agree today.
 
 4. **The operation is total (R14, C6).** `gemm` returns `()`. If a change wants
    to return a `Result`, the question to ask is "what object does not exist?" ---
@@ -51,11 +62,13 @@ scenario, a scenario with no ID, or an ID with no test all fail `just bdd`.
 ## Adding a backend
 
 Add a module under `crates/uor-matmul-kernels/src/isa/` exporting a
-`KernelSpec`, and add it to the `available_*` iterator for its element and lane
-pair --- `available_i8`, `available_i16_modular`, `available_i32_exact` and so on
-in `spec.rs`; there is no single `available()`. Touch no driver code --- if you
-need to, the abstraction is wrong and that is the thing to fix. The differential
-test picks it up automatically.
+`KernelSpec`, and add it to the family's entry list in `spec.rs` --- one line
+in the `family!` invocation behind `available_i8`, `available_i16_modular`,
+`available_i32_exact` and so on; there is no single `available()`. The one
+list generates both the full walk and the cached walk the driver selects from
+(`CG-13`), so a line added once appears in both. Touch no driver code --- if
+you need to, the abstraction is wrong and that is the thing to fix. The
+differential test picks it up automatically.
 
 ## Adding an element type
 

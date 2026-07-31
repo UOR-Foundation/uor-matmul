@@ -107,3 +107,27 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-17
     Then the claim holds byte for byte
+
+  @CD-18 @build
+  Scenario: A u8-symbol-coded float weight matrix gives byte-identical output to the dense float driver at every shape and every offer
+    Given the standing corpus
+    When the suite exercises CD-18
+    Then the claim holds byte for byte
+
+  @CD-19 @build
+  Scenario: The float driver's scaled lanes give byte-identical output whether the integer dot product runs as the scalar loop or on the integer kernel table, at every shape and every offer
+    Given the standing corpus
+    When the suite exercises CD-19
+    Then the claim holds byte for byte
+
+  @CD-20 @build
+  Scenario: A u8-symbol-coded float weight matrix tabulated in the scaled integer lane gives byte-identical output to the dense float driver at every shape and every offer, with the span walk admitted and declined alike
+    Given the standing corpus
+    When the suite exercises CD-20
+    Then the claim holds byte for byte
+
+  @CD-21 @build
+  Scenario: The sub-cubic recursion is byte-identical to the cubic packed walk at every shape, level count, and offer, and to the CX-01 oracle at every corpus size; an unadmitted level is declined and declining changes no byte
+    Given the standing corpus
+    When the suite exercises CD-21
+    Then the claim holds byte for byte

@@ -121,8 +121,8 @@ mod tests {
     };
     use uor_matmul_gemm::{
         gemm_float, gemm_tabulated_counted, suggested_tabulation, suggested_tabulation_index,
-        suggested_tabulation_panel, Census, Collapse, GemmOptions, Linear, Scratch,
-        TabulatedTriple, Tabulation,
+        suggested_tabulation_lanes, suggested_tabulation_panel, Census, Collapse, GemmOptions,
+        Linear, Scratch, TabulatedTriple, Tabulation,
     };
 
     /// The xorshift fill every sweep in this workspace uses, so two runs of
@@ -141,11 +141,23 @@ mod tests {
 
     /// The symbols one codeword can name, deterministic and small: a handful
     /// of magnitudes across a few exponents, so the exact accumulator's
-    /// placement step is exercised rather than dodged.
+    /// placement step is exercised rather than dodged. The magnitudes stay
+    /// inside one five-binade band, because the scaled lane admits a panel
+    /// only where `24 + span <= 31` (`lane_scale`'s bridge declaration): a
+    /// wider fill is declined by design, and this instrument exists to make
+    /// the table run, not to probe the decline.
     pub(crate) fn symbols(len: usize, salt: u64) -> Vec<f32> {
         fill(len, salt)
             .into_iter()
-            .map(|x| ((x % 2000) as f32 - 1000.0) / 500.0)
+            .map(|x| {
+                // [2^-4, 4): exponents -4 through 1, a span of five.
+                let mag = 0.0625 + (x % 1000) as f32 / 1000.0 * 3.9375;
+                if x & 1 == 0 {
+                    mag
+                } else {
+                    -mag
+                }
+            })
             .collect()
     }
 
@@ -216,6 +228,9 @@ mod tests {
             suggested_tabulation::<f32, Whole<f32>>(shape, S, BLK,)
         ];
         let mut ids = vec![0usize; suggested_tabulation_index(shape)];
+        // The scaled lane's words are `i64`-shaped and do not live in the
+        // exact offer: an empty lanes slice declines the table by design.
+        let mut lanes = vec![0i64; suggested_tabulation_lanes::<f32, Whole<f32>>(shape, S, BLK)];
         let mut panel = vec![Alphabet::<f32, Whole<f32>>::ZERO; suggested_tabulation_panel(S, BLK)];
         let mut got = vec![0.0f32; m * n];
         let mut census = Census::default();
@@ -231,7 +246,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
-                &mut Tabulation::with_index(&mut [], &mut ids),
+                &mut Tabulation::with_index(&mut lanes, &mut ids),
                 &mut Collapse::none(),
                 &mut census,
             );

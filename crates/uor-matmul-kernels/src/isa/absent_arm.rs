@@ -21,6 +21,11 @@ pub const NEON_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
 /// Unreachable: [`dotprod_available`] is `false`.
 pub const NEON_DOTPROD_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
 
+/// Unreachable: [`neon_available`] is `false`.
+pub const NEON_I32_I64: KernelSpec<i32, i64> = portable::I32_I64;
+/// Unreachable: [`neon_available`] is `false`.
+pub const NEON_I32_I64_M1: KernelSpec<i32, i64> = portable::I32_I64;
+
 /// Absent here; the reference reduce sequence carries this family.
 pub const NEON_R_I8_I32: KernelSpec<i8, i32> = portable::R_I8_I32;
 /// Absent here; the reference reduce sequence carries this family.

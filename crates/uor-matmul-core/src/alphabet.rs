@@ -129,6 +129,16 @@ pub trait IntegerElement: Element {
     /// rather than inherited from the build profile --- not because a wrap can
     /// occur.
     fn sub(self, other: Self) -> Self;
+
+    /// Exact sum, for the sub-cubic recursion's block sums.
+    ///
+    /// The recursion's level plan admits a level only when the grown declared
+    /// bound keeps every block sum inside the element type, so the addition
+    /// cannot leave the type's range wherever it is reached. Spelled
+    /// `wrapping_add` for the same reason [`IntegerElement::sub`] is spelled
+    /// `wrapping_sub`: R5 asks that the overflow behaviour be written, not
+    /// because a wrap can occur.
+    fn add(self, other: Self) -> Self;
 }
 
 /// What an IEEE code names.
@@ -171,12 +181,23 @@ pub enum Decoded {
 /// a sentinel exponent, so the struct needs no flag bytes and a packed panel
 /// costs half the cache it otherwise would. Both matter: this array is read
 /// once per multiply-accumulate.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+///
+/// The trailing word is the padding the layout would carry anyway, named so
+/// that the code is plain data (`Pod`) and a panel offer can be re-read as the
+/// sixteen-byte words it is. That re-read is the float placement bridge's:
+/// its reified `i32` operands live in the caller's panel offer rather than in
+/// an allocation the library does not make (R7), and a `PackedCode` is four
+/// `i32` words exactly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, bytemuck::Zeroable, bytemuck::Pod)]
+#[repr(C)]
 pub struct PackedCode {
     /// The signed integer significand, or the sign for a non-finite code.
     pub mantissa: i64,
     /// The binary exponent of bit 0 of `mantissa`, or a sentinel.
     pub exp: i32,
+    /// The layout's fourth word. Written as zero; never read.
+    #[doc(hidden)]
+    pub _pad: i32,
 }
 
 /// The exponent that marks an infinity. Below every real product exponent, and
@@ -205,6 +226,7 @@ impl PackedCode {
                     mantissa as i64
                 },
                 exp,
+                _pad: 0,
             },
             // The sign of an infinity rides in the mantissa, as `-1` or `1`,
             // so the product's sign is the product of the two mantissas and
@@ -212,10 +234,12 @@ impl PackedCode {
             Decoded::Infinite { sign } => Self {
                 mantissa: if sign { -1 } else { 1 },
                 exp: INF_EXP,
+                _pad: 0,
             },
             Decoded::NotANumber => Self {
                 mantissa: 0,
                 exp: NAN_EXP,
+                _pad: 0,
             },
         }
     }
@@ -535,6 +559,10 @@ macro_rules! impl_element_for_signed {
             fn sub(self, other: Self) -> Self {
                 self.wrapping_sub(other)
             }
+
+            fn add(self, other: Self) -> Self {
+                self.wrapping_add(other)
+            }
         }
     )* };
 }
@@ -572,6 +600,10 @@ impl IntegerElement for i64 {
 
     fn sub(self, other: Self) -> Self {
         self.wrapping_sub(other)
+    }
+
+    fn add(self, other: Self) -> Self {
+        self.wrapping_add(other)
     }
 }
 
@@ -669,6 +701,13 @@ macro_rules! impl_element_for_complex {
                 Complex {
                     re: <$t as IntegerElement>::sub(self.re, other.re),
                     im: <$t as IntegerElement>::sub(self.im, other.im),
+                }
+            }
+
+            fn add(self, other: Self) -> Self {
+                Complex {
+                    re: <$t as IntegerElement>::add(self.re, other.re),
+                    im: <$t as IntegerElement>::add(self.im, other.im),
                 }
             }
         }

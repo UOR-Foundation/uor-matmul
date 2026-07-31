@@ -24,8 +24,10 @@
 use uor_matmul_core::Backend;
 use uor_matmul_kernels::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
-    available_i64_modular, available_i8, available_i8_narrow, choose_for_rows, parity, portable_i8,
-    Factorization, KernelSpec,
+    available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
+    available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
+    available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
+    available_reduce_i8, choose_for_rows, parity, portable_i8, Factorization, KernelSpec,
 };
 
 /// The depths this harness walks: the whole corpus natively, the reduced one
@@ -361,6 +363,100 @@ fn wasm_simd128_equals_portable_cb_05() {
     let _ = check_named("CB-05", Backend::WasmSimd128);
 }
 
+/// `CB-12`: the wasm SIMD128 SWAR broadcast sequence equals the portable
+/// reference lane for lane, and selection offers it nowhere.
+///
+/// The sequence packs three `B` elements at 21-bit spacing in each 64-bit lane
+/// and multiplies by one broadcast scalar --- an ordinary integer identity, not
+/// an exactness argument this library is needed for. What this test pins is
+/// both halves of the measured outcome: the packing and its bias correction
+/// still compute *that* integer where the sequence can run, and no family list
+/// carries it --- `CG-17` measured it at 0.32--0.38x of the dot sequence it
+/// would displace, so an entry that reappears in a list is a shipped
+/// regression, and this assert is what says so.
+#[test]
+fn wasm_swar_broadcast_equals_portable_cb_12() {
+    let spec = uor_matmul_kernels::isa::wasm::SIMD128_SWAR_I8_I32;
+    let offered = available_i8().any(|s| {
+        s.backend == Backend::WasmSimd128
+            && s.mr == spec.mr
+            && s.nr == spec.nr
+            && s.k_group == spec.k_group
+    });
+    assert!(
+        !offered,
+        "CG-17 measured the SWAR sequence slower than the dot sequence; selection must not offer it"
+    );
+    if !cfg!(all(target_arch = "wasm32", target_feature = "simd128")) {
+        eprintln!(
+            "CB-12: the SWAR sequence runs only on baseline wasm SIMD128; the wasmtime cross-run covers the parity half"
+        );
+        return;
+    }
+    // Every packed depth, lane for lane: the spacing, the bias correction, and
+    // the chunk boundary all show up here if they are wrong. Depths are a
+    // whole number of `k`-groups, which is what the driver always packs.
+    let mut ks: Vec<usize> = depths()
+        .iter()
+        .map(|&kc| kc.div_ceil(spec.k_group) * spec.k_group)
+        .collect();
+    ks.dedup();
+    for kc in ks {
+        let pa = fill(spec.mr * kc, kc as u64 ^ 0x5B, |v| v as i8);
+        let pb = fill(spec.nr * kc, kc as u64 ^ 0xA7, |v| v as i8);
+        let mut acc = vec![0i32; spec.mr * spec.nr];
+        spec.mac_tile(kc, &pa, &pb, &mut acc);
+        assert_eq!(
+            acc,
+            reference_i8(&spec, kc, &pa, &pb),
+            "SWAR broadcast disagrees at kc={kc}"
+        );
+    }
+    // The alphabet's extremes, shallow and deep: the biased fields must absorb
+    // `-128` and `127` alike without a carry crossing a field boundary, at a
+    // depth well past the sequence's internal chunk.
+    for kc in [32usize, 160] {
+        for (av, bv) in [(i8::MIN, i8::MIN), (i8::MIN, i8::MAX), (i8::MAX, i8::MAX)] {
+            let pa = vec![av; spec.mr * kc];
+            let pb = vec![bv; spec.nr * kc];
+            let mut acc = vec![0i32; spec.mr * spec.nr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+            let want = (kc as i32) * i32::from(av) * i32::from(bv);
+            assert!(
+                acc.iter().all(|&x| x == want),
+                "SWAR broadcast at ({av}, {bv}) kc={kc}: {:?} want {want}",
+                &acc[..4.min(acc.len())]
+            );
+        }
+    }
+    // The tile contract is overwrite, not accumulate: the driver reuses the
+    // tile buffer without zeroing it, so a sequence that adds into `acc`
+    // double-counts on the second tile. A garbage-filled tile says which.
+    let kc = 96usize;
+    let pa = fill(spec.mr * kc, 0x33, |v| v as i8);
+    let pb = fill(spec.nr * kc, 0x44, |v| v as i8);
+    let mut acc = vec![0x5A5A_5A5Ai32; spec.mr * spec.nr];
+    spec.mac_tile(kc, &pa, &pb, &mut acc);
+    assert_eq!(
+        acc,
+        reference_i8(&spec, kc, &pa, &pb),
+        "the SWAR tile must be written, not accumulated into"
+    );
+    // The W4A8 bound, where the biased product is smallest: the sequence does
+    // not get a narrower declaration for it, so the fill is the check.
+    for kc in [33usize, 96] {
+        let pa = fill(spec.mr * kc, kc as u64 ^ 0x11, |v| (v % 15 - 7) as i8);
+        let pb = fill(spec.nr * kc, kc as u64 ^ 0x22, |v| (v % 15 - 7) as i8);
+        let mut acc = vec![0i32; spec.mr * spec.nr];
+        spec.mac_tile(kc, &pa, &pb, &mut acc);
+        assert_eq!(
+            acc,
+            reference_i8(&spec, kc, &pa, &pb),
+            "SWAR broadcast at the W4A8 bound disagrees at kc={kc}"
+        );
+    }
+}
+
 /// `CU-03`: every sequence agrees at depths straddling its own threshold, on
 /// the extremes where a lane fills fastest.
 #[test]
@@ -554,6 +650,175 @@ fn lane_depth_follows_the_declaration_cu_02() {
     // The modular lane is unbounded at every declared bound.
     assert_eq!(modular.lane_depth(1 << 31), usize::MAX);
     assert_eq!(modular.lane_depth(1), usize::MAX);
+}
+
+/// `CG-13`: the cached availability list *is* the full walk's list, in every
+/// family, and a selection from it returns the same sequence at every bound
+/// and panel height.
+///
+/// The driver selects from `uor_matmul_kernels::cached`, which reads each
+/// family's feature predicates once per process and reuses the bits. The claim
+/// is that this changes *when* the predicates are read and never *what*
+/// selection returns --- so this test compares the two walks directly, and the
+/// resolution counter is what makes "the cache is consulted" a number rather
+/// than an intention (the same shape of instrument as `dot_instrumented`).
+#[test]
+fn the_cached_walk_is_the_full_walk_cg_13() {
+    use uor_matmul_kernels::cached;
+
+    /// The identity of a spec, as a comparable value. `KernelSpec` carries no
+    /// `PartialEq` --- nothing in the library compares one --- so the test
+    /// names the fields it means, the entry point included.
+    fn key<E, L>(
+        s: &KernelSpec<E, L>,
+    ) -> (
+        Backend,
+        Factorization,
+        usize,
+        usize,
+        usize,
+        usize,
+        u128,
+        u128,
+        usize,
+    ) {
+        (
+            s.backend,
+            s.factorization,
+            s.mr,
+            s.nr,
+            s.k_group,
+            s.products_per_step,
+            s.lane_cap,
+            s.max_bound,
+            s.mac_tile as usize,
+        )
+    }
+
+    fn same<E, L, I, J>(family: &str, walk: impl Fn() -> I, cached_walk: impl Fn() -> J)
+    where
+        I: Iterator<Item = KernelSpec<E, L>>,
+        J: Iterator<Item = KernelSpec<E, L>>,
+    {
+        let full: Vec<_> = walk().collect();
+        let hit = cached::resolutions();
+        let cached_list: Vec<_> = cached_walk().collect();
+        assert_eq!(
+            cached::resolutions() - hit,
+            1,
+            "{family}: the first cached touch resolves its predicates exactly once"
+        );
+        assert_eq!(
+            full.iter().map(key).collect::<Vec<_>>(),
+            cached_list.iter().map(key).collect::<Vec<_>>(),
+            "{family}: the cached list differs from the full walk"
+        );
+        // What the driver does with the list: choose, at every declared bound
+        // and panel height, for every backend a caller can name.
+        for bound in [1, 127, 32767, 32768, 1 << 31, u128::MAX] {
+            for rows in [1, 4, 8, 64] {
+                for backend in Backend::ALL.into_iter().chain([Backend::Auto]) {
+                    let a = choose_for_rows(walk(), backend, bound, rows);
+                    let b = choose_for_rows(cached_walk(), backend, bound, rows);
+                    assert_eq!(
+                        a.as_ref().map(key),
+                        b.as_ref().map(key),
+                        "{family}: cached selection differs at bound {bound}, rows {rows}, \
+                         {backend:?}"
+                    );
+                }
+            }
+        }
+        // The loop above is hundreds of selections against one family. The
+        // count is the assertion that the cache is consulted, read the way
+        // `CU-02` reads `narrow_tiles` --- a number, not an intention.
+        assert_eq!(
+            cached::resolutions() - hit,
+            1,
+            "{family}: a repeat selection resolves nothing"
+        );
+    }
+
+    let cold = cached::resolutions();
+    let mut families = 0usize;
+    macro_rules! family {
+        ($name:literal, $walk:expr, $cached:expr) => {{
+            same($name, $walk, $cached);
+            families += 1;
+        }};
+    }
+    family!("i8 tile", available_i8, cached::available_i8);
+    family!(
+        "i8 narrow",
+        available_i8_narrow,
+        cached::available_i8_narrow
+    );
+    family!("i16 tile", available_i16, cached::available_i16);
+    family!(
+        "i16 modular",
+        available_i16_modular,
+        cached::available_i16_modular
+    );
+    family!(
+        "i32 exact",
+        available_i32_exact,
+        cached::available_i32_exact
+    );
+    family!(
+        "i32 modular",
+        available_i32_modular,
+        cached::available_i32_modular
+    );
+    family!(
+        "i64 exact",
+        available_i64_exact,
+        cached::available_i64_exact
+    );
+    family!(
+        "i64 modular",
+        available_i64_modular,
+        cached::available_i64_modular
+    );
+    family!(
+        "i8 reduce",
+        available_reduce_i8,
+        cached::available_reduce_i8
+    );
+    family!(
+        "i16 reduce",
+        available_reduce_i16,
+        cached::available_reduce_i16
+    );
+    family!(
+        "i16 modular reduce",
+        available_reduce_i16_modular,
+        cached::available_reduce_i16_modular
+    );
+    family!(
+        "i32 exact reduce",
+        available_reduce_i32_exact,
+        cached::available_reduce_i32_exact
+    );
+    family!(
+        "i32 modular reduce",
+        available_reduce_i32_modular,
+        cached::available_reduce_i32_modular
+    );
+    family!(
+        "i64 exact reduce",
+        available_reduce_i64_exact,
+        cached::available_reduce_i64_exact
+    );
+    family!(
+        "i64 modular reduce",
+        available_reduce_i64_modular,
+        cached::available_reduce_i64_modular
+    );
+    assert_eq!(
+        cached::resolutions() - cold,
+        families,
+        "every family resolved once and no selection re-resolved"
+    );
 }
 
 /// `CB-07`, at the extremes of every alphabet a sequence declares.

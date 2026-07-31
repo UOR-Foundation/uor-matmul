@@ -51,20 +51,20 @@
 use uor_matmul_codec::{CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
-    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, EncodeMode, MatView, MatViewMut,
-    NotAProduct, Shape, Traversal,
+    AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, EncodeMode, FloatElement, MatView,
+    MatViewMut, NotAProduct, Shape, Traversal,
 };
 
 use uor_matmul_core::{Backend, Strides, Triple};
 use uor_matmul_kernels::{
     available_table_i16, available_table_i32_modular, available_table_i64_modular,
-    available_table_i8, choose_table, packed_slot, portable_table, Mod32, Mod64,
+    available_table_i8, choose_table, packed_slot, portable_table, Mod32, Mod64, Scaled64,
 };
 
 use crate::collapse::{compact, distinct_rows, expand, Collapse};
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
-use crate::float::gemm_float;
+use crate::float::{admits_bridge, gemm_float, scaled_f32, Span};
 use crate::kernel::{gemm_packed, Kernelized};
 use crate::scratch::Scratch;
 
@@ -540,7 +540,7 @@ pub fn suggested_tabulation_lanes<E: Tabulated, Bd: Bound>(
         usize::MAX,
         usize::MAX,
         block,
-        <E::Lane as Lane<E>>::capacity(Bd::VALUE),
+        E::probe_capacity::<E::Lane>(Bd::VALUE),
     ) else {
         return 0;
     };
@@ -573,7 +573,7 @@ pub fn suggested_tabulation<E: Tabulated, Bd: Bound>(
         usize::MAX,
         usize::MAX,
         block,
-        <E::Lane as Lane<E>>::capacity(Bd::VALUE),
+        E::probe_capacity::<E::Lane>(Bd::VALUE),
     ) else {
         return 0;
     };
@@ -759,6 +759,49 @@ pub const fn tabulation_depth(
     }
 }
 
+/// What one call's panels declare for the lane: the scale its inputs are
+/// pre-scaled by, and the worst one-product magnitude its depth is derived
+/// from.
+///
+/// A fact of the call, not the family --- but for an integer family it is
+/// the family's own declaration: bases of zero and the square of the declared
+/// bound, with no walk to answer it, because an integer element carries no
+/// exponent. The float symbol lane's is the span walk's answer, asked once
+/// per call and only when the table was selected (`CD-20`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LaneScale {
+    /// `A`'s elements are pre-scaled by `2^-base_a`: the panel's lowest
+    /// decoded exponent.
+    pub base_a: i32,
+    /// The codebook's, likewise.
+    pub base_b: i32,
+    /// The worst one-product magnitude the lane must hold: the scaled
+    /// panels' per-side bounds multiplied, `2^(2p + wa + wb)` --- per side,
+    /// because the lane holds a product of one element of each panel and the
+    /// panels' spans differ. The kernel table's single declared bound,
+    /// squared, is the same answer at a symmetric span and the conservative
+    /// one at an asymmetric one; the lane is not the kernel table and is not
+    /// bound by its one-alphabet interface.
+    pub per_step: u128,
+}
+
+impl LaneScale {
+    /// The integral scale: nothing is pre-scaled, and the depth is the
+    /// lane's own answer at the declared bound.
+    fn integral(bound: u128) -> Self {
+        Self {
+            base_a: 0,
+            base_b: 0,
+            per_step: bound.saturating_mul(bound), // R3-ok: a bound, not an accumulation
+        }
+    }
+
+    /// The exponent a completed run is placed at: `base_a + base_b`.
+    fn exponent(&self) -> i32 {
+        self.base_a.saturating_add(self.base_b) // R3-ok: an exponent base, not an accumulation
+    }
+}
+
 /// The lane a family tabulates in, and the sequence that reads it.
 ///
 /// One associated type, not a scan. Which register holds a run of products is a
@@ -795,6 +838,17 @@ pub trait Tabulated: Element {
     /// quotient read would buy nothing, and [`Self::modular_table_admitted`]
     /// is `false` there.
     type ModLane: Lane<Self>;
+
+    /// The lane the streaming decline accumulates in.
+    ///
+    /// The family's own lane for an integer --- a plain dot product is a
+    /// table of one entry that nobody shares, so the stream and the table
+    /// hold their runs in the same register. A family whose table lane holds
+    /// *scaled* products cannot stream in it: the stream walks raw elements
+    /// with no span walk ahead of them, so its lane is the one that holds a
+    /// raw product exactly --- the complete accumulator, which was the float
+    /// families' table lane too before the scaled lane existed.
+    type StreamLane: Lane<Self>;
 
     /// Bytes one lane word occupies. The column loop's traffic is this divided
     /// by the codec's block, per product, which is the whole of why it is here.
@@ -898,6 +952,72 @@ pub trait Tabulated: Element {
         want: usize,
     ) -> Option<&'s mut [Self::ModLane]>;
 
+    /// The lane capacity to plan against before the call's panels are
+    /// walked.
+    ///
+    /// The lane's own answer at the declared bound, for every family whose
+    /// capacity is a function of the alphabet alone. A family whose real
+    /// capacity is a fact of the *data* --- the float symbol lane's is the
+    /// span walk's --- plans against the caches instead, and the walk's
+    /// answer shrinks the depth once it is in: planning at the data-free
+    /// answer, one product at an unbounded alphabet, would pin the stack at
+    /// one block for every call, admitted or not.
+    fn probe_capacity<L: Lane<Self>>(declared: u128) -> Option<usize> {
+        L::capacity(declared)
+    }
+
+    /// The scale one call's panels declare for the lane, from a walk of the
+    /// activations and the codebook --- or `None`, declining the table, when
+    /// the panels are not the lane's alphabet.
+    ///
+    /// The default answers the integral scale without walking: an integer
+    /// element carries no exponent and there is nothing to measure. The float
+    /// symbol lane's answer is the placement bridge's span walk (`CD-19`),
+    /// over `A` and over the codebook --- not the coded stream: the alphabet
+    /// of `W` is the codebook, already materialized, so the walk costs
+    /// `m * k + code_space * block` decodes rather than `(m + n) * k`.
+    ///
+    /// Asked only after the traversal has selected the table, so a call the
+    /// predicate declines never pays for it; the decodes it issues are
+    /// charged to the ledger, so a harness reads their price off the census.
+    fn lane_scale<Bd, C, Lg>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        w: &CodedMatrix<'_, Self, Bd, C>,
+        ledger: &mut Lg,
+    ) -> Option<LaneScale>
+    where
+        Bd: Bound,
+        C: Enumerable<Self, Bd>,
+        Lg: Ledger,
+    {
+        let _ = (a, w, ledger);
+        Some(LaneScale::integral(Bd::VALUE))
+    }
+
+    /// The most products one lane word holds for these panels, once the walk
+    /// has answered.
+    ///
+    /// The lane's own answer at the declared bound, for every family the
+    /// default `lane_scale` serves. The float symbol lane's is derived from
+    /// the walk's per-side bounds (`LaneScale::per_step`).
+    fn lane_run<L: Lane<Self>>(declared: u128, scale: &LaneScale) -> Option<usize> {
+        let _ = scale;
+        L::capacity(declared)
+    }
+
+    /// Scale one element by `2^-base`, exactly, on its way into the table's
+    /// inputs.
+    ///
+    /// Identity for every family the default `lane_scale` serves: their
+    /// elements carry no exponent and the base is zero. The float symbol
+    /// lane's is a power-of-two rescaling of the code --- bit surgery, not
+    /// float arithmetic --- exact by the same arithmetic the bridge's
+    /// `rescale` states.
+    fn prescale(x: Self, base: i32) -> Self {
+        let _ = base;
+        x
+    }
+
     /// Number the rows of `a` by symbolic identity, writing each row's
     /// representative into `index` and returning how many are distinct ---
     /// the row half of the collapse (`CD-15`, and `CD-17` for the float
@@ -968,6 +1088,7 @@ where
 impl Tabulated for i8 {
     type Lane = i32;
     type ModLane = i32;
+    type StreamLane = i32;
     const LANE_IS_EXACT: bool = false;
 
     fn modular_table_admitted(_: u32) -> bool {
@@ -1051,6 +1172,7 @@ impl Tabulated for i8 {
 impl Tabulated for i16 {
     type Lane = i64;
     type ModLane = i64;
+    type StreamLane = i64;
     const LANE_IS_EXACT: bool = false;
 
     fn modular_table_admitted(_: u32) -> bool {
@@ -1138,6 +1260,7 @@ impl Tabulated for i16 {
 impl Tabulated for i32 {
     type Lane = Wide<AccOf<i32>>;
     type ModLane = Mod32;
+    type StreamLane = Wide<AccOf<i32>>;
     const LANE_IS_EXACT: bool = true;
 
     fn modular_table_admitted(out_bits: u32) -> bool {
@@ -1226,6 +1349,7 @@ impl Tabulated for i32 {
 impl Tabulated for i64 {
     type Lane = Wide<AccOf<i64>>;
     type ModLane = Mod64;
+    type StreamLane = Wide<AccOf<i64>>;
     const LANE_IS_EXACT: bool = true;
 
     fn modular_table_admitted(out_bits: u32) -> bool {
@@ -1306,19 +1430,32 @@ impl Tabulated for i64 {
     }
 }
 
-/// `f32`: a float has no magnitude for a bound to measure, and the only
-/// register that holds a sum of its products exactly is the complete
-/// accumulator --- so the lane is that accumulator, with the same status
-/// `i32`'s has. There is no narrower word a float product could be accumulated
-/// in, because there is no float arithmetic in the accumulation at all (`CU-01`).
+/// `f32`: the lane is the scaled integer word, [`Scaled64`]. A float has no
+/// magnitude for a bound to measure, so the lane's alphabet is not the
+/// element type's but the *call's*: the panels' significands pre-scaled to
+/// their measured base exponents, which are exact integers below `2^31` ---
+/// the placement bridge's alphabet, one level up (`CD-19`). Over it the table
+/// is integer tabulation: the build decodes each codebook entry and each
+/// activation into that alphabet once, the gather accumulates eight-byte lane
+/// words, and the exact sum is placed at `2^(base_a + base_b)`. At a 256-entry
+/// codebook and a four-row tile the slab is 8 KiB where the complete
+/// accumulator's was 80, and the table fits L1 --- which is the whole of why
+/// this lane exists.
+///
+/// What the lane cannot hold, the walk declines by declaration: a non-finite
+/// code, or a span past the seven binades `24 + w <= 31` admits. Those calls
+/// take the dense float factorization at the same bytes, and the census says
+/// which ran (`CD-20`).
 impl Tabulated for f32 {
-    type Lane = Wide<AccOf<f32>>;
-    type ModLane = Wide<AccOf<f32>>;
-    const LANE_IS_EXACT: bool = true;
+    type Lane = Scaled64;
+    type ModLane = Scaled64;
+    type StreamLane = Wide<AccOf<f32>>;
+    const LANE_IS_EXACT: bool = false;
 
     fn modular_table_admitted(_: u32) -> bool {
-        // There is no quotient a float wraps into: the exact accumulator is
-        // the only lane, as the impl's note above says.
+        // There is no quotient a float wraps into, as before --- and the
+        // scaled lane is not one: it is exact at the declared scale, not
+        // congruent modulo a width.
         false
     }
 
@@ -1328,11 +1465,13 @@ impl Tabulated for f32 {
         rows: usize,
         group: usize,
         block: usize,
-    ) -> TableSpec<f32, Wide<AccOf<f32>>> {
-        // The reference is the only sequence for this family, and its `k_group`
-        // is one, which divides every block.
+    ) -> TableSpec<f32, Scaled64> {
+        // The reference is the only sequence for this family, exact on every
+        // alphabet by its own declaration, and its `k_group` is one, which
+        // divides every block. The walk's bound is not a selection input:
+        // there is no narrower-`max_bound` sequence to admit or decline.
         let _ = (backend, bound, block);
-        portable_table::<f32, Wide<AccOf<f32>>>(rows, group)
+        portable_table::<f32, Scaled64>(rows, group)
     }
 
     fn table_spec_modular(
@@ -1341,26 +1480,99 @@ impl Tabulated for f32 {
         rows: usize,
         group: usize,
         block: usize,
-    ) -> TableSpec<f32, Wide<AccOf<f32>>> {
+    ) -> TableSpec<f32, Scaled64> {
         // Never reached, as `i8`'s.
         Self::table_spec(backend, bound, rows, group, block)
     }
 
     fn lanes<'s>(
-        _: &'s mut [i64],
-        exact: &'s mut [AccOf<f32>],
+        narrow: &'s mut [i64],
+        _: &'s mut [AccOf<f32>],
         want: usize,
-    ) -> Option<&'s mut [Wide<AccOf<f32>>]> {
-        Some(Wide::wrap_slice_mut(exact.get_mut(..want)?))
+    ) -> Option<&'s mut [Scaled64]> {
+        // The lane word *is* an `i64`, so the narrow offer is the lane
+        // buffer, relabelled one word to one lane.
+        Some(Scaled64::wrap_i64s_mut(narrow.get_mut(..want)?))
     }
 
     fn lanes_modular<'s>(
         narrow: &'s mut [i64],
         exact: &'s mut [AccOf<f32>],
         want: usize,
-    ) -> Option<&'s mut [Wide<AccOf<f32>>]> {
+    ) -> Option<&'s mut [Scaled64]> {
         // Never reached, as `i8`'s.
         Self::lanes(narrow, exact, want)
+    }
+
+    fn probe_capacity<L: Lane<Self>>(_: u128) -> Option<usize> {
+        // The lane's capacity is a fact of the panels' spans, which the plan
+        // is made before: plan against the caches and let `lane_run` shrink
+        // the depth once the walk has answered.
+        None
+    }
+
+    fn lane_scale<Bd, C, Lg>(
+        a: &MatView<'_, Alphabet<Self, Bd>>,
+        w: &CodedMatrix<'_, Self, Bd, C>,
+        ledger: &mut Lg,
+    ) -> Option<LaneScale>
+    where
+        Bd: Bound,
+        C: Enumerable<Self, Bd>,
+        Lg: Ledger,
+    {
+        // The bridge's walk and the bridge's declaration (`CD-19`), over `A`
+        // and over the codebook. The alphabet of `W` is the codebook, already
+        // materialized, so the coded stream itself is never read here.
+        let (m, k) = (a.rows(), a.cols());
+        let peeled = a.peeled();
+        let mut finite = true;
+        let mut a_span = Span::EMPTY;
+        for i in 0..m {
+            for v in peeled.row_walk(i, 0, k) {
+                let code = v.pack();
+                finite &= code.is_finite();
+                a_span.see(code);
+            }
+        }
+        let mut b_span = Span::EMPTY;
+        let codec = w.codec();
+        let block = <C as uor_matmul_codec::Codec<Self, Bd>>::MAX_BLOCK;
+        for index in 0..C::CODE_SPACE {
+            for t in 0..block {
+                let code = codec.decode_element(C::code_at(index), t).get().pack();
+                finite &= code.is_finite();
+                b_span.see(code);
+            }
+        }
+        ledger.decoded((m * k + C::CODE_SPACE * block) as u64); // R3-ok: a size or cost query, not an accumulation
+        let (wa, wb) = (a_span.width(), b_span.width());
+        let bridge = finite
+            .then(|| admits_bridge::<Self>(a_span, b_span))
+            .flatten()?;
+        // The worst one-product magnitude, per side: `2^(p + wa)` of an
+        // activation against `2^(p + wb)` of a codebook entry.
+        let per_step = 1u128 << (2 * Self::SIGNIFICAND_BITS + wa + wb);
+        Some(LaneScale {
+            base_a: bridge.base_a,
+            base_b: bridge.base_b,
+            per_step,
+        })
+    }
+
+    fn lane_run<L: Lane<Self>>(_: u128, scale: &LaneScale) -> Option<usize> {
+        // The lane word is an `i64` and the family declares no other scaled
+        // lane, so the cap is `i64`'s own; the depth is the walk's per-side
+        // bound, exactly as `capacity` derives it from a single one.
+        Some(
+            usize::try_from((i64::MAX as u128) / scale.per_step) // R3-ok: a lane-width question, not an accumulation
+                .unwrap_or(usize::MAX)
+                .max(1),
+        )
+    }
+
+    fn prescale(x: Self, base: i32) -> Self {
+        scaled_f32(x.pack(), base)
     }
 
     fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
@@ -1409,10 +1621,16 @@ impl Tabulated for f32 {
     }
 }
 
-/// `f64`: as `f32`, one width up.
+/// `f64`: no scaled lane. A 53-bit significand is not an `i32` at any span ---
+/// the bridge's admission arithmetic answers for the type, not a branch on it
+/// --- so the lane is the complete accumulator, with the same status `i32`'s
+/// has, and a 256-entry table over 536-byte words fits no L1 tile at any
+/// tile height. The dense float factorization is what runs, at the same
+/// bytes (`CD-20`).
 impl Tabulated for f64 {
     type Lane = Wide<AccOf<f64>>;
     type ModLane = Wide<AccOf<f64>>;
+    type StreamLane = Wide<AccOf<f64>>;
     const LANE_IS_EXACT: bool = true;
 
     fn modular_table_admitted(_: u32) -> bool {
@@ -1504,11 +1722,20 @@ impl Tabulated for f64 {
 }
 
 /// The row tile, column block and stack depth one call resolves to.
+///
+/// `pub` so a measurement harness asks the planner the same question the
+/// traversal asks, once, instead of carrying a copy of the derivation that
+/// would drift from it: the chunk-extraction count the census does not see is
+/// a function of this plan and the walk's lane run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Plan {
-    rows: usize,
-    cols: usize,
-    depth: usize,
+pub struct Plan {
+    /// Rows of `A` one tile reduces together.
+    pub rows: usize,
+    /// Output columns one block of the traversal covers before `exact` is
+    /// reused.
+    pub cols: usize,
+    /// Blocks of the reduction the table stack holds at once.
+    pub depth: usize,
 }
 
 impl Plan {
@@ -1534,7 +1761,7 @@ impl Plan {
     /// Then the column block, as wide as the exact offer allows, because the
     /// build repeats once per column block. Then the depth, as deep as the lane
     /// offer and the cache allow.
-    fn choose(
+    pub fn choose(
         code_space: usize,
         shape: Shape,
         lane_bytes: usize,
@@ -1845,7 +2072,7 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
         exact_offer,
         offered,
         block,
-        <L as Lane<E>>::capacity(Bd::VALUE),
+        E::probe_capacity::<L>(Bd::VALUE),
     ) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
@@ -1882,6 +2109,24 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
         return;
     }
 
+    // The panels' own declaration, asked only now that the table is selected:
+    // a call the predicate declines never pays the walk. `None` declines the
+    // table --- the panels are not the lane's alphabet --- and the dense
+    // route answers at the same bytes, with the census saying which ran.
+    let Some(scale) = E::lane_scale(&triple.a, &triple.w, ledger) else {
+        decline(triple, epilogue, options, scratch, ledger);
+        return;
+    };
+    // The walk's capacity answer can only shrink the plan the probe made:
+    // rows and columns are capacity-independent, so it is applied here rather
+    // than re-planned. For a family whose capacity is a function of the
+    // alphabet this is the value `Plan::choose` already used, and the minimum
+    // is the identity.
+    let mut plan = plan;
+    if let Some(run) = E::lane_run::<L>(Bd::VALUE, &scale) {
+        plan.depth = (run / block).min(plan.depth).max(1); // R3-ok: a lane-width question, not an accumulation
+    }
+
     let want = plan.lane_words(space);
     let tile = plan.rows * plan.cols;
     // The accumulator words the lane words occupy: one each when the lane *is*
@@ -1896,7 +2141,7 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
         return;
     }
     let (panel, accumulators) = scratch.split(suggested_tabulation_panel(space, block), take);
-    if !decode_book(triple.w.codec(), panel, ledger) {
+    if !decode_book(triple.w.codec(), panel, scale.base_b, ledger) {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     }
@@ -1906,7 +2151,7 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
         return;
     };
     tabulate::<E, Bd, C, O, Ep, Lg, L>(
-        triple, epilogue, options, exact, lanes, panel, collapse, plan, spec_of, ledger,
+        triple, epilogue, options, exact, lanes, panel, collapse, plan, scale, spec_of, ledger,
     );
 }
 
@@ -1967,12 +2212,22 @@ const ROW_TILES: [usize; 5] = [16, 8, 4, 2, 1];
 /// the *whole call* rather than once per row tile and per block of the reduction
 /// --- measured, re-deriving it per tile was half the build.
 ///
+/// Each entry is pre-scaled by `2^-base` on the way in: the zero scale leaves
+/// every element itself, and the float symbol lane's scale shifts each exponent
+/// to the codebook's measured base, so the build's multiply reads integers
+/// either way (`CD-20`).
+///
 /// This is the only reason the tabulated traversal wants a panel offer at all.
 /// Without one there is nowhere to put the decoded book, and the traversal
 /// streams --- the same rule every other offer in this library follows.
-fn decode_book<E, Bd, C, Lg>(codec: &C, panel: &mut [Alphabet<E, Bd>], ledger: &mut Lg) -> bool
+fn decode_book<E, Bd, C, Lg>(
+    codec: &C,
+    panel: &mut [Alphabet<E, Bd>],
+    base: i32,
+    ledger: &mut Lg,
+) -> bool
 where
-    E: Element,
+    E: Tabulated,
     Bd: Bound,
     C: Enumerable<E, Bd>,
     Lg: Ledger,
@@ -1987,7 +2242,9 @@ where
     }
     for index in 0..space {
         for t in 0..block {
-            panel[index * block + t] = codec.decode_element(C::code_at(index), t);
+            let entry = codec.decode_element(C::code_at(index), t);
+            panel[index * block + t] =
+                bytemuck::TransparentWrapper::wrap(E::prescale(entry.get(), base));
         }
     }
     ledger.decoded((space * block) as u64);
@@ -2285,6 +2542,7 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     acts: &mut [E],
     collapse: Option<ColumnMap<'_>>,
     plan: Plan,
+    scale: LaneScale,
     rows: usize,
     group: usize,
     row0: usize,
@@ -2307,8 +2565,9 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     let slab = table.slab();
     // Blocks one lane word holds before it must be placed. A question about a
     // register, never a limit on `k`: a deeper reduction takes more runs, and the
-    // runs combine exactly (§5.1).
-    let run_blocks = <L as Lane<E>>::capacity(Bd::VALUE)
+    // runs combine exactly (§5.1). The walk's answer for a family whose capacity
+    // is a fact of the data, the lane's own at the declared bound otherwise.
+    let run_blocks = E::lane_run::<L>(Bd::VALUE, &scale)
         .map(|c| (c / block).max(1))
         .unwrap_or(usize::MAX);
     // The two widths this tile reduces at, resolved once. `wide` is the group
@@ -2379,8 +2638,12 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
                 let base = (p0 + slot) * block;
                 for t in 0..block {
                     for i in 0..rows {
+                        // Pre-scaled by the walk's base, as the book is: the
+                        // zero scale is the identity, and the float symbol
+                        // lane's shifts each exponent to the panel's base, so
+                        // the build's multiply reads integers either way.
                         acts[packed_slot(t, i, rows, spec.k_group)] =
-                            triple.a.at(row0 + i, base + t).get();
+                            E::prescale(triple.a.at(row0 + i, base + t).get(), scale.base_a);
                     }
                 }
                 table.build(spec, block, book, &acts[..block * rows], slot, ledger);
@@ -2406,12 +2669,12 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
             // every `k` a narrow lane covers whole, which is every `k` under
             // 133144 at `(i8, 128)`.
             if in_run + plan.depth > run_blocks {
-                place(carried, acc, placed);
+                place(carried, acc, placed, scale.exponent());
                 placed = true;
                 in_run = 0;
             }
         }
-        place(carried, acc, placed);
+        place(carried, acc, placed, scale.exponent());
 
         // The expansion: every repeated column takes the accumulation of the one
         // it repeats. Ascending, and a repeat always names an earlier column, so
@@ -2554,7 +2817,10 @@ where
 ///
 /// The only place the exact accumulator appears in the reduction, and for a
 /// narrow lane that holds the whole depth it runs once per output element.
-fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc], onto: bool) {
+/// `exponent` is the scale the run was built at: zero for every lane whose
+/// products are the elements' own, and the walk's `base_a + base_b` for the
+/// float symbol lane, whose placement is the accumulator's `add_scaled`.
+fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc], onto: bool, exponent: i32) {
     for (cell, word) in acc.iter_mut().zip(lane.iter_mut()) {
         // The first run sets, the rest combine. Placing onto a zero the caller
         // wrote is the same value and one more pass over the output tile.
@@ -2563,7 +2829,7 @@ fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc], onto: bool)
         } else {
             <E::Acc as Accumulator>::ZERO
         };
-        *cell = word.place(prior);
+        *cell = word.place_scaled(prior, exponent);
         *word = L::ZERO;
     }
 }
@@ -2578,6 +2844,7 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
     panel: &mut [Alphabet<E, Bd>],
     collapse: Option<ColumnMap<'_>>,
     plan: Plan,
+    scale: LaneScale,
     spec_of: SpecOf<E, L>,
     ledger: &mut Lg,
 ) where
@@ -2625,7 +2892,7 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
         let acts: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(acts);
         row_tile::<E, Bd, C, O, Ep, L, Lg>(
             triple, epilogue, options, exact, columns, &mut table, &spec, spec_of, book, acts,
-            collapse, plan, rows, group, row0, ledger,
+            collapse, plan, scale, rows, group, row0, ledger,
         );
         row0 += rows;
     }
@@ -2759,9 +3026,11 @@ fn stream<E, Bd, C, O, Ep, Lg>(
     // it --- which decodes each weight once instead of once per row of `A`, and
     // leaves two contiguous runs for the lane dot product below.
     let borrowed = panel.len() >= shape.k;
-    // The same lane the table uses, at a block of one: a plain dot product is a
-    // table of one entry that nobody shares.
-    let run = <E::Lane as Lane<E>>::capacity(Bd::VALUE).unwrap_or(usize::MAX);
+    // The lane that holds a *raw* product, at a block of one: the family's own
+    // for an integer --- a plain dot product is a table of one entry that
+    // nobody shares --- and the complete accumulator for a family whose table
+    // lane holds scaled products, because the stream walks raw elements.
+    let run = <E::StreamLane as Lane<E>>::capacity(Bd::VALUE).unwrap_or(usize::MAX);
     for j in 0..shape.n {
         if borrowed {
             triple.w.decode_row_into(j, panel);
@@ -2775,8 +3044,8 @@ fn stream<E, Bd, C, O, Ep, Lg>(
             };
             let acc = match row {
                 // Both operands are runs: the whole reduction is a loop over two
-                // contiguous slices in the family's own lane.
-                Some(a) => dot_lane::<E, Bd, E::Lane>(a, &panel[..shape.k], run),
+                // contiguous slices in the lane that holds raw products.
+                Some(a) => dot_lane::<E, Bd, E::StreamLane>(a, &panel[..shape.k], run),
                 // `A`'s row is not a run, or nothing was offered to decode into.
                 // The same accumulation, walked: this is what makes the traversal
                 // runnable on a target whose RAM cannot hold one row (S13).
@@ -2816,10 +3085,11 @@ mod tests {
     use crate::collapse::suggested_collapse_index;
     use crate::driver::gemm;
     use crate::epilogue::Linear;
+    use std::format;
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_codec::{
-        canonicalize, e8_codec, e8_table, Arena, Book, Grid, Packed, Sign, Ternary,
+        canonicalize, e8_codec, e8_table, Arena, Book, Grid, Packed, Sign, SymbolCode, Ternary,
     };
     use uor_matmul_core::{
         as_alphabet, as_alphabet_full, as_alphabet_whole, Bnd, EncodeMode, FloatElement, Full,
@@ -3163,12 +3433,18 @@ mod tests {
     /// The same shape as [`tabulated`], with one knob scaling the panel,
     /// accumulator and index offers together so the extremes --- nothing, one
     /// word, exactly the suggested amount, and a multiple --- are all reachable.
-    /// The lane offer is not swept because a float family has none: its lane *is*
-    /// the exact accumulator, and the words live in the accumulator offer.
+    /// The lane offer moves with the same knob: `f32`'s table lane is the
+    /// scaled integer word (`CD-20`), which lives in the narrow offer; `f64`
+    /// has no narrow lane and its suggested lane count is zero, so the knob
+    /// scales an empty buffer there exactly as it did before the lane existed.
+    ///
+    /// Generic over the code width (`CK-14`): the `u8` and `u16` spellings of
+    /// one codebook are the same tier at two residencies, and both are asserted
+    /// against the same dense bytes.
     #[allow(clippy::too_many_arguments)]
-    fn arena_tabulated<E, const D: usize>(
+    fn arena_tabulated<E, const D: usize, K: SymbolCode>(
         table: &[Alphabet<E, Whole<E>>; D],
-        codes: &[u16],
+        codes: &[K],
         a: &[E],
         m: usize,
         k: usize,
@@ -3176,6 +3452,8 @@ mod tests {
         traversal: Traversal,
         offer: usize,
         collapse_offer: usize,
+        epilogue: &Linear,
+        c0: &[E],
     ) -> (Vec<E>, Census)
     where
         E: FloatElement + EncodeFrom<AccOf<E>> + Tabulated,
@@ -3183,8 +3461,8 @@ mod tests {
         Linear: Epilogue<E, E>,
     {
         let shape = Shape { m, k, n };
-        let space = <Arena<'_, E, D> as Enumerable<E, Whole<E>>>::CODE_SPACE;
-        let block = <Arena<'_, E, D> as uor_matmul_codec::Codec<E, Whole<E>>>::MAX_BLOCK;
+        let space = <Arena<'_, E, D, K> as Enumerable<E, Whole<E>>>::CODE_SPACE;
+        let block = <Arena<'_, E, D, K> as uor_matmul_codec::Codec<E, Whole<E>>>::MAX_BLOCK;
         let scale = |want: usize, offer: usize| -> usize {
             if offer >= OFFER_STEPS {
                 want.saturating_mul(offer - OFFER_STEPS + 1) // R3-ok: a size or cost query, not an accumulation
@@ -3196,6 +3474,13 @@ mod tests {
             <AccOf<E> as Accumulator>::ZERO;
             scale(
                 suggested_tabulation::<E, Whole<E>>(shape, space, block).max(1),
+                offer
+            )
+        ];
+        let mut lane_words = vec![
+            0i64;
+            scale(
+                suggested_tabulation_lanes::<E, Whole<E>>(shape, space, block),
                 offer
             )
         ];
@@ -3219,7 +3504,7 @@ mod tests {
             }
         ];
         let mut collapse_rows = vec![Alphabet::<E, Whole<E>>::ZERO; collapse_offer];
-        let mut c = vec![E::ZERO; m * n];
+        let mut c = c0.to_vec();
         let mut census = Census::default();
         {
             let av = MatView::row_major(as_alphabet_whole(a), m, k).unwrap();
@@ -3234,13 +3519,13 @@ mod tests {
             };
             gemm_tabulated_counted(
                 &mut tr,
-                &Linear::OVERWRITE,
+                epilogue,
                 GemmOptions {
                     traversal,
                     ..Default::default()
                 },
                 &mut Scratch::with_accumulators(&mut panel, &mut accumulators),
-                &mut Tabulation::with_index(&mut [], &mut ids),
+                &mut Tabulation::with_index(&mut lane_words, &mut ids),
                 &mut collapse,
                 &mut census,
             );
@@ -3251,44 +3536,71 @@ mod tests {
     /// The dense float driver's product of the same operands, which is the
     /// identity the arena claims to code. `W` is decoded into a dense `k x n`
     /// matrix first, so this is the product itself and not a restatement of it.
-    fn arena_reference<E, const D: usize>(
+    ///
+    /// The decode is written out here --- a direct table read, codes reduced
+    /// modulo `D` --- rather than delegated to the codec under test: a
+    /// reference that decoded through the tier would share a wrong decode with
+    /// the traversal and the comparison would be the tier against itself. This
+    /// is the vacuity R13's harness exists to refuse, and it was planted: an
+    /// off-by-one in the tier's decode passed every arena test until this
+    /// reference read the table itself.
+    #[allow(clippy::too_many_arguments)]
+    fn arena_reference<E, const D: usize, K: SymbolCode + Into<usize>>(
         table: &[Alphabet<E, Whole<E>>; D],
-        codes: &[u16],
+        codes: &[K],
         a: &[E],
         m: usize,
         k: usize,
         n: usize,
+        epilogue: &Linear,
+        c0: &[E],
     ) -> Vec<E>
     where
         E: FloatElement + EncodeFrom<AccOf<E>>,
         AccOf<E>: crate::SignedPlace,
         Linear: Epilogue<E, E>,
     {
-        let w = CodedMatrix::new(Arena::new(table), n, k, codes).expect("the codes describe n x k");
         let mut b = vec![E::ZERO; k * n];
         for p in 0..k {
             for j in 0..n {
-                b[p * n + j] = w.at(j, p).get();
+                // The intended operand, decoded without the tier: `W` is
+                // `n x k`, so `B[p][j]` is the symbol codes[j][p] names.
+                let code: usize = codes[j * k + p].into();
+                b[p * n + j] = table[code % D].get();
             }
         }
-        let mut c = vec![E::ZERO; m * n];
+        let mut c = c0.to_vec();
         let av = MatView::row_major(a, m, k).unwrap();
         let bv = MatView::row_major(&b, k, n).unwrap();
         let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
         let mut t = Triple::new(av, bv, cv).unwrap();
-        crate::float::gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
+        crate::float::gemm_float(&mut t, epilogue, GemmOptions::default());
         c
     }
 
     /// Every traversal at every offer, against the dense float driver's bytes.
-    fn every_arena_traversal_agrees<E, const D: usize>(
+    ///
+    /// `table_expected` is what the census must show for the forced traversal
+    /// at a full offer: `true` when a table both fits and is admitted ---
+    /// `f64`, whose lane is the exact accumulator, at a code space whose slab
+    /// holds in L1; `f32` at a finite codebook whose exponent span the scaled
+    /// lane's alphabet holds. A codebook past either boundary is not a defect:
+    /// the lane declines by the same declaration the placement bridge makes
+    /// (`CD-19`), the dense route computes the same bytes, and the census's
+    /// `table_reads == 0` is the decline witnessed rather than the predicate
+    /// trusted twice.
+    #[allow(clippy::too_many_arguments)]
+    fn every_arena_traversal_agrees<E, const D: usize, K: SymbolCode + Into<usize>>(
         label: &str,
         table: &[Alphabet<E, Whole<E>>; D],
-        codes: &[u16],
+        codes: &[K],
         a: &[E],
         m: usize,
         k: usize,
         n: usize,
+        epilogue: &Linear,
+        c0: &[E],
+        table_expected: bool,
     ) where
         E: FloatElement + EncodeFrom<AccOf<E>> + Tabulated,
         AccOf<E>: crate::SignedPlace,
@@ -3296,7 +3608,7 @@ mod tests {
     {
         // Bit patterns, not values: a NaN in the codebook is a NaN in the
         // output, and NaN is not `==` itself.
-        let want: Vec<u64> = arena_reference(table, codes, a, m, k, n)
+        let want: Vec<u64> = arena_reference(table, codes, a, m, k, n, epilogue, c0)
             .iter()
             .map(|v| v.symbol_bits())
             .collect();
@@ -3309,7 +3621,8 @@ mod tests {
             Traversal::OutputMajor,
         ] {
             for offer in offers {
-                let (got, census) = arena_tabulated(table, codes, a, m, k, n, traversal, offer, 0);
+                let (got, census) =
+                    arena_tabulated(table, codes, a, m, k, n, traversal, offer, 0, epilogue, c0);
                 let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
                 assert_eq!(
                     got, want,
@@ -3319,11 +3632,11 @@ mod tests {
             }
         }
 
-        // And the comparison is not vacuous: the forced traversal really read a
-        // table, the costed one really declined to the dense route --- a
-        // one-element block can never pay --- and an offer of nothing reached
-        // neither. The census says which ran rather than the predicate being
-        // asked to say it again.
+        // And the comparison is not vacuous: the forced traversal read a table
+        // exactly when one was expected to run, the costed one really declined
+        // to the dense route --- a one-element block can never pay --- and an
+        // offer of nothing reached neither. The census says which ran rather
+        // than the predicate being asked to say it again.
         let (_, tabled) = arena_tabulated(
             table,
             codes,
@@ -3334,19 +3647,57 @@ mod tests {
             Traversal::Tabulated,
             OFFER_STEPS,
             0,
+            epilogue,
+            c0,
         );
-        assert!(
-            tabled.table_reads > 0,
-            "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
+        if table_expected {
+            assert!(
+                tabled.table_reads > 0,
+                "{label} {m}x{k}x{n}: the offer was sized for a table and none was read"
+            );
+        } else {
+            assert_eq!(
+                tabled.table_reads, 0,
+                "{label} {m}x{k}x{n}: the lane does not hold these panels, so no table ran \
+                 ({tabled:?})"
+            );
+            assert!(
+                tabled.kernel_calls > 0,
+                "{label} {m}x{k}x{n}: a declined table at a full offer takes the dense route \
+                 ({tabled:?})"
+            );
+        }
+        let (_, declined) = arena_tabulated(
+            table,
+            codes,
+            a,
+            m,
+            k,
+            n,
+            Traversal::Blocked,
+            OFFER_STEPS,
+            0,
+            epilogue,
+            c0,
         );
-        let (_, declined) =
-            arena_tabulated(table, codes, a, m, k, n, Traversal::Blocked, OFFER_STEPS, 0);
         assert!(
             declined.kernel_calls > 0,
             "{label} {m}x{k}x{n}: `Blocked` must decline a one-element block to the \
              dense route ({declined:?})"
         );
-        let (_, without) = arena_tabulated(table, codes, a, m, k, n, Traversal::Tabulated, 0, 0);
+        let (_, without) = arena_tabulated(
+            table,
+            codes,
+            a,
+            m,
+            k,
+            n,
+            Traversal::Tabulated,
+            0,
+            0,
+            epilogue,
+            c0,
+        );
         assert_eq!(
             without.table_reads, 0,
             "{label} {m}x{k}x{n}: an offer of nothing cannot read a table"
@@ -3402,6 +3753,14 @@ mod tests {
                         m,
                         k,
                         n,
+                        &Linear::OVERWRITE,
+                        &vec![0.0f32; m * n],
+                        // The scaled lane's alphabet holds this codebook
+                        // exactly while every symbol is finite and its span
+                        // fits `24 + w <= 31`: the pool's canonical order puts
+                        // the infinity at `d = 4` and the NaN at `d = 5`, and a
+                        // non-finite symbol is not an integer, scaled or not.
+                        $d <= 3,
                     );
                     every_arena_traversal_agrees(
                         concat!("Arena<", $d, "> f64"),
@@ -3411,6 +3770,13 @@ mod tests {
                         m,
                         k,
                         n,
+                        &Linear::OVERWRITE,
+                        &vec![0.0f64; m * n],
+                        // `f64` declares no scaled lane --- a 53-bit
+                        // significand is not an `i32` at any span --- and its
+                        // table lane is the exact accumulator, which holds
+                        // every one of these code spaces.
+                        true,
                     );
                 }
             }};
@@ -3426,6 +3792,559 @@ mod tests {
         sweep!(6);
         sweep!(7);
         sweep!(8);
+    }
+
+    /// `CK-14`, the traversal half: the `u8` and `u16` spellings of one
+    /// codebook give byte-identical output through every traversal --- the
+    /// packed decline, the table, and the stream alike --- because they decode
+    /// the same stream and the codec is not an argument of the arithmetic
+    /// below it.
+    #[test]
+    fn the_u8_and_u16_spellings_give_the_same_bytes_ck_14() {
+        let mut pool32 = [0.5f32, 1.0, f32::INFINITY, f32::NAN, -0.0, -1.5, -2.5, 0.0];
+        assert_eq!(canonicalize(&mut pool32), 8, "eight distinct bit patterns");
+        let t32: &[Alphabet<f32, Whole<f32>>; 8] = as_alphabet_whole(&pool32).try_into().unwrap();
+
+        for &(m, k, n) in &[(1usize, 1usize, 1usize), (5, 17, 7), (7, 40, 9)] {
+            // One artifact at two widths: codes below 256, so the `u8` stream
+            // is the `u16` stream narrowed value for value --- including codes
+            // past the table, which both spellings reduce modulo it (C6).
+            let wide: Vec<u16> = fill(n * k, 0xa4ea, |x| (x % 17) as u16);
+            let narrow: Vec<u8> = wide.iter().map(|&c| c as u8).collect();
+            let a: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
+            let zeros = vec![0.0f32; m * n];
+            for traversal in [
+                Traversal::Tabulated,
+                Traversal::Blocked,
+                Traversal::OutputMajor,
+            ] {
+                for offer in [0, OFFER_STEPS] {
+                    let (by_word, _) = arena_tabulated(
+                        t32,
+                        &wide,
+                        &a,
+                        m,
+                        k,
+                        n,
+                        traversal,
+                        offer,
+                        0,
+                        &Linear::OVERWRITE,
+                        &zeros,
+                    );
+                    let (by_byte, _) = arena_tabulated(
+                        t32,
+                        &narrow,
+                        &a,
+                        m,
+                        k,
+                        n,
+                        traversal,
+                        offer,
+                        0,
+                        &Linear::OVERWRITE,
+                        &zeros,
+                    );
+                    let by_word: Vec<u64> = by_word.iter().map(|v| v.symbol_bits()).collect();
+                    let by_byte: Vec<u64> = by_byte.iter().map(|v| v.symbol_bits()).collect();
+                    assert_eq!(
+                        by_byte, by_word,
+                        "{m}x{k}x{n}: {traversal:?} at an offer of {offer}: the two widths of one \
+                         codebook must give the same bytes"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `CD-18`: a `u8`-symbol-coded float weight matrix gives the dense float
+    /// driver's bytes at every shape, with the tabulated traversal forced and
+    /// declined alike, at every offer including none, and under an epilogue
+    /// that reads `C`.
+    ///
+    /// The reference is `gemm_float` over the decoded weights, as `CD-14`'s:
+    /// an agreement between two coded traversals would say nothing about
+    /// whether either computes the product.
+    #[test]
+    fn a_u8_symbol_coded_float_matrix_matches_the_dense_driver_cd_18() {
+        // The same pool as `CD-14`: an infinity and a NaN are codes like any
+        // other, and the two zeros are distinct symbols with equal decodes.
+        let mut pool32 = [0.5f32, 1.0, f32::INFINITY, f32::NAN, -0.0, -1.5, -2.5, 0.0];
+        assert_eq!(canonicalize(&mut pool32), 8, "eight distinct bit patterns");
+        let mut pool64 = [0.5f64, 1.0, f64::INFINITY, f64::NAN, -0.0, -1.5, -2.5, 0.0];
+        assert_eq!(canonicalize(&mut pool64), 8, "eight distinct bit patterns");
+
+        macro_rules! sweep {
+            ($d:literal) => {{
+                let t32: &[Alphabet<f32, Whole<f32>>; $d] =
+                    as_alphabet_whole(&pool32[..$d]).try_into().unwrap();
+                let t64: &[Alphabet<f64, Whole<f64>>; $d] =
+                    as_alphabet_whole(&pool64[..$d]).try_into().unwrap();
+                for &(m, k, n) in &[
+                    (1usize, 1usize, 1usize),
+                    (2, 3, 5),
+                    (5, 17, 7),
+                    (13, 11, 3),
+                    (7, 40, 9),
+                ] {
+                    // Codes past the table on purpose, as `CD-14`'s: the
+                    // enumeration reduces them modulo `D`, and the reference
+                    // decodes them the same way.
+                    let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| (x % (2 * $d as u64 + 1)) as u8);
+                    let a32: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
+                    let a64: Vec<f64> = fill(m * k, 0xac7, |x| (x % 7) as f64 * 0.5 - 1.5);
+                    every_arena_traversal_agrees(
+                        concat!("Arena<", $d, ", u8> f32"),
+                        t32,
+                        &codes,
+                        &a32,
+                        m,
+                        k,
+                        n,
+                        &Linear::OVERWRITE,
+                        &vec![0.0f32; m * n],
+                        // As `CD-14`: finite and in-span through `d = 3`; the
+                        // infinity and the NaN are not the scaled lane's
+                        // alphabet and the dense route answers for them.
+                        $d <= 3,
+                    );
+                    every_arena_traversal_agrees(
+                        concat!("Arena<", $d, ", u8> f64"),
+                        t64,
+                        &codes,
+                        &a64,
+                        m,
+                        k,
+                        n,
+                        &Linear::OVERWRITE,
+                        &vec![0.0f64; m * n],
+                        // `f64` declares no scaled lane; its table lane is the
+                        // exact accumulator, which holds these code spaces.
+                        true,
+                    );
+                }
+            }};
+        }
+        sweep!(2);
+        sweep!(3);
+        sweep!(4);
+        sweep!(5);
+        sweep!(6);
+        sweep!(7);
+        sweep!(8);
+
+        // An epilogue that reads `C`: two rows with equal rows of `A` have
+        // different priors, so the row collapse is declined outright, and the
+        // bytes are still the dense driver's. The offer sweep is the helper's
+        // own; two tables stand for the range.
+        let t32: &[Alphabet<f32, Whole<f32>>; 8] = as_alphabet_whole(&pool32).try_into().unwrap();
+        for &(m, k, n) in &[(2usize, 3usize, 5usize), (7, 40, 9)] {
+            let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| (x % 17) as u8);
+            let a: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
+            // A prior worth reading: not zeros, so a decline that skipped the
+            // read would write different bytes.
+            let c0: Vec<f32> = fill(m * n, 0xc01, |x| (x % 5) as f32 * 0.25 - 0.5);
+            every_arena_traversal_agrees(
+                "Arena<8, u8> f32 accumulate",
+                t32,
+                &codes,
+                &a,
+                m,
+                k,
+                n,
+                &Linear::ACCUMULATE,
+                &c0,
+                // The pool of eight holds the infinity and the NaN, which the
+                // scaled lane declines; the dense route reads `C` and answers.
+                false,
+            );
+        }
+
+        // The tier's design point: a codebook that fills the byte. The
+        // codebook's symbols are an exact dequantization grid, so every
+        // pattern is distinct by construction --- and `canonicalize` is asked
+        // rather than told. The grid spans seven binades, which is exactly the
+        // widest span the scaled lane's alphabet holds at `f32` (`24 + 7 <=
+        // 31`): the design point is the admission boundary, not an interior
+        // point of it.
+        let mut pool256: Vec<f32> = (0..256).map(|q| (q as f32 - 127.5) * 0.015_625).collect();
+        assert_eq!(canonicalize(&mut pool256), 256, "256 distinct bit patterns");
+        let t256: &[Alphabet<f32, Whole<f32>>; 256] =
+            as_alphabet_whole(&pool256).try_into().unwrap();
+
+        // Over the 80-byte complete accumulator a 256-entry table holds no L1
+        // slab at any tile --- `tabulation_fits` says so at a single row ---
+        // and that was once the end of the story: the forced traversal
+        // declined and the tier's claim was identity and residency. The scaled
+        // lane (`CD-20`) is the answer to the lane question that paragraph
+        // deferred: at eight bytes a lane word the slab is 2 KiB a row and the
+        // table fits, so the forced traversal *tabulates* now, and it is again
+        // the census that says so, not the predicate trusted twice.
+        let wide = core::mem::size_of::<AccOf<f32>>();
+        let narrow = core::mem::size_of::<i64>();
+        assert!(
+            !tabulation_fits(256, 1, blocking::L1_BYTES, wide),
+            "a 256-entry table over a {wide}-byte lane fits no L1 tile"
+        );
+        assert!(
+            tabulation_fits(256, 1, blocking::L1_BYTES, narrow),
+            "a 256-entry table over an {narrow}-byte lane holds at one row"
+        );
+
+        for &(m, k, n) in &[(1usize, 1usize, 1usize), (5, 17, 7), (7, 40, 9)] {
+            // Every byte value is a live code: the enumeration is total on
+            // `u8`, so the fill needs no reduction (`CT-07`).
+            let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| x as u8);
+            let a: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
+            let zeros = vec![0.0f32; m * n];
+            let want: Vec<u64> =
+                arena_reference(t256, &codes, &a, m, k, n, &Linear::OVERWRITE, &zeros)
+                    .iter()
+                    .map(|v| v.symbol_bits())
+                    .collect();
+            for traversal in [
+                Traversal::Tabulated,
+                Traversal::Blocked,
+                Traversal::OutputMajor,
+            ] {
+                for offer in [0, 1, OFFER_STEPS - 1, OFFER_STEPS, OFFER_STEPS + 2] {
+                    let (got, census) = arena_tabulated(
+                        t256,
+                        &codes,
+                        &a,
+                        m,
+                        k,
+                        n,
+                        traversal,
+                        offer,
+                        0,
+                        &Linear::OVERWRITE,
+                        &zeros,
+                    );
+                    let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
+                    assert_eq!(
+                        got, want,
+                        "Arena<256, u8> f32 {m}x{k}x{n}: {traversal:?} at an offer of {offer} \
+                         must give the dense float driver's bytes ({census:?})"
+                    );
+                }
+            }
+            // The forced traversal now tabulates: the narrow lane fits the
+            // slab and the grid's span is exactly the alphabet's edge. The
+            // decodes are the span walk (`m * k` of `A`, plus the codebook)
+            // and the one book decode, counted so the walk's price is read
+            // off the census and not re-derived.
+            let (_, tabled) = arena_tabulated(
+                t256,
+                &codes,
+                &a,
+                m,
+                k,
+                n,
+                Traversal::Tabulated,
+                OFFER_STEPS,
+                0,
+                &Linear::OVERWRITE,
+                &zeros,
+            );
+            assert!(
+                tabled.table_reads > 0,
+                "the narrow lane fits, so the forced traversal reads a table ({tabled:?})"
+            );
+            assert_eq!(
+                tabled.decodes,
+                (m * k + 2 * 256) as u64,
+                "the span walk and the book decode are the decodes ({tabled:?})"
+            );
+            // Under the costed traversal the one-element block still declines:
+            // the op-count predicate prices a table read against one dense
+            // product and finds no win, which `CG-16` measures against the
+            // clock. At no offer it is the stream.
+            let (_, declined) = arena_tabulated(
+                t256,
+                &codes,
+                &a,
+                m,
+                k,
+                n,
+                Traversal::Blocked,
+                OFFER_STEPS,
+                0,
+                &Linear::OVERWRITE,
+                &zeros,
+            );
+            assert_eq!(declined.table_reads, 0, "a one-element block never pays");
+            assert!(
+                declined.kernel_calls > 0,
+                "a full offer declines to the dense route ({declined:?})"
+            );
+            let (_, streamed) = arena_tabulated(
+                t256,
+                &codes,
+                &a,
+                m,
+                k,
+                n,
+                Traversal::Tabulated,
+                0,
+                0,
+                &Linear::OVERWRITE,
+                &zeros,
+            );
+            assert_eq!(streamed.table_reads, 0);
+            assert_eq!(streamed.kernel_calls, 0);
+            assert_eq!(
+                streamed.multiplies,
+                (m * k * n) as u64,
+                "an offer of nothing streams ({streamed:?})"
+            );
+        }
+    }
+
+    /// `CD-20`: a `u8`-symbol-coded float weight matrix tabulated in the
+    /// scaled integer lane gives the dense float driver's bytes at every shape
+    /// and every offer, including none, with the span walk admitted and
+    /// declined alike, and a reduction deeper than the lane's run chunked
+    /// exactly.
+    ///
+    /// The lane is the placement bridge's identity one level up (`CD-19`):
+    /// the codebook and the activation tile are pre-scaled to the panels'
+    /// measured base exponents, the table is built over the scaled integer
+    /// alphabet the bridge defines, the gather accumulates `i64` lane words,
+    /// and the exact sum is placed at `2^(base_a + base_b)`. The reference is
+    /// `gemm_float` over the decoded weights, as `CD-18`'s: an agreement
+    /// between two coded traversals would say nothing about whether either
+    /// computes the product.
+    #[test]
+    fn the_scaled_lane_tabulation_matches_the_dense_driver_cd_20() {
+        // A codebook of 256 distinct finite symbols whose values span exactly
+        // `span` binades: significands in `[2^22, 2^23)`, so every value's
+        // exponent is `22 + e` and no two collapse, and `e` cycling through
+        // `span + 1` values. Seven binades is the widest span the lane's
+        // alphabet holds (`24 + 7 <= 31`), so the sweep stands on the
+        // admission boundary rather than inside it.
+        let codebook = |span: u64| {
+            let mut pool: Vec<f32> = (0..256u64)
+                .map(|q| {
+                    let m = (0x40_0000 + q * 0x1000) as f32;
+                    let e = if span == 0 {
+                        0
+                    } else {
+                        (q % (span + 1)) as i32 - (span / 2) as i32
+                    };
+                    m * 2.0f32.powi(e)
+                })
+                .collect();
+            assert_eq!(canonicalize(&mut pool), 256, "{span} binades, 256 patterns");
+            pool
+        };
+
+        let shapes: &[(usize, usize, usize)] = &[
+            (1, 1, 1),
+            (2, 3, 5),
+            (5, 17, 7),
+            (13, 11, 3),
+            (7, 40, 9),
+            // Deeper than the lane's run at the widest admitted span --- 127
+            // products at seven binades against the one-binade `A` below ---
+            // so the reduction is cut into runs and placed more than once: a
+            // lane that dropped a carry between runs would write different
+            // bytes here.
+            (3, 300, 5),
+        ];
+        for span in [0u64, 3, 7] {
+            let pool = codebook(span);
+            let table: &[Alphabet<f32, Whole<f32>>; 256] =
+                as_alphabet_whole(&pool).try_into().unwrap();
+            for &(m, k, n) in shapes {
+                // Every byte value is a live code (`CT-07`); `A` spans one
+                // binade, so the walk admits at every `span` above.
+                let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| x as u8);
+                let a: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
+                every_arena_traversal_agrees(
+                    &format!("Arena<256, u8> f32 span {span}"),
+                    table,
+                    &codes,
+                    &a,
+                    m,
+                    k,
+                    n,
+                    &Linear::OVERWRITE,
+                    &vec![0.0f32; m * n],
+                    // Finite and in span: the table runs.
+                    true,
+                );
+            }
+        }
+
+        // Nine binades is past the alphabet (`24 + 9 > 31`): the lane declines
+        // by the bridge's own declaration and the dense route answers, at the
+        // same bytes. A non-finite symbol is not an integer at any scale, and
+        // a non-finite activation is not either: likewise.
+        let wide = codebook(9);
+        let wide_t: &[Alphabet<f32, Whole<f32>>; 256] =
+            as_alphabet_whole(&wide).try_into().unwrap();
+        let mut nonfinite = codebook(3);
+        nonfinite.truncate(255);
+        nonfinite.push(f32::INFINITY);
+        assert_eq!(
+            canonicalize(&mut nonfinite),
+            256,
+            "255 grid points and an infinity"
+        );
+        let nonfinite_t: &[Alphabet<f32, Whole<f32>>; 256] =
+            as_alphabet_whole(&nonfinite).try_into().unwrap();
+        let grid3 = codebook(3);
+        let grid3_t: &[Alphabet<f32, Whole<f32>>; 256] =
+            as_alphabet_whole(&grid3).try_into().unwrap();
+        for &(m, k, n) in &[(2usize, 3usize, 5usize), (13, 11, 3), (7, 40, 9)] {
+            let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| x as u8);
+            let a: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
+            let zeros = vec![0.0f32; m * n];
+            every_arena_traversal_agrees(
+                "Arena<256, u8> f32 span 9",
+                wide_t,
+                &codes,
+                &a,
+                m,
+                k,
+                n,
+                &Linear::OVERWRITE,
+                &zeros,
+                false,
+            );
+            every_arena_traversal_agrees(
+                "Arena<256, u8> f32 non-finite book",
+                nonfinite_t,
+                &codes,
+                &a,
+                m,
+                k,
+                n,
+                &Linear::OVERWRITE,
+                &zeros,
+                false,
+            );
+            // One NaN in `A` declines the lane however admissible the book is.
+            let mut a_nan = a.clone();
+            a_nan[0] = f32::NAN;
+            every_arena_traversal_agrees(
+                "Arena<256, u8> f32 non-finite A",
+                grid3_t,
+                &codes,
+                &a_nan,
+                m,
+                k,
+                n,
+                &Linear::OVERWRITE,
+                &zeros,
+                false,
+            );
+        }
+
+        // `f64` declines by declaration: a 53-bit significand is not an `i32`
+        // at any span, so the family has no scaled lane --- its table lane is
+        // the exact accumulator, over which a 256-entry table fits no L1 tile.
+        // The dense route answers, at the same bytes.
+        let mut pool64: Vec<f64> = (0..256).map(|q| (q as f64 - 127.5) * 0.015_625).collect();
+        assert_eq!(canonicalize(&mut pool64), 256, "256 distinct bit patterns");
+        let t64: &[Alphabet<f64, Whole<f64>>; 256] = as_alphabet_whole(&pool64).try_into().unwrap();
+        for &(m, k, n) in &[(2usize, 3usize, 5usize), (7, 40, 9)] {
+            let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| x as u8);
+            let a: Vec<f64> = fill(m * k, 0xac7, |x| (x % 7) as f64 * 0.5 - 1.5);
+            every_arena_traversal_agrees(
+                "Arena<256, u8> f64",
+                t64,
+                &codes,
+                &a,
+                m,
+                k,
+                n,
+                &Linear::OVERWRITE,
+                &vec![0.0f64; m * n],
+                false,
+            );
+        }
+
+        // The row collapse composes with the lane: repeated rows of `A` are
+        // numbered, the compacted product is walked and tabulated, and the
+        // expansion copies the sums. A span that fits admits the same table on
+        // the compacted rows, and the bytes are the dense driver's.
+        let pool = codebook(3);
+        let table: &[Alphabet<f32, Whole<f32>>; 256] = as_alphabet_whole(&pool).try_into().unwrap();
+        let (m, k, n) = (7usize, 40usize, 9usize);
+        let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| x as u8);
+        // Rows in threes: two repeats of every row, so the collapse has work
+        // to do and the recursion's own span walk is exercised.
+        let a: Vec<f32> = (0..m * k)
+            .map(|at| {
+                let row = at / k % 3;
+                ((at % 7) as f32 * 0.5 - 1.5) * (row as f32 + 1.0)
+            })
+            .collect();
+        let zeros = vec![0.0f32; m * n];
+        let want: Vec<u64> =
+            arena_reference(table, &codes, &a, m, k, n, &Linear::OVERWRITE, &zeros)
+                .iter()
+                .map(|v| v.symbol_bits())
+                .collect();
+        let (got, census) = arena_tabulated(
+            table,
+            &codes,
+            &a,
+            m,
+            k,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            m * k,
+            &Linear::OVERWRITE,
+            &zeros,
+        );
+        let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
+        assert_eq!(
+            got, want,
+            "a collapsed and tabulated run must give the dense float driver's bytes ({census:?})"
+        );
+        assert!(
+            census.table_reads > 0,
+            "the compacted product tabulated ({census:?})"
+        );
+
+        // The capacity boundary, driven: every code names the codebook's
+        // widest symbol and every activation is the widest finite
+        // significand, all one sign, so a run's sum approaches `2^63` rather
+        // than cancelling away from it. Both panels then span zero binades
+        // and sit *at* the declared per-step bound: each scaled significand
+        // is `2^24 - 1`, each product `2^48 - 2^25 + 1`, and the honest run
+        // is 32767 of them --- `k = 40000` is one full run and a tail, where
+        // a single run sums past `2^63`. A capacity declaration one run too
+        // long wraps the lane and writes different bytes --- which is the
+        // plant the falsifiability table records, and it only fires because
+        // this fill reaches the bound.
+        let mut edge: Vec<f32> = (0..255u64)
+            .map(|q| 1.0 + q as f32 * 2.0f32.powi(-12))
+            .collect();
+        edge.push(f32::from_bits(0x3FFF_FFFF));
+        assert_eq!(canonicalize(&mut edge), 256, "256 distinct patterns");
+        let edge_t: &[Alphabet<f32, Whole<f32>>; 256] =
+            as_alphabet_whole(&edge).try_into().unwrap();
+        let (m, k, n) = (2usize, 40000usize, 3usize);
+        let codes = vec![255u8; n * k];
+        let a = vec![f32::from_bits(0x3FFF_FFFF); m * k];
+        let zeros = vec![0.0f32; m * n];
+        every_arena_traversal_agrees(
+            "Arena<256, u8> f32 worst case",
+            edge_t,
+            &codes,
+            &a,
+            m,
+            k,
+            n,
+            &Linear::OVERWRITE,
+            &zeros,
+            true,
+        );
     }
 
     /// `CD-17`: collapsing bit-identical rows of `A` in the float tabulated
@@ -3451,7 +4370,7 @@ mod tests {
         assert_eq!(canonicalize(&mut pool64), 8, "eight distinct bit patterns");
 
         macro_rules! case {
-            ($t:ty, $label:expr, $pool:expr, $nan1:expr, $nan2:expr) => {{
+            ($t:ty, $label:expr, $pool:expr, $nan1:expr, $nan2:expr, $build:expr) => {{
                 let label = $label;
                 let table: &[Alphabet<$t, Whole<$t>>; 8] =
                     as_alphabet_whole(&$pool).try_into().unwrap();
@@ -3480,10 +4399,19 @@ mod tests {
                     // `d` distinct rows, numbered by first occurrence: row `i`
                     // is row `i % d`, and the first `d` are pairwise distinct.
                     let a: Vec<$t> = (0..m * k).map(|x| symbols[(x / k % d) + x % k]).collect();
-                    let want: Vec<u64> = arena_reference(table, &codes, &a, m, k, n)
-                        .iter()
-                        .map(|v| v.symbol_bits())
-                        .collect();
+                    let want: Vec<u64> = arena_reference(
+                        table,
+                        &codes,
+                        &a,
+                        m,
+                        k,
+                        n,
+                        &Linear::OVERWRITE,
+                        &vec![<$t>::default(); m * n],
+                    )
+                    .iter()
+                    .map(|v| v.symbol_bits())
+                    .collect();
                     // No offer, a rows offer too short for the distinct rows,
                     // exactly enough, and the worst case.
                     for collapse_offer in [0usize, k / 2, d * k, m * k] {
@@ -3497,6 +4425,8 @@ mod tests {
                             Traversal::Tabulated,
                             OFFER_STEPS,
                             collapse_offer,
+                            &Linear::OVERWRITE,
+                            &vec![<$t>::default(); m * n],
                         );
                         let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
                         assert_eq!(
@@ -3505,7 +4435,17 @@ mod tests {
                              must give the dense float driver's bytes ({census:?})"
                         );
                         // The build charges per *distinct* row when the collapse
-                        // ran, and per row when anything declined it.
+                        // ran, and per row when anything declined it. What one
+                        // charged row is charged *for* depends on the route
+                        // below the collapse: the table builds `space` entries
+                        // per element of the reduction, the dense route computes
+                        // `n` products. The scaled lane declines a non-finite
+                        // panel by declaration (`CD-20`) --- and `symbols`
+                        // carries NaNs and an infinity --- so `f32`'s route is
+                        // the dense one and the witness is `n`; `f64`'s lane is
+                        // the complete accumulator, which holds them, and its
+                        // witness is the table's `space`. Either way the count
+                        // moves with `d`, which is the collapse's evidence.
                         let charged = if collapse_offer >= d * k && d < m {
                             d
                         } else {
@@ -3513,7 +4453,7 @@ mod tests {
                         };
                         assert_eq!(
                             census.multiplies,
-                            (charged * k * 8) as u64,
+                            (charged * k * $build) as u64,
                             "{label} {m}x{k}x{n} d={d} rows offer {collapse_offer}: the build \
                              must charge per distinct row ({census:?})"
                         );
@@ -3536,6 +4476,8 @@ mod tests {
                             traversal,
                             OFFER_STEPS,
                             d * k,
+                            &Linear::OVERWRITE,
+                            &vec![<$t>::default(); m * n],
                         );
                         let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
                         assert_eq!(
@@ -3562,10 +4504,19 @@ mod tests {
                     $nan1, 1.0, 0.5, -1.5, // row 5: row 2's bits again
                 ];
                 let d = 4usize;
-                let want: Vec<u64> = arena_reference(table, &codes, &a, m, k, n)
-                    .iter()
-                    .map(|v| v.symbol_bits())
-                    .collect();
+                let want: Vec<u64> = arena_reference(
+                    table,
+                    &codes,
+                    &a,
+                    m,
+                    k,
+                    n,
+                    &Linear::OVERWRITE,
+                    &vec![<$t>::default(); m * n],
+                )
+                .iter()
+                .map(|v| v.symbol_bits())
+                .collect();
                 for collapse_offer in [0usize, d * k] {
                     let (got, census) = arena_tabulated(
                         table,
@@ -3577,6 +4528,8 @@ mod tests {
                         Traversal::Tabulated,
                         OFFER_STEPS,
                         collapse_offer,
+                        &Linear::OVERWRITE,
+                        &vec![<$t>::default(); m * n],
                     );
                     let got: Vec<u64> = got.iter().map(|v| v.symbol_bits()).collect();
                     assert_eq!(
@@ -3587,7 +4540,7 @@ mod tests {
                     let charged = if collapse_offer >= d * k { d } else { m };
                     assert_eq!(
                         census.multiplies,
-                        (charged * k * 8) as u64,
+                        (charged * k * $build) as u64,
                         "{label} bit cases, rows offer {collapse_offer}: `-0.0` beside `+0.0` \
                          and one NaN payload beside another are distinct rows ({census:?})"
                     );
@@ -3599,14 +4552,21 @@ mod tests {
             "Arena<8> f32",
             pool32,
             f32::from_bits(0x7fc0_0001),
-            f32::from_bits(0x7fc0_0002)
+            f32::from_bits(0x7fc0_0002),
+            // The scaled lane declines the NaN rows and the non-finite
+            // codebook, so the route below the collapse is the dense one and
+            // a charged row is `n` products --- nine, the `n` bound inside.
+            9
         );
         case!(
             f64,
             "Arena<8> f64",
             pool64,
             f64::from_bits(0x7ff8_0000_0000_0001),
-            f64::from_bits(0x7ff8_0000_0000_0002)
+            f64::from_bits(0x7ff8_0000_0000_0002),
+            // The complete accumulator holds every code, so the table runs
+            // and a charged row is the build's `space` entries per element.
+            8
         );
     }
 
@@ -4812,5 +5772,194 @@ mod tests {
             dense_rows: blocking::KERNEL_ROWS,
         };
         assert!(!tabulation_pays(256, 8, usize::MAX, rows, vnni, l1, lane));
+    }
+
+    /// `CG-18`: the performance gate, counted rather than timed.
+    ///
+    /// A wall-clock gate on shared CI would measure the machine as much as the
+    /// library, which is why the CG-* figures are `open`. What is not a
+    /// measurement is the operation census: which factorization selection ran,
+    /// and what it issued. This test is the regression gate on both, and it is
+    /// the same claim twice ---
+    ///
+    /// - Selection is the derivation. The break-even is recomputed at test
+    ///   time from the declarations the host's own sequences make (the table
+    ///   spec's `lanes_per_add` against the dense tile's numbers, at the
+    ///   model's cache and blocking constants), never from a recorded one:
+    ///   the NEON row and the AVX2 row of `model/tiers.toml` differ because
+    ///   the pairs do, and a hardcoded 683 fails on aarch64 exactly as a
+    ///   hardcoded 2049 fails on x86. Below the first column width the
+    ///   predicate pays at, the census must show the dense route; at and
+    ///   above it, the table.
+    /// - The gather never multiplies. When the table runs, the census's
+    ///   multiplies are exactly the build's charge --- `code_space * block *
+    ///   rows` per slot of the stack --- and one more is the asymptotic
+    ///   regression this gate exists to catch.
+    ///
+    /// And the boundary the other way: a codec one element wide per code is
+    /// declined at every `n`, so the census shows the dense route at every
+    /// size. A decline that ever flips is the same regression read backwards.
+    #[test]
+    fn selection_is_the_derivation_and_the_gather_never_multiplies_cg_18() {
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        // E8's own shape, as the codec declares it and `model/tiers.toml`
+        // records it.
+        let space = 256usize;
+        let block = 8usize;
+        let (m, k) = (16usize, 64usize);
+        let blocks = k / block;
+        let lane = core::mem::size_of::<<i8 as Tabulated>::Lane>();
+        let l1 = blocking::L1_BYTES;
+
+        // The derivation, at the host's own pair of declarations: the table
+        // sequence the family resolves to against the dense tile it would
+        // otherwise run. This is `run_lane`'s own arithmetic, asked from the
+        // outside; a boundary computed from a recorded number would pass on
+        // one ISA and be wrong on every other.
+        let bound = <Full<i8> as Bound>::VALUE;
+        let backend = GemmOptions::default().backend;
+        let rows = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= tabulation_rows(space, l1, lane).min(m))
+            .expect("a 256-entry table fits L1 at some tile");
+        let spec = <i8 as Tabulated>::table_spec(backend, bound, rows, column_group(rows), block);
+        let steps =
+            <i8 as Tabulated>::dense_steps(backend, bound, rows, block * spec.lanes_per_add);
+        let break_even = (1..)
+            .find(|&cols| tabulation_pays(space, block, cols, rows, steps, l1, lane))
+            .expect("E8 pays at some column width on every pair this workspace ships");
+        assert!(
+            !tabulation_pays(space, block, break_even - 1, rows, steps, l1, lane),
+            "the first paying width is a boundary, not a plateau"
+        );
+
+        // Sixteen rows of activations; the values are immaterial to a count,
+        // and the product is asserted against the dense driver's bytes.
+        let a: Vec<i8> = (0..m * k).map(|i| ((i % 255) as i64 - 127) as i8).collect();
+
+        for n in [break_even - 1, break_even, break_even + 1, 2 * break_even] {
+            // Column `j` is `j` in base `space`, so no two columns repeat and
+            // the gather's closed form is exact rather than a census of a
+            // hash's luck.
+            let stream: Vec<u16> = (0..n * blocks)
+                .map(|i| {
+                    let (j, p) = (i / blocks, i % blocks);
+                    // The `p`-th base-`space` digit of `j`, by repeated
+                    // division: `space.pow(p)` overflows a 32-bit `usize`
+                    // (wasm32) at `p = 4`, and the wrap reads as a divide by
+                    // zero.
+                    let shifted = (0..p).fold(j, |acc, _| acc / space);
+                    (shifted % space) as u16
+                })
+                .collect();
+            let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+            let (got, census) = tabulated(
+                &w,
+                &a,
+                m,
+                n,
+                Traversal::Blocked,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
+            assert_eq!(
+                got,
+                reference(&w, &a, m, k, n),
+                "the product, whichever factorization ran ({census:?})"
+            );
+
+            // The plan the traversal resolved to, recomputed from the same
+            // offers the helper passes: the accumulator offer is the suggested
+            // one, the lane offer the suggested `i64` words re-read as lanes
+            // (`run_lane`'s own conversion).
+            let shape = Shape { m, k, n };
+            let plan = Plan::choose(
+                space,
+                shape,
+                lane,
+                suggested_tabulation::<i8, Full<i8>>(shape, space, block).max(1),
+                suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block).max(1) * 8 / lane,
+                block,
+                <i8 as Tabulated>::probe_capacity::<<i8 as Tabulated>::Lane>(bound),
+            )
+            .expect("the suggested offers admit a plan");
+            assert_eq!(
+                plan.cols, n,
+                "the offer must be wide enough that the amortization axis is `n` itself"
+            );
+            assert_eq!(plan.rows, rows, "the tile the derivation priced");
+
+            if n < break_even {
+                assert_eq!(
+                    census.table_reads, 0,
+                    "below the break-even ({break_even}) the table must not run at n = {n}: {census:?}"
+                );
+                assert!(
+                    census.kernel_calls > 0,
+                    "and the dense route is what ran at n = {n}: {census:?}"
+                );
+            } else {
+                assert!(
+                    census.table_reads > 0,
+                    "at and above the break-even ({break_even}) the table runs at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.kernel_calls, 0,
+                    "no dense route at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.table_reads,
+                    (m * n * blocks) as u64,
+                    "one read per code at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.adds, census.table_reads,
+                    "every read is exactly one add at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.multiplies,
+                    (space * k * m * n.div_ceil(plan.cols)) as u64,
+                    "the only multiplies are the build's (`code_space * block * rows` per slot) \
+                     at n = {n}: {census:?}"
+                );
+            }
+        }
+
+        // The boundary the other way: `block = 1` names one element per code,
+        // the derivation declines at every `n`, and the census must show the
+        // dense route at every size.
+        let i4: [A8; 16] = core::array::from_fn(|i| Alphabet::of((i as i8) - 8));
+        let grid = Grid::<i8, Full<i8>, 16>::new(&i4);
+        for n in [
+            1usize,
+            break_even - 1,
+            break_even,
+            break_even + 1,
+            2 * break_even,
+        ] {
+            let stream: Vec<u16> = fill(n * k, 0x61d, |x| (x % 16) as u16);
+            let w = CodedMatrix::new(grid, n, k, &stream).expect("the codes describe n x k");
+            let (got, census) = tabulated(
+                &w,
+                &a,
+                m,
+                n,
+                Traversal::Blocked,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
+            assert_eq!(got, reference(&w, &a, m, k, n));
+            assert_eq!(
+                census.table_reads, 0,
+                "a block-1 codec is declined at every n ({n}): {census:?}"
+            );
+            assert!(
+                census.kernel_calls > 0,
+                "and the dense route is what ran at n = {n}: {census:?}"
+            );
+        }
     }
 }

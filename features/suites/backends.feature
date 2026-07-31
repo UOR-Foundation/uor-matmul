@@ -71,3 +71,9 @@ Feature: Backend parity
     Given the standing corpus
     When the suite exercises CB-11
     Then the claim holds byte for byte
+
+  @CB-12 @build
+  Scenario: The wasm SIMD128 SWAR broadcast sequence equals the portable reference lane for lane, and selection offers it nowhere because CG-17 measured it slower than the dot sequence it would displace
+    Given the standing corpus
+    When the suite exercises CB-12
+    Then the claim holds byte for byte

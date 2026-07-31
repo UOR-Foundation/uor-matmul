@@ -1,0 +1,33 @@
+{
+  "byte_order": "little-endian",
+  "cases": [
+    {
+      "codes_sha256": "sha256:033a77fbe6a8e789a2e3f5a7b1264085351895f3e036c832beca8d736b0b8ece",
+      "shape": {
+        "k": 257,
+        "n": 13
+      },
+      "stem": "13x257",
+      "weights_sha256": "sha256:dec578d7e0b55153750768451e90fde6881175ae7b67b74f0af5c2a0e452380a"
+    },
+    {
+      "codes_sha256": "sha256:145a2a6d8862e4d1a3cb9dda29aa3b02133ecb5e631f8dff91dc5521d0a2866a",
+      "shape": {
+        "k": 1024,
+        "n": 1024
+      },
+      "stem": "1024x1024",
+      "weights_sha256": "sha256:4e4f5f6f8a34ab734ad149f0225068de0b406d7bb2ed288e2613afe8c2ec16a8"
+    }
+  ],
+  "codebook_sha256": "sha256:a271efcbf3f4142bdeb156bd055a9ee831eca58536be983d80f1abf1b4c5acbf",
+  "codebook_symbols": 256,
+  "dtype": "f32",
+  "entry": "dequantized-8-bit-style f32 weights, <= 256 distinct bit patterns",
+  "id": "CK-14",
+  "note": "The codebook is the artifact's distinct bit patterns in canonical arena order; the codes address it one byte a symbol; the dense spelling is committed beside them so the fixture's reference is the artifact itself. No quality claim attaches to the codebook (N3).",
+  "numpy_version": "2.2.6",
+  "oracle": "none: a self-describing artifact, not an outside witness",
+  "seed": 20260730,
+  "spec": "uor-matmul/1"
+}

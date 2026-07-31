@@ -16,8 +16,8 @@ pub mod registry;
 
 pub use registry::{
     Authorities, Authority, AuthorityRow, Blocking, Claim, Codebook, Complete, Constants, Element,
-    IdRow, Ids, Instantiation, Ledger, Level, Narrow, Oracle, Oracles, Threshold, Tier, Tiers,
-    Width, Widths,
+    IdRow, Ids, Instantiation, Ledger, Level, Narrow, Oracle, Oracles, Suspension, Threshold, Tier,
+    Tiers, Width, Widths,
 };
 
 use std::path::{Path, PathBuf};
@@ -63,6 +63,32 @@ impl std::fmt::Display for ModelError {
 }
 
 impl std::error::Error for ModelError {}
+
+/// The CG-* register rows whose level is `build` rather than `open`.
+///
+/// §2 forces every CG-* row `open`, because a scaling exponent is a
+/// measurement: fitted, reported, never asserted. A census is not a
+/// measurement. CG-11's claim is that the static issue analysis runs over the
+/// emitted inner loops and names a bottleneck resource for every kernel
+/// sequence --- that is constructed here and validated, which is what `build`
+/// means. The figures the census prints remain `llvm-mca` scheduling-model
+/// predictions: reported, never asserted as measurements, exactly as the row's
+/// statement says. The exception lives in the ID register alone; a CG-* claim
+/// in the *ledger* is still forced `open` by `Ledger::check`, because a ledger
+/// claim about scaling is a measurement and nothing else.
+///
+/// CG-13's is the same shape of claim about dispatch: that the resolved kernel
+/// sequence is cached per element family and that a cached selection returns
+/// the sequence the full walk returns is constructed here and asserted, which
+/// is `build`. What the cache buys in nanoseconds is a measurement and stays
+/// `open` under CG-07, exactly as the row's statement says.
+///
+/// CG-18's is the same shape again, about selection: that auto-selection is
+/// the break-even derivation and that the running gather issues no multiplies
+/// beyond the build's is read off the operation census, which is a count and
+/// not a clock --- constructed here and asserted, which is `build`. What the
+/// boundary buys in nanoseconds stays `open` under CG-10.
+const CG_BUILD_ROWS: &[&str] = &["CG-11", "CG-13", "CG-18"];
 
 impl Model {
     /// Load every model file from a `model/` directory.
@@ -300,7 +326,10 @@ impl Model {
                 )));
             }
             // §2: a fitted exponent is measured and reported, never asserted.
-            if row.id.starts_with("CG-") && row.level != Level::Open {
+            if row.id.starts_with("CG-")
+                && row.level != Level::Open
+                && !CG_BUILD_ROWS.contains(&row.id.as_str())
+            {
                 return Err(bad(format!("{}: a scaling exponent must be open", row.id)));
             }
             // §2, R4: a cross-library *result* is evidence that the kernels

@@ -34,8 +34,8 @@ use uor_matmul_core::{
 };
 use uor_matmul_gemm::{
     gemm_float, gemm_float_packed, gemm_tabulated, gemm_tabulated_counted, suggested_tabulation,
-    suggested_tabulation_index, suggested_tabulation_panel, Census, Collapse, GemmOptions, Linear,
-    Scratch, TabulatedTriple, Tabulation,
+    suggested_tabulation_index, suggested_tabulation_lanes, suggested_tabulation_panel, Census,
+    Collapse, GemmOptions, Linear, Scratch, TabulatedTriple, Tabulation,
 };
 use uor_matmul_validate::float_tab::{codebook, FloatBook};
 
@@ -70,11 +70,22 @@ fn fill(len: usize, salt: u64) -> Vec<u64> {
 
 /// Deterministic `f32`s across a few exponents: the exact float mac's cost is
 /// the placement into the fixed-point accumulator, and a single-exponent fill
-/// would dodge it.
+/// would dodge it. The magnitudes stay inside one five-binade band, because
+/// the scaled lane admits a panel only where `24 + span <= 31`: a wider fill
+/// is declined by design, and this instrument exists to make the table run,
+/// not to probe the decline.
 fn symbols(len: usize, salt: u64) -> Vec<f32> {
     fill(len, salt)
         .into_iter()
-        .map(|x| ((x % 2000) as f32 - 1000.0) / 500.0)
+        .map(|x| {
+            // [2^-4, 4): exponents -4 through 1, a span of five.
+            let mag = 0.0625 + (x % 1000) as f32 / 1000.0 * 3.9375;
+            if x & 1 == 0 {
+                mag
+            } else {
+                -mag
+            }
+        })
         .collect()
 }
 
@@ -179,6 +190,9 @@ fn sweep<const S: usize, const BLK: usize>() {
             suggested_tabulation::<f32, Whole<f32>>(shape, S, BLK,)
         ];
         let mut ids = vec![0usize; suggested_tabulation_index(shape)];
+        // The scaled lane's words are `i64`-shaped and do not live in the
+        // exact offer: an empty lanes slice declines the table by design.
+        let mut lanes = vec![0i64; suggested_tabulation_lanes::<f32, Whole<f32>>(shape, S, BLK)];
         let mut panel = vec![Alphabet::<f32, Whole<f32>>::ZERO; suggested_tabulation_panel(S, BLK)];
         let mut c = vec![0.0f32; m * n];
 
@@ -188,8 +202,15 @@ fn sweep<const S: usize, const BLK: usize>() {
         };
 
         let t_tab = {
-            let (a, w, c, panel, accumulators, ids) =
-                (&a, &w, &mut c, &mut panel, &mut accumulators, &mut ids);
+            let (a, w, c, panel, accumulators, lanes, ids) = (
+                &a,
+                &w,
+                &mut c,
+                &mut panel,
+                &mut accumulators,
+                &mut lanes,
+                &mut ids,
+            );
             best(|| {
                 let s = Instant::now();
                 {
@@ -201,7 +222,7 @@ fn sweep<const S: usize, const BLK: usize>() {
                         &Linear::OVERWRITE,
                         options(Traversal::Tabulated),
                         &mut Scratch::with_accumulators(panel, accumulators),
-                        &mut Tabulation::with_index(&mut [], ids),
+                        &mut Tabulation::with_index(lanes, ids),
                         &mut Collapse::none(),
                     );
                 }
@@ -221,6 +242,7 @@ fn sweep<const S: usize, const BLK: usize>() {
                        c: &mut Vec<f32>,
                        panel: &mut Vec<Alphabet<f32, Whole<f32>>>,
                        accumulators: &mut Vec<AccOf<f32>>,
+                       lanes: &mut Vec<i64>,
                        ids: &mut Vec<usize>|
          -> Census {
             let mut census = Census::default();
@@ -232,7 +254,7 @@ fn sweep<const S: usize, const BLK: usize>() {
                 &Linear::OVERWRITE,
                 options(traversal),
                 &mut Scratch::with_accumulators(panel, accumulators),
-                &mut Tabulation::with_index(&mut [], ids),
+                &mut Tabulation::with_index(lanes, ids),
                 &mut Collapse::none(),
                 &mut census,
             );
@@ -243,6 +265,7 @@ fn sweep<const S: usize, const BLK: usize>() {
             &mut c,
             &mut panel,
             &mut accumulators,
+            &mut lanes,
             &mut ids,
         );
         assert!(
@@ -262,6 +285,7 @@ fn sweep<const S: usize, const BLK: usize>() {
             &mut out,
             &mut big_panel,
             &mut accumulators,
+            &mut lanes,
             &mut ids,
         );
         let picked = if declined.table_reads > 0 {

@@ -153,8 +153,10 @@ pub struct Threshold {
     pub cap_override: Option<u128>,
 }
 
-/// Cache-shaped tuning parameters. Changing one cannot change any output byte,
-/// only which traversal produces it (`CD-01`).
+/// Constants discovered by measurement: cache-shaped tuning, found empirically.
+/// Changing one cannot change any output byte, only which traversal produces it
+/// (`CD-01`). A derivation story for such a constant is fiction, so the table
+/// records the measurement instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Blocking {
     /// Asserts the R1 allowlist applies to this table.
@@ -185,6 +187,11 @@ pub struct Blocking {
     /// rows the tile pays for lanes that are not there, and the predicate scales
     /// the dense side accordingly.
     pub kernel_rows: usize,
+    /// The smallest base-case extent at which one level of the sub-cubic
+    /// recursion pays on the `i32`-exact lane, measured by `just strassen-sweep`.
+    /// Below it a level's block sums and temporary traffic cost more than its
+    /// product count saves.
+    pub strassen_min_extent: usize,
 }
 
 /// `model/widths.toml`.
@@ -407,6 +414,38 @@ pub struct Ledger {
     pub spec: String,
     /// One row per claim.
     pub claim: Vec<Claim>,
+    /// One row per suspended rule. Empty in the steady state: a suspension is
+    /// an event, not a condition.
+    #[serde(default)]
+    pub suspension: Vec<Suspension>,
+}
+
+/// A working rule deliberately suspended for one named scope.
+///
+/// The rules in §0 are the repository's promises, so suspending one is itself
+/// a claim and belongs in the ledger, where `CONFORMANCE.md` renders it: a
+/// suspension that lived only in a gate's exemption list would be a hole
+/// nobody reviews. What the suspension *admits* is enumerated here and read by
+/// the gate from this file, so the exemption is model data (R10) rather than a
+/// constant inside the gate.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Suspension {
+    /// Stable identifier, e.g. `SUSP-R15-WIDTH-PHASE`.
+    pub id: String,
+    /// The rule suspended, e.g. `R15`.
+    pub rule: String,
+    /// The scope the suspension is bounded to. A suspension without a named
+    /// scope is a repeal, and that is a different decision.
+    pub scope: String,
+    /// Why the rule blocks the work and why suspending it is honest here.
+    pub reason: String,
+    /// The repo-relative paths the suspension exempts from the rule's gate.
+    /// Never a crate: a deferral does not become admissible by being parked in
+    /// shipped code, so an admitted path under `crates/` is rejected.
+    #[serde(default)]
+    pub admits: Vec<String>,
+    /// How the suspension ends.
+    pub ends: String,
 }
 
 /// One claim, at exactly one honesty level.
@@ -434,12 +473,39 @@ pub struct Claim {
 
 impl Ledger {
     /// The meta-gate's structural half: every claim is well formed for its
-    /// level (R4).
+    /// level (R4), and every suspension names what it exempts.
     ///
     /// The behavioural half --- that no test asserts an `open` claim as
     /// established --- lives in `uor-matmul-conformance`, because it needs the
     /// test names, not the model.
     pub fn check(&self) -> Result<(), ModelError> {
+        for s in &self.suspension {
+            for (field, value) in [
+                ("id", &s.id),
+                ("rule", &s.rule),
+                ("scope", &s.scope),
+                ("reason", &s.reason),
+                ("ends", &s.ends),
+            ] {
+                if value.trim().is_empty() {
+                    return Err(ModelError::Inconsistent(format!(
+                        "{}: a suspension with an empty {field} is a repeal written \
+                         carelessly; every field is the claim",
+                        s.id
+                    )));
+                }
+            }
+            for path in &s.admits {
+                if path.starts_with("crates/") || path.starts_with("xtask/") {
+                    return Err(ModelError::Inconsistent(format!(
+                        "{}: `{path}` is code, and a suspension never admits shipped code or \
+                         a gate --- a deferral does not become admissible by being parked \
+                         where the rule matters most",
+                        s.id
+                    )));
+                }
+            }
+        }
         for c in &self.claim {
             match c.level {
                 Level::SomeTrue => {

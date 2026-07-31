@@ -44,7 +44,7 @@ pub mod table;
 pub use table::{
     available_table_i16, available_table_i32_modular, available_table_i64_modular,
     available_table_i8, choose_table, gather_reference_i32, gather_reference_wide, portable_table,
-    Lane, LaneWord, Mod32, Mod64, TableBuild, TableGather, TableSpec, Wide,
+    Lane, LaneWord, Mod32, Mod64, Scaled64, TableBuild, TableGather, TableSpec, Wide,
 };
 
 pub use spec::{
@@ -52,6 +52,6 @@ pub use spec::{
     available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
     available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
     available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
-    available_reduce_i8, choose, choose_for_rows, packed_slot, portable_i8, Factorization,
+    available_reduce_i8, cached, choose, choose_for_rows, packed_slot, portable_i8, Factorization,
     KernelSpec, LaneLayout, MAX_TILE_LANES,
 };

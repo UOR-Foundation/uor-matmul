@@ -37,20 +37,25 @@ pub mod float;
 pub mod kernel;
 pub mod partition;
 pub mod scratch;
+pub mod strassen;
 pub mod tabulated;
 
 pub use coded::{coded_gemm, CodedTriple};
 pub use collapse::{gemm_collapsed, suggested_collapse_index, suggested_collapse_rows, Collapse};
 pub use driver::{gemm, GemmOptions};
-pub use epilogue::{Bias, Epilogue, Linear};
-pub use float::{gemm_float, gemm_float_packed, SignedPlace};
+pub use epilogue::{Bias, Epilogue, Linear, PlaceAt, Scaled};
+pub use float::{
+    gemm_float, gemm_float_bridged, gemm_float_packed, suggested_bridge_scaled,
+    suggested_float_panels, SignedPlace,
+};
 pub use kernel::{gemm_packed, Kernelized};
 pub use partition::{Partition, Tile};
 pub use scratch::{suggested_accumulators, suggested_scratch, PanelSplit, Scratch};
+pub use strassen::{gemm_strassen, levels as strassen_levels, strassen_scratch};
 pub use tabulated::{
     gather_reference_i32, gather_reference_wide, gemm_tabulated, gemm_tabulated_counted,
     suggested_tabulation, suggested_tabulation_index, suggested_tabulation_lanes,
     suggested_tabulation_panel, tabulation_depth, tabulation_fits, tabulation_pays,
-    tabulation_rows, Census, Lane, LaneWord, Ledger, Table, TableSpec, Tabulated, TabulatedTriple,
-    Tabulation, Wide,
+    tabulation_rows, Census, Lane, LaneScale, LaneWord, Ledger, Table, TableSpec, Tabulated,
+    TabulatedTriple, Tabulation, Wide,
 };

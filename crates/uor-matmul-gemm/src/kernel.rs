@@ -21,11 +21,7 @@ use uor_matmul_core::{
     Triple,
 };
 use uor_matmul_kernels::{
-    available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
-    available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
-    available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
-    available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
-    available_reduce_i8, choose_for_rows, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
+    cached, choose_for_rows, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
 };
 
 use crate::driver::GemmOptions;
@@ -118,6 +114,19 @@ pub trait Kernelized: IntegerElement {
     /// chunks passes through the accumulator, and this is what lets it come back
     /// out as the lane the next chunk adds to.
     fn acc_as_modular(acc: Self::Acc) -> Self::Modular;
+
+    /// The smallest base-case extent at which a level of the sub-cubic
+    /// recursion pays on this lane, from the measured-constants table.
+    ///
+    /// `None` where the lane has no measurement: an unmeasured lane declines
+    /// the recursion, because a gain that cannot be measured cannot be
+    /// selected. The `i16` lane's analysis is recorded in ANALYSIS.md --- at a
+    /// per-operation penalty of two the break-even sits near five levels, which
+    /// the alphabet's headroom does not admit at any useful bound --- and that
+    /// is a measurement of a different kind: the decline is the finding.
+    fn strassen_min_extent() -> Option<usize> {
+        None
+    }
 }
 
 impl Kernelized for i8 {
@@ -125,17 +134,17 @@ impl Kernelized for i8 {
     type Modular = i32;
 
     fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i32> {
-        choose_for_rows(available_i8(), backend, bound, rows)
+        choose_for_rows(cached::available_i8(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i32> {
-        choose_for_rows(available_reduce_i8(), backend, bound, rows)
+        choose_for_rows(cached::available_reduce_i8(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
     fn exact_narrow(backend: Backend, bound: u128, rows: usize) -> Option<KernelSpec<Self, i32>> {
-        choose_for_rows(available_i8_narrow(), backend, bound, rows)
+        choose_for_rows(cached::available_i8_narrow(), backend, bound, rows)
     }
 
     fn modular_narrow(
@@ -148,7 +157,7 @@ impl Kernelized for i8 {
             return None;
         }
         // The same homomorphism the full-width tile cashes in.
-        let spec = choose_for_rows(available_i8_narrow(), backend, bound, rows)?;
+        let spec = choose_for_rows(cached::available_i8_narrow(), backend, bound, rows)?;
         Some(KernelSpec {
             factorization: Factorization::Modular,
             ..spec
@@ -166,7 +175,7 @@ impl Kernelized for i8 {
         }
         // The same homomorphism the tile kernel cashes in: an `i8` reduce lane is
         // already 32 bits, and read as `Z/2^32` its wrap *is* the encode.
-        let spec = choose_for_rows(available_reduce_i8(), backend, bound, rows)?;
+        let spec = choose_for_rows(cached::available_reduce_i8(), backend, bound, rows)?;
         Some(KernelSpec {
             factorization: Factorization::Modular,
             ..spec
@@ -188,7 +197,7 @@ impl Kernelized for i8 {
         // encode, so the same kernel carries any depth in one chunk. Same
         // instructions, same bytes, one fewer fold: that is the homomorphism
         // being cashed in rather than a second kernel being written.
-        let spec = choose_for_rows(available_i8(), backend, bound, rows)?;
+        let spec = choose_for_rows(cached::available_i8(), backend, bound, rows)?;
         Some(KernelSpec {
             factorization: Factorization::Modular,
             ..spec
@@ -217,12 +226,12 @@ impl Kernelized for i16 {
     type Modular = i32;
 
     fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
-        choose_for_rows(available_i16(), backend, bound, rows)
+        choose_for_rows(cached::available_i16(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
-        choose_for_rows(available_reduce_i16(), backend, bound, rows)
+        choose_for_rows(cached::available_reduce_i16(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
@@ -235,7 +244,7 @@ impl Kernelized for i16 {
         if out_bits > 32 {
             return None;
         }
-        choose_for_rows(available_reduce_i16_modular(), backend, bound, rows)
+        choose_for_rows(cached::available_reduce_i16_modular(), backend, bound, rows)
     }
 
     fn modular_spec(
@@ -250,7 +259,7 @@ impl Kernelized for i16 {
         // Not a shortcut for the exact lane's benefit --- that lane already
         // reaches every addressable `k` for `i16`. It is twice the columns per
         // instruction, because in `Z/2^32` there is nothing to widen to.
-        choose_for_rows(available_i16_modular(), backend, bound, rows)
+        choose_for_rows(cached::available_i16_modular(), backend, bound, rows)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i64) {
@@ -275,12 +284,12 @@ impl Kernelized for i32 {
     type Modular = i32;
 
     fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
-        choose_for_rows(available_i32_exact(), backend, bound, rows)
+        choose_for_rows(cached::available_i32_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i64> {
-        choose_for_rows(available_reduce_i32_exact(), backend, bound, rows)
+        choose_for_rows(cached::available_reduce_i32_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
@@ -293,7 +302,7 @@ impl Kernelized for i32 {
         if out_bits > 32 {
             return None;
         }
-        choose_for_rows(available_reduce_i32_modular(), backend, bound, rows)
+        choose_for_rows(cached::available_reduce_i32_modular(), backend, bound, rows)
     }
 
     fn modular_spec(
@@ -305,7 +314,7 @@ impl Kernelized for i32 {
         if out_bits > 32 {
             return None;
         }
-        choose_for_rows(available_i32_modular(), backend, bound, rows)
+        choose_for_rows(cached::available_i32_modular(), backend, bound, rows)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i64) {
@@ -323,6 +332,10 @@ impl Kernelized for i32 {
     fn acc_as_modular(acc: Self::Acc) -> i32 {
         acc as i32
     }
+
+    fn strassen_min_extent() -> Option<usize> {
+        Some(uor_matmul_core::generated::blocking::STRASSEN_MIN_EXTENT)
+    }
 }
 
 impl Kernelized for i64 {
@@ -335,12 +348,12 @@ impl Kernelized for i64 {
         // this is not a placeholder --- it is the whole of what the hardware
         // offers, and the packing still buys it the locality every other family
         // gets.
-        choose_for_rows(available_i64_exact(), backend, bound, rows)
+        choose_for_rows(cached::available_i64_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
     fn exact_reduce(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i128> {
-        choose_for_rows(available_reduce_i64_exact(), backend, bound, rows)
+        choose_for_rows(cached::available_reduce_i64_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
 
@@ -353,7 +366,7 @@ impl Kernelized for i64 {
         if out_bits > 64 {
             return None;
         }
-        choose_for_rows(available_reduce_i64_modular(), backend, bound, rows)
+        choose_for_rows(cached::available_reduce_i64_modular(), backend, bound, rows)
     }
 
     fn modular_spec(
@@ -365,7 +378,7 @@ impl Kernelized for i64 {
         if out_bits > 64 {
             return None;
         }
-        choose_for_rows(available_i64_modular(), backend, bound, rows)
+        choose_for_rows(cached::available_i64_modular(), backend, bound, rows)
     }
 
     fn fold_exact(acc: &mut Self::Acc, lane: i128) {
@@ -409,6 +422,25 @@ pub fn gemm_packed<E, Bd, O, Ep>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
+    gemm_packed_impl(triple, epilogue, options, scratch, true);
+}
+
+/// [`gemm_packed`], with the sub-cubic auto-selection switchable.
+///
+/// `recurse` is `true` for every caller but one: [`crate::strassen`]'s own
+/// decline path, which must not re-enter the recursion it just declined.
+pub(crate) fn gemm_packed_impl<E, Bd, O, Ep>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    recurse: bool,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+{
     let shape = triple.shape();
     if shape.m == 0 || shape.n == 0 {
         return;
@@ -426,7 +458,8 @@ pub fn gemm_packed<E, Bd, O, Ep>(
         Some(tile) => {
             match pick(
                 shape,
-                triple,
+                triple.a(),
+                triple.b(),
                 &tile,
                 || E::modular_narrow(options.backend, O::BITS, Bd::VALUE, shape.m),
                 || E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m),
@@ -439,46 +472,241 @@ pub fn gemm_packed<E, Bd, O, Ep>(
                     let accumulate = |acc: &mut AccOf<E>, lane: E::Modular| {
                         *acc = E::modular_as_acc(E::add_modular(E::acc_as_modular(*acc), lane));
                     };
-                    run::<E, Bd, O, Ep, E::Modular>(
-                        triple,
-                        epilogue,
-                        options,
-                        scratch,
-                        spec,
-                        E::add_modular,
-                        &accumulate,
-                        usize::MAX,
-                    )
+                    let (a, b) = (*triple.a(), *triple.b());
+                    let reads_c = epilogue.reads_c();
+                    let ran = {
+                        let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| {
+                            let c = triple.c_mut();
+                            let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
+                            *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+                        };
+                        run::<E, Bd, E::Modular>(
+                            shape,
+                            &a,
+                            &b,
+                            scratch,
+                            spec,
+                            E::add_modular,
+                            &accumulate,
+                            usize::MAX,
+                            &mut emit,
+                        )
+                    };
+                    if !ran {
+                        crate::gemm(triple, epilogue, options, scratch);
+                    }
                 }
                 None => crate::gemm(triple, epilogue, options, scratch),
             }
         }
-        None => {
-            let tile = E::exact_spec(options.backend, Bd::VALUE, shape.m);
-            match pick(
-                shape,
-                triple,
-                &tile,
-                || E::exact_narrow(options.backend, Bd::VALUE, shape.m),
-                || Some(E::exact_reduce(options.backend, Bd::VALUE, shape.m)),
-                scratch.len(),
-            ) {
-                Some(spec) => {
-                    let depth = spec.lane_depth(Bd::VALUE);
-                    let accumulate = E::fold_exact;
-                    run::<E, Bd, O, Ep, E::Exact>(
-                        triple,
-                        epilogue,
-                        options,
-                        scratch,
-                        spec,
-                        |_, lane| lane,
-                        &accumulate,
-                        depth,
-                    )
-                }
-                None => crate::gemm(triple, epilogue, options, scratch),
+        None => gemm_packed_exact_at(triple, epilogue, options, scratch, Bd::VALUE, recurse),
+    }
+}
+
+/// The exact arm of [`gemm_packed`], with the alphabet bound measured rather
+/// than read from the type.
+///
+/// [`gemm_packed`] derives the bound from `Bd`; the float placement bridge is
+/// the caller that cannot, because its alphabet is a scaled float panel whose
+/// bound is a fact of the data's exponent spans, established by measuring them
+/// one walk ahead of the arithmetic. The bound here is that measurement, and
+/// it is a declaration in the same sense `Bd::VALUE` is: the lane depth is
+/// derived from it, so a bound below the data's true magnitude is a wrong
+/// answer, not a fast one.
+///
+/// There is no modular arm. The modular lane is legitimate when the caller
+/// asked to wrap into an integer quotient; this caller's encode is a float
+/// rounding, a question the quotient does not answer, so the exact lane is the
+/// only one the bridge can mean.
+pub(crate) fn gemm_packed_exact_at<E, Bd, O, Ep>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    bound: u128,
+    recurse: bool,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+{
+    let shape = triple.shape();
+    if shape.m == 0 || shape.n == 0 {
+        return;
+    }
+    // The sub-cubic regrouping, taken when the declarations admit at least one
+    // level: the shape (even, and past the measured crossover), the bound's
+    // headroom in the element type, and the offer. Every factorization below
+    // computes the same integer, so this decides which instructions run and
+    // nothing else --- `CD-21` asserts the bytes at every level count and every
+    // offer, including none (R13). `recurse` is `false` for exactly one caller:
+    // the recursion's own decline path, which must not re-enter what it
+    // declined --- a caller who asked for zero levels gets the cubic walk.
+    let take = if recurse {
+        crate::strassen::levels::<E>(
+            shape,
+            bound,
+            scratch.len(),
+            scratch.accumulators(),
+            usize::MAX,
+        )
+    } else {
+        0
+    };
+    if take > 0 {
+        crate::strassen::run(triple, epilogue, options, scratch, bound, take);
+        return;
+    }
+    gemm_packed_cubic_at(triple, epilogue, options, scratch, bound);
+}
+
+/// The cubic half of [`gemm_packed_exact_at`]: the packed traversal with no
+/// recursion above it. This is what a declined level falls to, and a decline
+/// is not a fallback to something less exact --- it is the same identity with
+/// fewer regroupings, which is why the bytes cannot tell (`CD-21`).
+pub(crate) fn gemm_packed_cubic_at<E, Bd, O, Ep>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    bound: u128,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+{
+    let shape = triple.shape();
+    if shape.m == 0 || shape.n == 0 {
+        return;
+    }
+    let tile = E::exact_spec(options.backend, bound, shape.m);
+    match pick(
+        shape,
+        triple.a(),
+        triple.b(),
+        &tile,
+        || E::exact_narrow(options.backend, bound, shape.m),
+        || Some(E::exact_reduce(options.backend, bound, shape.m)),
+        scratch.len(),
+    ) {
+        Some(spec) => {
+            let depth = spec.lane_depth(bound);
+            let accumulate = E::fold_exact;
+            let (a, b) = (*triple.a(), *triple.b());
+            let reads_c = epilogue.reads_c();
+            let ran = {
+                let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| {
+                    let c = triple.c_mut();
+                    let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
+                    *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+                };
+                run::<E, Bd, E::Exact>(
+                    shape,
+                    &a,
+                    &b,
+                    scratch,
+                    spec,
+                    |_, lane| lane,
+                    &accumulate,
+                    depth,
+                    &mut emit,
+                )
+            };
+            if !ran {
+                crate::gemm(triple, epilogue, options, scratch);
             }
+        }
+        None => crate::gemm(triple, epilogue, options, scratch),
+    }
+}
+
+/// The exact arm of the packed traversal with the encode step replaced by a
+/// store.
+///
+/// The sub-cubic recursion's product temporaries are exact sums, not output,
+/// so no epilogue runs on one --- the epilogue runs exactly once, on the
+/// temporaries' combination, at the recursion's top (`CD-21`). `out` is
+/// row-major with leading dimension `ldc`.
+pub(crate) fn gemm_packed_exact_raw<E, Bd>(
+    a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    backend: Backend,
+    scratch: &mut Scratch<'_, E, Bd>,
+    bound: u128,
+    out: &mut [AccOf<E>],
+    ldc: usize,
+) where
+    E: Kernelized,
+    Bd: Bound,
+{
+    let shape = uor_matmul_core::Shape {
+        m: a.rows(),
+        k: a.cols(),
+        n: b.cols(),
+    };
+    if shape.m == 0 || shape.n == 0 {
+        return;
+    }
+    let tile = E::exact_spec(backend, bound, shape.m);
+    let picked = pick(
+        shape,
+        a,
+        b,
+        &tile,
+        || E::exact_narrow(backend, bound, shape.m),
+        || Some(E::exact_reduce(backend, bound, shape.m)),
+        scratch.len(),
+    );
+    if let Some(spec) = picked {
+        let depth = spec.lane_depth(bound);
+        let accumulate = E::fold_exact;
+        let ran = {
+            let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| out[ci * ldc + cj] = acc;
+            run::<E, Bd, E::Exact>(
+                shape,
+                a,
+                b,
+                scratch,
+                spec,
+                |_, lane| lane,
+                &accumulate,
+                depth,
+                &mut emit,
+            )
+        };
+        if ran {
+            return;
+        }
+    }
+    raw_stream(shape, a, b, out, ldc);
+}
+
+/// The streaming reference traversal with the encode step replaced by a store.
+///
+/// Reached exactly when the traversal above would have deferred to
+/// [`crate::gemm`] --- an offer that cannot hold one packed group, or a shape
+/// the cost model prefers unpacked. It is the same `Element::mac` walk in the
+/// same order, into a raw accumulator buffer rather than through the epilogue:
+/// not a second accumulation, but a second sink for the one there is (R13).
+fn raw_stream<E, Bd>(
+    shape: uor_matmul_core::Shape,
+    a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    out: &mut [AccOf<E>],
+    ldc: usize,
+) where
+    E: Kernelized,
+    Bd: Bound,
+{
+    for i in 0..shape.m {
+        for j in 0..shape.n {
+            let mut acc = <AccOf<E> as Accumulator>::ZERO;
+            for p in 0..shape.k {
+                E::mac(&mut acc, a.at(i, p).get(), b.at(p, j).get());
+            }
+            out[i * ldc + j] = acc;
         }
     }
 }
@@ -549,9 +777,10 @@ fn packed_cost<E, L>(
 /// sequences, `CD-01` and `CD-04` for the traversals --- so this decides which
 /// instructions run and nothing else. It reads the declared shape, the declared
 /// strides, and the sequences' own declarations, and never the data (R13).
-fn pick<E, Bd, O, L>(
+fn pick<E, Bd, L>(
     shape: uor_matmul_core::Shape,
-    triple: &Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
     tile: &KernelSpec<E, L>,
     narrow: impl FnOnce() -> Option<KernelSpec<E, L>>,
     reduce: impl FnOnce() -> Option<KernelSpec<E, L>>,
@@ -578,14 +807,8 @@ where
             && kpad == shape.k
             && shape.m.is_multiple_of(spec.mr)
             && shape.n.is_multiple_of(spec.nr)
-            && triple
-                .a()
-                .row_block(0, 0, shape.m.min(spec.mr), kpad)
-                .is_some()
-            && triple
-                .b()
-                .column_block(0, 0, shape.n.min(spec.nr), kpad)
-                .is_some()
+            && a.row_block(0, 0, shape.m.min(spec.mr), kpad).is_some()
+            && b.column_block(0, 0, shape.n.min(spec.nr), kpad).is_some()
     };
 
     let mut best = *tile;
@@ -636,24 +859,30 @@ where
 /// `combine_lane` folds two lanes of the same chunk --- the ring's addition for
 /// a modular lane, and unreachable for an exact one, which never sees two
 /// chunks in the same lane. `fold` moves a finished lane into the accumulator.
+/// `emit` is where a finished output element goes: through the encode step into
+/// `C` for an ordinary call, or verbatim into an accumulator buffer for the
+/// sub-cubic recursion's product temporaries (`CD-21`).
+///
+/// Returns `false` when the offer cannot hold even one packed group, in which
+/// case nothing was written and the caller walks the streaming reference ---
+/// the same identity, walked differently (S13).
 #[allow(clippy::too_many_arguments)]
-fn run<E, Bd, O, Ep, L>(
-    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
-    epilogue: &Ep,
-    options: GemmOptions,
+fn run<E, Bd, L>(
+    shape: uor_matmul_core::Shape,
+    a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
     scratch: &mut Scratch<'_, E, Bd>,
     spec: KernelSpec<E, L>,
     combine_lane: impl Fn(L, L) -> L,
     fold: &impl Fn(&mut AccOf<E>, L),
     lane_depth: usize,
-) where
+    emit: &mut impl FnMut(usize, usize, AccOf<E>),
+) -> bool
+where
     E: Kernelized,
     Bd: Bound,
-    O: Element + EncodeFrom<AccOf<E>>,
-    Ep: Epilogue<E, O>,
     L: Copy + Default + 'static,
 {
-    let shape = triple.shape();
     let (mr, nr) = (spec.mr, spec.nr);
     let per_step = mr + nr;
     debug_assert!(
@@ -672,8 +901,7 @@ fn run<E, Bd, O, Ep, L>(
     // streaming traversal runs instead --- the same identity, walked
     // differently (S13).
     if scratch.len() < per_step * pad_to {
-        crate::gemm(triple, epilogue, options, scratch);
-        return;
+        return false;
     }
 
     // A whole number of groups, so a chunk's padded depth never outgrows what
@@ -689,10 +917,8 @@ fn run<E, Bd, O, Ep, L>(
         // declarations and not something any of them states. `CB-07` now asserts
         // the coincidence, and this costs one comparison if it ever stops holding.
         // `run_chunked_depth` has always guarded the same arithmetic this way.
-        crate::gemm(triple, epilogue, options, scratch);
-        return;
+        return false;
     }
-    let reads_c = epilogue.reads_c();
 
     // The panels are the only copies this driver makes, and which loop they sit
     // in decides how many times each byte is copied. A microkernel panel is
@@ -715,7 +941,6 @@ fn run<E, Bd, O, Ep, L>(
     // small the chunked traversal below runs instead, and `CD-01` and `CD-10`
     // assert the bytes are the same either way.
     let mut tile = [L::default(); MAX_TILE];
-    let (a, b, c) = triple.parts();
     // The depth-chunked traversal, when the caller offered somewhere to keep the
     // exact partial sums.
     //
@@ -798,10 +1023,7 @@ fn run<E, Bd, O, Ep, L>(
         && scratch.len() >= per_step * pad_to
         && shape.k > pad_to
     {
-        run_chunked_depth(
-            triple, epilogue, options, scratch, spec, fold, lane_depth, pad_to,
-        );
-        return;
+        return run_chunked_depth(shape, a, b, scratch, spec, fold, lane_depth, pad_to, emit);
     }
 
     if full_depth {
@@ -925,9 +1147,7 @@ fn run<E, Bd, O, Ep, L>(
                             for j in 0..nr.min(cols - jj) {
                                 let mut acc = <AccOf<E> as Accumulator>::ZERO;
                                 fold(&mut acc, tile[i * nr + j]);
-                                let (ci, cj) = (i0 + ii + i, j0 + jj + j);
-                                let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
-                                *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+                                emit(i0 + ii + i, j0 + jj + j, acc);
                             }
                         }
                         jj += nr;
@@ -938,7 +1158,7 @@ fn run<E, Bd, O, Ep, L>(
             }
             j0 += nc;
         }
-        return;
+        return true;
     }
 
     // Declared once, cleared per panel, and only over the part a panel uses.
@@ -1000,19 +1220,14 @@ fn run<E, Bd, O, Ep, L>(
 
             for i in 0..mr.min(shape.m - i0) {
                 for j in 0..nr.min(shape.n - j0) {
-                    let prior = if reads_c {
-                        Some(*c.at(i0 + i, j0 + j))
-                    } else {
-                        None
-                    };
-                    *c.at_mut(i0 + i, j0 + j) =
-                        epilogue.finish(wide[i * nr + j], prior, options.encode);
+                    emit(i0 + i, j0 + j, wide[i * nr + j]);
                 }
             }
             j0 += nr;
         }
         i0 += mr;
     }
+    true
 }
 
 /// A lane's cursor through a packed panel.
@@ -1067,28 +1282,26 @@ impl Cursor {
 /// Every panel is `kc` deep rather than `k` deep, so the offer does not grow with
 /// the depth and an astronomical `k` is blocked exactly as a modest one is.
 #[allow(clippy::too_many_arguments)]
-fn run_chunked_depth<E, Bd, O, Ep, L>(
-    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
-    epilogue: &Ep,
-    options: GemmOptions,
+fn run_chunked_depth<E, Bd, L>(
+    shape: uor_matmul_core::Shape,
+    a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
     scratch: &mut Scratch<'_, E, Bd>,
     spec: KernelSpec<E, L>,
     accumulate: &impl Fn(&mut AccOf<E>, L),
     lane_depth: usize,
     pad_to: usize,
-) where
+    emit: &mut impl FnMut(usize, usize, AccOf<E>),
+) -> bool
+where
     E: Kernelized,
     Bd: Bound,
-    O: Element + EncodeFrom<AccOf<E>>,
-    Ep: Epilogue<E, O>,
     L: Copy + Default + 'static,
 {
     use uor_matmul_core::generated::blocking;
 
-    let shape = triple.shape();
     let (mr, nr) = (spec.mr, spec.nr);
     let per_step = mr + nr;
-    let reads_c = epilogue.reads_c();
 
     // The chunk depth: as deep as the declared blocking, the lane admits, and the
     // panel offer pays for --- and a whole number of `k`-groups, so a chunk's
@@ -1101,8 +1314,7 @@ fn run_chunked_depth<E, Bd, O, Ep, L>(
         * pad_to;
     if kc == 0 {
         // Not even one group of panel room; the streaming traversal runs.
-        crate::gemm(triple, epilogue, options, scratch);
-        return;
+        return false;
     }
 
     // The output block, in whole microkernel tiles, fitted to *both* offers: the
@@ -1125,8 +1337,7 @@ fn run_chunked_depth<E, Bd, O, Ep, L>(
         // One tile of accumulators and one panel step is the least this needs,
         // and the guard at the call site established both; if the arithmetic
         // above still cannot fit, the streaming traversal runs.
-        crate::gemm(triple, epilogue, options, scratch);
-        return;
+        return false;
     }
     // Spread the extents evenly over the blocks they imply, so no block is a
     // sliver.
@@ -1152,7 +1363,6 @@ fn run_chunked_depth<E, Bd, O, Ep, L>(
                     LaneLayout::Contiguous => pad,
                 };
                 {
-                    let (a, b, _) = triple.parts();
                     let buf = scratch.take(pad * (mc + nc));
                     let (pa_buf, pb_buf) = buf.split_at_mut(mc * pad);
                     pack_rows(pa_buf, mr, group, depth, pad, a, i0, p0, rows, shape.m);
@@ -1186,21 +1396,17 @@ fn run_chunked_depth<E, Bd, O, Ep, L>(
                 p0 += depth;
             }
 
-            // One encode per output element, after the whole reduction --- which
-            // is the point: the chunking is invisible because nothing was encoded
-            // until every chunk had been added.
+            // One emit per output element, after the whole reduction --- which
+            // is the point: the chunking is invisible because nothing left the
+            // accumulator until every chunk had been added.
             let per_row = cols.div_ceil(nr);
             let accs = scratch.keep_accumulators(block_tiles * mr * nr);
-            let (_, _, c) = triple.parts();
             for ii in (0..rows).step_by(mr) {
                 for jj in (0..cols).step_by(nr) {
                     let at = ((ii / mr) * per_row + jj / nr) * mr * nr;
                     for i in 0..mr.min(rows - ii) {
                         for j in 0..nr.min(cols - jj) {
-                            let acc = accs[at + i * nr + j];
-                            let (ci, cj) = (i0 + ii + i, j0 + jj + j);
-                            let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
-                            *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+                            emit(i0 + ii + i, j0 + jj + j, accs[at + i * nr + j]);
                         }
                     }
                 }
@@ -1209,6 +1415,7 @@ fn run_chunked_depth<E, Bd, O, Ep, L>(
         }
         j0 += nc;
     }
+    true
 }
 
 /// How many lines of a transpose tile to hold open at once.

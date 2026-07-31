@@ -619,6 +619,53 @@ impl<E: IntegerElement> MatView<'_, E> {
     pub const PAD: E = E::ZERO;
 }
 
+impl<'a, E> MatView<'a, E> {
+    /// The `rows x cols` block at `(i, j)`, as a view in its own right.
+    ///
+    /// A quadrant of an operand is such a block, and the sub-cubic recursion
+    /// names eight of them per level; nothing is copied and nothing is
+    /// re-placed, because the block's window lies inside this view's window,
+    /// which is what `place` established at this view's construction.
+    ///
+    /// `None` when the block reaches outside the view. That is the same kind
+    /// of condition as [`NotAProduct`]: decided before any arithmetic is
+    /// named, and impossible to provoke with the values in the buffer.
+    pub fn subview(&self, i: usize, j: usize, rows: usize, cols: usize) -> Option<MatView<'a, E>> {
+        if i.checked_add(rows)? > self.rows || j.checked_add(cols)? > self.cols {
+            return None;
+        }
+        // The block's offsets are a subset of this view's, so anchoring at
+        // `(i, j)` keeps every cell the block names inside the window.
+        Some(MatView {
+            data: self.data,
+            origin: self.index(i, j),
+            rows,
+            cols,
+            strides: self.strides,
+        })
+    }
+}
+
+impl<'a, E: IntegerElement> MatView<'a, E> {
+    /// The same cells, declared as the full alphabet.
+    ///
+    /// Every value of `E` is a member of `Full<E>`, so this is a
+    /// re-declaration rather than a check: it copies nothing and admits
+    /// everything. It exists for the sub-cubic recursion, whose block sums
+    /// outgrow the caller's declared bound *by construction* --- the grown
+    /// bound is carried as a value and re-declared at the kernel boundary,
+    /// which is where the alphabet hypothesis is discharged.
+    pub fn full_alphabet(&self) -> MatView<'a, Alphabet<E, crate::alphabet::Full<E>>> {
+        MatView {
+            data: TransparentWrapper::wrap_slice(self.data),
+            origin: self.origin,
+            rows: self.rows,
+            cols: self.cols,
+            strides: self.strides,
+        }
+    }
+}
+
 impl<'a, E: Element, Bd: Bound> MatView<'a, Alphabet<E, Bd>> {
     /// The same cells with the alphabet wrapper peeled off.
     ///

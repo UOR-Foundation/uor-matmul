@@ -1413,8 +1413,9 @@ places an oracle is ahead, and the sweep says so.
 **On floats the library is roughly 39x behind `matrixmultiply`.** It was 134x,
 and calling that a trade was wrong: most of it was not the price of
 exactness, it was a placement done once per product that can be done once per
-reduction. See "The float placement" below. What remains is a real gap and it is
-still the largest one in this document.
+reduction. See "The float placement" below. The next section, "The float
+placement bridge", measures what closed most of what remained on the
+development host: the same placement, handed to the kernel table.
 
 ### The modular factorization
 
@@ -1572,9 +1573,115 @@ What is left is the `39x`. The scaled lanes are scalar; the `i64` lane's inner
 loop is a plain integer dot product, which is exactly what the AVX2 `i32` tile
 kernel already computes at an order of magnitude more throughput. Reaching it
 means expressing the scaled panels as an integer alphabet and handing them to the
-kernel table, and that is not done: it wants an epilogue that can place a raw
-`i128` accumulator at a scale, which the integer driver's epilogue contract does
-not currently express.
+kernel table. That is the float placement bridge, and it is the next section.
+
+### The float placement bridge
+
+The scaled panels are exact integers, so the reduction over them is an integer
+dot product at one known scale, `2^-(base_a + base_b)`. The bridge reifies the
+scaled panels as the `i32` alphabet they already are, hands them to the kernel
+table, and places the table's exact `i128` sum into the float accumulator at
+that scale --- through `Complete::add_scaled`, the decode's own primitive, so
+nothing is rounded on the way in. The scale channel is a placement epilogue,
+`Scaled`, not a parameter on the `Epilogue` trait: the scale is a fact of one
+call's panels, and a wrapping epilogue carries it without touching the
+contract every other epilogue implements. `CD-19` asserts the bytes are the
+streaming traversal's at every shape and every offer; a span that does not fit
+the `i32` alphabet --- more than seven binades at a 24-bit significand, any
+`f64` --- takes the scalar scaled lanes, and a wider one the per-product
+placement, exactly as before.
+
+**The prediction, written before the measurement.** A 24-bit significand
+forces products into the 64-bit lane, and AVX2 offers four `i64` lanes against
+eight `f32` FMA lanes across two units, so on the x86 runner the realistic
+ceiling is single-digit Gmac/s: roughly 4--7x over the 1.10--1.12 the scalar
+lanes post at 512--1024 cubed, the gap to `matrixmultiply` closing to
+something like 6--10x, not to parity. On this host --- an Apple M4 Max,
+aarch64, not the x86 runner the rest of this document's figures come from ---
+the `i32`-exact family has no hand-written NEON sequence: the table's entries
+for it are the portable kernel and the two AVX2 ones, so the bridge runs the
+portable kernel at the aarch64 baseline and the figure is whatever LLVM's
+auto-vectorizer makes of a portable `i32 x i32 -> i64` loop. That predicts a
+smaller factor here: measurably above the scalar lanes at the two cubes if the
+auto-vectorizer finds the widening multiply-accumulate, a wash if it does not
+--- the portable loop issues the same per-product multiply the scalar lane
+does, and the bridge adds a decode and a pack on top. What the machine
+actually said is below.
+
+**The measurement.** Every figure in the tables is `open`: measured on an
+Apple M4 Max (dev machine, aarch64-apple-darwin), 2026-07-30, by `just
+bridge-sweep` (`CG-15`), best of a 0.35 s budget per point, with byte-identity
+against the scalar lanes asserted inside every timed run. The baseline figures
+quoted from elsewhere in this document are an x86 runner's; the scalar column
+here is the same code measured on this host, and it is three to four times the
+x86 runner's number before the bridge does anything --- the two machines'
+figures are not interchangeable, which is why the sweep remeasures the
+baseline it compares against. Gmac/s:
+
+| fill | `m x k x n` | scalar | bridged | | `matrixmultiply` |
+| --- | --- | --- | --- | --- | --- |
+| one exponent | `512` cubed | 4.326 | **13.082** | 3.0x | 61.277 |
+| one exponent | `1024` cubed | 4.505 | **15.309** | 3.4x | 58.589 |
+| one exponent | `509x1021x257` | 4.421 | **13.580** | 3.1x | 58.461 |
+| one exponent | `256` cubed | 3.918 | 9.643 | 2.5x | 60.659 |
+| one exponent | `32` cubed | 1.615 | 2.280 | 1.4x | 52.429 |
+| a few binades (3/4) | `512` cubed | 4.255 | **11.964** | 2.8x | 60.529 |
+| a few binades (3/4) | `1024` cubed | 4.039 | **14.233** | 3.5x | 58.440 |
+| a few binades (3/4) | `509x1021x257` | 3.994 | **12.822** | 3.2x | 58.714 |
+| wide spans (18/22) | `512` cubed | 3.945 | 3.900 | 1.0x | 62.096 |
+| wide spans (18/22) | `1024` cubed | 4.016 | 4.036 | 1.0x | 58.109 |
+
+Read against the prediction. The direction was right and the size was not, in
+both halves. The auto-vectorizer did find the widening multiply-accumulate ---
+the portable `i32`-exact kernel runs at 13--15 Gmac/s where the scalar lane
+posts 4.0--4.5, so the bridge buys 3.0--3.5x at the two cubes, below the
+4--7x the x86-oriented prediction said, because the four-lanes-against-eight
+arithmetic is an AVX2 sentence and this host's family entry is a portable loop
+the compiler vectorized. And the gap to `matrixmultiply` closed further than
+predicted --- to 3.8x at `1024` cubed, from 13x --- because the prediction
+priced the oracle from the x86 runner's figure and this host's `sgemm` posts
+58--61, not more. The wide-span rows are the boundary, reported rather than
+smoothed over: past seven binades the scaled significand is not an `i32`, the
+bridge declines, and the two columns are the same walk with the span
+question's price on top --- about 1%, the walk being `(m + n) * k` packs
+against `m * k * n` products.
+
+Two more honest edges. `f64` never crosses the bridge: a 53-bit significand
+is not an `i32` at any span, and the `i64`-element family whose lane is an
+`i128` has no SIMD multiply on any target this library supports, so the scalar
+scaled lanes are `f64`'s answer until a wider alphabet earns a family. And the
+declared bound is the wider of the two panels, so an asymmetric span --- seven
+binades on one side, none on the other --- declares `2^31` and the lane depth
+collapses to one product: exact, chunked by the table's own machinery, and no
+faster than the scalar lane it replaced. That case is the alphabet's edge, not
+its center; the center is a significand and a few binades, and it is measured
+above.
+
+**The bridge is the default path now.** As first shipped, the bridge sat
+behind its own entry point and the default float driver never took it ---
+`cargo bench` timed the scalar lanes, which is the measurement that forced
+the issue. The selection is the library's usual doctrine: a `PackedCode`
+panel offer re-reads as four `i32` words a code (the layout's padding word is
+named, so the re-read is a safe cast, not a transmute), and the packed entry
+takes the table when the offer holds the reified operands plus a full-depth
+kernel panel pair, the spans admit the `i32` alphabet, and the declared lane
+holds the whole depth. The last term is the one the first draft lacked, and
+the sweep caught it: past the lane's depth the table chunks, the chunked
+traversal's partial sums want an accumulator offer a panel buffer cannot
+spell (eight-byte aligned against `i128`'s sixteen), and the per-tile chunk
+traversal it falls to measured 2.5 Gmac/s at `512` cubed against the scalar
+lanes' 4.3. So a deep reduction declines to the scalar lanes by default and
+reaches the table through the explicit entry, whose offers can spell the
+accumulator room. Every figure here is `open`, measured on an Apple M4 Max
+(dev machine, aarch64-apple-darwin), 2026-07-30, `cargo bench -p
+uor-matmul-validate -- gemm_f32`, before against after, criterion means:
+`16` cubed 4.130 us against 3.890 (a wash, kept because the doctrine forbids
+a regression there, and no floor constant entered the model for it); `128`
+cubed 697.3 us against 338.9 (2.06x); `64x512x1024` 9.788 ms against 3.812
+(2.57x). The remaining distance to the explicit entry is the accumulator
+room its offer can spell --- the chunked traversal and the sub-cubic level
+both live there --- and `suggested_float_panels` is the query a caller asks
+for the offer that admits every factorization the shape supports.
 
 ### The declared alphabet
 
@@ -1787,3 +1894,445 @@ float route by 1.2x--12.9x at `m <= 4` and by 1.2x--2.4x at `m = 16` with wide
 outputs, and loses only at tall-`m`, narrow-`n` shapes (down to 0.38x) ---
 with the caveat that the selection predicate currently cannot see that region,
 because it prices the dense side at the streaming declaration.
+
+A note on the fill, added when the scaled lane landed (`CD-20`): the figures
+above were measured with a fill spanning about ten binades, which the scaled
+lane's admission (`24 + span <= 31`) declines by design. The instrument's
+fills now stay inside one five-binade band and its offer carries the scaled
+lane's `i64` words (`suggested_tabulation_lanes`), so the forced table runs
+under the merged semantics; the measured economics above are the wide-lane
+tree's, and re-running the instrument today prices the scaled lane instead.
+
+## The SWAR broadcast, measured and declined
+
+Every figure in this section is `open`: measured on one host under one runtime
+and reported, never asserted. `CG-17` is the claim these numbers belong to;
+`CB-12` pins the bytes.
+
+Kronecker substitution --- packing several small integers into one machine
+word's bit fields so one multiply produces several products --- is a plain
+identity over the integers, available to any library, and nothing about it is
+exactness-gated: disjoint fields cannot carry into each other inside their
+guard bits, and that is a fact of arithmetic, not of this library. OpenBLAS
+declines the trick for throughput reasons, not numerical ones. The question
+here was narrower: on baseline wasm SIMD128 there is `i64x2.mul` and no
+byte-width dot product --- relaxed-simd's `i8x16.dot_i8x16_i7x8_s` is
+specified non-deterministic, its intermediate precision
+implementation-defined, so this library cannot use it regardless of
+availability --- and the incumbent is `i32x4.dot_i16x8_s` at eight products an
+instruction but paying two extends per sixteen bytes of operand. A
+six-products-per-multiply form with no extends is a plausible win, and cheap
+to measure. It was measured.
+
+The form is the broadcast one, because it is the only one: multiplying two
+packed vectors convolves their fields, so one side must be scalar. Pack three
+elements of a `B` row at 21-bit spacing in each 64-bit lane --- two lanes to
+a `v128`, six columns a register --- and multiply by one splatted `A` scalar.
+Both operands are biased to unsigned first, the `dpbusd` offset identity
+applied on both sides, so a product reaches `255 * 255` (sixteen bits) and
+five guard bits a field remain; the compensation
+`sum(a*b) = sum(a'*b') - 128*sum(a') - 128*sum(b') + 16384*k` is paid in exact
+integers at extraction. The guard bits absorb `floor((2^21 - 1) / (255*255)) =
+32` products a field, which is the packed accumulator's chunk; extraction and
+compensation run once a chunk, and the driver's lane capacity composes on top
+unchanged --- declare it, as the chunk, rather than inventing a second
+extraction mechanism. The spacing is the one choice: sixteen bits is the
+product width exactly and leaves no guard bit, so every product would be
+extracted; twenty-four fits only two fields a lane; twenty-one is the widest
+spacing that still holds three, and it is the one the numeral derives. The
+bytes are pinned against the portable reference at every packed depth, at the
+alphabet's extremes, and at the W4A8 bound (`CB-12`), including the extremes
+fill that drives a field to its guard bits inside one chunk.
+
+Measured on an Apple M4 Max (dev machine, aarch64-apple-darwin) under
+wasmtime 45.0.0, 2026-07-30, `just swar-sweep`, padded-panel Mmac/s in a hot
+loop --- the ratio is the finding, the absolutes are the harness's --- with
+byte-identity asserted inside every timed run:
+
+| k | fill | portable (4x4) | dot (4x8) | swar (4x12) | swar / dot |
+| --- | --- | --- | --- | --- | --- |
+| 64 | full i8 | 13141.0 | 20289.9 | 7615.9 | 0.38x |
+| 64 | W4A8 (bound 7) | 13139.3 | 19855.7 | 7566.4 | 0.38x |
+| 1024 | full i8 | 18423.8 | 26859.7 | 8707.9 | 0.32x |
+| 1024 | W4A8 (bound 7) | 18424.7 | 26861.5 | 8729.0 | 0.32x |
+| 16384 | full i8 | 18907.5 | 27449.3 | 8776.2 | 0.32x |
+| 16384 | W4A8 (bound 7) | 18907.4 | 27456.7 | 8787.1 | 0.32x |
+
+The reading, and it is the one the instruction count predicts. The incumbent's
+widening is one extend per sixteen bytes of `B` and its dot is eight products;
+the broadcast form pays eleven instructions per six columns per step to spread
+bytes into fields the ISA has no instruction for --- a shuffle, three
+mask-and-shifts, two ors, the bias add and mask --- and the multiply that buys
+(six products against eight, no extends) never recovers it. The loss grows
+with depth because the dot kernel's per-step cost is already amortized while
+the pack is paid on every step. The narrower alphabet does not rescue the
+form: at the W4A8 bound a `+-7` bias fits the biased product in eight bits,
+so six ten-bit fields fit a lane --- but the guard bits shrink to two, the
+chunk to five products, and the extraction the pack was amortized against
+returns every fifth step. The field arithmetic is exact in every case and the
+parity net says so; the loss is throughput, which is OpenBLAS's reason for
+declining the trick, arrived at here independently and on a different ISA.
+
+So selection declines it, and the decline is the kind of fact this repository
+keeps as a gate: the sequence is not in any family's availability list,
+because a listed sequence is one `Auto` may select and selecting this one
+would be a measured 2.6--3.1x regression on every wasm panel shape. The spec
+stays exported --- a caller who knows its shape can name it --- and `CB-12`
+asserts both halves: the bytes, where the sequence can run, and the absence
+from every list, so the decline cannot quietly revert.
+
+**The x86 half is a census reading and a decision, not a sequence.** The
+`CG-11` census reads the AVX2 `i8` tile (`avx2_i8_inner::<6>`) bound on
+`Zn4FP2` --- 85 instructions, 14.5 cycles a tile-step, IPC 5.88, all of it
+`llvm-mca` scheduling-model prediction on `znver4` and reported as such. The
+vector pipes are the binding resource in the model and the scalar ALU ports
+are not, which is exactly the condition under which a scalar Kronecker stream
+co-issued into the same accumulator could buy a single-digit gain. But the
+x86 kernels do not run on this aarch64 host, a scheduling model is not a
+measurement (that distinction is what `CG-11` exists to keep), and a gain
+that cannot be measured cannot ship. No x86 sequence was added; what would
+change the decision is an x86 runner timing the co-issued pair against the
+vector kernel alone.
+
+**The Cortex-M half is analysis, for two different reasons on the two
+families.** The repository's embedded target is thumbv7em-none-eabihf
+(Cortex-M4/M7), which has the DSP extension: `SMLAD` is two 16-bit
+multiply-accumulates in one instruction, the multiplexing already in silicon,
+so a Kronecker sequence gains nothing there and none is registered --- the
+same rule that keeps one off x86. thumbv6m (M0/M0+/M23) is where the trick
+would matter: no SIMD, one 32-bit multiplier, and on the base M0 that
+multiply is the slow iterative one. There the honest arithmetic is two biased
+bytes at sixteen-bit spacing in a `u32` --- no guard bits, so extraction on
+every multiply --- against two scalar MACs, and the pack and extract dominate
+exactly as they did on wasm; the plausible outcome is a wash. But the
+decisive fact is not the arithmetic: this repository has no way to *execute*
+a thumbv6m test --- qemu user-mode does not cover Cortex-M --- and `CB`
+parity is a run, not a compile, the discipline that found the NEON `i16`
+defect. A sequence no gate runs is a claim nothing checks, so no thumbv6m
+sequence is registered. What would change that is a Cortex-M system emulator
+in CI (qemu-system's `mps2`/`mps3` machines, or renode) running the parity
+net on a thumbv6m build; the analysis above says what such a sequence would
+have to beat, and it is not much.
+
+## The symbol path against the bus
+
+Every figure in this section is `open`: measured on one host and reported,
+never asserted. `CG-14` is the claim these numbers belong to.
+
+The arena tier at a `u8` code width stores one byte per weight where the
+dense float driver reads four, over the same exact accumulation --- `CK-14`
+and `CD-18` pin the bytes, so what is left to ask is the economics. The
+harness (`just symbol-bandwidth`) measures gemv and skinny GEMM shapes,
+charges each path its operand bytes --- `A` plus the stored weights plus `C`,
+the 1 KiB codebook on the symbol side --- and takes the host's STREAM number
+in the same process: a triad `a[i] = b[i] + 3*c[i]` over 3 x 2^25 `f32`
+(384 MiB, past every cache this host has), best of ten, 12 bytes counted per
+element, with the write-allocate read stated and not counted. Byte-identity
+with the dense float driver is asserted inside every timed run, and the
+census printed per shape records which factorization ran. On an Apple M4 Max
+(dev machine, aarch64-apple-darwin), 2026-07-30, STREAM measured 134.19 GB/s
+and the sweep read:
+
+| `m x k x n` | W stored (B) | sym walk GB/s | sym panel GB/s | uor `f32` GB/s | matrixmultiply GB/s |
+| --- | --- | --- | --- | --- | --- |
+| 1024x1024x1 | 1024 | 0.97 (1%) | 1.01 (1%) | 0.95 (1%) | 17.19 (13%) |
+| 1x1024x1024 | 1048576 | 0.17 (0%) | 0.16 (0%) | 0.94 (1%) | 17.86 (13%) |
+| 1x1048576x1 | 1048576 | 0.84 (1%) | 0.77 (1%) | 1.65 (1%) | 3.24 (2%) |
+| 2048x8x2048 | 16384 | 0.08 (0%) | 0.08 (0%) | 0.28 (0%) | 8.34 (6%) |
+| 8x262144x8 | 2097152 | 0.10 (0%) | 0.10 (0%) | 1.37 (1%) | 21.38 (16%) |
+
+The reading is the outcome the phase said to report if it came. Every exact
+path sits near 1% of the bus; the inexact oracle sits at 13-16% of it. The
+symbol path's fourfold residency advantage is real --- the census counts one
+decode per stored byte, and the stored-weights column is a quarter of the
+dense spelling's --- and buys nothing at these shapes, because nothing here
+is waiting on the bus: at 0.08-0.25 Gmac/s the traversal is bound by the
+scalar exact accumulation, one product per step with a decode and a placement
+per element, and the dense driver reading four times the bytes posts the same
+figure for the same reason. Decode-and-place latency, not bandwidth, is the
+bottleneck at O(1) arithmetic intensity, which prices the rest of the phase's
+queue: the items that can move these rows are the ones that attack products
+per step --- the float placement bridge and the narrow lane it unblocks ---
+and a narrower stream is not among the levers left.
+
+### The symbol table in the scaled lane
+
+Every figure in this section is `open`: measured on one host and reported,
+never asserted. `CG-16` is the claim these numbers belong to.
+
+The previous section priced the lever: at O(1) arithmetic intensity the
+symbol path is bound by per-element work, so what moves it is products per
+step. The scaled lane is the bridge's identity with the table doing the
+reduction. The slab arithmetic is the whole reason it exists: a table entry
+is `rows` lane words, and at `S = 256` codes the slab is
+
+```text
+  256 * rows * 80 bytes  =  80 KiB at rows = 4   (the complete accumulator)
+  256 * rows * 8  bytes  =   8 KiB at rows = 4   (the scaled lane)
+```
+
+--- the 80 KiB slab fits no L1 at any tile, which is what `tabulation_fits`
+answered and what made even the forced traversal decline; the 8 KiB slab
+holds at `rows = 8` (32 KiB against this host's 32 KiB budget term, the
+factor of two inside `tabulation_fits` included). The lane's inputs are the
+codebook and the activation tile pre-scaled to the panels' measured base
+exponents --- the bridge's span walk, over `A` and over the *codebook*, which
+is `W`'s whole alphabet materialized: `m * k + 256` decodes, never `n * k`
+--- and the walk is asked only after the table is selected, so a call the
+predicate declines never pays it. Admission is the bridge's own declaration
+(`24 + span <= 31`, finite codes only); the lane's run depth is derived from
+the per-side spans, `2^63 / 2^(48 + wa + wb)`, because the lane holds a
+product of one element of each panel and is not bound by the kernel table's
+one-alphabet interface. At the corpus codebook (seven binades, the
+alphabet's edge) against a one-binade `A` the run is 127 products; against a
+one-exponent `A`, 255.
+
+Measured on an Apple M4 Max (dev machine, aarch64-apple-darwin),
+2026-07-30, `just symbol-tabulated`, Gmac/s, best of a 0.35 s budget per
+point, byte-identity with the dense float driver asserted inside every timed
+run, the census confirming the table ran; STREAM in the same harness
+measured 135.10 GB/s:
+
+| fill | `m x k x n` | sym table | bridge | uor `f32` | `matrixmultiply` |
+| --- | --- | --- | --- | --- | --- |
+| one exponent | `1024x1024x1` | 0.004 | 0.696 | 0.706 | 4.286 |
+| one exponent | `1x1024x1024` | **0.973** | 0.533 | 0.540 | 4.455 |
+| one exponent | `1x1048576x1` | 0.003 | 0.474 | 0.470 | 0.405 |
+| one exponent | `2048x8x2048` | 0.409 | 0.353 | 0.525 | 16.520 |
+| one exponent | `8x262144x8` | 0.032 | 0.835 | 1.414 | 21.384 |
+| one exponent | `64x1024x4096` | **3.986** | 1.426 | 3.150 | 54.272 |
+| one exponent | `64x4096x4096` | **3.785** | 1.356 | 2.339 | 51.341 |
+| a few binades (3) | `1x1024x1024` | **1.135** | 0.527 | 0.518 | 4.458 |
+| a few binades (3) | `64x1024x4096` | 2.784 | 1.405 | 3.132 | 53.638 |
+| a few binades (3) | `64x4096x4096` | **2.716** | 1.358 | 2.293 | 50.646 |
+| wide spans (~18, declines) | `64x4096x4096` | 0.187 | 1.879 | 2.331 | 50.737 |
+
+The reading, and it is not the one the work order priced. The table wins
+where the build's `code_space` products per reduction element amortize over
+a wide `n` *and* the runs stay deep: 1.8--2.2x over the dense driver at
+`1x1024x1024` --- a gemv the bridge's `m * n > m + n` question refuses to
+walk --- and 1.2--1.6x at the tabulation-sweep shapes, where it also posts
+2.8x over the bridge, whose per-call reification of the `k x n` operand
+amortizes over `m = 64` rows rather than a cube's thousand. It loses
+everywhere the amortization is absent, and the losses are not marginal:
+175x at `1024x1024x1`, where the build issues 256 products per reduction
+element to serve one output column; 44x at `8x262144x8`, where the census
+counts 537 million build products against 17 million gathered; and a
+0.76--0.78x wash at `2048x8x2048`, where `k = 8` leaves one placement per
+output and nothing for the table to share. The span narrows it further:
+the fill's three exponents --- a span of two --- against the seven-binade
+book cut the run from 255 to 63, and `64x1024x4096` falls from a 1.27x win
+to a 0.89x loss.
+
+So the predicate stays as it is, and that is a measured decision, not an
+unasked question. `tabulation_pays` counts *instructions*: one table read
+against one dense product, which at `block = 1` is never a win. The table's
+win here is an op-*kind* difference --- a read and an add against a decode
+and a placement, with the build's price and the run's depth as terms ---
+and expressing it would take per-op-kind costs, which are measured constants
+of one host, into a predicate that today reads only declarations the
+sequences make about themselves. The asymmetry settles it: the winning
+margin is under 2.2x and the losing region is 40--175x, so a selection rule
+that guesses the boundary wrong is catastrophic where a missing one is
+merely leaving 1.2--2.2x on shapes the caller knows. The table is reachable
+under `Traversal::Tabulated` for exactly that caller, `CD-20` pins its
+bytes, and this table is why selection declines it. The wide-fill rows are
+the boundary the other way: past seven binades the lane declines by the
+bridge's own declaration and the dense route answers, one span walk (read
+off the census's decode count) poorer.
+
+## The sub-cubic recursion, on integers
+
+Every figure in this section is `open`: measured on one host and reported,
+never asserted. `CG-12` is the claim the scaling numbers belong to; `CD-21`
+pins the bytes and is `build`.
+
+The standing objection to everything above is that the library's wins come
+from data that is quantized or structured: a narrower alphabet, a codebook, a
+collapsed row. The sub-cubic recursion is the answer that needs no structure
+at all. Winograd's form of Strassen's algorithm regroups one product into
+seven products of half the extent plus eighteen block additions, and applied
+for `L` levels it does `(7/8)^L` of the products. Over the integers the
+regrouping uses only add, subtract, and multiply, so the regrouped sum is the
+same integer the naive loop returns, bit for bit. A float library declines
+Strassen because intermediate cancellation degrades its norm bounds with
+depth; there is no norm here and nothing degrades, which is why the
+`CD-*` byte-equality discipline covers the recursion with no new argument ---
+exactly as it covers tabulation --- and why no classical `sgemm` can make the
+same claim.
+
+### Why the i32 lane, and the bound bookkeeping
+
+The recursion runs where the block sums stay inside the element type.
+Winograd's cross-term sums are four block terms at worst
+(`S4 = A12 - A21 - A22 + A11`), so a level taken at operand bound `B` forms
+sums of magnitude at most `4B`, and those sums are the next level's operands.
+At full `i8` range one level already leaves the alphabet (`254 > 127`), so
+the `i8` lane has zero free levels --- staying in `i8` would take a declared
+bound of 63 for one level, which is quantization and is excluded. On the
+`i32` lane each level costs two bits of a thirty-one that bounded data is not
+using: at a declared `2^24` --- the bound the float placement bridge's scaled
+alphabet already declares --- three levels fit (`4^3 * 2^24 = 2^30`), and the
+lane's chunking is exact at any depth, so a shallow lane at a grown bound is
+a few percent of rate and not a correctness question (the figures below
+include it). At the full `i32` alphabet there are zero
+free levels, the same zero `i8` has: a sum of two full-range values is not an
+`i32`, and the plan says so and declines. The accumulator is not a constraint
+at any admitted depth either: a product temporary at level `l` is bounded by
+`9 * 4^2l * B^2 * k / 2^l`, which the headroom rule keeps under `9/16` of the
+worst case the accumulator's width was derived against. The `i16` lane's
+analysis is recorded rather than implemented: its per-operation penalty is
+about two, so break-even sits near five levels, and `4^5 * B <= 2^15` admits
+no useful bound.
+
+The one sign in the combination is folded into a sum temporary (`T4` is
+`B21 - T2` where the textbook writes `T2 - B21`), so the accumulator only
+ever adds: there is no subtraction in the accumulator width to define, and
+the byte argument stays one sentence. The sums live in the panel offer, as
+bare elements --- they outgrow the declared bound by construction, and the
+grown bound travels as a value to the kernel boundary, which is where the
+alphabet hypothesis is discharged (the bridge's measured bound is the same
+kind of declaration). The seven products live in the accumulator offer, in
+the accumulator's own width, and no epilogue runs on one: the encode step
+runs exactly once, on the combination, at the recursion's top.
+
+### The plan, and what declines
+
+The level count is a pure function of declarations, never of data: the
+shape's evenness (odd extents decline rather than pad --- padding would be
+exact, `CK-03`'s precedent, but it would materialize a padded copy of both
+operands to buy a shape one halving, and declining keeps the mechanism one
+code path), the bound's headroom above, the offer (a level whose sums or
+product temporaries the offer cannot hold is declined, `CD-10`'s rule one
+traversal up), and the measured crossover `strassen_min_extent` in the
+`[blocking]` table. An explicit `gemm_strassen(t, e, o, s, levels)` request
+is capped only by the exactness rules --- a caller declaring levels is in
+`Traversal::Tabulated`'s position and knows its shape. `CD-21` asserts the
+bytes against the `CX-01` wrapping oracle and `ndarray` at every corpus size,
+every requested level count, and every offer including none, so the plan
+decides which instructions run and nothing else.
+
+### The measurement
+
+Measured on an Apple M4 Max (dev machine, aarch64-apple-darwin), 2026-07-30,
+`just strassen-sweep`, nominal Gmac/s (`m*k*n` per second) on random dense
+`i32` at a declared `2^24` bound, seed `20260730`, best of a 0.35 s budget
+per point, byte-identity against the cubic walk at the same encode asserted
+inside every timed run. Two baselines, because the library has two cubic
+walks a caller can mean: the modular lane, which a wrapping `i32 -> i32`
+call selects by default, and the exact lane the recursion factorizes, which
+a saturating call, a wider output, or the float bridge runs. The recursion's
+columns are measured under `EncodeMode::Saturating`, so the comparison is
+within one lane:
+
+| `n` | default (modular) | exact cubic | `L=1` | `L=2` | `L=3` | levels taken |
+| --- | --- | --- | --- | --- | --- | --- |
+| 256 | 26.571 | 17.677 | 15.900 | 13.100 | 9.522 | 0 |
+| 384 | 28.834 | 18.653 | 17.780 | 15.602 | 12.171 | 0 |
+| 512 | 29.024 | 18.884 | 18.461 | 17.360 | 13.641 | 0 |
+| 768 | 27.859 | 18.718 | 19.934 | 19.454 | 16.530 | 1 |
+| 1024 | 28.152 | 18.393 | 20.592 | 20.347 | 18.096 | 1 |
+| 1536 | 27.175 | 18.069 | 20.332 | 21.686 | 20.121 | 2 |
+| 2048 | 26.186 | 17.297 | 20.026 | 21.485 | 20.378 | 2 |
+| 3072 | 24.357 | 16.587 | 19.996 | 22.294 | 22.537 | 3 |
+| 4096 | 22.511 | 15.534 | 19.088 | 22.225 | 23.203 | 3 |
+
+The fitted exponents, `time = c * x^e`, geometric spacing, nine samples each,
+1.96 standard errors: exact cubic against MAC count `1.0171 +/- 0.0111`;
+recursion at the auto-selected levels against MAC count `0.9679 +/- 0.0031`;
+exact cubic against `n` `3.0514 +/- 0.0334`; recursion against `n`
+`2.9037 +/- 0.0092`, whose interval `[2.894, 2.913]` excludes `3.0`. The
+fastest sustained product rate this library reaches on this host, measured
+in the same harness (the `i8` lane at `4096` cubed), is 63.1 Gmac/s; the
+machine's peak arithmetic throughput is the bar the queue set, because a
+nominal rate above it would be impossible for any implementation performing
+`Theta(m*k*n)` products. The recursion's nominal rate does not cross that
+line at any measured size, and the exponent says why it does not need to:
+the win is a smaller exponent, not a bigger constant.
+
+### The honest reading
+
+The recursion beats the lane it factorizes from `n = 768` (+6%) and the
+margin grows with size: +18--24% at `1536--2048`, +36% at `3072`, +49% at
+`4096`, with the fitted exponent's interval excluding 3.0. That is the
+sub-cubic claim on arbitrary random dense input, and it needs no structure
+in the data.
+
+Two boundaries, stated rather than smoothed. A wrapping `i32 -> i32` caller
+is not served: that call's default is the modular lane, which reads
+`Z/2^32` off the encode declaration and issues eight products per instruction
+where the exact lane's widening issues four --- on this host 22--30 Gmac/s
+against the exact lane's 16--19, and the recursion only matches the modular
+lane at `4096`. The recursion serves the exact arm: saturating encodes,
+wider outputs, and the float placement bridge, whose scaled alphabet is the
+`2^24` bound the sweep declares. On `f32` the composition is measured by
+re-running `just bridge-sweep` with the recursion in place: one exponent at
+`1024` cubed reads 16.239 Gmac/s where the same harness recorded 15.309 the
+day before (+6%, the one level the threshold admits there), `512` cubed is
+unchanged at 13.105 (the threshold declines), and the wide-span fills decline
+exactly as before. And the x86 economics the queue priced --- the `i32` lane
+at 1.29x per operation, two levels to break even --- are a different
+machine's story: on this host the exact lane's penalty against the modular
+lane is about 1.5x per operation, the crossover sits at `n = 768` rather
+than the predicted 1024--2048, and an x86 runner measuring the same sweep is
+what would move any of these figures.
+
+Two harness defects the measurement itself found, both recorded in
+VERIFICATION.md's falsifiability table: the first baseline column was the
+modular lane in exact clothing (`EncodeMode::Wrapping` selects it, so the
+recursion was being priced against a lane it does not factorize), and the
+base case streamed per tile at deep levels because the plan reserved a
+shape-only accumulator suggestion that answers zero whenever `k <= KC` ---
+while the grown bounds make the base case's *lane* shallower than its `k`,
+which only an accumulator block repairs. The second is why the L=3 column at
+`2048` read 8.2 Gmac/s in the first sweep and 20.9 in this one.
+
+## Mantissa slicing, and the RNS beside it --- the analysis, recorded
+
+This section is a derivation, not a measurement: no figure in it is a claim
+about a machine, and nothing here is implemented. It is recorded so that the
+arithmetic is not rediscovered, and its precondition --- the placement bridge
+and the SWAR investigation, both landed above --- is exactly what makes the
+arithmetic short.
+
+The idea: a 24-bit `f32` significand is three 8-bit slices. A product of two
+significands is nine slice-products, each an exact integer at a known shift,
+so nine integer GEMMs over the sliced operands --- each byte-identical to the
+dense integer path it factorizes, because slicing is a regrouping of the same
+products --- and a recombination that is a shift and an add into the wide
+accumulator. No error analysis arises anywhere: the slices are integers, the
+shifts are exact, and the sum is the same sum. This is the placement bridge's
+identity read one level down, and like the bridge it is a factorization, not
+a method.
+
+The count says where it pays. Nine passes at the `i8` lane's rate against one
+pass at the `i64` lane's: on baseline AVX2 the `i8` tile runs about twice the
+`i64` lane's products per instruction, so nine passes at `38.5` read as about
+`4.3` effective against the `i64` lane --- a wash, and a wash is a decline.
+The condition that flips it is a large narrow-to-wide throughput ratio: VNNI
+issues 64 `i8` MACs per instruction against the `i64` lane's four, and
+`64 / 9 ~ 7` beats `4` by about 1.8x. NEON's dotprod and the `i8` tensor
+units are the same shape. Where the ratio is two, slicing is dead; where it
+is eight or sixteen, slicing is the widest exact lane the machine has.
+
+Two compositions fall out of work already done. The slices are exactly the
+width where SWAR field packing is most favourable --- the measured wasm
+decline above says where that does and does not pay, and the argument
+transfers unchanged to targets with a wide multiply and no narrow MAC. And a
+symbol is narrower still: a sliced symbol operand would tabulate in the
+narrow lane the symbol work landed, which is the composition to measure first
+if slicing is ever implemented.
+
+The adjacent idea, recorded so it is not rediscovered: full RNS --- several
+coprime moduli, CRT reconstruction. Covering the `i8` lane's 79-bit worst
+case takes about six 16-bit channels, giving about `6 / (2 * 3)` ~ 1.3
+effective MACs per instruction against the `i64` lane's four, or eleven
+8-bit channels for VNNI at about `64 / 11 ~ 5.8`. Marginal where it is
+available at all, and it turns favourable only under the same condition
+mantissa slicing needs --- a large narrow-to-wide ratio --- where slicing
+wins on simplicity: nine passes and a shift, against a basis conversion, a
+CRT reconstruction, and a carry argument the slicing never has to make.
+
+If this is ever implemented, the trigger is a host whose measured
+narrow-to-wide ratio is eight or better, and the first composition to
+measure is the sliced symbol. Until then this section is the whole item.

@@ -47,3 +47,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  census:
+    name: CG-11, static issue census
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # llvm-mca is the census's tool, and a Rust toolchain does not ship one,
+      # which is why this is its own job rather than a step of `just vv`.
+      # Ubuntu's `llvm` package keeps the binary versioned under
+      # /usr/lib/llvm-*/bin, so locate it and hand it over explicitly --- a
+      # gate that passes without its tool is worse than no gate.
+      - run: sudo apt-get update && sudo apt-get install -y llvm
+      - name: locate llvm-mca
+        run: |
+          MCA=$(command -v llvm-mca || ls /usr/lib/llvm-*/bin/llvm-mca 2>/dev/null | head -1)
+          test -n "$MCA" || { echo "llvm-mca was not installed by the llvm package"; exit 1; }
+          echo "LLVM_MCA=$MCA" >> "$GITHUB_ENV"
+      # x86-64 is the host, so the required half needs no cross target.
+      - run: cargo run -q -p xtask -- issue-census
+      - run: cargo test -p uor-matmul-conformance --test issue_census -- --ignored --nocapture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue-census
+          path: target/issue-census/*.md

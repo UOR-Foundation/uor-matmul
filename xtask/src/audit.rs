@@ -99,7 +99,8 @@ fn effective_lines(text: &str) -> Vec<(usize, &str)> {
 }
 
 /// R1: no magic numeral. Every constant derives by `const fn` from the declared
-/// tuple, and `133144` appears only inside a `const _: () = assert!(...)` pin.
+/// tuple, or is recorded in the model as discovered by measurement; `133144`
+/// appears only inside a `const _: () = assert!(...)` pin.
 pub fn check_constants(root: &Path) -> Result<(), Fail> {
     let model = Model::load(&root.join("model"))?;
     let sources = shipped_sources(root)?;
@@ -141,8 +142,9 @@ pub fn check_constants(root: &Path) -> Result<(), Fail> {
     if !violations.is_empty() {
         return Err(format!(
             "R1: no magic numeral. Every constant derives by const fn from the declared \
-             tuple, and a model numeral appears only in the generated file or inside a \
-             `const _: () = assert!(...)` pin.\n\n{}",
+             tuple, or is recorded in the model as discovered by measurement --- a \
+             derivation story for a measured constant is fiction. A model numeral appears \
+             only in the generated file or inside a `const _: () = assert!(...)` pin.\n\n{}",
             violations.join("\n")
         )
         .into());
@@ -226,34 +228,66 @@ pub fn audit_purity(root: &Path) -> Result<(), Fail> {
     // what closes that, so it tracks which values are floats rather than matching
     // a token list: `let mut t = a; t = t + b;` on two `f32` parameters passed
     // both halves until it did.
+    //
+    // The one exemption is a function named with the `f64_exact` marker, which
+    // must hold the `F64Exact` witness: float arithmetic whose operands and
+    // results are integers below 2^53 *is* integer arithmetic, so the property
+    // --- exactness --- survives it. The marker without the witness is a
+    // violation here; the witness without the bound does not compile; the
+    // opcode without the marker is a violation in `audit_disassembly`.
     let mut violations = Vec::new();
     for src in &sources {
         let mut floats = FloatScope::default();
+        // Set inside a function named with the `f64_exact` marker: the one
+        // place float arithmetic is permitted, because such a function must
+        // hold the `F64Exact` witness (checked just below), whose constructor
+        // does not compile unless the declared bound and depth keep every
+        // value inside binary64's exact-integer range. The exemption is a
+        // type the compiler checked, not a comment this gate trusts (`CU-01`
+        // as restated). R3 and R13 still apply inside it: the witness
+        // licenses exact float arithmetic, not saturation and not a second
+        // method.
+        let mut in_f64_exact = false;
+        let raw_lines: Vec<&str> = src.text.lines().collect();
         for (line_no, line) in effective_lines(&src.text) {
-            for tok in FLOAT_ARITHMETIC {
-                if line.contains(tok) {
+            if is_fn_start(line.trim_start()) {
+                in_f64_exact = line.contains(F64_EXACT_MARKER);
+                if in_f64_exact && !function_span_mentions(&raw_lines, line_no - 1, "F64Exact") {
                     violations.push(format!(
-                        "R2: {}:{line_no}: `{tok}` is float arithmetic\n    {}",
+                        "CU-01: {}:{line_no}: the `f64_exact` marker licenses float arithmetic \
+                         only where the `F64Exact` witness is held; this function names neither \
+                         the type nor its constructor\n    {}",
                         src.rel,
                         line.trim()
                     ));
                 }
             }
-            if let Some(op) = float_literal_arithmetic(line) {
-                violations.push(format!(
-                    "R2: {}:{line_no}: `{op}` applied to a float literal\n    {}",
-                    src.rel,
-                    line.trim()
-                ));
-            }
-            // A binding whose type is a float, and an operator next to it.
-            floats.observe(line);
-            if let Some(name) = floats.arithmetic_on_a_float(line) {
-                violations.push(format!(
-                    "R2: {}:{line_no}: arithmetic on `{name}`, which is a float\n    {}",
-                    src.rel,
-                    line.trim()
-                ));
+            if !in_f64_exact {
+                for tok in FLOAT_ARITHMETIC {
+                    if line.contains(tok) {
+                        violations.push(format!(
+                            "R2: {}:{line_no}: `{tok}` is float arithmetic\n    {}",
+                            src.rel,
+                            line.trim()
+                        ));
+                    }
+                }
+                if let Some(op) = float_literal_arithmetic(line) {
+                    violations.push(format!(
+                        "R2: {}:{line_no}: `{op}` applied to a float literal\n    {}",
+                        src.rel,
+                        line.trim()
+                    ));
+                }
+                // A binding whose type is a float, and an operator next to it.
+                floats.observe(line);
+                if let Some(name) = floats.arithmetic_on_a_float(line) {
+                    violations.push(format!(
+                        "R2: {}:{line_no}: arithmetic on `{name}`, which is a float\n    {}",
+                        src.rel,
+                        line.trim()
+                    ));
+                }
             }
             // R3: no saturating or rounding instruction in an accumulation.
             // The single encode step is the only place information is
@@ -303,15 +337,54 @@ pub fn audit_purity(root: &Path) -> Result<(), Fail> {
 
     if !violations.is_empty() {
         return Err(format!(
-            "R13: one method, no fallback. Every path in the library is \
-             decode-then-accumulate-exactly; backends are factorizations of one identity, \
-             not a quality hierarchy.\n\n{}",
+            "R13: one answer, many factorizations, no fallback. Every path in the library \
+             is decode-then-accumulate-exactly; backends and traversals are factorizations \
+             of one identity, byte-identical under the CD-* gates, not a quality hierarchy.\n\n{}",
             violations.join("\n")
         )
         .into());
     }
     println!("audit-purity: one method; no float arithmetic, no second-best (R2, R3, R13)");
     Ok(())
+}
+
+/// A line that opens a function definition.
+///
+/// Shared by `audit_purity`'s two function-scoped trackers --- the float scope
+/// and the `f64_exact` exemption --- because the two must agree on where a
+/// function begins: if they drifted, an exemption could outlive the function
+/// that earned it.
+fn is_fn_start(t: &str) -> bool {
+    t.starts_with("fn ")
+        || t.starts_with("pub fn ")
+        || t.starts_with("unsafe fn ")
+        || t.starts_with("pub unsafe fn ")
+        || t.starts_with("pub(crate) fn ")
+        || t.starts_with("const fn ")
+        || t.starts_with("pub const fn ")
+}
+
+/// Does the function whose header is at raw line `start` (0-based) mention
+/// `needle` anywhere from its signature through its body?
+///
+/// Crude in the house style: brace counting, confused by a brace inside a
+/// string literal and by nothing else these crates write. The span ends where
+/// the body's brace depth returns to zero.
+fn function_span_mentions(lines: &[&str], start: usize, needle: &str) -> bool {
+    let mut depth = 0i32;
+    let mut opened = false;
+    for line in &lines[start..] {
+        if line.contains(needle) {
+            return true;
+        }
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+        opened |= line.contains('{');
+        if opened && depth <= 0 {
+            break;
+        }
+    }
+    false
 }
 
 /// Method names that can only be float arithmetic.
@@ -348,14 +421,7 @@ impl FloatScope {
     /// Read one line for float declarations, and reset at a function boundary.
     fn observe(&mut self, line: &str) {
         let t = line.trim();
-        if t.starts_with("fn ")
-            || t.starts_with("pub fn ")
-            || t.starts_with("unsafe fn ")
-            || t.starts_with("pub unsafe fn ")
-            || t.starts_with("pub(crate) fn ")
-            || t.starts_with("const fn ")
-            || t.starts_with("pub const fn ")
-        {
+        if is_fn_start(t) {
             self.names.clear();
         }
         // Any binding whose declared type *mentions* a float: `x: f32`,
@@ -591,6 +657,15 @@ fn contains_word(line: &str, word: &str) -> bool {
 
 /// R15: nothing is deferred. No `TODO`, no stub, no placeholder document
 /// section, no capability behind a flag that turns it off, no "later version".
+///
+/// R15 is suspended for one named phase (`SUSP-R15-WIDTH-PHASE` in
+/// `model/ledger.toml`). What the suspension admits is read from the ledger
+/// rather than hard-coded here: a gate with a hard-coded hole is a hole nobody
+/// reviews, and a suspension recorded in the model is rendered into
+/// `CONFORMANCE.md`, where it is reviewed like any other claim. The admitted
+/// set is bounded by the model's own check, which refuses any path under
+/// `crates/` or `xtask/` --- a deferral parked in shipped code or in a gate is
+/// a deferral, whatever the ledger says.
 pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
     let markers = [
         "TODO",
@@ -601,6 +676,13 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
         "for now",
         "later version",
     ];
+    let admitted: Vec<String> = Model::load(&root.join("model"))?
+        .ledger
+        .suspension
+        .iter()
+        .filter(|s| s.rule == "R15")
+        .flat_map(|s| s.admits.clone())
+        .collect();
     let mut violations = Vec::new();
 
     let mut files: Vec<PathBuf> = Vec::new();
@@ -615,6 +697,10 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
         "ARCHITECTURE.md",
         "CONFORMANCE.md",
         "VERIFICATION.md",
+        // The phase's measurement log is scanned like every other document; the
+        // suspension is what currently spares it, and when the suspension's
+        // ledger row goes the log is held to the rule like everything else.
+        "MEASUREMENT-LOG.md",
     ] {
         let p = root.join(doc);
         if p.exists() {
@@ -631,6 +717,9 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
             .unwrap_or(&path)
             .display()
             .to_string();
+        if admitted.contains(&rel) {
+            continue;
+        }
         for (i, line) in text.lines().enumerate() {
             for marker in markers {
                 if !line.contains(marker) {
@@ -655,7 +744,15 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
         )
         .into());
     }
-    println!("audit-deferral: nothing is deferred (R15)");
+    if admitted.is_empty() {
+        println!("audit-deferral: nothing is deferred (R15)");
+    } else {
+        println!(
+            "audit-deferral: nothing is deferred outside the suspension recorded in \
+             model/ledger.toml (R15 suspended; admits: {})",
+            admitted.join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -695,7 +792,9 @@ fn gather_all(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Fail> {
 }
 
 /// `CU-01`, R2: no float add, subtract, multiply, or FMA opcode appears in any
-/// shipped kernel's disassembly.
+/// shipped kernel's disassembly --- except inside a function that holds the
+/// [`F64Exact`] witness, where the operand bound and the depth prove the opcode
+/// computes the same integer the exact accumulator does.
 ///
 /// The definitive form of R2. The source grep in [`audit_purity`] cannot see
 /// what the optimizer emitted; this reads the assembly the compiler actually
@@ -708,6 +807,15 @@ fn gather_all(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Fail> {
 /// What it deliberately does *not* catch is a float add the optimizer removed,
 /// because such an add is not in the shipped kernel. That is the gate reporting
 /// the binary rather than the source, which is the only thing worth reporting.
+///
+/// The exemption is not a comment the gate trusts and it is not a review
+/// judgement. A function whose emitted name carries `f64_exact` must mention
+/// the `F64Exact<Bd, DEPTH>` witness --- the source half of this gate requires
+/// it --- and the witness's only constructor does not compile unless
+/// `DEPTH * Bd::VALUE^2 <= 2^53`, the range in which binary64 arithmetic on
+/// integers *is* integer arithmetic. The disassembly gate checks the name, the
+/// source gate checks the type, and the compiler checks the bound; no hop is a
+/// judgement call.
 pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
     let out_dir = root.join("target").join("cu01-asm");
     // Removed, not reused. `--emit asm` writes a `.s` only when the crate is
@@ -754,9 +862,22 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
                 continue;
             }
             checked += 1;
+            // The function each instruction belongs to, so that an opcode can
+            // be attributed: an exemption applies to a function holding the
+            // witness, never to a crate or a file. Local labels (`.L*` on ELF,
+            // `LBB*`/`Ltmp*` on Mach-O) are not functions and do not move the
+            // attribution.
+            let mut enclosing = String::new();
             for (i, line) in text.lines().enumerate() {
-                if let Some(op) = float_opcode(line.trim()) {
-                    violations.push(format!("{name}:{}: `{op}`\n    {}", i + 1, line.trim()));
+                let trimmed = line.trim();
+                if is_function_label(trimmed) {
+                    enclosing = trimmed.trim_end_matches(':').to_string();
+                }
+                if let Some(op) = float_opcode(trimmed) {
+                    if enclosing.contains(F64_EXACT_MARKER) {
+                        continue;
+                    }
+                    violations.push(format!("{name}:{}: `{op}`\n    {}", i + 1, trimmed));
                 }
             }
             for (label, body) in function_bodies(&text, TABULATED_COLUMN_LOOP) {
@@ -798,7 +919,9 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
         return Err(format!(
             "R2, CU-01: the library never adds two floats. A float arithmetic opcode in a \
              shipped kernel means an accumulation is not exact, which breaks every claim in \
-             §3.\n\
+             §3. The one exemption is a function holding the `F64Exact` witness, where the \
+             declared bound and depth keep every value below 2^53 and the opcode computes \
+             the same integer --- any other float opcode is a defect.\n\
              CU-06: the tabulated column loop never multiplies. A multiply there means a \
              product the table was supposed to have already computed, which is the whole \
              content of the traversal.\n\n{}",
@@ -820,6 +943,28 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
 /// `uor_matmul_gemm::tabulated::gather_reference_*` names the reference
 /// instantiation precisely so this gate has instructions to read.
 const TABULATED_COLUMN_LOOP: &str = "gather_reference";
+
+/// The name fragment marking a function that holds the `F64Exact` witness ---
+/// the one place a float arithmetic opcode may appear in shipped code (`CU-01`
+/// as restated: the property is exactness, and the witness is its proof). The
+/// source half of the gate requires every function so named to mention
+/// `F64Exact`, whose only constructor refuses to compile outside the exact
+/// range, so the marker cannot be worn without the proof.
+const F64_EXACT_MARKER: &str = "f64_exact";
+
+/// Is this assembly line a *function* label, as opposed to a local one?
+///
+/// ELF locals start with `.L` and Mach-O locals are `LBB*` / `Ltmp*`, so the
+/// filters differ; a mangled function symbol on either starts with `_` or a
+/// letter. Attributing an instruction to the local label above it would lose
+/// the function it belongs to, which is the same failure class as the Mach-O
+/// framing defect `function_bodies` records below.
+pub(crate) fn is_function_label(trimmed: &str) -> bool {
+    trimmed.ends_with(':')
+        && !trimmed.starts_with('.')
+        && !trimmed.starts_with("LBB")
+        && !trimmed.starts_with("Ltmp")
+}
 
 /// Every emitted function whose symbol contains `fragment`, as `(label, body)`,
 /// where the body is the `(line number, instruction)` pairs between the label and
@@ -952,7 +1097,7 @@ fn float_opcode(line: &str) -> Option<&'static str> {
         .find(|op| mnemonic == *op || mnemonic.starts_with(op))
 }
 
-fn asm_files(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
+pub(crate) fn asm_files(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
     let mut out = Vec::new();
     let mut stack = std::vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {

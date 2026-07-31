@@ -90,3 +90,25 @@ id = "OPEN-RESIDENCY"
 level = "open"
 statement = """the residency collapse of the coded tiers, measured as a scaling
 constant against the oracle (CG-03), never asserted."""
+
+# ==========================================================================
+# Suspended rules. A working rule deliberately suspended for one named scope,
+# recorded here because a suspension that lived only in a gate's exemption
+# list would be a hole nobody reviews. The gate the suspension exempts reads
+# this file, so what is admitted is model data (R10).
+# ==========================================================================
+
+[[suspension]]
+id = "SUSP-R15-WIDTH-PHASE"
+rule = "R15"
+scope = "the representation-width performance phase"
+reason = """R15 was written about a plan being complete before implementation
+began. Performance work is iterative: a measurement lands, what bound it is
+learned, and the next step follows from that. Forbidding a named next step
+makes the honest artifact of such work --- a measurement log --- unwritable,
+so for this phase the log may name next steps. Everywhere else the rule and
+its gate stand exactly as written."""
+admits = ["MEASUREMENT-LOG.md"]
+ends = """the phase closes: the log's open items have each either shipped with
+their IDs and gates, or been measured and recorded as results, and this row and
+the exemption are removed together."""

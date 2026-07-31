@@ -90,11 +90,11 @@ honesty = "build"
 
 [[tier]]
 id = "Arena"
-rust = "Arena<'a, E, N>"
+rust = "Arena<'a, E, N, K>"
 code = "index"
 block = 1
 table = "borrowed [Alphabet<E, Whole<E>>; N]"
-note = "a codebook of one artifact's distinct float bit patterns, canonicalized by `canonicalize` (CK-10). The symbols are the identity level; the decode is the same table read as Grid."
+note = "a codebook of one artifact's distinct float bit patterns, canonicalized by `canonicalize` (CK-10). The code width K is a parameter of the one tier, u16 by default and u8 where the artifact's distinct patterns fit a byte (CK-14): two residencies, one decode. The symbols are the identity level; the decode is the same table read as Grid."
 honesty = "build"
 
 # --------------------------------------------------------------------------
@@ -238,7 +238,7 @@ code_space = 4
 block = 1
 rows = 16
 lanes_per_add = 8
-note = "the float arena, at one representative code space --- the space is per-artifact, and at block = 1 the conclusion is the Grid<16> one: the table saves the multiply and no adds, so selection declines it and the byte-identical dense route runs (CD-14). The tier's claim is identity and residency, not a traversal win."
+note = "the float arena, at one representative code space --- the space is per-artifact, and at block = 1 the conclusion is the Grid<16> one: the table saves the multiply and no adds, so selection declines it and the byte-identical dense route runs (CD-14). The u8 code width (CK-14, CD-18) changes the residency and not this count. The scaled integer lane (CD-20) is what makes the table fit at all --- at 256 entries the slab is 8 bytes a word, not 80 --- so the forced traversal tabulates where it once declined; whether selection should follow is an op-kind question (a read and an add against a decode and a placement), not an instruction count, and CG-16's measurement is why it does not: the win is under 2.2x where the build amortizes over n, and 40--175x losses where it does not."
 honesty = "build"
 
 # --------------------------------------------------------------------------
