@@ -1,0 +1,24 @@
+[package]
+name = "uor-matmul-executor"
+description = "The CB-11 executor: the parity checks, run on a Cortex-M target under qemu-system. Dev and CI only; never a dependency of a shipped crate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+uor-matmul-core = { workspace = true }
+# `default-features = false` from the workspace table: the `std` feature is
+# runtime CPU feature detection, and a Cortex-M target has nothing to detect
+# (C1). What is offered here is what the build offers, which is the claim.
+uor-matmul-kernels = { workspace = true }
+
+# Host builds of the workspace (`cargo test --workspace`) compile this crate
+# too; the device half and its crates exist only where they can run.
+[target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+
+[lints]
+workspace = true

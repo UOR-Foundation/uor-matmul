@@ -11,7 +11,14 @@ yanked = "deny"
 # is available", because the fix would have to land in those crates. The shipped
 # crates depend on none of them, which `just no-alloc` witnesses by building them
 # for a target with no allocator at all.
-ignore = ["RUSTSEC-2024-0436"]
+ignore = [
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2026-0110: `bare-metal` is deprecated. It is not a vulnerability,
+    # and it arrives only through `cortex-m-semihosting`, a dependency of the
+    # executor --- CI infrastructure that no shipped crate depends on, which
+    # `just no-alloc` witnesses by building the shipped crates without it.
+    "RUSTSEC-2026-0110",
+]
 
 [licenses]
 version = 2

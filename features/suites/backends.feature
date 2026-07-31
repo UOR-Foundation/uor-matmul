@@ -65,3 +65,9 @@ Feature: Backend parity
     Given the standing corpus
     When the suite exercises CB-10
     Then the claim holds byte for byte
+
+  @CB-11 @build
+  Scenario: Every sequence a Cortex-M build offers equals its reference, run under qemu-system on an mps2 machine
+    Given the standing corpus
+    When the suite exercises CB-11
+    Then the claim holds byte for byte
