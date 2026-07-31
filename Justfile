@@ -114,6 +114,33 @@ cross-run:
     RUSTFLAGS="-C target-feature=+simd128" \
         cargo test --release --target wasm32-wasip1 {{cross_crates}}
 
+# CB-11: the parity checks, run on a Cortex-M target.
+#
+# This exists for the same reason `cross-run` does: the alternative was
+# believing them. No user-mode emulator covers Cortex-M, so the sequences a
+# thumbv6m build offers were asserted by a compile --- which is no assertion at
+# all, as the NEON kernel that compiled, passed every gate, and was wrong on
+# every ARM host established. The executor is the *same* check bodies the host
+# test runs, on the reduced corpus, and the run is the claim.
+#
+# The linker script reaches the build here rather than in `.cargo/config.toml`
+# for exactly the reason `cross-run`'s comment records: a `[target.thumbv*]`
+# section there would apply to the `no-alloc` library builds too, and a linker
+# script named for an executor binary has no business in those. Set per
+# invocation, it reaches this build and nothing else.
+#
+# The ignored test is what asserts the marker: it runs each ELF under
+# qemu-system and fails if `CB-11: PASS` is absent, so a crash mid-suite is a
+# failure and not a pass-by-silence.
+#
+# Run the Cortex-M parity executor, on the system emulator, for real.
+cortex-m-run:
+    RUSTFLAGS="-C link-arg=-Tlink.x" \
+        cargo build --release -p uor-matmul-executor --target thumbv6m-none-eabi
+    RUSTFLAGS="-C link-arg=-Tlink.x" \
+        cargo build --release -p uor-matmul-executor --target thumbv7em-none-eabihf
+    cargo test -p uor-matmul-conformance --test cortex_m -- --ignored --nocapture
+
 # `CU-01`'s companion: the crate with the `unsafe` in it, under Miri.
 #
 # A recipe because it was only ever run in CI, and in CI it never once reported:

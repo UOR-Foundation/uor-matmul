@@ -86,6 +86,7 @@ returns an error the model does not sanction.
 | `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two |
 | `CB-09` | `build` | Every modular table sequence equals the portable modular reference lane for lane |
 | `CB-10` | `build` | At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run |
+| `CB-11` | `build` | Every sequence a Cortex-M build offers equals its reference, run under qemu-system on an mps2 machine --- parity there is a run, not a compile, and no user-mode emulator covers Cortex-M |
 | `CB-12` | `build` | The wasm SIMD128 SWAR sequence --- three B-row elements packed at 21-bit spacing in each 64-bit lane, multiplied by one broadcast scalar --- equals the portable reference lane for lane at every packed depth, at the alphabet's extremes, and at the W4A8 bound; selection offers it nowhere, because CG-17 measured it slower than the dot sequence it would displace |
 
 ## `CU-*` --- Purity: one answer, many factorizations; no classical path, no fallback

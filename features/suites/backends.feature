@@ -66,6 +66,12 @@ Feature: Backend parity
     When the suite exercises CB-10
     Then the claim holds byte for byte
 
+  @CB-11 @build
+  Scenario: Every sequence a Cortex-M build offers equals its reference, run under qemu-system on an mps2 machine
+    Given the standing corpus
+    When the suite exercises CB-11
+    Then the claim holds byte for byte
+
   @CB-12 @build
   Scenario: The wasm SIMD128 SWAR broadcast sequence equals the portable reference lane for lane, and selection offers it nowhere because CG-17 measured it slower than the dot sequence it would displace
     Given the standing corpus

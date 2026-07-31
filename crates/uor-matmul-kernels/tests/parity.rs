@@ -5,36 +5,211 @@
 //! answer. These tests are what makes that a fact rather than an intention:
 //! each family has a reference, and each backend is compared against it on
 //! shapes chosen to hit every tail and every threshold.
+//!
+//! The check bodies live in [`parity`], shared with the Cortex-M executor
+//! (`CB-11`): this file is the host harness --- the whole corpus, `Vec`
+//! scratch, and the host-only assertions --- and the executor is the same
+//! bodies on the reduced corpus with static scratch. One implementation, two
+//! harnesses (R13).
+//!
+//! The reduced corpus is the one Miri walks, and the discipline is Miri's: it
+//! reduces the number of *instances*, not the set of *paths* --- every arm of
+//! `dispatch_run!` and `dispatch_slab!` is the same macro body at different
+//! constants, so a narrow arm and a wide arm together exercise the code, and
+//! keeping a code space that is not a power of two keeps the padding claim.
+//! That is what keeps the Miri job inside a CI budget instead of running past
+//! the six-hour ceiling and being cancelled, which is what it did on every
+//! push it was ever enabled for. The native run takes the whole corpus.
 
-use uor_matmul_core::{as_alphabet_full, dot_ref, Backend};
+use uor_matmul_core::Backend;
 use uor_matmul_kernels::{
     available_i16, available_i16_modular, available_i32_exact, available_i32_modular,
     available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
     available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
     available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
-    available_reduce_i8, choose_for_rows, packed_slot, portable_i8, Factorization, KernelSpec,
+    available_reduce_i8, choose_for_rows, parity, portable_i8, Factorization, KernelSpec,
 };
 
-/// Element `p` of lane `l`, read the way the kernel reads it.
-///
-/// The panel layout is the kernel contract, so the reference goes through the
-/// crate's own [`packed_slot`] rather than restating it. A kernel that
-/// misreads its panel therefore fails here, which is the whole point.
-fn at<T: Copy>(panel: &[T], p: usize, lane: usize, lanes: usize, group: usize) -> T {
-    panel[packed_slot(p, lane, lanes, group)]
+/// The depths this harness walks: the whole corpus natively, the reduced one
+/// under Miri.
+fn depths() -> &'static [usize] {
+    if cfg!(miri) {
+        parity::DEPTHS_REDUCED
+    } else {
+        parity::DEPTHS_FULL
+    }
 }
 
-/// The depths a kernel can be handed: a whole number of `k`-groups, which is
-/// what the driver always packs (it pads with the alphabet's zero).
-fn depths<E, L>(spec: &KernelSpec<E, L>) -> Vec<usize> {
-    // Empty, one, a whole group, and one past a group: the four shapes the tail
-    // handling has. Under Miri that is the corpus; natively it is the whole list.
-    let mut v: Vec<usize> = corpus(DEPTHS, &[0, 1, 8, 65])
+/// The table corpora, with the same native/Miri split as [`depths`].
+fn table_32() -> parity::TableCorpus {
+    if cfg!(miri) {
+        parity::TABLE_REDUCED
+    } else {
+        parity::TABLE_32_FULL
+    }
+}
+
+/// The 64-bit lane's table corpus; the reduced corpus serves every family.
+fn table_64() -> parity::TableCorpus {
+    if cfg!(miri) {
+        parity::TABLE_REDUCED
+    } else {
+        parity::TABLE_64_FULL
+    }
+}
+
+/// The bound-1 corpus, natively and under Miri.
+fn bound1() -> parity::Bound1Corpus {
+    if cfg!(miri) {
+        parity::BOUND1_REDUCED
+    } else {
+        parity::BOUND1_FULL
+    }
+}
+
+/// The deepest panel any spec in `specs` reaches over `corpus`.
+fn kc_max<E, L>(specs: &[KernelSpec<E, L>], corpus: &[usize]) -> usize {
+    specs
         .iter()
-        .map(|&kc| kc.div_ceil(spec.k_group) * spec.k_group)
-        .collect();
-    v.dedup();
-    v
+        .flat_map(|s| parity::depths_of(s.k_group, corpus))
+        .max()
+        .unwrap_or(0)
+}
+
+/// `Vec`-backed tile scratch for the host harness.
+struct TileVecs<E, L> {
+    pa: Vec<E>,
+    pb: Vec<E>,
+    lane_a: Vec<E>,
+    lane_b: Vec<E>,
+    acc: Vec<L>,
+    want: Vec<L>,
+}
+
+impl<E: Copy + Default, L: Copy + Default> TileVecs<E, L> {
+    fn for_specs(specs: &[KernelSpec<E, L>], corpus: &[usize]) -> Self {
+        let kc = kc_max(specs, corpus);
+        let mr = specs.iter().map(|s| s.mr).max().unwrap_or(0);
+        let nr = specs.iter().map(|s| s.nr).max().unwrap_or(0);
+        TileVecs {
+            pa: vec![E::default(); mr * kc],
+            pb: vec![E::default(); nr * kc],
+            lane_a: vec![E::default(); kc],
+            lane_b: vec![E::default(); kc],
+            acc: vec![L::default(); mr * nr],
+            want: vec![L::default(); mr * nr],
+        }
+    }
+
+    fn scratch(&mut self) -> parity::TileScratch<'_, E, L> {
+        parity::TileScratch {
+            pa: &mut self.pa,
+            pb: &mut self.pb,
+            lane_a: &mut self.lane_a,
+            lane_b: &mut self.lane_b,
+            acc: &mut self.acc,
+            want: &mut self.want,
+        }
+    }
+}
+
+/// `Vec`-backed reduce scratch for the host harness.
+struct ReduceVecs<E, L> {
+    pa: Vec<E>,
+    pb: Vec<E>,
+    acc: Vec<L>,
+}
+
+impl<E: Copy + Default, L: Copy + Default> ReduceVecs<E, L> {
+    fn for_specs(specs: &[KernelSpec<E, L>], corpus: &[usize]) -> Self {
+        let kc = kc_max(specs, corpus);
+        let mr = specs.iter().map(|s| s.mr).max().unwrap_or(0);
+        ReduceVecs {
+            pa: vec![E::default(); mr * kc],
+            pb: vec![E::default(); kc],
+            acc: vec![L::default(); mr],
+        }
+    }
+
+    fn scratch(&mut self) -> parity::ReduceScratch<'_, E, L> {
+        parity::ReduceScratch {
+            pa: &mut self.pa,
+            pb: &mut self.pb,
+            acc: &mut self.acc,
+        }
+    }
+}
+
+/// `Vec`-backed table scratch for the host harness.
+struct TableVecs<E, L> {
+    book: Vec<E>,
+    flat: Vec<E>,
+    packed: Vec<E>,
+    model: Vec<L>,
+    out: Vec<L>,
+    stack: Vec<L>,
+    off: Vec<u32>,
+    stream: Vec<u16>,
+    lane_a: Vec<L>,
+    lane_b: Vec<L>,
+}
+
+impl<E: Copy + Default, L: Copy> TableVecs<E, L> {
+    fn for_corpus(c: &parity::TableCorpus, zero: L) -> Self {
+        let max = |xs: &[usize]| xs.iter().copied().max().unwrap_or(0);
+        let (space, block, rows, group) =
+            (max(c.spaces), max(c.blocks), max(c.rows), max(c.groups));
+        let slab = space.next_power_of_two() * rows;
+        TableVecs {
+            book: vec![E::default(); space * block],
+            flat: vec![E::default(); rows * block],
+            packed: vec![E::default(); rows * block],
+            model: vec![zero; space * rows],
+            out: vec![zero; space * rows],
+            stack: vec![zero; c.depth * slab],
+            off: vec![0; c.depth * group],
+            stream: vec![0; (group - 1) * (c.depth + 3) + c.depth],
+            lane_a: vec![zero; group * rows],
+            lane_b: vec![zero; group * rows],
+        }
+    }
+
+    fn for_bound1(c: &parity::Bound1Corpus, zero: L) -> Self {
+        let max = |xs: &[usize]| xs.iter().copied().max().unwrap_or(0);
+        let (space, block) = c
+            .pairs
+            .iter()
+            .copied()
+            .fold((0, 0), |(s, b), (s2, b2)| (s.max(s2), b.max(b2)));
+        let rows = max(c.rows);
+        TableVecs {
+            book: vec![E::default(); space * block],
+            flat: vec![E::default(); rows * block],
+            packed: vec![E::default(); rows * block],
+            model: vec![zero; space * rows],
+            out: vec![zero; space * rows],
+            stack: Vec::new(),
+            off: Vec::new(),
+            stream: Vec::new(),
+            lane_a: Vec::new(),
+            lane_b: Vec::new(),
+        }
+    }
+
+    fn scratch(&mut self) -> parity::TableScratch<'_, E, L> {
+        parity::TableScratch {
+            book: &mut self.book,
+            flat: &mut self.flat,
+            packed: &mut self.packed,
+            model: &mut self.model,
+            out: &mut self.out,
+            stack: &mut self.stack,
+            off: &mut self.off,
+            stream: &mut self.stream,
+            lane_a: &mut self.lane_a,
+            lane_b: &mut self.lane_b,
+        }
+    }
 }
 
 /// Deterministic fill. A recorded generator rather than a crate, so a failure
@@ -51,9 +226,20 @@ fn fill<T, F: Fn(i64) -> T>(len: usize, salt: u64, map: F) -> Vec<T> {
         .collect()
 }
 
+/// Element `p` of lane `l`, read the way the kernel reads it.
+///
+/// The panel layout is the kernel contract, so the reference goes through the
+/// crate's own [`uor_matmul_kernels::packed_slot`] rather than restating it. A
+/// kernel that misreads its panel therefore fails here, which is the whole
+/// point.
+fn at<T: Copy>(panel: &[T], p: usize, lane: usize, lanes: usize, group: usize) -> T {
+    panel[uor_matmul_kernels::packed_slot(p, lane, lanes, group)]
+}
+
 /// The exact `mr x nr` tile for an `i8` kernel, from the core's own
 /// accumulation. This is the link that anchors the whole chain to `dot_ref`.
 fn reference_i8(spec: &KernelSpec<i8, i32>, kc: usize, pa: &[i8], pb: &[i8]) -> Vec<i32> {
+    use uor_matmul_core::{as_alphabet_full, dot_ref};
     let mut out = vec![0i32; spec.mr * spec.nr];
     let g = spec.k_group;
     for i in 0..spec.mr {
@@ -66,41 +252,21 @@ fn reference_i8(spec: &KernelSpec<i8, i32>, kc: usize, pa: &[i8], pb: &[i8]) -> 
     out
 }
 
-/// The corpus, and the smaller one Miri takes.
-///
-/// Miri checks *soundness* --- provenance, bounds, initialisation --- and one
-/// instance of a code path shows that as well as three hundred do, at something
-/// like a hundredfold the cost per instance. The native run takes the whole
-/// corpus; this is what keeps the Miri job inside a CI budget instead of running
-/// past the six-hour ceiling and being cancelled, which is what it did on every
-/// push it was ever enabled for.
-///
-/// It reduces the number of *instances*, not the set of *paths*: every arm of
-/// `dispatch_run!` and `dispatch_slab!` is the same macro body at different
-/// constants, so a narrow arm and a wide arm together exercise the code, and
-/// keeping a code space that is not a power of two keeps the padding claim. The
-/// native run adds the rest of the corpus and still runs all of it.
-fn corpus<T: Copy>(all: &[T], under_miri: &[T]) -> Vec<T> {
-    if cfg!(miri) {
-        under_miri.to_vec()
-    } else {
-        all.to_vec()
-    }
-}
-
-const DEPTHS: &[usize] = &[0, 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 63, 64, 65, 129, 512];
-
 /// `CB-01`: the portable kernel equals `dot_ref` on the whole corpus.
 #[test]
 fn portable_equals_dot_ref_cb_01() {
     let spec = portable_i8();
-    for kc in depths(&spec) {
-        let pa = fill(spec.mr * kc, kc as u64, |v| v as i8);
-        let pb = fill(spec.nr * kc, kc as u64 ^ 0x5A, |v| v as i8);
-        let mut acc = vec![0i32; spec.mr * spec.nr];
-        spec.mac_tile(kc, &pa, &pb, &mut acc);
-        assert_eq!(acc, reference_i8(&spec, kc, &pa, &pb), "kc={kc}");
-    }
+    let mut vecs = TileVecs::for_specs(&[spec], depths());
+    let compared = parity::tile_parity(
+        "CB-01",
+        core::iter::once(spec),
+        depths(),
+        (0, 0x5A),
+        (|v| v as i8, |v| v as i8),
+        parity::dot_i8,
+        &mut vecs.scratch(),
+    );
+    assert!(compared > 0, "CB-01 compared nothing");
 }
 
 /// Every `i8` tile sequence this build can run, at every panel width.
@@ -108,7 +274,7 @@ fn portable_equals_dot_ref_cb_01() {
 /// The narrow panels live in their own list because the driver only asks for
 /// one when the shape is narrower than the tile --- but a differential test has
 /// no such condition. A sequence outside the net is a sequence nothing checks.
-fn every_i8_tile() -> impl Iterator<Item = uor_matmul_kernels::KernelSpec<i8, i32>> {
+fn every_i8_tile() -> impl Iterator<Item = KernelSpec<i8, i32>> {
     available_i8().chain(available_i8_narrow())
 }
 
@@ -116,27 +282,20 @@ fn every_i8_tile() -> impl Iterator<Item = uor_matmul_kernels::KernelSpec<i8, i3
 /// reference, byte for byte.
 #[test]
 fn every_i8_backend_equals_portable_cb_02() {
-    let mut names = Vec::new();
-    for spec in every_i8_tile() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, kc as u64 ^ 0xC0, |v| v as i8);
-            let pb = fill(spec.nr * kc, kc as u64 ^ 0x0D, |v| v as i8);
-            let mut acc = vec![0i32; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            assert_eq!(
-                acc,
-                reference_i8(&spec, kc, &pa, &pb),
-                "{} disagrees at kc={kc}",
-                spec.backend.as_str()
-            );
-        }
-        names.push(spec.backend.as_str());
-    }
-    eprintln!("CB-02: {} i8 backend(s): {}", names.len(), names.join(", "));
-    assert!(
-        !names.is_empty(),
-        "at least the portable kernel must have run"
+    let specs: Vec<_> = every_i8_tile().collect();
+    let mut vecs = TileVecs::for_specs(&specs, depths());
+    let compared = parity::tile_parity(
+        "CB-02",
+        specs.iter().copied(),
+        depths(),
+        (0xC0, 0x0D),
+        (|v| v as i8, |v| v as i8),
+        parity::dot_i8,
+        &mut vecs.scratch(),
     );
+    let names: Vec<_> = specs.iter().map(|s| s.backend.as_str()).collect();
+    eprintln!("CB-02: {} i8 backend(s): {}", names.len(), names.join(", "));
+    assert!(compared > 0, "at least the portable kernel must have run");
     // A test that only ever ran the reference against itself would pass while
     // asserting nothing, which is exactly what this test did before the
     // `std` feature reached it: without runtime detection every `available_*`
@@ -158,7 +317,7 @@ fn every_i8_backend_equals_portable_cb_02() {
 }
 
 /// Check one named `i8` backend, and say whether the host could run it.
-fn check_named(backend: Backend) -> bool {
+fn check_named(check: &'static str, backend: Backend) -> bool {
     let Some(spec) = available_i8().find(|s| s.backend == backend) else {
         eprintln!(
             "{}: not available on this host; the cross-architecture CI job runs it",
@@ -166,25 +325,23 @@ fn check_named(backend: Backend) -> bool {
         );
         return false;
     };
-    for kc in depths(&spec) {
-        let pa = fill(spec.mr * kc, kc as u64 ^ 0xAB, |v| v as i8);
-        let pb = fill(spec.nr * kc, kc as u64 ^ 0xCD, |v| v as i8);
-        let mut acc = vec![0i32; spec.mr * spec.nr];
-        spec.mac_tile(kc, &pa, &pb, &mut acc);
-        assert_eq!(
-            acc,
-            reference_i8(&spec, kc, &pa, &pb),
-            "{} disagrees at kc={kc}",
-            backend.as_str()
-        );
-    }
+    let mut vecs = TileVecs::for_specs(&[spec], depths());
+    parity::tile_parity(
+        check,
+        core::iter::once(spec),
+        depths(),
+        (0xAB, 0xCD),
+        (|v| v as i8, |v| v as i8),
+        parity::dot_i8,
+        &mut vecs.scratch(),
+    );
     true
 }
 
 /// `CB-03`: AVX-512 VNNI equals portable, on both of its sequences.
 #[test]
 fn avx512vnni_equals_portable_cb_03() {
-    if check_named(Backend::Avx512Vnni) {
+    if check_named("CB-03", Backend::Avx512Vnni) {
         let sequences = available_i8()
             .filter(|s| s.backend == Backend::Avx512Vnni)
             .count();
@@ -195,15 +352,15 @@ fn avx512vnni_equals_portable_cb_03() {
 /// `CB-04`: NEON and NEON dotprod equal portable.
 #[test]
 fn neon_equals_portable_cb_04() {
-    let _ = check_named(Backend::Neon);
-    let _ = check_named(Backend::NeonDotprod);
+    let _ = check_named("CB-04", Backend::Neon);
+    let _ = check_named("CB-04", Backend::NeonDotprod);
 }
 
 /// `CB-05`: wasm SIMD128 equals portable. A SIMD128-off build runs the portable
 /// kernel, so "off equals on" is the composition of this with `CB-01`.
 #[test]
 fn wasm_simd128_equals_portable_cb_05() {
-    let _ = check_named(Backend::WasmSimd128);
+    let _ = check_named("CB-05", Backend::WasmSimd128);
 }
 
 /// `CB-12`: the wasm SIMD128 SWAR broadcast sequence equals the portable
@@ -237,8 +394,14 @@ fn wasm_swar_broadcast_equals_portable_cb_12() {
         return;
     }
     // Every packed depth, lane for lane: the spacing, the bias correction, and
-    // the chunk boundary all show up here if they are wrong.
-    for kc in depths(&spec) {
+    // the chunk boundary all show up here if they are wrong. Depths are a
+    // whole number of `k`-groups, which is what the driver always packs.
+    let mut ks: Vec<usize> = depths()
+        .iter()
+        .map(|&kc| kc.div_ceil(spec.k_group) * spec.k_group)
+        .collect();
+    ks.dedup();
+    for kc in ks {
         let pa = fill(spec.mr * kc, kc as u64 ^ 0x5B, |v| v as i8);
         let pb = fill(spec.nr * kc, kc as u64 ^ 0xA7, |v| v as i8);
         let mut acc = vec![0i32; spec.mr * spec.nr];
@@ -325,119 +488,68 @@ fn sequences_agree_across_their_thresholds_cu_03() {
 /// oracle would say nothing.
 #[test]
 fn the_wider_families_equal_their_references_cb_02() {
-    for spec in available_i16() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 7, |v| (v * 251) as i16);
-            let pb = fill(spec.nr * kc, 8, |v| (v * 251) as i16);
-            let mut acc = vec![0i64; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                for j in 0..spec.nr {
-                    let want: i64 = (0..kc)
-                        .map(|p| {
-                            i64::from(at(&pa, p, i, spec.mr, spec.k_group))
-                                * i64::from(at(&pb, p, j, spec.nr, spec.k_group))
-                        })
-                        .sum();
-                    assert_eq!(
-                        acc[i * spec.nr + j],
-                        want,
-                        "{} i16 kc={kc}",
-                        spec.backend.as_str()
-                    );
-                }
-            }
-        }
-    }
+    let specs: Vec<_> = available_i16().collect();
+    let mut vecs = TileVecs::for_specs(&specs, depths());
+    parity::tile_parity(
+        "CB-02 i16",
+        specs.iter().copied(),
+        depths(),
+        (7, 8),
+        (|v| (v * 251) as i16, |v| (v * 251) as i16),
+        parity::dot_i16,
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_i32_exact() {
-        // Values bounded by 2^20, so the *reference* sum fits an `i64` at every
-        // depth below. The kernel's own lane is bounded the same way, and the
-        // driver only ever offers it a chunk `lane_depth` admits --- testing it
-        // past that would be testing something the driver never asks for.
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 9, |v| ((v & 0xFFFF) - 0x8000) as i32);
-            let pb = fill(spec.nr * kc, 10, |v| ((v & 0xFFFF) - 0x8000) as i32);
-            let mut acc = vec![0i64; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                for j in 0..spec.nr {
-                    let want: i64 = (0..kc)
-                        .map(|p| {
-                            i64::from(at(&pa, p, i, spec.mr, spec.k_group))
-                                * i64::from(at(&pb, p, j, spec.nr, spec.k_group))
-                        })
-                        .sum();
-                    assert_eq!(
-                        acc[i * spec.nr + j],
-                        want,
-                        "{} i32 kc={kc}",
-                        spec.backend.as_str()
-                    );
-                }
-            }
-        }
-    }
+    // Values bounded by 2^20, so the *reference* sum fits an `i64` at every
+    // depth below. The kernel's own lane is bounded the same way, and the
+    // driver only ever offers it a chunk `lane_depth` admits --- testing it
+    // past that would be testing something the driver never asks for.
+    let specs: Vec<_> = available_i32_exact().collect();
+    let mut vecs = TileVecs::for_specs(&specs, depths());
+    parity::tile_parity(
+        "CB-02 i32",
+        specs.iter().copied(),
+        depths(),
+        (9, 10),
+        (
+            |v| ((v & 0xFFFF) - 0x8000) as i32,
+            |v| ((v & 0xFFFF) - 0x8000) as i32,
+        ),
+        parity::dot_i32_exact,
+        &mut vecs.scratch(),
+    );
 
     // The modular lanes wrap, and that *is* the answer in the quotient: the
     // references below wrap too, deliberately.
-    for spec in available_i32_modular() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 11, |v| (v.wrapping_mul(99_991)) as i32);
-            let pb = fill(spec.nr * kc, 12, |v| (v.wrapping_mul(65_537)) as i32);
-            let mut acc = vec![0i32; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                for j in 0..spec.nr {
-                    let want = (0..kc).fold(0i32, |s, p| {
-                        s.wrapping_add(at(&pa, p, i, spec.mr, spec.k_group).wrapping_mul(at(
-                            &pb,
-                            p,
-                            j,
-                            spec.nr,
-                            spec.k_group,
-                        )))
-                    });
-                    assert_eq!(
-                        acc[i * spec.nr + j],
-                        want,
-                        "{} i32 modular kc={kc}",
-                        spec.backend.as_str()
-                    );
-                }
-            }
-        }
-    }
+    let specs: Vec<_> = available_i32_modular().collect();
+    let mut vecs = TileVecs::for_specs(&specs, depths());
+    parity::tile_parity(
+        "CB-02 i32 modular",
+        specs.iter().copied(),
+        depths(),
+        (11, 12),
+        (
+            |v| (v.wrapping_mul(99_991)) as i32,
+            |v| (v.wrapping_mul(65_537)) as i32,
+        ),
+        parity::dot_i32_mod,
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_i64_modular() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 13, |v| {
-                v.wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64)
-            });
-            let pb = fill(spec.nr * kc, 14, |v| v.wrapping_mul(0x1000_0000_01B3));
-            let mut acc = vec![0i64; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                for j in 0..spec.nr {
-                    let want = (0..kc).fold(0i64, |s, p| {
-                        s.wrapping_add(at(&pa, p, i, spec.mr, spec.k_group).wrapping_mul(at(
-                            &pb,
-                            p,
-                            j,
-                            spec.nr,
-                            spec.k_group,
-                        )))
-                    });
-                    assert_eq!(
-                        acc[i * spec.nr + j],
-                        want,
-                        "{} i64 modular kc={kc}",
-                        spec.backend.as_str()
-                    );
-                }
-            }
-        }
-    }
+    let specs: Vec<_> = available_i64_modular().collect();
+    let mut vecs = TileVecs::for_specs(&specs, depths());
+    parity::tile_parity(
+        "CB-02 i64 modular",
+        specs.iter().copied(),
+        depths(),
+        (13, 14),
+        (
+            |v| v.wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64),
+            |v| v.wrapping_mul(0x1000_0000_01B3),
+        ),
+        parity::dot_i64_mod,
+        &mut vecs.scratch(),
+    );
 }
 
 /// `CD-01`: naming a backend never changes the answer, and naming one the host
@@ -723,60 +835,40 @@ fn the_cached_walk_is_the_full_walk_cg_13() {
 /// merely exact on likely data.
 #[test]
 fn the_extremes_of_every_alphabet_are_exact_cb_07() {
-    /// The largest and smallest value an alphabet bounded by `bound` holds,
-    /// within the element type.
-    fn extremes(bound: u128, type_bound: u128) -> (i64, i64) {
-        let b = bound.min(type_bound) as i64;
-        // A bound of `B` admits magnitudes up to `B`, and the type's own
-        // negative extreme is `-B`; the positive one is `B - 1` when the bound is
-        // the type's, and `B` when the caller declared it.
-        if bound >= type_bound {
-            (-b, b - 1)
-        } else {
-            (-b, b)
-        }
-    }
-
     for spec in available_i16() {
-        let (lo, hi) = extremes(spec.max_bound, 32768);
-        for kc in [2usize, 4, 8, 16, 64].map(|k| k.div_ceil(spec.k_group) * spec.k_group) {
-            for (av, bv) in [(lo, lo), (lo, hi), (hi, hi), (hi, lo)] {
-                let (av, bv) = (av as i16, bv as i16);
-                let pa = vec![av; spec.mr * kc];
-                let pb = vec![bv; spec.nr * kc];
-                let mut acc = vec![0i64; spec.mr * spec.nr];
-                spec.mac_tile(kc, &pa, &pb, &mut acc);
-                let want = (kc as i64) * i64::from(av) * i64::from(bv);
-                assert!(
-                    acc.iter().all(|&x| x == want),
-                    "{} i16 (max_bound {}) at ({av}, {bv}) kc={kc}: got {:?}, want {want}",
-                    spec.backend.as_str(),
-                    spec.max_bound,
-                    &acc[..4.min(acc.len())]
-                );
-            }
-        }
+        let (lo, hi) = parity::extremes(spec.max_bound, 32768);
+        let values: Vec<(i16, i16)> = [(lo, lo), (lo, hi), (hi, hi), (hi, lo)]
+            .iter()
+            .map(|&(a, b)| (a as i16, b as i16))
+            .collect();
+        let mut vecs = TileVecs::for_specs(&[spec], &[64]);
+        parity::tile_extremes(
+            "CB-07 i16",
+            core::iter::once(spec),
+            &[2, 4, 8, 16, 64],
+            &values,
+            |kc, a, b| (kc as i64) * i64::from(a) * i64::from(b),
+            &mut vecs.scratch(),
+        );
     }
 
     for spec in available_i32_exact() {
-        let (lo, hi) = extremes(spec.max_bound, 1 << 31);
+        let (lo, hi) = parity::extremes(spec.max_bound, 1 << 31);
+        let values: Vec<(i32, i32)> = [(lo, lo), (lo, hi), (hi, hi)]
+            .iter()
+            .map(|&(a, b)| (a as i32, b as i32))
+            .collect();
         // One product at a time: `lane_depth` at the full bound is 1, and the
         // driver never offers this lane more than that.
-        for (av, bv) in [(lo, lo), (lo, hi), (hi, hi)] {
-            let (av, bv) = (av as i32, bv as i32);
-            let kc = spec.k_group;
-            let pa = vec![av; spec.mr * kc];
-            let pb = vec![bv; spec.nr * kc];
-            let mut acc = vec![0i64; spec.mr * spec.nr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            let want = (kc as i64) * i64::from(av) * i64::from(bv);
-            assert!(
-                acc.iter().all(|&x| x == want),
-                "{} i32 at ({av}, {bv}): got {:?}, want {want}",
-                spec.backend.as_str(),
-                &acc[..4.min(acc.len())]
-            );
-        }
+        let mut vecs = TileVecs::for_specs(&[spec], &[1]);
+        parity::tile_extremes(
+            "CB-07 i32",
+            core::iter::once(spec),
+            &[1],
+            &values,
+            |kc, a, b| (kc as i64) * i64::from(a) * i64::from(b),
+            &mut vecs.scratch(),
+        );
     }
 }
 
@@ -822,32 +914,26 @@ fn every_reduce_sequence_equals_its_reference_cb_06() {
     use uor_matmul_kernels::{
         available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
         available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
-        available_reduce_i8, LaneLayout,
+        available_reduce_i8,
     };
 
-    let mut seen = 0usize;
-    for spec in available_reduce_i8() {
-        assert_eq!(spec.nr, 1, "a reduce kernel produces one column");
-        assert_eq!(spec.lane_layout, LaneLayout::Contiguous);
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 21, |v| v as i8);
-            let pb: Vec<i8> = fill(kc, 22, |v| v as i8);
-            let mut acc = vec![0i32; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                let row = &pa[i * kc..][..kc];
-                let want = dot_ref(as_alphabet_full(row), as_alphabet_full(&pb[..kc])) as i32;
-                assert_eq!(acc[i], want, "{} i8 reduce kc={kc}", spec.backend.as_str());
-            }
-        }
-        seen += 1;
-    }
+    let specs: Vec<_> = available_reduce_i8().collect();
+    let mut vecs = ReduceVecs::for_specs(&specs, depths());
+    let seen = parity::reduce_parity(
+        "CB-06 i8",
+        specs.iter().copied(),
+        depths(),
+        (21, 22),
+        (|v| v as i8, |v| v as i8),
+        parity::dot_i8,
+        &mut vecs.scratch(),
+    );
     assert!(seen > 0);
     // Native only, as `CB-02`'s counterpart is: Miri models no vector intrinsics,
     // so the reference is the whole list there by design.
     if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) && !cfg!(miri) {
         assert!(
-            seen > 1,
+            specs.len() > 2,
             "x86-64 and aarch64 both have a vector i8 reduce sequence past the reference"
         );
     }
@@ -855,145 +941,115 @@ fn every_reduce_sequence_equals_its_reference_cb_06() {
     // The extremes too: the reduce sequences accumulate a whole row into one
     // lane, so their intermediate widths are a different question from the tile
     // sequences' and deserve the same input.
-    for spec in available_reduce_i8() {
-        for kc in [16usize, 64, 1024].map(|k| k.div_ceil(spec.k_group) * spec.k_group) {
-            let pa = vec![i8::MIN; spec.mr * kc];
-            let pb = vec![i8::MIN; kc];
-            let mut acc = vec![0i32; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            let want = (kc as i32) * 128 * 128;
-            assert!(
-                acc.iter().all(|&x| x == want),
-                "{} i8 reduce at the extreme, kc={kc}: {acc:?} want {want}",
-                spec.backend.as_str()
-            );
-        }
-    }
+    let mut vecs = ReduceVecs::for_specs(&specs, &[1024]);
+    parity::reduce_extremes(
+        "CB-06 i8",
+        specs.iter().copied(),
+        &[16, 64, 1024],
+        &[(i8::MIN, i8::MIN)],
+        |kc, a, b| (kc as i32) * i32::from(a) * i32::from(b),
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_reduce_i16() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 23, |v| v as i16);
-            let pb: Vec<i16> = fill(kc, 24, |v| v as i16);
-            let mut acc = vec![0i64; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                let want: i64 = (0..kc)
-                    .map(|p| i64::from(pa[i * kc + p]) * i64::from(pb[p]))
-                    .sum();
-                assert_eq!(acc[i], want, "{} i16 reduce kc={kc}", spec.backend.as_str());
-            }
-        }
-        // At the full alphabet, where a paired-product sequence would be wrong.
-        let kc = 16usize.div_ceil(spec.k_group) * spec.k_group;
-        for (av, bv) in [(i16::MIN, i16::MIN), (i16::MIN, i16::MAX)] {
-            let pa = vec![av; spec.mr * kc];
-            let pb = vec![bv; kc];
-            let mut acc = vec![0i64; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            let want = (kc as i64) * i64::from(av) * i64::from(bv);
-            assert!(
-                acc.iter().all(|&x| x == want),
-                "{} i16 reduce at ({av}, {bv}): {acc:?} want {want}",
-                spec.backend.as_str()
-            );
-        }
-    }
+    let specs: Vec<_> = available_reduce_i16().collect();
+    let mut vecs = ReduceVecs::for_specs(&specs, depths());
+    parity::reduce_parity(
+        "CB-06 i16",
+        specs.iter().copied(),
+        depths(),
+        (23, 24),
+        (|v| v as i16, |v| v as i16),
+        parity::dot_i16,
+        &mut vecs.scratch(),
+    );
+    // At the full alphabet, where a paired-product sequence would be wrong.
+    let mut vecs = ReduceVecs::for_specs(&specs, &[16]);
+    parity::reduce_extremes(
+        "CB-06 i16",
+        specs.iter().copied(),
+        &[16],
+        &[(i16::MIN, i16::MIN), (i16::MIN, i16::MAX)],
+        |kc, a, b| (kc as i64) * i64::from(a) * i64::from(b),
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_reduce_i32_exact() {
-        for kc in depths(&spec) {
-            // Bounded so the reference sum fits an `i64` at every depth here.
-            let pa = fill(spec.mr * kc, 25, |v| ((v & 0xFFFF) - 0x8000) as i32);
-            let pb: Vec<i32> = fill(kc, 26, |v| ((v & 0xFFFF) - 0x8000) as i32);
-            let mut acc = vec![0i64; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                let want: i64 = (0..kc)
-                    .map(|p| i64::from(pa[i * kc + p]) * i64::from(pb[p]))
-                    .sum();
-                assert_eq!(acc[i], want, "{} i32 reduce kc={kc}", spec.backend.as_str());
-            }
-        }
-    }
+    let specs: Vec<_> = available_reduce_i32_exact().collect();
+    let mut vecs = ReduceVecs::for_specs(&specs, depths());
+    // Bounded so the reference sum fits an `i64` at every depth here.
+    parity::reduce_parity(
+        "CB-06 i32",
+        specs.iter().copied(),
+        depths(),
+        (25, 26),
+        (
+            |v| ((v & 0xFFFF) - 0x8000) as i32,
+            |v| ((v & 0xFFFF) - 0x8000) as i32,
+        ),
+        parity::dot_i32_exact,
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_reduce_i32_modular() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 27, |v| v.wrapping_mul(99_991) as i32);
-            let pb: Vec<i32> = fill(kc, 28, |v| v.wrapping_mul(65_537) as i32);
-            let mut acc = vec![0i32; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                let want = (0..kc).fold(0i32, |s, p| {
-                    s.wrapping_add(pa[i * kc + p].wrapping_mul(pb[p]))
-                });
-                assert_eq!(
-                    acc[i],
-                    want,
-                    "{} i32 modular reduce kc={kc}",
-                    spec.backend.as_str()
-                );
-            }
-        }
-    }
+    let specs: Vec<_> = available_reduce_i32_modular().collect();
+    let mut vecs = ReduceVecs::for_specs(&specs, depths());
+    parity::reduce_parity(
+        "CB-06 i32 modular",
+        specs.iter().copied(),
+        depths(),
+        (27, 28),
+        (
+            |v| v.wrapping_mul(99_991) as i32,
+            |v| v.wrapping_mul(65_537) as i32,
+        ),
+        parity::dot_i32_mod,
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_reduce_i16_modular() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 29, |v| v as i16);
-            let pb: Vec<i16> = fill(kc, 30, |v| v as i16);
-            let mut acc = vec![0i32; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                let want = (0..kc).fold(0i32, |s, p| {
-                    s.wrapping_add(i32::from(pa[i * kc + p]).wrapping_mul(i32::from(pb[p])))
-                });
-                assert_eq!(
-                    acc[i],
-                    want,
-                    "{} i16 modular reduce kc={kc}",
-                    spec.backend.as_str()
-                );
-            }
-        }
-    }
+    let specs: Vec<_> = available_reduce_i16_modular().collect();
+    let mut vecs = ReduceVecs::for_specs(&specs, depths());
+    parity::reduce_parity(
+        "CB-06 i16 modular",
+        specs.iter().copied(),
+        depths(),
+        (29, 30),
+        (|v| v as i16, |v| v as i16),
+        parity::dot_i16_mod,
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_reduce_i64_exact() {
-        // Bounded by `2^31`, so the *reference* sum fits an `i128` at every depth
-        // below. The kernel's lane is bounded the same way: at the full `i64`
-        // bound one product needs 126 bits and `lane_depth` is 1, so the driver
-        // never offers this lane a deeper chunk, and testing past that would be
-        // testing something no caller can reach.
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 31, |v| (v & 0xFFFF_FFFF) - 0x8000_0000);
-            let pb: Vec<i64> = fill(kc, 32, |v| (v & 0xFFFF_FFFF) - 0x8000_0000);
-            let mut acc = vec![0i128; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                let want: i128 = (0..kc)
-                    .map(|p| i128::from(pa[i * kc + p]) * i128::from(pb[p]))
-                    .sum();
-                assert_eq!(acc[i], want, "{} i64 reduce kc={kc}", spec.backend.as_str());
-            }
-        }
-    }
+    // Bounded by `2^31`, so the *reference* sum fits an `i128` at every depth
+    // below. The kernel's lane is bounded the same way: at the full `i64`
+    // bound one product needs 126 bits and `lane_depth` is 1, so the driver
+    // never offers this lane a deeper chunk, and testing past that would be
+    // testing something no caller can reach.
+    let specs: Vec<_> = available_reduce_i64_exact().collect();
+    let mut vecs = ReduceVecs::for_specs(&specs, depths());
+    parity::reduce_parity(
+        "CB-06 i64",
+        specs.iter().copied(),
+        depths(),
+        (31, 32),
+        (
+            |v| (v & 0xFFFF_FFFF) - 0x8000_0000,
+            |v| (v & 0xFFFF_FFFF) - 0x8000_0000,
+        ),
+        parity::dot_i64_exact,
+        &mut vecs.scratch(),
+    );
 
-    for spec in available_reduce_i64_modular() {
-        for kc in depths(&spec) {
-            let pa = fill(spec.mr * kc, 33, |v| v.wrapping_mul(0x1000_0000_01B3));
-            let pb: Vec<i64> = fill(kc, 34, |v| v.wrapping_mul(0x9E37_79B9));
-            let mut acc = vec![0i64; spec.mr];
-            spec.mac_tile(kc, &pa, &pb, &mut acc);
-            for i in 0..spec.mr {
-                let want = (0..kc).fold(0i64, |s, p| {
-                    s.wrapping_add(pa[i * kc + p].wrapping_mul(pb[p]))
-                });
-                assert_eq!(
-                    acc[i],
-                    want,
-                    "{} i64 modular reduce kc={kc}",
-                    spec.backend.as_str()
-                );
-            }
-        }
-    }
+    let specs: Vec<_> = available_reduce_i64_modular().collect();
+    let mut vecs = ReduceVecs::for_specs(&specs, depths());
+    parity::reduce_parity(
+        "CB-06 i64 modular",
+        specs.iter().copied(),
+        depths(),
+        (33, 34),
+        (
+            |v| v.wrapping_mul(0x1000_0000_01B3),
+            |v| v.wrapping_mul(0x9E37_79B9),
+        ),
+        parity::dot_i64_mod,
+        &mut vecs.scratch(),
+    );
 }
 
 /// Every declared number about a sequence is consistent with its own shape.
@@ -1087,273 +1143,30 @@ fn every_declaration_is_consistent_with_the_shape_cb_07() {
 // CB-08: the table sequences
 // ---------------------------------------------------------------------------
 
-/// Every table sequence equals the reference, lane for lane.
+/// `CB-08`: every table sequence equals the reference, lane for lane.
 ///
 /// Both halves: the build, which is the only place the tabulated traversal
 /// multiplies, and the gather, which is the only place it adds. A sequence that
 /// disagreed with the reference on either would produce a different sum, and
 /// this is the test that says so before `CD-13` sees it end to end.
-///
-/// The code spaces include one that is not a power of two, because the slab is
-/// rounded up and the padding must not reach any answer.
 #[test]
 fn every_table_sequence_equals_the_reference_cb_08() {
-    use uor_matmul_kernels::{available_table_i8, packed_slot, TableSpec};
+    let corpus = table_32();
+    let mut vecs = TableVecs::for_corpus(&corpus, 0);
+    let compared = parity::table_parity(
+        "CB-08",
+        uor_matmul_kernels::available_table_i8,
+        &corpus,
+        &parity::ops_i8(),
+        (0xb00c, 0xac75),
+        |v| ((v % 255) - 127) as i8,
+        parity::stack_value32,
+        (7, -3),
+        128,
+        true,
+        &mut vecs.scratch(),
+    );
 
-    /// One codebook and one activation tile, deterministic and full-range.
-    fn fill(len: usize, salt: u64) -> Vec<i8> {
-        let mut s = 0x243F_6A88_85A3_08D3u64 ^ salt;
-        (0..len)
-            .map(|_| {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                (((s >> 33) % 255) as i64 - 127) as i8
-            })
-            .collect()
-    }
-
-    /// The activation tile in the layout `spec` declared.
-    fn pack(flat: &[i8], rows: usize, block: usize, spec: &TableSpec<i8, i32>) -> Vec<i8> {
-        let mut out = vec![0i8; rows * block];
-        for t in 0..block {
-            for i in 0..rows {
-                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
-            }
-        }
-        out
-    }
-
-    let mut compared = 0usize;
-    for &space in &corpus(&[16usize, 64, 200, 256], &[200, 256]) {
-        for &block in &corpus(&[2usize, 4, 8], &[2, 8]) {
-            let book = fill(space * block, 0xb00c ^ space as u64);
-            for &rows in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
-                let flat = fill(rows * block, 0xac75 ^ rows as u64);
-                for &group in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
-                    let specs: Vec<_> = available_table_i8(rows, group).collect();
-                    let reference = specs[0];
-                    assert_eq!(
-                        reference.backend,
-                        uor_matmul_core::Backend::Portable,
-                        "the reference is listed first"
-                    );
-
-                    // The build, against the model rather than against the
-                    // reference's own run. `T[c][i] = sum_t A[i][t] * D[c][t]` is
-                    // the whole definition, and below eight rows no ISA offers a
-                    // build sequence --- so `specs[1..]` is empty there and reading
-                    // `want` off the reference compared it with itself. The gather
-                    // half of this test was given a model oracle for exactly this
-                    // reason, and this is the same oracle for the build.
-                    let model = {
-                        let mut out = vec![0i32; space * rows];
-                        for c in 0..space {
-                            for i in 0..rows {
-                                let mut acc = 0i32;
-                                for t in 0..block {
-                                    acc += i32::from(flat[t * rows + i])
-                                        * i32::from(book[c * block + t]);
-                                }
-                                out[c * rows + i] = acc;
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![0i32; space * rows];
-                    reference.build(
-                        space,
-                        block,
-                        &book,
-                        &pack(&flat, rows, block, &reference),
-                        &mut want,
-                    );
-                    assert_eq!(
-                        want, model,
-                        "the reference build disagrees with the model at space {space}, \
-                         block {block}, rows {rows}"
-                    );
-                    compared += 1;
-                    for spec in &specs[1..] {
-                        // The fill is full-range; a sequence that declares a
-                        // narrower alphabet --- the bound-1 build --- is exact
-                        // only within its declaration, and reading it against
-                        // data outside that is not a comparison but a contract
-                        // breach. `CB-10` holds it to the bound it declares.
-                        if spec.max_bound < 128 {
-                            continue;
-                        }
-                        let mut got = vec![0i32; space * rows];
-                        spec.build(
-                            space,
-                            block,
-                            &book,
-                            &pack(&flat, rows, block, spec),
-                            &mut got,
-                        );
-                        assert_eq!(
-                            got, want,
-                            "{:?} build disagrees at space {space}, block {block}, rows {rows}",
-                            spec.backend
-                        );
-                        compared += 1;
-                    }
-
-                    // The gather, over a stack whose slab is the rounded space.
-                    let codes = space.next_power_of_two();
-                    let slab = codes * rows;
-                    let depth = 5usize;
-                    let mut stack = vec![0i32; depth * slab];
-                    for slot in 0..depth {
-                        // The live entries; the padding stays zero, exactly as
-                        // `Table::new` leaves it.
-                        let at = slot * slab;
-                        stack[at..at + space * rows].copy_from_slice(
-                            &fill(space * rows, slot as u64)
-                                .iter()
-                                .map(|&x| x as i32)
-                                .collect::<Vec<_>>(),
-                        );
-                    }
-                    let off: Vec<u32> = (0..depth * group)
-                        .map(|i| ((i * 37 % space) * rows) as u32)
-                        .collect();
-                    // The oracle is the contract transcribed, not the reference's
-                    // own run. `gather` binds the slab's code count to a
-                    // compile-time constant, and at the tile heights no ISA
-                    // offers a sequence for --- which is every height below
-                    // eight --- the reference is the only party to the
-                    // comparison, so reading `want` off it would compare the
-                    // dispatch against itself and pass whatever it did.
-                    let model = {
-                        let mut out = vec![7i32; group * rows];
-                        for slot in 0..depth {
-                            for u in 0..group {
-                                let at = off[slot * group + u] as usize & (slab - 1);
-                                for i in 0..rows {
-                                    out[u * rows + i] += stack[slot * slab + at + i];
-                                }
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![7i32; group * rows];
-                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
-                    assert_eq!(
-                        want, model,
-                        "the reference gather disagrees with the model at space {space}, \
-                         rows {rows}, group {group}"
-                    );
-                    compared += 1;
-                    for spec in &specs[1..] {
-                        let mut got = vec![7i32; group * rows];
-                        spec.gather(depth, slab as u32, &stack, &off, &mut got);
-                        assert_eq!(
-                            got, want,
-                            "{:?} gather disagrees at space {space}, rows {rows}, group {group}",
-                            spec.backend
-                        );
-                        compared += 1;
-                    }
-
-                    // Offsets that are NOT multiples of the tile height. The
-                    // driver pre-scales, but `gather` is a safe public method and
-                    // its safety cannot rest on a caller doing so: without the
-                    // sub-row bits cleared, an offset near the end of the slab
-                    // starts the read inside the last entry and runs `rows - 1`
-                    // lanes past it -- a panic in the reference and an
-                    // out-of-bounds read in every ISA sequence. Every sequence
-                    // must agree on the row-aligned address, and none may fault.
-                    if rows > 1 {
-                        let ragged: Vec<u32> = (0..depth * group)
-                            .map(|i| ((i * 37 + 1) % (codes * rows)) as u32)
-                            .collect();
-                        let mut model = vec![0i32; group * rows];
-                        for slot in 0..depth {
-                            for u in 0..group {
-                                let at =
-                                    ragged[slot * group + u] as usize & (slab - 1) & !(rows - 1);
-                                for i in 0..rows {
-                                    model[u * rows + i] += stack[slot * slab + at + i];
-                                }
-                            }
-                        }
-                        for spec in &specs {
-                            let mut got = vec![0i32; group * rows];
-                            spec.gather(depth, slab as u32, &stack, &ragged, &mut got);
-                            assert_eq!(
-                                got, model,
-                                "{:?} disagrees on a ragged offset at space {space}, \
-                                 rows {rows}, group {group}",
-                                spec.backend
-                            );
-                            compared += 1;
-                        }
-                    }
-
-                    // The same reduction read from a code stream instead of an
-                    // index stream. Only where a codec could claim it: the
-                    // enumeration has to be addressed by the code, which needs a
-                    // power-of-two space.
-                    if codes == space {
-                        let stride = depth + 3;
-                        let stream: Vec<u16> = (0..(group - 1) * stride + depth)
-                            .map(|i| ((i * 37) % space) as u16)
-                            .collect();
-                        let by_off: Vec<u32> = (0..depth * group)
-                            .map(|i| {
-                                let (slot, u) = (i / group, i % group);
-                                (stream[u * stride + slot] as usize % space * rows) as u32
-                            })
-                            .collect();
-                        // The same, read from the code stream: the shift the
-                        // boundary derives is `rows.trailing_zeros()`, so the
-                        // entry's address is the masked code scaled by the tile
-                        // height and nothing else.
-                        let model = {
-                            let mut out = vec![-3i32; group * rows];
-                            for slot in 0..depth {
-                                for u in 0..group {
-                                    let at =
-                                        (stream[u * stride + slot] as usize & (codes - 1)) * rows;
-                                    for i in 0..rows {
-                                        out[u * rows + i] += stack[slot * slab + at + i];
-                                    }
-                                }
-                            }
-                            out
-                        };
-                        let mut want = vec![-3i32; group * rows];
-                        reference.gather(depth, slab as u32, &stack, &by_off, &mut want);
-                        assert_eq!(
-                            want, model,
-                            "the reference gather disagrees with the model read by code at \
-                             space {space}, rows {rows}, group {group}"
-                        );
-                        compared += 1;
-                        for spec in &specs {
-                            let mut got = vec![-3i32; group * rows];
-                            spec.gather_codes(
-                                depth,
-                                slab as u32,
-                                &stack,
-                                &stream,
-                                stride,
-                                &mut got,
-                            );
-                            assert_eq!(
-                                got, want,
-                                "{:?} gather_codes disagrees at space {space}, rows {rows}, \
-                                 group {group}",
-                                spec.backend
-                            );
-                            compared += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
     // `dispatch_slab!`'s wildcard, which is what keeps the enumeration from being
     // a ceiling (R8). Sixteen exponents cover every code space a `u16` can name,
     // and no shipped codec exceeds them --- but `slab` is a `u32` the caller
@@ -1361,6 +1174,12 @@ fn every_table_sequence_equals_the_reference_cb_08() {
     // list does not have, and that arm binds the constant to zero and reads the
     // slab from its argument instead. Untested, that arm was the one line standing
     // between the enumeration and a limit.
+    //
+    // Host-only: `2^20` lane words is 12 MB of stack, past anything the
+    // executor's static scratch will hold. The wildcard arm is the same macro
+    // body as the enumerated ones, so the reduced corpus covers the code on the
+    // device; this sweep covers the *sizes*.
+    let mut compared = compared;
     for shift in [17u32, 18, 20] {
         let codes = 1usize << shift;
         let (rows, group, depth) = (1usize, 1usize, 3usize);
@@ -1378,7 +1197,7 @@ fn every_table_sequence_equals_the_reference_cb_08() {
                 model[u * rows] += stack[slot * slab + at];
             }
         }
-        for spec in available_table_i8(rows, group) {
+        for spec in uor_matmul_kernels::available_table_i8(rows, group) {
             let mut got = vec![0i32; group * rows];
             spec.gather(depth, slab as u32, &stack, &off, &mut got);
             assert_eq!(
@@ -1406,525 +1225,63 @@ fn every_table_sequence_equals_the_reference_cb_08() {
 /// and not this one's.
 #[test]
 fn every_i16_table_sequence_equals_the_reference_cb_08() {
-    use uor_matmul_kernels::{available_table_i16, packed_slot, TableSpec};
-
-    fn fill(len: usize, salt: u64) -> Vec<i16> {
-        let mut s = 0x243F_6A88_85A3_08D3u64 ^ salt;
-        (0..len)
-            .map(|_| {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                // The extremes of the declared alphabet, which is where a
-                // sequence with a narrow intermediate fails first.
-                (((s >> 33) % 65535) as i64 - 32767) as i16
-            })
-            .collect()
-    }
-
-    fn pack(flat: &[i16], rows: usize, block: usize, spec: &TableSpec<i16, i64>) -> Vec<i16> {
-        let mut out = vec![0i16; rows * block];
-        for t in 0..block {
-            for i in 0..rows {
-                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
-            }
-        }
-        out
-    }
-
-    let mut compared = 0usize;
-    for &space in &corpus(&[16usize, 200, 256], &[200, 256]) {
-        for &block in &corpus(&[2usize, 8], &[2]) {
-            let book = fill(space * block, 0x16b0 ^ space as u64);
-            for &rows in &corpus(&[1usize, 8, 16], &[1, 16]) {
-                let flat = fill(rows * block, 0x16ac ^ rows as u64);
-                for &group in &[1usize, 2] {
-                    let specs: Vec<_> = available_table_i16(rows, group).collect();
-                    let reference = specs[0];
-
-                    // The model, for the reason the 32-bit lane has one: below
-                    // eight rows no ISA offers an `i16` build either.
-                    let model = {
-                        let mut out = vec![0i64; space * rows];
-                        for c in 0..space {
-                            for i in 0..rows {
-                                let mut acc = 0i64;
-                                for t in 0..block {
-                                    acc += i64::from(flat[t * rows + i])
-                                        * i64::from(book[c * block + t]);
-                                }
-                                out[c * rows + i] = acc;
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![0i64; space * rows];
-                    reference.build(
-                        space,
-                        block,
-                        &book,
-                        &pack(&flat, rows, block, &reference),
-                        &mut want,
-                    );
-                    assert_eq!(
-                        want, model,
-                        "the reference i16 build disagrees with the model at space {space}, \
-                         block {block}, rows {rows}"
-                    );
-                    compared += 1;
-                    for spec in &specs[1..] {
-                        let mut got = vec![0i64; space * rows];
-                        spec.build(
-                            space,
-                            block,
-                            &book,
-                            &pack(&flat, rows, block, spec),
-                            &mut got,
-                        );
-                        assert_eq!(
-                            got, want,
-                            "{:?} i16 build disagrees at space {space}, block {block}, rows {rows}",
-                            spec.backend
-                        );
-                        compared += 1;
-                    }
-
-                    let codes = space.next_power_of_two();
-                    let slab = codes * rows;
-                    let depth = 5usize;
-                    let mut stack = vec![0i64; depth * slab];
-                    for slot in 0..depth {
-                        let at = slot * slab;
-                        for (i, cell) in stack[at..at + space * rows].iter_mut().enumerate() {
-                            *cell = ((i as i64 + slot as i64 * 7) % 4096) - 2048;
-                        }
-                    }
-                    let off: Vec<u32> = (0..depth * group)
-                        .map(|i| ((i * 37 % space) * rows) as u32)
-                        .collect();
-                    // The contract transcribed, for the same reason it is
-                    // transcribed at the 32-bit lane: below eight rows the
-                    // reference is the only sequence there is, so it has to be
-                    // read against the model rather than against itself.
-                    let model = {
-                        let mut out = vec![11i64; group * rows];
-                        for slot in 0..depth {
-                            for u in 0..group {
-                                let at = off[slot * group + u] as usize & (slab - 1);
-                                for i in 0..rows {
-                                    out[u * rows + i] += stack[slot * slab + at + i];
-                                }
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![11i64; group * rows];
-                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
-                    assert_eq!(
-                        want, model,
-                        "the reference i16 gather disagrees with the model at space {space}, \
-                         rows {rows}, group {group}"
-                    );
-                    compared += 1;
-                    for spec in &specs[1..] {
-                        let mut got = vec![11i64; group * rows];
-                        spec.gather(depth, slab as u32, &stack, &off, &mut got);
-                        assert_eq!(
-                            got, want,
-                            "{:?} i16 gather disagrees at space {space}, rows {rows}",
-                            spec.backend
-                        );
-                        compared += 1;
-                    }
-
-                    if codes == space {
-                        let stride = depth + 3;
-                        let stream: Vec<u16> = (0..(group - 1) * stride + depth)
-                            .map(|i| ((i * 37) % space) as u16)
-                            .collect();
-                        let by_off: Vec<u32> = (0..depth * group)
-                            .map(|i| {
-                                let (slot, u) = (i / group, i % group);
-                                (stream[u * stride + slot] as usize % space * rows) as u32
-                            })
-                            .collect();
-                        let model = {
-                            let mut out = vec![-5i64; group * rows];
-                            for slot in 0..depth {
-                                for u in 0..group {
-                                    let at =
-                                        (stream[u * stride + slot] as usize & (codes - 1)) * rows;
-                                    for i in 0..rows {
-                                        out[u * rows + i] += stack[slot * slab + at + i];
-                                    }
-                                }
-                            }
-                            out
-                        };
-                        let mut want = vec![-5i64; group * rows];
-                        reference.gather(depth, slab as u32, &stack, &by_off, &mut want);
-                        assert_eq!(
-                            want, model,
-                            "the reference i16 gather disagrees with the model read by code at \
-                             space {space}, rows {rows}, group {group}"
-                        );
-                        compared += 1;
-                        for spec in &specs {
-                            let mut got = vec![-5i64; group * rows];
-                            spec.gather_codes(
-                                depth,
-                                slab as u32,
-                                &stack,
-                                &stream,
-                                stride,
-                                &mut got,
-                            );
-                            assert_eq!(
-                                got, want,
-                                "{:?} i16 gather_codes disagrees at space {space}, rows {rows}",
-                                spec.backend
-                            );
-                            compared += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let corpus = table_64();
+    let mut vecs = TableVecs::for_corpus(&corpus, 0);
+    let compared = parity::table_parity(
+        "CB-08 i16",
+        uor_matmul_kernels::available_table_i16,
+        &corpus,
+        &parity::ops_i16(),
+        (0x16b0, 0x16ac),
+        |v| ((v % 65535) - 32767) as i16,
+        parity::stack_value64,
+        (11, -5),
+        0,
+        false,
+        &mut vecs.scratch(),
+    );
     assert!(compared > 0, "CB-08 compared nothing for the 64-bit lane");
 }
 
 /// `CB-09`: every modular table sequence equals the portable modular
 /// reference, lane for lane.
 ///
-/// The modular lane is `Z/2^w`: the build's products wrap and the gather's
-/// adds wrap, and both are the ring's own operations, so the model oracle is
-/// written in wrapping arithmetic. As in `CB-08`, the reference is read
-/// against the model rather than against itself, because below eight rows no
-/// ISA offers a sequence and the reference is the only party to the
-/// comparison. For `i64` the reference is the *only* sequence at every height
-/// --- the build's multiply is the table's only one, and no SIMD integer
-/// multiply reaches an `i64` lane, which is why the dense family is
-/// portable-only too.
+/// For `i64` the reference is the *only* sequence at every height --- the
+/// build's multiply is the table's only one, and no SIMD integer multiply
+/// reaches an `i64` lane, which is why the dense family is portable-only too.
 #[test]
 fn every_modular_table_sequence_equals_the_reference_cb_09() {
-    use uor_matmul_kernels::{
-        available_table_i32_modular, available_table_i64_modular, packed_slot, Mod32, Mod64,
-        TableSpec,
-    };
+    let corpus = table_32();
+    let mut vecs = TableVecs::for_corpus(&corpus, uor_matmul_kernels::Mod32(0));
+    let mut compared = parity::table_parity(
+        "CB-09 mod32",
+        uor_matmul_kernels::available_table_i32_modular,
+        &corpus,
+        &parity::ops_mod32(),
+        (0xb32c, 0xa32c),
+        |v| v.wrapping_mul(0x9E37_79B9) as i32,
+        parity::stack_value32,
+        (7, -3),
+        0,
+        true,
+        &mut vecs.scratch(),
+    );
 
-    /// Full-range fills: the modular lane declares no bound, so the extremes
-    /// of the element type are ordinary inputs here, and a product of two of
-    /// them wraps on purpose.
-    fn fill32(len: usize, salt: u64) -> Vec<i32> {
-        fill(len, salt, |v| v.wrapping_mul(0x9E37_79B9) as i32)
-    }
-
-    fn fill64(len: usize, salt: u64) -> Vec<i64> {
-        fill(len, salt, |v| {
-            v.wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64)
-        })
-    }
-
-    fn pack32(flat: &[i32], rows: usize, block: usize, spec: &TableSpec<i32, Mod32>) -> Vec<i32> {
-        let mut out = vec![0i32; rows * block];
-        for t in 0..block {
-            for i in 0..rows {
-                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
-            }
-        }
-        out
-    }
-
-    fn pack64(flat: &[i64], rows: usize, block: usize, spec: &TableSpec<i64, Mod64>) -> Vec<i64> {
-        let mut out = vec![0i64; rows * block];
-        for t in 0..block {
-            for i in 0..rows {
-                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
-            }
-        }
-        out
-    }
-
-    let mut compared = 0usize;
-    for &space in &corpus(&[16usize, 64, 200, 256], &[200, 256]) {
-        for &block in &corpus(&[2usize, 4, 8], &[2, 8]) {
-            let book = fill32(space * block, 0xb32c ^ space as u64);
-            for &rows in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
-                let flat = fill32(rows * block, 0xa32c ^ rows as u64);
-                for &group in &corpus(&[1usize, 2, 4, 8, 16], &[1, 16]) {
-                    let specs: Vec<_> = available_table_i32_modular(rows, group).collect();
-                    let reference = specs[0];
-                    assert_eq!(
-                        reference.backend,
-                        uor_matmul_core::Backend::Portable,
-                        "the reference is listed first"
-                    );
-
-                    // The build, against the model in the ring itself. `T[c][i]
-                    // = sum_t A[i][t] * D[c][t]` with every operation taken mod
-                    // `2^32` is the whole definition.
-                    let model = {
-                        let mut out = vec![0i32; space * rows];
-                        for c in 0..space {
-                            for i in 0..rows {
-                                let mut acc = 0i32;
-                                for t in 0..block {
-                                    acc = acc.wrapping_add(
-                                        flat[t * rows + i].wrapping_mul(book[c * block + t]),
-                                    );
-                                }
-                                out[c * rows + i] = acc;
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![Mod32(0); space * rows];
-                    reference.build(
-                        space,
-                        block,
-                        &book,
-                        &pack32(&flat, rows, block, &reference),
-                        &mut want,
-                    );
-                    assert_eq!(
-                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
-                        model,
-                        "the reference mod32 build disagrees with the model at space {space}, \
-                         block {block}, rows {rows}"
-                    );
-                    compared += 1;
-                    for spec in &specs[1..] {
-                        let mut got = vec![Mod32(0); space * rows];
-                        spec.build(
-                            space,
-                            block,
-                            &book,
-                            &pack32(&flat, rows, block, spec),
-                            &mut got,
-                        );
-                        assert_eq!(
-                            got, want,
-                            "{:?} mod32 build disagrees at space {space}, block {block}, \
-                             rows {rows}",
-                            spec.backend
-                        );
-                        compared += 1;
-                    }
-
-                    // The gather, over a stack whose slab is the rounded space,
-                    // with wrapping adds on both sides.
-                    let codes = space.next_power_of_two();
-                    let slab = codes * rows;
-                    let depth = 5usize;
-                    let mut stack = vec![Mod32(0); depth * slab];
-                    for slot in 0..depth {
-                        let at = slot * slab;
-                        for (i, cell) in stack[at..at + space * rows].iter_mut().enumerate() {
-                            *cell = Mod32(fill32(1, (slot * space * rows + i) as u64)[0]);
-                        }
-                    }
-                    let off: Vec<u32> = (0..depth * group)
-                        .map(|i| ((i * 37 % space) * rows) as u32)
-                        .collect();
-                    let model = {
-                        let mut out = vec![7i32; group * rows];
-                        for slot in 0..depth {
-                            for u in 0..group {
-                                let at = off[slot * group + u] as usize & (slab - 1);
-                                for i in 0..rows {
-                                    out[u * rows + i] = out[u * rows + i]
-                                        .wrapping_add(stack[slot * slab + at + i].0);
-                                }
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![Mod32(7); group * rows];
-                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
-                    assert_eq!(
-                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
-                        model,
-                        "the reference mod32 gather disagrees with the model at space {space}, \
-                         rows {rows}, group {group}"
-                    );
-                    compared += 1;
-                    for spec in &specs[1..] {
-                        let mut got = vec![Mod32(7); group * rows];
-                        spec.gather(depth, slab as u32, &stack, &off, &mut got);
-                        assert_eq!(
-                            got, want,
-                            "{:?} mod32 gather disagrees at space {space}, rows {rows}, \
-                             group {group}",
-                            spec.backend
-                        );
-                        compared += 1;
-                    }
-
-                    // Ragged offsets, exactly as `CB-08` requires of the exact
-                    // lane: the sub-row bits are cleared, every read is
-                    // row-aligned, and every sequence agrees on which.
-                    if rows > 1 {
-                        let ragged: Vec<u32> = (0..depth * group)
-                            .map(|i| ((i * 37 + 1) % (codes * rows)) as u32)
-                            .collect();
-                        let mut model = vec![0i32; group * rows];
-                        for slot in 0..depth {
-                            for u in 0..group {
-                                let at =
-                                    ragged[slot * group + u] as usize & (slab - 1) & !(rows - 1);
-                                for i in 0..rows {
-                                    model[u * rows + i] = model[u * rows + i]
-                                        .wrapping_add(stack[slot * slab + at + i].0);
-                                }
-                            }
-                        }
-                        for spec in &specs {
-                            let mut got = vec![Mod32(0); group * rows];
-                            spec.gather(depth, slab as u32, &stack, &ragged, &mut got);
-                            assert_eq!(
-                                got.iter().map(|m| m.0).collect::<Vec<_>>(),
-                                model,
-                                "{:?} mod32 disagrees on a ragged offset at space {space}, \
-                                 rows {rows}, group {group}",
-                                spec.backend
-                            );
-                            compared += 1;
-                        }
-                    }
-
-                    // The same reduction read from a code stream.
-                    if codes == space {
-                        let stride = depth + 3;
-                        let stream: Vec<u16> = (0..(group - 1) * stride + depth)
-                            .map(|i| ((i * 37) % space) as u16)
-                            .collect();
-                        let model = {
-                            let mut out = vec![-3i32; group * rows];
-                            for slot in 0..depth {
-                                for u in 0..group {
-                                    let at =
-                                        (stream[u * stride + slot] as usize & (codes - 1)) * rows;
-                                    for i in 0..rows {
-                                        out[u * rows + i] = out[u * rows + i]
-                                            .wrapping_add(stack[slot * slab + at + i].0);
-                                    }
-                                }
-                            }
-                            out
-                        };
-                        for spec in &specs {
-                            let mut got = vec![Mod32(-3); group * rows];
-                            spec.gather_codes(
-                                depth,
-                                slab as u32,
-                                &stack,
-                                &stream,
-                                stride,
-                                &mut got,
-                            );
-                            assert_eq!(
-                                got.iter().map(|m| m.0).collect::<Vec<_>>(),
-                                model,
-                                "{:?} mod32 gather_codes disagrees at space {space}, rows \
-                                 {rows}, group {group}",
-                                spec.backend
-                            );
-                            compared += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // The `i64` half: the portable reference is the whole list, so the sweep
-    // reads it against the model at every shape --- the comparison `CB-08`
-    // gives the families that have ISA sequences, with the ISA half empty.
-    for &space in &corpus(&[16usize, 200, 256], &[200, 256]) {
-        for &block in &corpus(&[2usize, 8], &[2]) {
-            let book = fill64(space * block, 0xb64c ^ space as u64);
-            for &rows in &corpus(&[1usize, 8, 16], &[1, 16]) {
-                let flat = fill64(rows * block, 0xa64c ^ rows as u64);
-                for &group in &[1usize, 2] {
-                    let specs: Vec<_> = available_table_i64_modular(rows, group).collect();
-                    assert_eq!(
-                        specs.len(),
-                        1,
-                        "the i64 modular table is portable-only: no SIMD integer multiply \
-                         reaches the lane"
-                    );
-                    let reference = specs[0];
-                    let model = {
-                        let mut out = vec![0i64; space * rows];
-                        for c in 0..space {
-                            for i in 0..rows {
-                                let mut acc = 0i64;
-                                for t in 0..block {
-                                    acc = acc.wrapping_add(
-                                        flat[t * rows + i].wrapping_mul(book[c * block + t]),
-                                    );
-                                }
-                                out[c * rows + i] = acc;
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![Mod64(0); space * rows];
-                    reference.build(
-                        space,
-                        block,
-                        &book,
-                        &pack64(&flat, rows, block, &reference),
-                        &mut want,
-                    );
-                    assert_eq!(
-                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
-                        model,
-                        "the reference mod64 build disagrees with the model at space {space}, \
-                         block {block}, rows {rows}"
-                    );
-                    compared += 1;
-
-                    let codes = space.next_power_of_two();
-                    let slab = codes * rows;
-                    let depth = 5usize;
-                    let mut stack = vec![Mod64(0); depth * slab];
-                    for slot in 0..depth {
-                        let at = slot * slab;
-                        for (i, cell) in stack[at..at + space * rows].iter_mut().enumerate() {
-                            *cell = Mod64(fill64(1, (slot * space * rows + i) as u64 | 0x5A)[0]);
-                        }
-                    }
-                    let off: Vec<u32> = (0..depth * group)
-                        .map(|i| ((i * 37 % space) * rows) as u32)
-                        .collect();
-                    let model = {
-                        let mut out = vec![11i64; group * rows];
-                        for slot in 0..depth {
-                            for u in 0..group {
-                                let at = off[slot * group + u] as usize & (slab - 1);
-                                for i in 0..rows {
-                                    out[u * rows + i] = out[u * rows + i]
-                                        .wrapping_add(stack[slot * slab + at + i].0);
-                                }
-                            }
-                        }
-                        out
-                    };
-                    let mut want = vec![Mod64(11); group * rows];
-                    reference.gather(depth, slab as u32, &stack, &off, &mut want);
-                    assert_eq!(
-                        want.iter().map(|m| m.0).collect::<Vec<_>>(),
-                        model,
-                        "the reference mod64 gather disagrees with the model at space {space}, \
-                         rows {rows}, group {group}"
-                    );
-                    compared += 1;
-                }
-            }
-        }
-    }
+    let corpus = table_64();
+    let mut vecs = TableVecs::for_corpus(&corpus, uor_matmul_kernels::Mod64(0));
+    compared += parity::table_parity(
+        "CB-09 mod64",
+        uor_matmul_kernels::available_table_i64_modular,
+        &corpus,
+        &parity::ops_mod64(),
+        (0xb64c, 0xa64c),
+        |v| v.wrapping_mul(0x9E37_79B9_7F4A_7C15u64 as i64),
+        parity::stack_value64,
+        (11, -5),
+        0,
+        false,
+        &mut vecs.scratch(),
+    );
 
     assert!(
         compared > 0,
@@ -1941,161 +1298,57 @@ fn every_modular_table_sequence_equals_the_reference_cb_09() {
 /// offers the adds-only build exactly when the declared bound admits it.
 ///
 /// At bound 1 every product is `+-a` or `0`, so a build can fill the same slot
-/// the reference fills with adds and subtracts alone. The parity half reads
-/// every bound-1 build sequence against the model oracle --- the identity
-/// `T[c][i] = sum_t A[i][t] * D[c][t]` transcribed, as in `CB-08`, because at
-/// the tile heights no ISA serves, the reference is not the sequence under
-/// test and comparing it against itself would pass whatever it did. The code
-/// spaces are the sign codec's --- `Packed<Grid<2>, Bk>` enumerates `2^Bk`
-/// words, and 256 is also the ternary spelling's --- and the fill includes
-/// zero, so both spellings `CK-13` declared are exercised.
-///
-/// The selection half is `CB-07`'s rule at the new declaration: the bound-1
-/// builds are listed after every full-alphabet sequence, so `Auto` takes one
-/// exactly at bound 1 and never one past it.
+/// the reference fills with adds and subtracts alone. The code spaces are the
+/// sign codec's --- `Packed<Grid<2>, Bk>` enumerates `2^Bk` words, and 256 is
+/// also the ternary spelling's --- and the fill includes zero, so both
+/// spellings `CK-13` declared are exercised.
 #[test]
 fn every_bound1_table_build_equals_the_reference_cb_10() {
-    use uor_matmul_kernels::{available_table_i8, choose_table, packed_slot, TableSpec};
-
-    /// A fill over the whole bound-1 alphabet, zero included.
-    fn fill1(len: usize, salt: u64) -> Vec<i8> {
-        fill(len, salt, |x| ((x % 3) as i8) - 1)
-    }
-
-    /// The activation tile in the layout `spec` declared, as in `CB-08`.
-    fn pack(flat: &[i8], rows: usize, block: usize, spec: &TableSpec<i8, i32>) -> Vec<i8> {
-        let mut out = vec![0i8; rows * block];
-        for t in 0..block {
-            for i in 0..rows {
-                out[packed_slot(t, i, rows, spec.k_group)] = flat[t * rows + i];
-            }
-        }
-        out
-    }
-
-    let mut compared = 0usize;
-    for &(space, block) in &corpus(&[(4usize, 2usize), (16, 4), (256, 8)], &[(4, 2), (256, 8)]) {
-        let book = fill1(space * block, 0xb10c ^ space as u64);
-        for rows in corpus(&(1..=16usize).collect::<Vec<_>>(), &[1, 16]) {
-            let flat = fill1(rows * block, 0xb10a ^ rows as u64);
-            for group in corpus(&(1..=16usize).collect::<Vec<_>>(), &[1, 16]) {
-                let specs: Vec<_> = available_table_i8(rows, group).collect();
-                let reference = specs[0];
-
-                let model = {
-                    let mut out = vec![0i32; space * rows];
-                    for c in 0..space {
-                        for i in 0..rows {
-                            let mut acc = 0i32;
-                            for t in 0..block {
-                                acc +=
-                                    i32::from(flat[t * rows + i]) * i32::from(book[c * block + t]);
-                            }
-                            out[c * rows + i] = acc;
-                        }
-                    }
-                    out
-                };
-                let mut want = vec![0i32; space * rows];
-                reference.build(
-                    space,
-                    block,
-                    &book,
-                    &pack(&flat, rows, block, &reference),
-                    &mut want,
-                );
-                assert_eq!(
-                    want, model,
-                    "the reference build disagrees with the model at bound 1, space {space}, \
-                     block {block}, rows {rows}"
-                );
-                compared += 1;
-
-                let mut bound1 = 0usize;
-                for spec in &specs[1..] {
-                    // A full-alphabet sequence at bound-1 data is `CB-08`'s
-                    // ground; this sweep reads the sequences that declare the
-                    // bound.
-                    if spec.max_bound > 1 {
-                        continue;
-                    }
-                    bound1 += 1;
-                    assert!(
-                        !spec.build_multiplies,
-                        "{:?} declares bound 1 but still multiplies",
-                        spec.backend
-                    );
-                    // The gathers are bound-independent, so the bound-1 spec
-                    // carries its backend's own --- shared, not duplicated
-                    // (R13). Under Miri every fn-pointer creation is a fresh
-                    // allocation, so address equality cannot witness sharing
-                    // there; the claim is asserted on real targets.
-                    if !cfg!(miri) {
-                        let donor = specs[1..]
-                            .iter()
-                            .find(|s| s.backend == spec.backend && s.max_bound > 1)
-                            .unwrap_or(&reference);
-                        assert!(
-                            core::ptr::fn_addr_eq(spec.gather, donor.gather),
-                            "{:?} bound-1 spec duplicates the gather instead of sharing it",
-                            spec.backend
-                        );
-                        assert!(
-                            core::ptr::fn_addr_eq(spec.gather_codes, donor.gather_codes),
-                            "{:?} bound-1 spec duplicates gather_codes instead of sharing it",
-                            spec.backend
-                        );
-                    }
-                    let mut got = vec![0i32; space * rows];
-                    spec.build(
-                        space,
-                        block,
-                        &book,
-                        &pack(&flat, rows, block, spec),
-                        &mut got,
-                    );
-                    assert_eq!(
-                        got, model,
-                        "{:?} bound-1 build disagrees at space {space}, block {block}, \
-                         rows {rows}",
-                        spec.backend
-                    );
-                    compared += 1;
-                }
-                assert!(
-                    bound1 >= 1,
-                    "no bound-1 build offered at rows {rows}, group {group}; the portable one \
-                     is unconditional"
-                );
-            }
-        }
-    }
+    let corpus = bound1();
+    let mut vecs = TableVecs::for_bound1(&corpus, 0);
+    let compared = parity::table_bound1(
+        "CB-10",
+        uor_matmul_kernels::available_table_i8,
+        &corpus,
+        &parity::ops_i8(),
+        (0xb10c, 0xb10a),
+        |v| ((v % 3) - 1) as i8,
+        &mut vecs.scratch(),
+    );
     assert!(
         compared > 0,
         "CB-10 compared nothing; the portable bound-1 build is present on every host"
     );
 
-    // The selection half. At bound 1 the adds-only build is what `Auto` runs;
-    // one past its declaration it is not considered at all --- not because it
-    // is riskier there, but because there it computes a different number.
-    for &(rows, group) in &[(16usize, 1usize), (16, 2), (8, 1), (8, 2), (1, 16), (1, 1)] {
-        for &block in &[2usize, 4, 8] {
-            let picked = choose_table(available_table_i8(rows, group), Backend::Auto, 1, block)
-                .expect("the reference sequence is always present");
-            assert_eq!(
-                picked.max_bound, 1,
-                "bound 1 must select a bound-1 build at {rows}x{group} b={block}"
-            );
-            assert!(
-                !picked.build_multiplies,
-                "the build bound 1 selects must be the adds-only one at {rows}x{group} b={block}"
-            );
-            let past = choose_table(available_table_i8(rows, group), Backend::Auto, 2, block)
-                .expect("the reference sequence is always present");
-            assert!(
-                past.build_multiplies,
-                "bound 2 must not be offered the adds-only build at {rows}x{group} b={block}"
-            );
+    // The gathers are bound-independent, so the bound-1 spec carries its
+    // backend's own --- shared, not duplicated (R13). Under Miri every
+    // fn-pointer creation is a fresh allocation, so address equality cannot
+    // witness sharing there; the claim is asserted on real targets.
+    if !cfg!(miri) {
+        for rows in [1usize, 16] {
+            for group in [1usize, 16] {
+                let specs: Vec<_> = uor_matmul_kernels::available_table_i8(rows, group).collect();
+                let reference = specs[0];
+                for spec in &specs[1..] {
+                    if spec.max_bound > 1 {
+                        continue;
+                    }
+                    let donor = specs[1..]
+                        .iter()
+                        .find(|s| s.backend == spec.backend && s.max_bound > 1)
+                        .unwrap_or(&reference);
+                    assert!(
+                        core::ptr::fn_addr_eq(spec.gather, donor.gather),
+                        "{:?} bound-1 spec duplicates the gather instead of sharing it",
+                        spec.backend
+                    );
+                    assert!(
+                        core::ptr::fn_addr_eq(spec.gather_codes, donor.gather_codes),
+                        "{:?} bound-1 spec duplicates gather_codes instead of sharing it",
+                        spec.backend
+                    );
+                }
+            }
         }
     }
 }

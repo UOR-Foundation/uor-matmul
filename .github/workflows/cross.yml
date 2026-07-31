@@ -58,6 +58,22 @@ jobs:
       - run: cargo build -p uor-matmul --no-default-features --release --target thumbv7em-none-eabihf
       - run: cargo test -p uor-matmul-conformance --test environment no_allocator
 
+  cortex-m:
+    name: CB-11, Cortex-M parity under qemu-system
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add thumbv6m-none-eabi thumbv7em-none-eabihf
+      # The `embedded` job above asserts the same tree *links* for a Cortex-M
+      # target. This one runs it: no user-mode emulator covers Cortex-M, so the
+      # CB parity checks are executed by qemu-system on an mps2 machine, and
+      # the recipe fails if the PASS marker is absent.
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - uses: extractions/setup-just@v2
+      - uses: Swatinem/rust-cache@v2
+      - run: just cortex-m-run
+
   wasm:
     name: CB-05, wasm with and without SIMD128
     runs-on: ubuntu-latest
