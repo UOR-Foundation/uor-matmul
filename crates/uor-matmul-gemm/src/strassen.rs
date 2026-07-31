@@ -282,7 +282,7 @@ pub fn gemm_strassen<E, Bd, O, Ep>(
         // switched off. A caller who asked for zero levels gets zero levels ---
         // the packed walk's own auto-selection would otherwise take them, which
         // is the same bytes (`CD-21`) and not what was asked.
-        crate::kernel::gemm_packed_impl(triple, epilogue, options, scratch, false);
+        crate::kernel::gemm_packed_impl(triple, epilogue, options, scratch, false, &mut ());
         return;
     }
     run(triple, epilogue, options, scratch, Bd::VALUE, take);
@@ -311,7 +311,7 @@ pub(crate) fn run<E, Bd, O, Ep>(
     // bytes, more products (`CD-21`).
     let (need_panels, need_accs) = level_cost(shape.m, shape.k, shape.n);
     if (scratch.len() as u128) < need_panels || (scratch.accumulators() as u128) < need_accs {
-        crate::kernel::gemm_packed_cubic_at(triple, epilogue, options, scratch, bound);
+        crate::kernel::gemm_packed_cubic_at(triple, epilogue, options, scratch, bound, &mut ());
         return;
     }
     // The operands, as bare elements and back as the full alphabet: the sums

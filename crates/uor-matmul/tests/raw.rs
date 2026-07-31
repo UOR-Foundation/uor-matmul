@@ -363,3 +363,49 @@ fn the_f64_face_reaches_the_same_window_cs_05() {
     }
     assert_eq!(c, expected, "the f64 face agrees with the safe API");
 }
+
+/// The raw face offers no panels, so at a shape the placement bridge would
+/// admit if it had them, the auto-selecting float driver it now calls declines
+/// to the scalar lanes --- the same bytes `gemm_float` produces on the same
+/// triple.
+#[test]
+fn the_raw_face_offers_no_panels_and_keeps_the_scalar_bytes() {
+    // 13x17x19: `m * n > m + n` and small dyadic values, so the bridge's
+    // admission questions are all yes --- except the offer's, which a raw
+    // pointer cannot make. The decline is the claim under test.
+    let (m, k, n) = (13usize, 17usize, 19usize);
+    let a: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.5 - 3.0).collect();
+    let b: Vec<f32> = (0..k * n).map(|i| (i as f32) * -0.25 + 1.5).collect();
+    let mut c = vec![0.0f32; m * n];
+
+    let mut want = vec![0.0f32; m * n];
+    {
+        let av = MatView::row_major(&a, m, k).expect("A fits");
+        let bv = MatView::row_major(&b, k, n).expect("B fits");
+        let cv = MatViewMut::row_major(&mut want, m, n).expect("C fits");
+        let mut t = Triple::new(av, bv, cv).expect("conformant");
+        gemm_float(&mut t, &Linear::OVERWRITE, GemmOptions::default());
+    }
+
+    // SAFETY: `a`, `b` and `c` are dense row-major and exactly sized, and the
+    // three allocations are disjoint.
+    unsafe {
+        uor_matmul::raw::sgemm(
+            m,
+            k,
+            n,
+            1,
+            a.as_ptr(),
+            k as isize,
+            1,
+            b.as_ptr(),
+            n as isize,
+            1,
+            0,
+            c.as_mut_ptr(),
+            n as isize,
+            1,
+        );
+    }
+    assert_eq!(c, want, "the raw face must keep the scalar lanes' bytes");
+}

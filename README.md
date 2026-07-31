@@ -65,6 +65,15 @@ gemm(&mut t, &Linear::OVERWRITE, GemmOptions::default(), &mut Scratch::none());
 assert_eq!(c, [19, 22, 43, 50]);
 ```
 
+The `slice::gemm` and `gemm` those examples call are the auto-selecting
+entry: at the caller's offer and the host's declarations they run the
+kernelized factorization the offer admits --- a kernel from the CG-13 table at
+the suggested scratch, the streaming reference at none --- and every route
+returns the same bytes at every offer (`CD-22`). The reference traversal the
+kernels are validated against is never hidden: it stays directly callable as
+`uor_matmul_gemm::gemm` (R6), and the route the selection took is readable
+through `gemm_auto_counted`'s census rather than inferred from a clock.
+
 ## The six hard constraints
 
 | # | Constraint |

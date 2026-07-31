@@ -308,7 +308,12 @@ fn the_slice_face_agrees_with_the_view_api_cs_08() {
                     let mut t = Triple::new(av, bv, cv).expect("a product");
                     let mut buf =
                         vec![Default::default(); uor_matmul::suggested_scratch(Shape { m, k, n })];
-                    uor_matmul::gemm(
+                    // The reference traversal explicitly, not the facade's
+                    // `gemm`: that name is the auto-selecting entry now, and
+                    // comparing the slice face against the same function it
+                    // calls would be the vacuous differential this test exists
+                    // not to be. `CD-22` asserts the two entries agree.
+                    uor_matmul::driver::gemm(
                         &mut t,
                         &Linear { alpha, beta },
                         GemmOptions::default(),

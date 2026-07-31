@@ -17,6 +17,19 @@
 //! instantiation. The traversals differ in which order they walk the output and
 //! how much working memory they use; they do not differ in what they compute,
 //! and `CD-05` asserts it byte for byte.
+//!
+//! # Three entries, one identity
+//!
+//! [`gemm`] is the reference traversal: portable, never optimized, and the
+//! oracle every other factorization is validated against (R6). It stays
+//! directly callable under its own name. [`gemm_packed`] is the kernelized
+//! traversal: the modular lane, the sub-cubic recursion, and the CG-13 kernel
+//! table, each taken exactly when the caller's declarations and the offer
+//! admit it and declining to [`gemm`] when they do not. [`gemm_auto`] is
+//! [`gemm_packed`] under the name the documented API calls --- the default
+//! entry the safe faces reach --- and [`gemm_auto_counted`] is the same call
+//! recording which factorization ran, which is what `CD-22` asserts: the
+//! kernel table is reached, and every route returns the reference's bytes.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -48,7 +61,9 @@ pub use float::{
     gemm_float, gemm_float_bridged, gemm_float_packed, suggested_bridge_scaled,
     suggested_float_panels, SignedPlace,
 };
-pub use kernel::{gemm_packed, Kernelized};
+pub use kernel::{
+    gemm_auto, gemm_auto_counted, gemm_packed, Kernelized, Route, RouteCensus, RouteLedger,
+};
 pub use partition::{Partition, Tile};
 pub use scratch::{suggested_accumulators, suggested_scratch, PanelSplit, Scratch};
 pub use strassen::{gemm_strassen, levels as strassen_levels, strassen_scratch};

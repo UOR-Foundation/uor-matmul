@@ -87,8 +87,11 @@ fn vs_oracles(c: &mut Criterion) {
                 let bv = MatView::row_major(as_alphabet_full(&b), k, n).expect("B fits");
                 let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
                 let mut t = Triple::new(av, bv, cv).expect("the product exists");
-                // The packed driver, which is what the library runs. Timing the
-                // generic traversal would time a factorization no caller gets.
+                // The kernelized driver directly. The documented safe entry
+                // reaches the same selection through `gemm_auto`, and the
+                // `public_api` group below times the two side by side so the
+                // claim "the public route is this route" is measured, not
+                // asserted in a comment.
                 uor_matmul::gemm_packed(
                     &mut t,
                     &Linear::OVERWRITE,
@@ -230,5 +233,59 @@ fn handwritten_f32(m: usize, k: usize, n: usize, a: &[f32], b: &[f32], out: &mut
     }
 }
 
-criterion_group!(benches, scaling_report, vs_oracles);
+/// The public route against the explicit one: `slice::gemm`, which is the
+/// entry the README shows, against `gemm_packed` at the same shapes and the
+/// same suggested offer. The two must time the same, because the facade's
+/// `gemm` *is* `gemm_auto` --- `gemm_packed` with the selection already
+/// inside --- and this group is the measurement that keeps that sentence
+/// honest (`CD-22` asserts the route; this prices it). Byte-equality is
+/// asserted inside each timed closure, as everywhere in this file.
+fn public_api(c: &mut Criterion) {
+    const SHAPES: [(usize, usize, usize); 3] = [(16, 16, 16), (64, 64, 64), (128, 128, 128)];
+
+    let mut group = c.benchmark_group("public_api");
+    for &(m, k, n) in &SHAPES {
+        let shape = format!("{m}x{k}x{n}");
+        let a = vec![1i8; m * k];
+        let b = vec![1i8; k * n];
+
+        group.bench_function(format!("slice::gemm/{shape}"), |bench| {
+            let mut out = vec![0i32; m * n];
+            let mut scratch = vec![0i8; suggested_scratch(Shape { m, k, n })];
+            bench.iter(|| {
+                uor_matmul::slice::gemm(m, k, n, &a, &b, &mut out, &mut scratch)
+                    .expect("the product exists");
+                assert!(
+                    out.iter().all(|&v| v == k as i32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        group.bench_function(format!("gemm_packed/{shape}"), |bench| {
+            let mut out = vec![0i32; m * n];
+            let mut scratch =
+                vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_scratch(Shape { m, k, n })];
+            bench.iter(|| {
+                let av = MatView::row_major(as_alphabet_full(&a), m, k).expect("A fits");
+                let bv = MatView::row_major(as_alphabet_full(&b), k, n).expect("B fits");
+                let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                let mut t = Triple::new(av, bv, cv).expect("the product exists");
+                uor_matmul::gemm_packed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut Scratch::new(&mut scratch),
+                );
+                assert!(
+                    out.iter().all(|&v| v == k as i32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, scaling_report, vs_oracles, public_api);
 criterion_main!(benches);

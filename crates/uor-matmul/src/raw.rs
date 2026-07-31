@@ -10,15 +10,17 @@
 //! float entry points below compute the correctly-rounded value of the exact
 //! sum, not an order-dependent approximation of it.
 //!
-//! A raw pointer carries no panel offer, so the scalar lanes are what these
-//! entries run: the float placement bridge's reification has nowhere to live.
-//! The bytes are unaffected (`CD-19`); the throughput of the kernel-table
-//! lane is reached through the safe API by offering
+//! A raw pointer carries no panel offer, so these entries call the
+//! auto-selecting float driver with an empty one: the placement bridge's
+//! reification has nowhere to live, the driver declines, and the scalar lanes
+//! run --- the same lanes [`uor_matmul_gemm::gemm_float`] walks directly, at
+//! the same bytes (`CD-19`). The throughput of the kernel-table lane is reached
+//! through the safe API by offering
 //! [`uor_matmul_gemm::suggested_float_panels`].
 
 use uor_matmul_core::{MatView, MatViewMut, Strides, Triple};
 use uor_matmul_gemm::epilogue::{AbsorbPrior, ScaleExact};
-use uor_matmul_gemm::{gemm_float, GemmOptions, Linear};
+use uor_matmul_gemm::{gemm_float_packed, GemmOptions, Linear, PlaceAt};
 
 /// `C := alpha * A * B + beta * C`, over `f32`, computed exactly.
 ///
@@ -111,8 +113,11 @@ unsafe fn raw_gemm<E>(
     rsc: isize,
     csc: isize,
 ) where
-    E: uor_matmul_core::FloatElement + uor_matmul_core::EncodeFrom<uor_matmul_core::AccOf<E>>,
-    uor_matmul_core::AccOf<E>: ScaleExact + AbsorbPrior<E> + uor_matmul_gemm::float::SignedPlace,
+    E: uor_matmul_core::FloatElement
+        + uor_matmul_core::EncodeFrom<uor_matmul_core::AccOf<E>>
+        + uor_matmul_core::EncodeFrom<i128>,
+    uor_matmul_core::AccOf<E>:
+        ScaleExact + AbsorbPrior<E> + uor_matmul_gemm::float::SignedPlace + PlaceAt,
 {
     if m == 0 || n == 0 {
         return;
@@ -143,7 +148,16 @@ unsafe fn raw_gemm<E>(
     let Ok(mut t) = Triple::new(av, bv, cv) else {
         return;
     };
-    gemm_float(&mut t, &Linear { alpha, beta }, GemmOptions::default());
+    // The raw face offers no panels, so the packed driver's offer question is
+    // answered before it is asked and the scalar lanes run --- the same bytes
+    // `gemm_float` produces on the same triple (`CD-19`).
+    gemm_float_packed(
+        &mut t,
+        &Linear { alpha, beta },
+        GemmOptions::default(),
+        &mut [],
+        &mut [],
+    );
 }
 
 /// The lowest offset an `rows x cols` strided view reaches, as a negative
