@@ -507,7 +507,9 @@ fn fit(rows: &[Row]) -> Fit {
     };
     let mut beta = [0.0; 6];
     for (i, &ci) in keep.iter().enumerate() {
-        beta[ci] = gamma[i] / scale[ci];
+        // `gamma` fits seconds against the scaled counts, so this is seconds
+        // per op; the printed and predicted unit is nanoseconds.
+        beta[ci] = gamma[i] / scale[ci] * 1e9;
     }
     Fit {
         beta,
@@ -540,12 +542,21 @@ fn separation(name: &str, pairs: &[(f64, f64, [f64; 6], [f64; 6])], beta: &[f64;
     println!("| margin | wins kept | losses excluded | separates |");
     println!("| --- | --- | --- | --- |");
     let mut ratios: Vec<(bool, f64)> = Vec::new();
+    let mut dropped = 0usize;
     for &(t_secs, o_secs, ref t_counts, ref o_counts) in pairs {
         let pt = predicted(beta, t_counts);
         let po = predicted(beta, o_counts);
         if pt > 0.0 && po > 0.0 {
             ratios.push((t_secs < o_secs, po / pt));
+        } else {
+            // A non-positive prediction prices a side at nothing; a boundary
+            // read from a subset that excludes it would be a fiction, so the
+            // drop is counted and printed, never silent.
+            dropped += 1;
         }
+    }
+    if dropped > 0 {
+        println!("# {dropped} of {} points dropped: the fitted model predicts a non-positive time for them", pairs.len());
     }
     let wins = ratios.iter().filter(|r| r.0).count();
     let losses = ratios.len() - wins;

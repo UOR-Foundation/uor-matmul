@@ -41,21 +41,62 @@ measurements named:
    the SWAR co-issue experiment (the CG-11 census has the AVX2 i8 tile bound
    on Zn4FP2 with scalar ports idle in the model) are x86 questions this host
    cannot answer locally.
-2. **The op-kind cost model for symbol-table selection.** The measured
-   boundary is sharp --- the table wins under 2.2x and loses 40--175x --- so
-   this is measured per-op-kind constants in `model/tiers.toml` with the
-   CM-04 trail, or nothing.
-3. **A Cortex-M executor in CI** (qemu-system mps2/mps3 or renode) before
-   any thumbv6m sequence; CB parity is a run, and no user-mode emulator
-   covers Cortex-M.
-4. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
+2. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
    §"Mantissa slicing, and the RNS beside it") is recorded: nine 8-bit
    passes, shift recombination, a wash where the narrow-to-wide ratio is
    two, worth it at eight or better (VNNI, NEON dotprod, tensor units). The
    trigger is a host whose measured ratio is eight or better, and the first
-   composition to measure is the sliced symbol.
+   composition to measure is the sliced symbol. This host's ratio, read off
+   the lanes already measured here (i8 dotprod at 63.1 Gmac/s against the
+   `i32`-exact lane's 13--16), is about four to five, so the trigger does
+   not fire here.
 
 ## Measurements
+
+**The quiet-host batch: the M1 gemv, the Strassen A/B, and the op-cost
+feasibility fit (CG-12, CG-16; figures `open`).** Three deferred measurements
+from the entries below, taken in one quiet window on the same host (Apple M4
+Max, dev machine, aarch64-apple-darwin), 2026-07-30 late, byte-identity
+asserted inside every timed run. The M1 variant's gemv effect, against the
+`CG-16` table above: none. At `1x1024x1024` the bridge reads 0.517 against
+the pre-M1 0.533 --- a wash, because those shapes are bound by decode and
+placement, not by the MAC sequence (`CG-14`'s finding); the one shape with
+kernel work to save, `8x262144x8`, moved 0.835 to 0.946 (+13%). The
+one-row panel is the right shape for the family regardless --- it removes a
+four-row panel's padding arithmetic wherever the lane *is* the bottleneck
+--- and the differential walk covers it; it is simply not a gemv win on this
+host, which is what the measurement was for. The Strassen same-state A/B,
+attempted once and discarded under external load, reran clean (the i8 peak
+read 59.204 and 59.348 Gmac/s in the two runs, 0.2% apart): the exact cubic
+lane gains 1.21--1.29x from the NEON sequence at every size (17.57 to 22.59
+at `1024`, 14.98 to 18.80 at `4096`), and the recursion's margin over its
+own lane widens to +56% at `L=3`, `4096` --- where it now crosses the
+modular lane's rate (29.4 against 22.0), not merely matches it. The fitted
+exponent is `2.8721 +/- 0.0102` against `n`: the interval still excludes
+`3.0`, and the MAC-count fit `0.9574 +/- 0.0034` still excludes `1.0`.
+
+**The op-kind cost model, measured and closed as nothing (CG-16).** The
+queue item's escape hatch, taken. `just op-cost-fit` fits per-op-kind
+nanosecond constants over the `CG-16` grid --- 43 points, both sides timed
+with their censuses --- and the model does not fit: the decode coefficient
+comes out negative (-2.14 ns, least-squares noise across collinear counts,
+not physics), the dense side's mean relative residual is 126%, and the
+fitted model predicts a non-positive time at 8 of the 14 table-versus-dense
+points, which are exactly the build-dominated shapes the boundary would have
+to get right. A margin swept over the survivors is a boundary read from a
+subset that excludes the catastrophic losses, and that is a fiction, not a
+conservative rule --- the recorded separation is against the bridge only,
+where all 8 points price (any margin in `[0.32, 1.39)` separates), and it
+changes nothing: the bridge is not the path the table would displace. So
+selection keeps declining the symbol table, `Traversal::Tabulated` remains
+the entry for the caller who knows its shape, and `tiers.toml:241`'s note
+stands. The instrument stays in the tree (`just op-cost-fit`) for the
+second host, whose op costs may compose differently; two harness defects
+the first run exposed are fixed and worth recording: the fitted constants
+were seconds per op where the printer and the predictor read nanoseconds
+(every constant printed 0.0000 and every residual 1.0 --- a vacuous fit
+presenting as a verdict), and the boundary's drop rule was silent, so the
+first verdict covered 6 of 14 points without saying so.
 
 **A NEON sequence for the `i32`-exact lane (CB-02's family, shipped; figures
 `open`).** The queue's NEON item, landed: `NEON_I32_I64` in
@@ -91,10 +132,10 @@ excludes `3.0`, so `CG-12`'s honesty condition is unaffected by the lane
 change. A same-state Strassen A/B was attempted and discarded: an external
 load generator on the shared host (load average 152, processes unrelated to
 this repository) made the baseline run's figures unusable, and a contaminated
-A/B is not a result. Named follow-ups: an `M1` variant for one-row panels ---
-gemv shapes fall back to the portable kernel today, the gap the x86 family's
-`_M1` entries already close on that ISA --- and the Strassen A/B re-run on a
-quiet machine.
+A/B is not a result. Both follow-ups this paragraph named --- the `M1`
+variant and the quiet-machine A/B --- landed and are the entry above this
+one; the `M1` is no gemv win on this host, and the clean A/B is the 1.2x
+this lane's bridge measurement already priced.
 
 **The sub-cubic recursion on the i32-exact lane (CD-21, CG-12, shipped;
 CG-12 figures `open`).** Winograd's form of Strassen's recursion above the
