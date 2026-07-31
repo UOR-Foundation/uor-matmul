@@ -12,7 +12,10 @@
 //! x86-64 is the required half, modelled at `znver4`, because that model
 //! covers both the AVX2 and the AVX-512 VNNI sequences this crate emits ---
 //! `znver3` has no AVX-512 model. aarch64 is modelled at `apple-m4` when its
-//! target is installed, and skipped with a note when it is not. wasm has no
+//! target is installed, and skipped with a note when it is not; either half is
+//! also skipped, with the reason named, when the installed llvm-mca has no
+//! such model (`apple-m4` needs LLVM 19), because a census against a machine
+//! the tool silently substitutes is worse than none. wasm has no
 //! scheduling model at all, so the SIMD128 sequences are absent from the
 //! report rather than analysed against the wrong machine.
 
@@ -90,6 +93,22 @@ pub fn issue_census(root: &Path) -> Result<(), Fail> {
             AARCH64.triple
         );
     }
+    // A model the installed llvm-mca does not recognize is no model at all:
+    // the target is absent with the reason named, rather than analysed
+    // against a machine the tool silently substituted. `apple-m4` needs LLVM
+    // 19; CI's stock llvm-mca is older.
+    targets.retain(|target| {
+        if model_available(&mca, target) {
+            true
+        } else {
+            println!(
+                "issue-census: llvm-mca {} has no `{}` model for {}; the {} sequences are \
+                 absent from this run rather than analysed against the wrong machine",
+                version, target.mcpu, target.march, target.triple
+            );
+            false
+        }
+    });
 
     let mut total = 0usize;
     for target in &targets {
@@ -421,6 +440,32 @@ fn family(name: &str) -> &'static str {
         "table"
     } else {
         "other"
+    }
+}
+
+/// Does the installed llvm-mca recognize this target's scheduling model? One
+/// trivial probe per census run: an unrecognized processor is a warning the
+/// tool downgrades to `generic`, and a census against the wrong machine is
+/// worse than none (the wasm rule), so the target is skipped instead.
+fn model_available(mca: &Path, target: &CensusTarget) -> bool {
+    let mut child = match Command::new(mca)
+        .args(["-march", target.march, "-mcpu", target.mcpu])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // `nop` assembles on both targets; an empty input is an error on its
+        // own and would read as the model being absent.
+        let _ = stdin.write_all(b"nop\n");
+    }
+    match child.wait_with_output() {
+        Ok(out) => out.status.success() && out.stderr.is_empty(),
+        Err(_) => false,
     }
 }
 
