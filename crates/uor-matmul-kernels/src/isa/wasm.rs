@@ -399,15 +399,36 @@ const SIMD_TABLE_LANES: usize = 4;
 /// Narrower tiles take the reference, whose row count is a compile-time constant
 /// there too.
 pub fn simd128_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    let (build, gather, gather_codes): (
+    let (build, gather, gather_codes, gather_codes_u8): (
         crate::table::TableBuild<i8, i32>,
         crate::table::TableGather<i32>,
         crate::table::TableGatherCodes<i32>,
+        crate::table::TableGatherCodesU8<i32>,
     ) = match (rows, group) {
-        (16, 1) => (simd_build_v4, simd_gather_v4_u1, simd_codes_v4_u1),
-        (16, 2) => (simd_build_v4, simd_gather_v4_u2, simd_codes_v4_u2),
-        (8, 1) => (simd_build_v2, simd_gather_v2_u1, simd_codes_v2_u1),
-        (8, 2) => (simd_build_v2, simd_gather_v2_u2, simd_codes_v2_u2),
+        (16, 1) => (
+            simd_build_v4,
+            simd_gather_v4_u1,
+            simd_codes_v4_u1,
+            simd_codes_v4_u1_u8,
+        ),
+        (16, 2) => (
+            simd_build_v4,
+            simd_gather_v4_u2,
+            simd_codes_v4_u2,
+            simd_codes_v4_u2_u8,
+        ),
+        (8, 1) => (
+            simd_build_v2,
+            simd_gather_v2_u1,
+            simd_codes_v2_u1,
+            simd_codes_v2_u1_u8,
+        ),
+        (8, 2) => (
+            simd_build_v2,
+            simd_gather_v2_u2,
+            simd_codes_v2_u2,
+            simd_codes_v2_u2_u8,
+        ),
         _ => return None,
     };
     Some(TableSpec {
@@ -427,6 +448,7 @@ pub fn simd128_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -439,15 +461,36 @@ const SIMD_TABLE_LANES_64: usize = 2;
 /// widens again before accumulating, so nothing narrower than the lane is held
 /// and no `i16` alphabet is out of reach.
 pub fn simd128_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i64>> {
-    let (build, gather, gather_codes): (
+    let (build, gather, gather_codes, gather_codes_u8): (
         crate::table::TableBuild<i16, i64>,
         crate::table::TableGather<i64>,
         crate::table::TableGatherCodes<i64>,
+        crate::table::TableGatherCodesU8<i64>,
     ) = match (rows, group) {
-        (16, 1) => (simd_build16_v8, simd_gather64_v8_u1, simd_codes64_v8_u1),
-        (16, 2) => (simd_build16_v8, simd_gather64_v8_u2, simd_codes64_v8_u2),
-        (8, 1) => (simd_build16_v4, simd_gather64_v4_u1, simd_codes64_v4_u1),
-        (8, 2) => (simd_build16_v4, simd_gather64_v4_u2, simd_codes64_v4_u2),
+        (16, 1) => (
+            simd_build16_v8,
+            simd_gather64_v8_u1,
+            simd_codes64_v8_u1,
+            simd_codes64_v8_u1_u8,
+        ),
+        (16, 2) => (
+            simd_build16_v8,
+            simd_gather64_v8_u2,
+            simd_codes64_v8_u2,
+            simd_codes64_v8_u2_u8,
+        ),
+        (8, 1) => (
+            simd_build16_v4,
+            simd_gather64_v4_u1,
+            simd_codes64_v4_u1,
+            simd_codes64_v4_u1_u8,
+        ),
+        (8, 2) => (
+            simd_build16_v4,
+            simd_gather64_v4_u2,
+            simd_codes64_v4_u2,
+            simd_codes64_v4_u2_u8,
+        ),
         _ => return None,
     };
     Some(TableSpec {
@@ -463,6 +506,7 @@ pub fn simd128_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16,
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -573,14 +617,14 @@ unsafe fn simd_gather64<const V: usize, const U: usize>(
 /// [`crate::table::TableGatherCodes`]'s contract, with `rows == V * 2`,
 /// `group == U`.
 #[allow(clippy::too_many_arguments)]
-unsafe fn simd_codes64<const V: usize, const U: usize>(
+unsafe fn simd_codes64<const V: usize, const U: usize, K: Copy + Into<usize>>(
     rows: usize,
     _group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const i64,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut i64,
 ) {
@@ -602,7 +646,8 @@ unsafe fn simd_codes64<const V: usize, const U: usize>(
         let mut words = stack;
         for _ in 0..depth {
             for (u, cols) in acc.iter_mut().enumerate() {
-                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                let code: usize = (*cursor[u]).into();
+                let entry = words.add((code & mask) << shift);
                 cursor[u] = cursor[u].add(1);
                 for (v, cell) in cols.iter_mut().enumerate() {
                     *cell = i64x2_add(
@@ -656,7 +701,7 @@ unsafe fn simd_build16_v4(
 
 /// Generate the four `(rows, group)` entry points for the 64-bit lane.
 macro_rules! simd_gathers64 {
-    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+    ($($g:ident, $c:ident, $c8:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
         #[doc = concat!("# Safety\n\n[`crate::table::TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
         unsafe fn $g(
             rows: usize,
@@ -686,17 +731,36 @@ macro_rules! simd_gathers64 {
         ) {
             // SAFETY: the caller forwarded the extents.
             unsafe {
-                simd_codes64::<$v, $u>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+                simd_codes64::<$v, $u, u16>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`crate::table::TableGatherCodesU8`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c8(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const i64,
+            codes: *const u8,
+            stride: usize,
+            lane: *mut i64,
+        ) {
+            // SAFETY: the caller forwarded the extents.
+            unsafe {
+                simd_codes64::<$v, $u, u8>(rows, group, depth, slab, shift, stack, codes, stride, lane)
             }
         }
     )*};
 }
 
 simd_gathers64! {
-    simd_gather64_v8_u1, simd_codes64_v8_u1, 8, 1, 16;
-    simd_gather64_v8_u2, simd_codes64_v8_u2, 8, 2, 16;
-    simd_gather64_v4_u1, simd_codes64_v4_u1, 4, 1, 8;
-    simd_gather64_v4_u2, simd_codes64_v4_u2, 4, 2, 8;
+    simd_gather64_v8_u1, simd_codes64_v8_u1, simd_codes64_v8_u1_u8, 8, 1, 16;
+    simd_gather64_v8_u2, simd_codes64_v8_u2, simd_codes64_v8_u2_u8, 8, 2, 16;
+    simd_gather64_v4_u1, simd_codes64_v4_u1, simd_codes64_v4_u1_u8, 4, 1, 8;
+    simd_gather64_v4_u2, simd_codes64_v4_u2, simd_codes64_v4_u2_u8, 4, 2, 8;
 }
 
 /// One slot of the table, at `V` registers of `i32`.
@@ -828,14 +892,14 @@ unsafe fn simd_gather<const V: usize, const U: usize>(
 /// [`crate::table::TableGatherCodes`]'s contract, with `rows == V * 4`,
 /// `group == U`.
 #[allow(clippy::too_many_arguments)]
-unsafe fn simd_codes<const V: usize, const U: usize>(
+unsafe fn simd_codes<const V: usize, const U: usize, K: Copy + Into<usize>>(
     rows: usize,
     _group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const i32,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut i32,
 ) {
@@ -857,7 +921,8 @@ unsafe fn simd_codes<const V: usize, const U: usize>(
         let mut words = stack;
         for _ in 0..depth {
             for (u, cols) in acc.iter_mut().enumerate() {
-                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                let code: usize = (*cursor[u]).into();
+                let entry = words.add((code & mask) << shift);
                 cursor[u] = cursor[u].add(1);
                 for (v, cell) in cols.iter_mut().enumerate() {
                     *cell = i32x4_add(
@@ -912,7 +977,7 @@ unsafe fn simd_build_v2(
 /// Generate the four `(rows, group)` gather entry points, each a named
 /// monomorphization of one sequence.
 macro_rules! simd_gathers {
-    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+    ($($g:ident, $c:ident, $c8:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
         #[doc = concat!("# Safety\n\n[`crate::table::TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
         unsafe fn $g(
             rows: usize,
@@ -942,15 +1007,34 @@ macro_rules! simd_gathers {
         ) {
             // SAFETY: the caller forwarded the extents.
             unsafe {
-                simd_codes::<$v, $u>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+                simd_codes::<$v, $u, u16>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`crate::table::TableGatherCodesU8`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c8(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const i32,
+            codes: *const u8,
+            stride: usize,
+            lane: *mut i32,
+        ) {
+            // SAFETY: the caller forwarded the extents.
+            unsafe {
+                simd_codes::<$v, $u, u8>(rows, group, depth, slab, shift, stack, codes, stride, lane)
             }
         }
     )*};
 }
 
 simd_gathers! {
-    simd_gather_v4_u1, simd_codes_v4_u1, 4, 1, 16;
-    simd_gather_v4_u2, simd_codes_v4_u2, 4, 2, 16;
-    simd_gather_v2_u1, simd_codes_v2_u1, 2, 1, 8;
-    simd_gather_v2_u2, simd_codes_v2_u2, 2, 2, 8;
+    simd_gather_v4_u1, simd_codes_v4_u1, simd_codes_v4_u1_u8, 4, 1, 16;
+    simd_gather_v4_u2, simd_codes_v4_u2, simd_codes_v4_u2_u8, 4, 2, 16;
+    simd_gather_v2_u1, simd_codes_v2_u1, simd_codes_v2_u1_u8, 2, 1, 8;
+    simd_gather_v2_u2, simd_codes_v2_u2, simd_codes_v2_u2_u8, 2, 2, 8;
 }

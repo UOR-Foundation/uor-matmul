@@ -739,6 +739,29 @@ pub type TableGatherCodes<L> = unsafe fn(
     lane: *mut L,
 );
 
+/// [`TableGatherCodes`] at a byte-wide code stream.
+///
+/// The same contract, the same masking, the same slab reads: the code is
+/// widened to the index on load, and the two widths are two monomorphic
+/// sequences the driver dispatches between once per arm, never per code. A
+/// codec whose code space fits a byte stores half the codes the `u16` spelling
+/// does; nothing about the gather's arithmetic moves.
+///
+/// # Safety
+///
+/// As [`TableGatherCodes`].
+pub type TableGatherCodesU8<L> = unsafe fn(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const L,
+    codes: *const u8,
+    stride: usize,
+    lane: *mut L,
+);
+
 /// One backend's table sequences for one element family, and the shape they
 /// want their operands in.
 ///
@@ -785,8 +808,11 @@ pub struct TableSpec<E, L> {
     pub build: TableBuild<E, L>,
     /// Reduce one column group from an index stream the driver built.
     pub gather: TableGather<L>,
-    /// Reduce one column group from the operand's own code stream.
+    /// Reduce one column group from the operand's own `u16` code stream.
     pub gather_codes: TableGatherCodes<L>,
+    /// [`Self::gather_codes`] at a byte-wide code stream: the same lane words,
+    /// the operand stored at half the width.
+    pub gather_codes_u8: TableGatherCodesU8<L>,
 }
 
 impl<E, L> Clone for TableSpec<E, L> {
@@ -829,12 +855,23 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
     // of pure copy, which an unoptimized build sums over every arm of the
     // dispatcher. It accumulates where it lies instead: the same reads, the
     // same adds, the same lane words (`CB-08`).
-    let (gather, gather_codes): (TableGather<L>, TableGatherCodes<L>) =
-        if core::mem::size_of::<L>() * 16 <= 256 {
-            (portable_gather::<L>, portable_gather_codes::<L>)
-        } else {
-            (portable_gather_wide::<L>, portable_gather_codes_wide::<L>)
-        };
+    let (gather, gather_codes, gather_codes_u8): (
+        TableGather<L>,
+        TableGatherCodes<L>,
+        TableGatherCodesU8<L>,
+    ) = if core::mem::size_of::<L>() * 16 <= 256 {
+        (
+            portable_gather::<L>,
+            portable_gather_codes::<L, u16>,
+            portable_gather_codes::<L, u8>,
+        )
+    } else {
+        (
+            portable_gather_wide::<L>,
+            portable_gather_codes_wide::<L, u16>,
+            portable_gather_codes_wide::<L, u8>,
+        )
+    };
     TableSpec {
         backend: Backend::Portable,
         rows,
@@ -852,6 +889,7 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
         build: portable_build::<E, L>,
         gather,
         gather_codes,
+        gather_codes_u8,
     }
 }
 
@@ -886,7 +924,8 @@ pub const fn portable_table_bound1(rows: usize, group: usize) -> TableSpec<i8, i
         build_multiplies: false,
         build: portable_build_bound1,
         gather: portable_gather::<i32>,
-        gather_codes: portable_gather_codes::<i32>,
+        gather_codes: portable_gather_codes::<i32, u16>,
+        gather_codes_u8: portable_gather_codes::<i32, u8>,
     }
 }
 
@@ -1078,16 +1117,18 @@ unsafe fn portable_gather<L: LaneWord>(
 
 /// # Safety
 ///
-/// [`TableGatherCodes`]'s contract.
+/// [`TableGatherCodes`]'s contract at `K = u16`, [`TableGatherCodesU8`]'s at
+/// `K = u8`. One body at two monomorphizations: the code widens to the index
+/// on load, and nothing else about the walk knows the width.
 #[allow(clippy::too_many_arguments)]
-unsafe fn portable_gather_codes<L: LaneWord>(
+unsafe fn portable_gather_codes<L: LaneWord, K: Copy + Into<usize>>(
     rows: usize,
     group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const L,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut L,
 ) {
@@ -1103,7 +1144,7 @@ unsafe fn portable_gather_codes<L: LaneWord>(
         rows,
         group,
         codes_any(rows, depth, slab, shift, stack, codes, stride, lane),
-        |R, G| dispatch_slab!(code_words(slab, R), |C| codes_run::<C, R, G, L>(
+        |R, G| dispatch_slab!(code_words(slab, R), |C| codes_run::<C, R, G, L, K>(
             depth, slab, shift, stack, codes, stride, lane
         ))
     )
@@ -1136,16 +1177,17 @@ unsafe fn portable_gather_wide<L: LaneWord>(
 
 /// # Safety
 ///
-/// [`TableGatherCodes`]'s contract.
+/// [`TableGatherCodes`]'s contract at `K = u16`, [`TableGatherCodesU8`]'s at
+/// `K = u8`.
 #[allow(clippy::too_many_arguments)]
-unsafe fn portable_gather_codes_wide<L: LaneWord>(
+unsafe fn portable_gather_codes_wide<L: LaneWord, K: Copy + Into<usize>>(
     rows: usize,
     group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const L,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut L,
 ) {
@@ -1164,13 +1206,13 @@ unsafe fn portable_gather_codes_wide<L: LaneWord>(
 
 /// The same, at a row count no shipped tile uses.
 #[allow(clippy::too_many_arguments)]
-fn codes_any<L: LaneWord>(
+fn codes_any<L: LaneWord, K: Copy + Into<usize>>(
     rows: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: &[L],
-    codes: &[u16],
+    codes: &[K],
     stride: usize,
     lane: &mut [L],
 ) {
@@ -1181,7 +1223,7 @@ fn codes_any<L: LaneWord>(
         rest = tail;
         let mut at = slot;
         for cols in lane.chunks_exact_mut(rows) {
-            let entry = &words[(codes[at] as usize & mask) << shift..];
+            let entry = &words[(codes[at].into() & mask) << shift..];
             for (cell, &e) in cols.iter_mut().zip(&entry[..rows]) {
                 *cell = cell.add(e);
             }
@@ -1294,12 +1336,12 @@ fn gather_any<L: LaneWord>(
 /// compile-time `R` it is `R`'s and the entry's address is `(code & (C - 1)) *
 /// R` with both factors literal.
 #[inline(always)]
-fn codes_run<const C: usize, const R: usize, const G: usize, L: LaneWord>(
+fn codes_run<const C: usize, const R: usize, const G: usize, L: LaneWord, K: Copy + Into<usize>>(
     depth: usize,
     slab_arg: usize,
     shift_arg: u32,
     stack: &[L],
-    codes: &[u16],
+    codes: &[K],
     stride: usize,
     lane: &mut [L],
 ) {
@@ -1319,7 +1361,7 @@ fn codes_run<const C: usize, const R: usize, const G: usize, L: LaneWord>(
         rest = tail;
         let mut at = slot;
         for cols in acc.iter_mut() {
-            let entry = &words[(codes[at] as usize & mask) << shift..];
+            let entry = &words[(codes[at].into() & mask) << shift..];
             for (cell, &e) in cols.iter_mut().zip(&entry[..R]) {
                 *cell = cell.add(e);
             }
@@ -1476,6 +1518,52 @@ impl<E, L> TableSpec<E, L> {
         // spec came from a `*_table` selector.
         unsafe {
             (self.gather_codes)(
+                self.rows,
+                self.group,
+                depth,
+                slab,
+                self.rows.trailing_zeros(),
+                stack.as_ptr(),
+                codes.as_ptr(),
+                stride,
+                lane.as_mut_ptr(),
+            )
+        }
+    }
+
+    /// [`Self::gather_codes`] at a byte-wide code stream.
+    ///
+    /// The same claim, the same checks, the same lane words: the codec has
+    /// claimed this `u8` stream addresses its enumeration
+    /// ([`uor_matmul_codec::Enumerable::as_index_stream`]), every code is
+    /// widened and masked into the slab, and nothing is read per code.
+    pub fn gather_codes_u8(
+        &self,
+        depth: usize,
+        slab: u32,
+        stack: &[L],
+        codes: &[u8],
+        stride: usize,
+        lane: &mut [L],
+    ) {
+        assert!(slab.is_power_of_two(), "one slot is 2^j lane words");
+        assert!(self.rows.is_power_of_two(), "the tile height is 2^j");
+        let slab = slab as usize;
+        assert!(self.rows <= slab, "one slot holds at least one entry");
+        assert_eq!(stack.len(), depth * slab, "the stack is depth * slab");
+        assert_eq!(
+            codes.len(),
+            (self.group - 1) * stride + depth,
+            "the run spans the group's columns"
+        );
+        assert_eq!(
+            lane.len(),
+            self.group * self.rows,
+            "the lane is group * rows"
+        );
+        // SAFETY: as `gather_codes`.
+        unsafe {
+            (self.gather_codes_u8)(
                 self.rows,
                 self.group,
                 depth,

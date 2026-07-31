@@ -30,6 +30,14 @@ pub const ADDRESS_LABEL_BYTES: usize = 71;
 /// The field set and its JSON spelling are normative and are restated in
 /// `ARCHITECTURE.md`. Changing either changes every artifact's identity, which
 /// is why the schema carries a `spec` tag.
+///
+/// There is deliberately no code-width field. The width is a property of the
+/// code *bytes*, which `codes_sha256` already distinguishes: a `u8` spelling
+/// and a `u16` spelling of one tier decode alike and digest differently, so
+/// they are two artifacts with two addresses --- the same rule `CK-05` states
+/// for equal-decoding codecs generally. Nothing downstream of the manifest
+/// reads the codes width-sensitively: the only reader is the decoder, which
+/// learns the width from the artifact's own type.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Manifest<'a> {
     /// Which tier decodes the codes.

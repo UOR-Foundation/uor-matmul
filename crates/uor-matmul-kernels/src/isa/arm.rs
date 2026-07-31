@@ -525,15 +525,36 @@ const NEON_TABLE_LANES: usize = 4;
 /// this offers are sixteen and eight. Narrower tiles take the reference, whose
 /// row count is a compile-time constant there too.
 pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    let (build, gather, gather_codes): (
+    let (build, gather, gather_codes, gather_codes_u8): (
         crate::table::TableBuild<i8, i32>,
         crate::table::TableGather<i32>,
         crate::table::TableGatherCodes<i32>,
+        crate::table::TableGatherCodesU8<i32>,
     ) = match (rows, group) {
-        (16, 1) => (neon_table_build_v4, neon_gather_v4_u1, neon_codes_v4_u1),
-        (16, 2) => (neon_table_build_v4, neon_gather_v4_u2, neon_codes_v4_u2),
-        (8, 1) => (neon_table_build_v2, neon_gather_v2_u1, neon_codes_v2_u1),
-        (8, 2) => (neon_table_build_v2, neon_gather_v2_u2, neon_codes_v2_u2),
+        (16, 1) => (
+            neon_table_build_v4,
+            neon_gather_v4_u1,
+            neon_codes_v4_u1,
+            neon_codes_v4_u1_u8,
+        ),
+        (16, 2) => (
+            neon_table_build_v4,
+            neon_gather_v4_u2,
+            neon_codes_v4_u2,
+            neon_codes_v4_u2_u8,
+        ),
+        (8, 1) => (
+            neon_table_build_v2,
+            neon_gather_v2_u1,
+            neon_codes_v2_u1,
+            neon_codes_v2_u1_u8,
+        ),
+        (8, 2) => (
+            neon_table_build_v2,
+            neon_gather_v2_u2,
+            neon_codes_v2_u2,
+            neon_codes_v2_u2_u8,
+        ),
         _ => return None,
     };
     Some(TableSpec {
@@ -555,6 +576,7 @@ pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -565,30 +587,35 @@ pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
 /// build differs: at bound 1 the widening multiply has nothing left to do, and
 /// the slot is a sign mask, an XOR and a subtract (`CB-10`).
 pub fn neon_table_i8_i32_bound1(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    let (build, gather, gather_codes): (
+    let (build, gather, gather_codes, gather_codes_u8): (
         crate::table::TableBuild<i8, i32>,
         crate::table::TableGather<i32>,
         crate::table::TableGatherCodes<i32>,
+        crate::table::TableGatherCodesU8<i32>,
     ) = match (rows, group) {
         (16, 1) => (
             neon_table_build_bound1_v4,
             neon_gather_v4_u1,
             neon_codes_v4_u1,
+            neon_codes_v4_u1_u8,
         ),
         (16, 2) => (
             neon_table_build_bound1_v4,
             neon_gather_v4_u2,
             neon_codes_v4_u2,
+            neon_codes_v4_u2_u8,
         ),
         (8, 1) => (
             neon_table_build_bound1_v2,
             neon_gather_v2_u1,
             neon_codes_v2_u1,
+            neon_codes_v2_u1_u8,
         ),
         (8, 2) => (
             neon_table_build_bound1_v2,
             neon_gather_v2_u2,
             neon_codes_v2_u2,
+            neon_codes_v2_u2_u8,
         ),
         _ => return None,
     };
@@ -611,6 +638,7 @@ pub fn neon_table_i8_i32_bound1(rows: usize, group: usize) -> Option<TableSpec<i
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -624,15 +652,36 @@ const NEON_TABLE_LANES_64: usize = 2;
 /// alphabet is out of reach --- unlike the AVX2 sequence for this family, whose
 /// `madd` sums a pair into an `i32` and which therefore declares a bound.
 pub fn neon_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i64>> {
-    let (build, gather, gather_codes): (
+    let (build, gather, gather_codes, gather_codes_u8): (
         crate::table::TableBuild<i16, i64>,
         crate::table::TableGather<i64>,
         crate::table::TableGatherCodes<i64>,
+        crate::table::TableGatherCodesU8<i64>,
     ) = match (rows, group) {
-        (16, 1) => (neon_build16_v8, neon_gather64_v8_u1, neon_codes64_v8_u1),
-        (16, 2) => (neon_build16_v8, neon_gather64_v8_u2, neon_codes64_v8_u2),
-        (8, 1) => (neon_build16_v4, neon_gather64_v4_u1, neon_codes64_v4_u1),
-        (8, 2) => (neon_build16_v4, neon_gather64_v4_u2, neon_codes64_v4_u2),
+        (16, 1) => (
+            neon_build16_v8,
+            neon_gather64_v8_u1,
+            neon_codes64_v8_u1,
+            neon_codes64_v8_u1_u8,
+        ),
+        (16, 2) => (
+            neon_build16_v8,
+            neon_gather64_v8_u2,
+            neon_codes64_v8_u2,
+            neon_codes64_v8_u2_u8,
+        ),
+        (8, 1) => (
+            neon_build16_v4,
+            neon_gather64_v4_u1,
+            neon_codes64_v4_u1,
+            neon_codes64_v4_u1_u8,
+        ),
+        (8, 2) => (
+            neon_build16_v4,
+            neon_gather64_v4_u2,
+            neon_codes64_v4_u2,
+            neon_codes64_v4_u2_u8,
+        ),
         _ => return None,
     };
     Some(TableSpec {
@@ -648,6 +697,7 @@ pub fn neon_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -762,14 +812,14 @@ unsafe fn neon_gather64<const V: usize, const U: usize>(
 /// `group == U`.
 #[target_feature(enable = "neon")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn neon_codes64<const V: usize, const U: usize>(
+unsafe fn neon_codes64<const V: usize, const U: usize, K: Copy + Into<usize>>(
     rows: usize,
     _group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const i64,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut i64,
 ) {
@@ -791,7 +841,8 @@ unsafe fn neon_codes64<const V: usize, const U: usize>(
         let mut words = stack;
         for _ in 0..depth {
             for (u, cols) in acc.iter_mut().enumerate() {
-                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                let code: usize = (*cursor[u]).into();
+                let entry = words.add((code & mask) << shift);
                 cursor[u] = cursor[u].add(1);
                 for (v, cell) in cols.iter_mut().enumerate() {
                     *cell = vaddq_s64(*cell, vld1q_s64(entry.add(v * NEON_TABLE_LANES_64)));
@@ -839,7 +890,7 @@ unsafe fn neon_build16_v4(
 
 /// Generate the four `(rows, group)` entry points for the 64-bit lane.
 macro_rules! neon_gathers64 {
-    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+    ($($g:ident, $c:ident, $c8:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
         #[doc = concat!("# Safety\n\n[`crate::table::TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
         unsafe fn $g(
             rows: usize,
@@ -869,17 +920,36 @@ macro_rules! neon_gathers64 {
         ) {
             // SAFETY: NEON is mandatory here and the caller forwarded the extents.
             unsafe {
-                neon_codes64::<$v, $u>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+                neon_codes64::<$v, $u, u16>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`crate::table::TableGatherCodesU8`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c8(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const i64,
+            codes: *const u8,
+            stride: usize,
+            lane: *mut i64,
+        ) {
+            // SAFETY: NEON is mandatory here and the caller forwarded the extents.
+            unsafe {
+                neon_codes64::<$v, $u, u8>(rows, group, depth, slab, shift, stack, codes, stride, lane)
             }
         }
     )*};
 }
 
 neon_gathers64! {
-    neon_gather64_v8_u1, neon_codes64_v8_u1, 8, 1, 16;
-    neon_gather64_v8_u2, neon_codes64_v8_u2, 8, 2, 16;
-    neon_gather64_v4_u1, neon_codes64_v4_u1, 4, 1, 8;
-    neon_gather64_v4_u2, neon_codes64_v4_u2, 4, 2, 8;
+    neon_gather64_v8_u1, neon_codes64_v8_u1, neon_codes64_v8_u1_u8, 8, 1, 16;
+    neon_gather64_v8_u2, neon_codes64_v8_u2, neon_codes64_v8_u2_u8, 8, 2, 16;
+    neon_gather64_v4_u1, neon_codes64_v4_u1, neon_codes64_v4_u1_u8, 4, 1, 8;
+    neon_gather64_v4_u2, neon_codes64_v4_u2, neon_codes64_v4_u2_u8, 4, 2, 8;
 }
 
 /// One slot of the table, at `V` registers of `i32`.
@@ -1051,14 +1121,14 @@ unsafe fn neon_gather<const V: usize, const U: usize>(
 /// `group == U`.
 #[target_feature(enable = "neon")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn neon_codes<const V: usize, const U: usize>(
+unsafe fn neon_codes<const V: usize, const U: usize, K: Copy + Into<usize>>(
     rows: usize,
     _group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const i32,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut i32,
 ) {
@@ -1080,7 +1150,8 @@ unsafe fn neon_codes<const V: usize, const U: usize>(
         let mut words = stack;
         for _ in 0..depth {
             for (u, cols) in acc.iter_mut().enumerate() {
-                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                let code: usize = (*cursor[u]).into();
+                let entry = words.add((code & mask) << shift);
                 cursor[u] = cursor[u].add(1);
                 for (v, cell) in cols.iter_mut().enumerate() {
                     *cell = vaddq_s32(*cell, vld1q_s32(entry.add(v * NEON_TABLE_LANES)));
@@ -1171,7 +1242,7 @@ unsafe fn neon_table_build_bound1_v2(
 /// Generate the four `(rows, group)` gather entry points, each a named
 /// monomorphization of one sequence.
 macro_rules! neon_gathers {
-    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+    ($($g:ident, $c:ident, $c8:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
         #[doc = concat!("# Safety\n\n[`crate::table::TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
         unsafe fn $g(
             rows: usize,
@@ -1201,15 +1272,34 @@ macro_rules! neon_gathers {
         ) {
             // SAFETY: NEON is mandatory here and the caller forwarded the extents.
             unsafe {
-                neon_codes::<$v, $u>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+                neon_codes::<$v, $u, u16>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`crate::table::TableGatherCodesU8`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c8(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const i32,
+            codes: *const u8,
+            stride: usize,
+            lane: *mut i32,
+        ) {
+            // SAFETY: NEON is mandatory here and the caller forwarded the extents.
+            unsafe {
+                neon_codes::<$v, $u, u8>(rows, group, depth, slab, shift, stack, codes, stride, lane)
             }
         }
     )*};
 }
 
 neon_gathers! {
-    neon_gather_v4_u1, neon_codes_v4_u1, 4, 1, 16;
-    neon_gather_v4_u2, neon_codes_v4_u2, 4, 2, 16;
-    neon_gather_v2_u1, neon_codes_v2_u1, 2, 1, 8;
-    neon_gather_v2_u2, neon_codes_v2_u2, 2, 2, 8;
+    neon_gather_v4_u1, neon_codes_v4_u1, neon_codes_v4_u1_u8, 4, 1, 16;
+    neon_gather_v4_u2, neon_codes_v4_u2, neon_codes_v4_u2_u8, 4, 2, 16;
+    neon_gather_v2_u1, neon_codes_v2_u1, neon_codes_v2_u1_u8, 2, 1, 8;
+    neon_gather_v2_u2, neon_codes_v2_u2, neon_codes_v2_u2_u8, 2, 2, 8;
 }

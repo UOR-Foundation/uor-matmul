@@ -828,6 +828,50 @@ where
                             );
                             compared += 1;
                         }
+
+                        // The same reduction read from a byte-wide code
+                        // stream: the same values, so `want` still stands, at
+                        // half the stream's storage. Only where a byte holds
+                        // the code, which is what the u8 spellings store.
+                        if space <= 256 {
+                            let len = (group - 1) * stride + depth;
+                            // SAFETY: the u16 leg is done with `stream`, and
+                            // the byte view covers `len` bytes of its
+                            // `len` u16s, inside the same allocation.
+                            let stream8 = unsafe {
+                                core::slice::from_raw_parts_mut(
+                                    stream.as_mut_ptr().cast::<u8>(),
+                                    len,
+                                )
+                            };
+                            for (i, cell) in stream8.iter_mut().enumerate() {
+                                *cell = ((i * 37) % space) as u8;
+                            }
+                            for i in 0..depth * group {
+                                let (slot, u) = (i / group, i % group);
+                                off[i] =
+                                    (stream8[u * stride + slot] as usize % space * rows) as u32;
+                            }
+                            for spec in available(rows, group) {
+                                let got = &mut lane_a[..group * rows];
+                                got.fill((ops.into)(sentinels.1));
+                                spec.gather_codes_u8(
+                                    depth,
+                                    slab as u32,
+                                    &stack[..depth * slab],
+                                    &stream8[..len],
+                                    stride,
+                                    got,
+                                );
+                                assert_eq!(
+                                    got, want,
+                                    "{check}: {:?} gather_codes_u8 disagrees at space {space}, \
+                                     rows {rows}, group {group}",
+                                    spec.backend
+                                );
+                                compared += 1;
+                            }
+                        }
                     }
                 }
             }

@@ -31,8 +31,8 @@ pub use codecs::{
     canonicalize, Arena, Book, Grid, Identity, Offset, Packed, Runs, Sign, SymbolCode, Ternary,
     Transcode,
 };
-pub use e8::{e8_codec, e8_table, E8_I8};
+pub use e8::{e8_codec, e8_codec_u8, e8_table, E8_I8};
 pub use matrix::CodedMatrix;
-pub use tier::{Codec, Enumerable, TierId};
+pub use tier::{Codec, Enumerable, IndexStream, TierId};
 
 pub use kappa::{KappaError, Manifest};

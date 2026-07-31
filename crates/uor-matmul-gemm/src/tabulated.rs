@@ -2710,8 +2710,10 @@ struct Sweep<'c, E: Element, Bd: Bound, C: Enumerable<E, Bd>, L> {
     codes: &'c [C::Code],
     /// The operand's own memory, when the codec says it already addresses the
     /// enumeration. Then there is no index stream to build --- the same rule
-    /// [`uor_matmul_core::MatView::row_block`] follows on the dense side.
-    stream: Option<&'c [u16]>,
+    /// [`uor_matmul_core::MatView::row_block`] follows on the dense side. The
+    /// variant names the code word's width: the gather is monomorphic, and the
+    /// dispatch on this enum is the only one the width costs.
+    stream: Option<uor_matmul_codec::IndexStream<'c>>,
     codes_per_row: usize,
     /// The block's first-occurrence map, block-relative like the lane words it
     /// indexes into, or `None` when the block repeats nothing.
@@ -2772,10 +2774,19 @@ where
         let lane = &mut carried[j * rows..(j + run) * rows];
         // One branch per group of columns, covering `depth * run * rows` adds,
         // and it is the operand's layout that decides it --- not the data, and
-        // not a heuristic. Both arms compute the same lane words, which is what
-        // `CB-08` asserts.
+        // not a heuristic. The code width is the same kind of branch: one
+        // dispatch per group, monomorphic gathers below it. Both arms compute
+        // the same lane words, which is what `CB-08` asserts.
         match arg.stream {
-            Some(stream) => one.gather_codes(
+            Some(uor_matmul_codec::IndexStream::U16(stream)) => one.gather_codes(
+                depth,
+                arg.slab as u32,
+                stack,
+                &stream[base..base + (run - 1) * cpr + depth],
+                cpr,
+                lane,
+            ),
+            Some(uor_matmul_codec::IndexStream::U8(stream)) => one.gather_codes_u8(
                 depth,
                 arg.slab as u32,
                 stack,
@@ -3089,7 +3100,8 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_codec::{
-        canonicalize, e8_codec, e8_table, Arena, Book, Grid, Packed, Sign, SymbolCode, Ternary,
+        canonicalize, e8_codec, e8_codec_u8, e8_table, Arena, Book, Grid, Packed, Sign, SymbolCode,
+        Ternary,
     };
     use uor_matmul_core::{
         as_alphabet, as_alphabet_full, as_alphabet_whole, Bnd, EncodeMode, FloatElement, Full,
@@ -4835,6 +4847,144 @@ mod tests {
         }
     }
 
+    /// One tier at two widths, run through the whole offer gate at the narrow
+    /// one and against its own wide spelling through the table and the dense
+    /// route. `CK-15`'s per-tier body.
+    fn both_widths_agree<C16, C8>(label: &str, tier16: C16, tier8: C8, m: usize, k: usize, n: usize)
+    where
+        C16: Enumerable<i8, Full<i8>, Code = u16> + Copy,
+        C8: Enumerable<i8, Full<i8>, Code = u8> + Copy,
+    {
+        let block = <C8 as uor_matmul_codec::Codec<i8, Full<i8>>>::MAX_BLOCK;
+        let bytes8: Vec<u8> = fill(n * (k / block), 0xc15, |x| x as u8);
+        let codes16: Vec<u16> = bytes8.iter().map(|&b| u16::from(b)).collect();
+
+        // The residency claim: the same stream, half the bytes.
+        assert_eq!(
+            core::mem::size_of_val(&*bytes8) * 2,
+            core::mem::size_of_val(&*codes16),
+            "{label}: the u8 stream is half the u16 stream's bytes"
+        );
+
+        // The byte stream is the index stream: borrowed, as `U8`, not built.
+        let Some(uor_matmul_codec::IndexStream::U8(borrowed)) = C8::as_index_stream(&bytes8) else {
+            panic!("{label}: a 256-entry space borrows its byte stream")
+        };
+        assert!(
+            core::ptr::eq(borrowed.as_ptr(), bytes8.as_ptr()),
+            "{label}: the stream must be borrowed, not built"
+        );
+
+        // The narrow spelling through the same every-offer gate the wide one
+        // passes (`CK-13`'s ladder, unchanged).
+        every_traversal_agrees(label, tier8, &bytes8, m, k, n);
+
+        // And the two widths against each other directly, through the table
+        // and through the dense route.
+        let a: Vec<i8> = fill(m * k, 0xa11, |x| ((x % 255) as i64 - 127) as i8);
+        let w8 = CodedMatrix::new(tier8, n, k, &bytes8).expect("the codes describe n x k");
+        let w16 = CodedMatrix::new(tier16, n, k, &codes16).expect("the codes describe n x k");
+        for traversal in [Traversal::Tabulated, Traversal::Blocked] {
+            let (from8, _) = tabulated(&w8, &a, m, n, traversal, OFFER_STEPS, OFFER_STEPS, 0);
+            let (from16, census) =
+                tabulated(&w16, &a, m, n, traversal, OFFER_STEPS, OFFER_STEPS, 0);
+            assert_eq!(
+                from8, from16,
+                "{label} {m}x{k}x{n} at {traversal:?}: the two widths of one tier must \
+                 give the same bytes"
+            );
+            if traversal == Traversal::Tabulated {
+                assert!(
+                    census.table_reads > 0,
+                    "{label} {m}x{k}x{n}: the offer was sized for a table and none was read \
+                     ({census:?})"
+                );
+            }
+        }
+    }
+
+    /// `CK-15`: the `u8` spelling of a 256-entry tier is the same codec at
+    /// half the stream width. The decode is exhaustive over the shared code
+    /// space, the residency is the literal `size_of` of the two streams, and
+    /// the gather is pinned byte for byte through the tabulated driver at the
+    /// shapes `CK-13` straddles the break-even with --- the narrow stream
+    /// gathered from the operand's own memory (`CB-08` covers the sequences
+    /// lane for lane), never re-spelled.
+    #[test]
+    fn the_u8_spelling_halves_the_stream_and_matches_byte_for_byte_ck_15() {
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book16: Book<'_, i8, Full<i8>, 256, 8> = Book::new(&table);
+        let book8: Book<'_, i8, Full<i8>, 256, 8, u8> = Book::new(&table);
+        let sign16 = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
+        let sign8 = Sign::<i8, Full<i8>, 8, u8>::new().expect("the full alphabet admits +-1");
+        let tern16 = Ternary::<i8, Full<i8>, 4>::new().expect("the full alphabet admits 0 and +-1");
+        let tern8 =
+            Ternary::<i8, Full<i8>, 4, u8>::new().expect("the full alphabet admits 0 and +-1");
+
+        // Exhaustive over the shared code space: every byte decodes the block
+        // its `u16` widening decodes.
+        let (mut want, mut got) = ([A8::ZERO; 8], [A8::ZERO; 8]);
+        for c in 0..=u8::MAX {
+            assert_eq!(
+                uor_matmul_codec::Codec::decode_into(&book16, u16::from(c), &mut want),
+                8
+            );
+            assert_eq!(uor_matmul_codec::Codec::decode_into(&book8, c, &mut got), 8);
+            assert_eq!(
+                want, got,
+                "Book<256,8> code {c:#04x} decodes differently at the two widths"
+            );
+            for t in 0..8 {
+                assert_eq!(
+                    uor_matmul_codec::Codec::decode_element(&sign16, u16::from(c), t),
+                    uor_matmul_codec::Codec::decode_element(&sign8, c, t),
+                    "Sign<8> code {c:#04x} element {t} decodes differently at the two widths"
+                );
+            }
+            for t in 0..4 {
+                assert_eq!(
+                    uor_matmul_codec::Codec::decode_element(&tern16, u16::from(c), t),
+                    uor_matmul_codec::Codec::decode_element(&tern8, c, t),
+                    "Ternary<4> code {c:#04x} element {t} decodes differently at the two widths"
+                );
+            }
+        }
+
+        // The enumeration is the same enumeration at the narrow width: the
+        // space is unchanged, and the byte is its own index.
+        assert_eq!(
+            <Book<'_, i8, Full<i8>, 256, 8, u8> as Enumerable<i8, Full<i8>>>::CODE_SPACE,
+            256
+        );
+        for c in 0..=u8::MAX {
+            assert_eq!(
+                <Book<'_, i8, Full<i8>, 256, 8, u8> as Enumerable<i8, Full<i8>>>::index_of(c),
+                c as usize
+            );
+            assert_eq!(
+                <Sign<i8, Full<i8>, 8, u8> as Enumerable<i8, Full<i8>>>::index_of(c),
+                c as usize
+            );
+            assert_eq!(
+                <Ternary<i8, Full<i8>, 4, u8> as Enumerable<i8, Full<i8>>>::index_of(c),
+                c as usize
+            );
+        }
+
+        // End to end, at the shapes the table's break-even straddles: `k` is a
+        // whole number of both tiers' blocks at each.
+        for &(m, k, n) in &[
+            (1usize, 8usize, 1usize),
+            (5, 24, 683),
+            (3, 8, 684),
+            (4, 16, 700),
+        ] {
+            both_widths_agree("Book<256,8>", book16, book8, m, k, n);
+            both_widths_agree("Sign<8>", sign16, sign8, m, k, n);
+            both_widths_agree("Ternary<4>", tern16, tern8, m, k, n);
+        }
+    }
+
     /// `CK-12` at the bound the values live in: ternary weights are a subset of
     /// `{-1, 0, +1}`, so at `Bnd<1>` the tier runs the adds-only table build
     /// end to end --- the census's multiply count is zero, the same assertion
@@ -5803,6 +5953,7 @@ mod tests {
     fn selection_is_the_derivation_and_the_gather_never_multiplies_cg_18() {
         let table = e8_table::<Full<i8>>().expect("i8 holds E8");
         let book = e8_codec(&table);
+        let book8 = e8_codec_u8(&table);
         // E8's own shape, as the codec declares it and `model/tiers.toml`
         // records it.
         let space = 256usize;
@@ -5925,6 +6076,27 @@ mod tests {
                      at n = {n}: {census:?}"
                 );
             }
+
+            // The same closed forms at the byte width (`CK-15`): a gather read
+            // is a gather read whatever the code word's width, so the census
+            // is the same census, and the bytes are the same bytes.
+            let stream8: Vec<u8> = stream.iter().map(|&c| c as u8).collect();
+            let w8 = CodedMatrix::new(book8, n, k, &stream8).expect("the codes describe n x k");
+            let (got8, census8) = tabulated(
+                &w8,
+                &a,
+                m,
+                n,
+                Traversal::Blocked,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
+            assert_eq!(got8, got, "the u8 spelling's bytes at n = {n}");
+            assert_eq!(
+                census8, census,
+                "the census is width-independent at n = {n}: {census8:?} against {census:?}"
+            );
         }
 
         // The boundary the other way: `block = 1` names one element per code,
