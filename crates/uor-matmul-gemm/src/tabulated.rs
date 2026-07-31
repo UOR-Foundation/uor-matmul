@@ -1722,11 +1722,20 @@ impl Tabulated for f64 {
 }
 
 /// The row tile, column block and stack depth one call resolves to.
+///
+/// `pub` so a measurement harness asks the planner the same question the
+/// traversal asks, once, instead of carrying a copy of the derivation that
+/// would drift from it: the chunk-extraction count the census does not see is
+/// a function of this plan and the walk's lane run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Plan {
-    rows: usize,
-    cols: usize,
-    depth: usize,
+pub struct Plan {
+    /// Rows of `A` one tile reduces together.
+    pub rows: usize,
+    /// Output columns one block of the traversal covers before `exact` is
+    /// reused.
+    pub cols: usize,
+    /// Blocks of the reduction the table stack holds at once.
+    pub depth: usize,
 }
 
 impl Plan {
@@ -1752,7 +1761,7 @@ impl Plan {
     /// Then the column block, as wide as the exact offer allows, because the
     /// build repeats once per column block. Then the depth, as deep as the lane
     /// offer and the cache allow.
-    fn choose(
+    pub fn choose(
         code_space: usize,
         shape: Shape,
         lane_bytes: usize,

@@ -278,6 +278,21 @@ symbol-tabulated:
     cargo test --release -p uor-matmul-validate --test symbol_tabulated_sweep -- \
         --ignored --nocapture --test-threads=1
 
+# CG-16 follow-on: the feasibility test for a per-op-kind cost model of the
+# symbol-table selection boundary. Fits nanosecond constants per op kind over
+# the sweep's (shape, fill) grid --- the table's counts read off its census,
+# the dense side's derived from the drivers' own arithmetic --- and reports
+# the residuals and whether a safety-margin boundary separates every measured
+# win from every measured loss. If the intervals do not overlap the output
+# says so plainly: that is the "nothing" outcome, and it is the evidence the
+# queue item closes on. Minutes, and every figure is `open`. `--release` is
+# not optional: a throughput figure from an unoptimised build is not a figure.
+#
+# The per-op-kind cost fit, measured. Minutes.
+op-cost-fit:
+    cargo test --release -p uor-matmul-validate --test op_cost_fit -- \
+        --ignored --nocapture --test-threads=1
+
 # CG-12: the sub-cubic recursion against the cubic packed walk on the
 # i32-exact lane, swept through the crossover, with the host's fastest
 # sustained product rate on the same axes and byte-identity asserted inside
