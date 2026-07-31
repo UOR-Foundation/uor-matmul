@@ -634,3 +634,9 @@ id = "CG-17"
 level = "open"
 suite = "scaling"
 statement = """Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime, per panel depth and bound, with byte-identity asserted inside the timed region"""
+
+[[id]]
+id = "CG-18"
+level = "build"
+suite = "scaling"
+statement = """The operation census is the performance gate, asserted where the clock cannot be: at shapes straddling the break-even recomputed from the sequences' own per-ISA declarations, auto-selection runs the dense route below it (`kernel_calls`, no `table_reads`) and the table at and above it; the running table's multiplies are exactly the build's `code_space * block * rows` per slot (charged as adds at bound 1, `CB-10`), and a codec the derivation declines at `block = 1` shows the dense route at every size"""

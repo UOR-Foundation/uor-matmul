@@ -82,7 +82,13 @@ impl std::error::Error for ModelError {}
 /// the sequence the full walk returns is constructed here and asserted, which
 /// is `build`. What the cache buys in nanoseconds is a measurement and stays
 /// `open` under CG-07, exactly as the row's statement says.
-const CG_BUILD_ROWS: &[&str] = &["CG-11", "CG-13"];
+///
+/// CG-18's is the same shape again, about selection: that auto-selection is
+/// the break-even derivation and that the running gather issues no multiplies
+/// beyond the build's is read off the operation census, which is a count and
+/// not a clock --- constructed here and asserted, which is `build`. What the
+/// boundary buys in nanoseconds stays `open` under CG-10.
+const CG_BUILD_ROWS: &[&str] = &["CG-11", "CG-13", "CG-18"];
 
 impl Model {
     /// Load every model file from a `model/` directory.

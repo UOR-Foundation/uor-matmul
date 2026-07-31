@@ -169,6 +169,7 @@ returns an error the model does not sanction.
 | `CG-15` | `open` | Achieved MACs per second of the float placement bridge --- the default driver's auto-selected lane against the explicit entry's richer offers, with the decline fills pricing the scalar lanes both fall to --- measured on the shapes ANALYSIS tables, with byte-identity asserted inside the timed region |
 | `CG-16` | `open` | Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes, with byte-identity asserted inside the timed region |
 | `CG-17` | `open` | Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime, per panel depth and bound, with byte-identity asserted inside the timed region |
+| `CG-18` | `build` | The operation census is the performance gate, asserted where the clock cannot be: at shapes straddling the break-even recomputed from the sequences' own per-ISA declarations, auto-selection runs the dense route below it (`kernel_calls`, no `table_reads`) and the table at and above it; the running table's multiplies are exactly the build's `code_space * block * rows` per slot (charged as adds at bound 1, `CB-10`), and a codec the derivation declines at `block = 1` shows the dense route at every size |
 
 ## `CM-*` --- Model integrity: the model is the single source of every constant
 

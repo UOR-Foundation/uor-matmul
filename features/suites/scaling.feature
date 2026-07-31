@@ -116,3 +116,10 @@ Feature: Scaling
     Given the standing sweep and its recorded seed
     When the harness measures CG-17
     Then the figure is reported and not asserted
+
+  @CG-18 @build
+  Scenario: The operation census is the performance gate: selection is the derivation at the break-even, and the running gather issues no multiplies beyond the build's
+    Given the break-even recomputed at test time from the sequences' own per-ISA declarations
+    When the suite exercises CG-18
+    Then below the break-even the census shows the dense route, and at and above it the table
+    And the table's multiplies are exactly the build's charge, and a block-1 codec is declined at every size

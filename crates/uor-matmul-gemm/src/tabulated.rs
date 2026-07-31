@@ -5773,4 +5773,188 @@ mod tests {
         };
         assert!(!tabulation_pays(256, 8, usize::MAX, rows, vnni, l1, lane));
     }
+
+    /// `CG-18`: the performance gate, counted rather than timed.
+    ///
+    /// A wall-clock gate on shared CI would measure the machine as much as the
+    /// library, which is why the CG-* figures are `open`. What is not a
+    /// measurement is the operation census: which factorization selection ran,
+    /// and what it issued. This test is the regression gate on both, and it is
+    /// the same claim twice ---
+    ///
+    /// - Selection is the derivation. The break-even is recomputed at test
+    ///   time from the declarations the host's own sequences make (the table
+    ///   spec's `lanes_per_add` against the dense tile's numbers, at the
+    ///   model's cache and blocking constants), never from a recorded one:
+    ///   the NEON row and the AVX2 row of `model/tiers.toml` differ because
+    ///   the pairs do, and a hardcoded 683 fails on aarch64 exactly as a
+    ///   hardcoded 2049 fails on x86. Below the first column width the
+    ///   predicate pays at, the census must show the dense route; at and
+    ///   above it, the table.
+    /// - The gather never multiplies. When the table runs, the census's
+    ///   multiplies are exactly the build's charge --- `code_space * block *
+    ///   rows` per slot of the stack --- and one more is the asymptotic
+    ///   regression this gate exists to catch.
+    ///
+    /// And the boundary the other way: a codec one element wide per code is
+    /// declined at every `n`, so the census shows the dense route at every
+    /// size. A decline that ever flips is the same regression read backwards.
+    #[test]
+    fn selection_is_the_derivation_and_the_gather_never_multiplies_cg_18() {
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        // E8's own shape, as the codec declares it and `model/tiers.toml`
+        // records it.
+        let space = 256usize;
+        let block = 8usize;
+        let (m, k) = (16usize, 64usize);
+        let blocks = k / block;
+        let lane = core::mem::size_of::<<i8 as Tabulated>::Lane>();
+        let l1 = blocking::L1_BYTES;
+
+        // The derivation, at the host's own pair of declarations: the table
+        // sequence the family resolves to against the dense tile it would
+        // otherwise run. This is `run_lane`'s own arithmetic, asked from the
+        // outside; a boundary computed from a recorded number would pass on
+        // one ISA and be wrong on every other.
+        let bound = <Full<i8> as Bound>::VALUE;
+        let backend = GemmOptions::default().backend;
+        let rows = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= tabulation_rows(space, l1, lane).min(m))
+            .expect("a 256-entry table fits L1 at some tile");
+        let spec = <i8 as Tabulated>::table_spec(backend, bound, rows, column_group(rows), block);
+        let steps =
+            <i8 as Tabulated>::dense_steps(backend, bound, rows, block * spec.lanes_per_add);
+        let break_even = (1..)
+            .find(|&cols| tabulation_pays(space, block, cols, rows, steps, l1, lane))
+            .expect("E8 pays at some column width on every pair this workspace ships");
+        assert!(
+            !tabulation_pays(space, block, break_even - 1, rows, steps, l1, lane),
+            "the first paying width is a boundary, not a plateau"
+        );
+
+        // Sixteen rows of activations; the values are immaterial to a count,
+        // and the product is asserted against the dense driver's bytes.
+        let a: Vec<i8> = (0..m * k).map(|i| ((i % 255) as i64 - 127) as i8).collect();
+
+        for n in [break_even - 1, break_even, break_even + 1, 2 * break_even] {
+            // Column `j` is `j` in base `space`, so no two columns repeat and
+            // the gather's closed form is exact rather than a census of a
+            // hash's luck.
+            let stream: Vec<u16> = (0..n * blocks)
+                .map(|i| {
+                    let (j, p) = (i / blocks, i % blocks);
+                    ((j / space.pow(p as u32)) % space) as u16
+                })
+                .collect();
+            let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+            let (got, census) = tabulated(
+                &w,
+                &a,
+                m,
+                n,
+                Traversal::Blocked,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
+            assert_eq!(
+                got,
+                reference(&w, &a, m, k, n),
+                "the product, whichever factorization ran ({census:?})"
+            );
+
+            // The plan the traversal resolved to, recomputed from the same
+            // offers the helper passes: the accumulator offer is the suggested
+            // one, the lane offer the suggested `i64` words re-read as lanes
+            // (`run_lane`'s own conversion).
+            let shape = Shape { m, k, n };
+            let plan = Plan::choose(
+                space,
+                shape,
+                lane,
+                suggested_tabulation::<i8, Full<i8>>(shape, space, block).max(1),
+                suggested_tabulation_lanes::<i8, Full<i8>>(shape, space, block).max(1) * 8 / lane,
+                block,
+                <i8 as Tabulated>::probe_capacity::<<i8 as Tabulated>::Lane>(bound),
+            )
+            .expect("the suggested offers admit a plan");
+            assert_eq!(
+                plan.cols, n,
+                "the offer must be wide enough that the amortization axis is `n` itself"
+            );
+            assert_eq!(plan.rows, rows, "the tile the derivation priced");
+
+            if n < break_even {
+                assert_eq!(
+                    census.table_reads, 0,
+                    "below the break-even ({break_even}) the table must not run at n = {n}: {census:?}"
+                );
+                assert!(
+                    census.kernel_calls > 0,
+                    "and the dense route is what ran at n = {n}: {census:?}"
+                );
+            } else {
+                assert!(
+                    census.table_reads > 0,
+                    "at and above the break-even ({break_even}) the table runs at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.kernel_calls, 0,
+                    "no dense route at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.table_reads,
+                    (m * n * blocks) as u64,
+                    "one read per code at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.adds, census.table_reads,
+                    "every read is exactly one add at n = {n}: {census:?}"
+                );
+                assert_eq!(
+                    census.multiplies,
+                    (space * k * m * n.div_ceil(plan.cols)) as u64,
+                    "the only multiplies are the build's (`code_space * block * rows` per slot) \
+                     at n = {n}: {census:?}"
+                );
+            }
+        }
+
+        // The boundary the other way: `block = 1` names one element per code,
+        // the derivation declines at every `n`, and the census must show the
+        // dense route at every size.
+        let i4: [A8; 16] = core::array::from_fn(|i| Alphabet::of((i as i8) - 8));
+        let grid = Grid::<i8, Full<i8>, 16>::new(&i4);
+        for n in [
+            1usize,
+            break_even - 1,
+            break_even,
+            break_even + 1,
+            2 * break_even,
+        ] {
+            let stream: Vec<u16> = fill(n * k, 0x61d, |x| (x % 16) as u16);
+            let w = CodedMatrix::new(grid, n, k, &stream).expect("the codes describe n x k");
+            let (got, census) = tabulated(
+                &w,
+                &a,
+                m,
+                n,
+                Traversal::Blocked,
+                OFFER_STEPS,
+                OFFER_STEPS,
+                0,
+            );
+            assert_eq!(got, reference(&w, &a, m, k, n));
+            assert_eq!(
+                census.table_reads, 0,
+                "a block-1 codec is declined at every n ({n}): {census:?}"
+            );
+            assert!(
+                census.kernel_calls > 0,
+                "and the dense route is what ran at n = {n}: {census:?}"
+            );
+        }
+    }
 }
