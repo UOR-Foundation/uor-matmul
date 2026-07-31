@@ -65,7 +65,10 @@ pub use kernel::{
     gemm_auto, gemm_auto_counted, gemm_packed, Kernelized, Route, RouteCensus, RouteLedger,
 };
 pub use partition::{Partition, Tile};
-pub use scratch::{suggested_accumulators, suggested_scratch, PanelSplit, Scratch};
+pub use scratch::{
+    minimum_workspace, suggested_accumulators, suggested_scratch, workspace_for_budget,
+    workspace_report, Chunking, PanelSplit, Scratch, WorkspacePlan, WorkspaceReport,
+};
 pub use strassen::{gemm_strassen, levels as strassen_levels, strassen_scratch};
 pub use tabulated::{
     gather_reference_i32, gather_reference_wide, gemm_tabulated, gemm_tabulated_counted,

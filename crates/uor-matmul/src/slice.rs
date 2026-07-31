@@ -22,12 +22,26 @@
 //!
 //! # Scratch
 //!
-//! The library never allocates (R7), so the panel buffer is the caller's here as
-//! everywhere. The offer decides which factorization of the one identity runs
-//! --- never what the bytes are (`CD-22`). Pass `&mut []` and the streaming
-//! reference runs, which needs none; pass [`suggested_scratch`] elements and the
-//! kernelized traversal the host declares runs, which is the fast one. Anything
-//! between is a narrower block at the same bytes (`CD-10`).
+//! The library never allocates (R7), so the working memory is the caller's here
+//! as everywhere. The offer decides which factorization of the one identity
+//! runs --- never what the bytes are (`CD-22`). There are two offers and two
+//! named plans ([`uor_matmul_gemm::workspace_report`] prices both, in bytes):
+//!
+//! - The **suggested** plan: [`suggested_scratch`] panel elements, no
+//!   accumulators. The panels hold the whole of `k`, so the blocked traversal
+//!   runs full-depth wherever the lane reaches --- and the panel count grows
+//!   with `k`.
+//! - The **bounded** plan: one `KC` chunk of panels plus the accumulator block
+//!   [`suggested_accumulators`] sizes. The reduction is walked in chunks and
+//!   the exact partial sums live in the accumulator block between chunks, so
+//!   the cost stops growing with `k`. [`gemm_ex_full`] and [`gemm_full`] spell
+//!   both halves; [`gemm`] and [`gemm_ex`] are the panel-only half.
+//!
+//! `&mut []` everywhere is valid and gives the same bytes (`CD-04`, `CD-10`);
+//! only the chunking changes.
+//!
+//! [`suggested_scratch`]: uor_matmul_gemm::suggested_scratch
+//! [`suggested_accumulators`]: uor_matmul_gemm::suggested_accumulators
 //!
 //! ```
 //! # use uor_matmul::{slice, Shape, suggested_scratch};
@@ -181,6 +195,86 @@ where
     AccOf<E>: ScaleExact + AbsorbPrior<O>,
 {
     gemm_ex(m, k, n, 1, a, k, b, n, 0, c, n, scratch)
+}
+
+/// `C := alpha * A * B + beta * C` over integer operands, exactly, with both
+/// offers spelled.
+///
+/// The same call as [`gemm_ex`] with the working memory cut in two: `panels`
+/// is the panel buffer, `accumulators` a block of exact accumulators. The two
+/// are independent offers --- either may be empty --- and together they name
+/// the two plans [`uor_matmul_gemm::workspace_report`] distinguishes: the
+/// *suggested* plan (the full-depth panels [`suggested_scratch`] sizes, no
+/// accumulators) and the *bounded* plan (one `KC` chunk of panels plus the
+/// accumulator block [`suggested_accumulators`] sizes), whose cost does not
+/// grow with `k`. The bytes are identical on every rung between none and both
+/// (`CD-04`, `CD-10`); only the chunking changes.
+///
+/// [`suggested_scratch`]: uor_matmul_gemm::suggested_scratch
+/// [`suggested_accumulators`]: uor_matmul_gemm::suggested_accumulators
+///
+/// # Errors and panics
+///
+/// As [`gemm_ex`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_ex_full<E, O>(
+    m: usize,
+    k: usize,
+    n: usize,
+    alpha: i64,
+    a: &[E],
+    lda: usize,
+    b: &[E],
+    ldb: usize,
+    beta: i64,
+    c: &mut [O],
+    ldc: usize,
+    panels: &mut [E],
+    accumulators: &mut [AccOf<E>],
+) -> Result<(), NotAProduct>
+where
+    E: Kernelized,
+    O: Element + EncodeFrom<AccOf<E>> + Copy,
+    AccOf<E>: ScaleExact + AbsorbPrior<O>,
+{
+    let (a_len, b_len, c_len) = (a.len(), b.len(), c.len());
+    let av = MatView::new(as_alphabet_full(a), m, k, ld(lda))
+        .unwrap_or_else(|| does_not_fit(Operand::A, m, k, lda, a_len));
+    let bv = MatView::new(as_alphabet_full(b), k, n, ld(ldb))
+        .unwrap_or_else(|| does_not_fit(Operand::B, k, n, ldb, b_len));
+    let cv = MatViewMut::new(c, m, n, ld(ldc))
+        .unwrap_or_else(|| does_not_fit(Operand::C, m, n, ldc, c_len));
+    let mut triple = Triple::new(av, bv, cv)?;
+    view_gemm(
+        &mut triple,
+        &Linear { alpha, beta },
+        GemmOptions::default(),
+        &mut Scratch::with_accumulators(as_alphabet_full_mut(panels), accumulators),
+    );
+    Ok(())
+}
+
+/// `C := A * B` over contiguous row-major integer operands, with both offers.
+///
+/// [`gemm_ex_full`] at `alpha = 1`, `beta = 0`, and the implied leading
+/// dimensions.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_full<E, O>(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: &[E],
+    b: &[E],
+    c: &mut [O],
+    panels: &mut [E],
+    accumulators: &mut [AccOf<E>],
+) -> Result<(), NotAProduct>
+where
+    E: Kernelized,
+    O: Element + EncodeFrom<AccOf<E>> + Copy,
+    AccOf<E>: ScaleExact + AbsorbPrior<O>,
+{
+    gemm_ex_full(m, k, n, 1, a, k, b, n, 0, c, n, panels, accumulators)
 }
 
 /// `C := alpha * A * B + beta * C` over float operands, exactly.

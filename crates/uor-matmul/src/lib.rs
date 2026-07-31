@@ -55,6 +55,13 @@
 //! offer including none (`CD-22`). The reference traversal itself stays
 //! directly callable as [`driver::gemm`] (R6).
 //!
+//! The offer is working memory, and it comes in two halves: panels, and exact
+//! accumulators. [`workspace_report`] prices both halves in bytes for a shape
+//! and names the two plans --- the *suggested* full-depth panels, and the
+//! *bounded* plan whose accumulator block keeps the cost from growing with
+//! `k`. [`slice::gemm_ex_full`] spells both halves; [`workspace_for_budget`]
+//! names the plan a byte budget lands.
+//!
 //! # Non-goals
 //!
 //! See `README.md`, which states N1--N5 normatively. In brief: this library
@@ -125,12 +132,13 @@ pub use uor_matmul_core::{
 pub use uor_matmul_gemm::{
     coded_gemm, gemm_auto, gemm_auto as gemm, gemm_auto_counted, gemm_collapsed, gemm_float,
     gemm_float_bridged, gemm_float_packed, gemm_packed, gemm_strassen, gemm_tabulated,
-    gemm_tabulated_counted, strassen_levels, strassen_scratch, suggested_accumulators,
-    suggested_bridge_scaled, suggested_collapse_index, suggested_collapse_rows,
-    suggested_float_panels, suggested_scratch, suggested_tabulation, tabulation_fits,
-    tabulation_pays, tabulation_rows, Bias, Census, CodedTriple, Collapse, Epilogue, GemmOptions,
-    Kernelized, Ledger, Linear, Partition, PlaceAt, Route, RouteCensus, RouteLedger, Scaled,
-    Scratch, SignedPlace, Table, TabulatedTriple, Tile,
+    gemm_tabulated_counted, minimum_workspace, strassen_levels, strassen_scratch,
+    suggested_accumulators, suggested_bridge_scaled, suggested_collapse_index,
+    suggested_collapse_rows, suggested_float_panels, suggested_scratch, suggested_tabulation,
+    tabulation_fits, tabulation_pays, tabulation_rows, workspace_for_budget, workspace_report,
+    Bias, Census, Chunking, CodedTriple, Collapse, Epilogue, GemmOptions, Kernelized, Ledger,
+    Linear, Partition, PlaceAt, Route, RouteCensus, RouteLedger, Scaled, Scratch, SignedPlace,
+    Table, TabulatedTriple, Tile, WorkspacePlan, WorkspaceReport,
 };
 pub use uor_matmul_kernels as kernels;
 

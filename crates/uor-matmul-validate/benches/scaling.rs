@@ -18,8 +18,9 @@
 #![allow(missing_docs)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
+use std::mem::size_of;
 use uor_matmul::prelude::*;
-use uor_matmul::{suggested_float_panels, suggested_scratch, Shape};
+use uor_matmul::{suggested_float_panels, suggested_scratch, workspace_report, Shape};
 use uor_matmul_core::{Alphabet, EncodeMode, Full, PackedCode};
 use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 
@@ -287,5 +288,75 @@ fn public_api(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, scaling_report, vs_oracles, public_api);
+/// The Phase B workspace matrix: the public two-offer call at each plan the
+/// report names --- no offer, the suggested full-depth plan, and the bounded
+/// depth-chunked plan --- over deep `k` shapes and one large square. The row
+/// label carries the peak caller-provided bytes, because that is the number
+/// this phase is about: the bounded plan's label does not grow with `k`, and
+/// the suggested one's does. Byte-equality is asserted inside each timed
+/// closure, as everywhere in this file.
+fn workspace_plans(c: &mut Criterion) {
+    const SHAPES: [(usize, usize, usize); 4] = [
+        (1, 1_048_576, 1),
+        (8, 262_144, 8),
+        (16, 400_000, 16),
+        (256, 256, 256),
+    ];
+    let acc_bytes = size_of::<uor_matmul::AccOf<i8>>();
+
+    let mut group = c.benchmark_group("workspace");
+    for &(m, k, n) in &SHAPES {
+        let shape = Shape { m, k, n };
+        let a = vec![1i8; m * k];
+        let b = vec![1i8; k * n];
+        let report = workspace_report::<i8, Full<i8>>(shape);
+        let offers = [
+            ("none", 0usize, 0usize),
+            (
+                "suggested",
+                report.suggested.panels,
+                report.suggested.accumulators / acc_bytes,
+            ),
+            (
+                "bounded",
+                report.bounded.panels,
+                report.bounded.accumulators / acc_bytes,
+            ),
+        ];
+        for (plan, panels, accs) in offers {
+            let bytes = panels + accs * acc_bytes;
+            group.bench_function(format!("{plan}[{bytes}B]/{m}x{k}x{n}"), |bench| {
+                let mut out = vec![0i32; m * n];
+                let mut panels_buf = vec![0i8; panels];
+                let mut acc_buf = vec![0i128; accs];
+                bench.iter(|| {
+                    uor_matmul::slice::gemm_full(
+                        m,
+                        k,
+                        n,
+                        &a,
+                        &b,
+                        &mut out,
+                        &mut panels_buf,
+                        &mut acc_buf,
+                    )
+                    .expect("the product exists");
+                    assert!(
+                        out.iter().all(|&v| v == k as i32),
+                        "the timed call must be correct"
+                    );
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    scaling_report,
+    vs_oracles,
+    public_api,
+    workspace_plans
+);
 criterion_main!(benches);

@@ -4,7 +4,9 @@
 //! only the traversal differs. There is no scratch error in the library's error
 //! surface, because there is no scratch condition to report.
 
-use uor_matmul_core::{AccOf, Accumulator, Alphabet, Bound, Element, Shape};
+use core::mem::size_of;
+
+use uor_matmul_core::{AccOf, Accumulator, Alphabet, Backend, Bound, Element, Shape};
 
 /// A panel offer cut in two. Named because the pair is a return type and
 /// `(&mut [Alphabet<E, Bd>], &mut [Alphabet<E, Bd>])` written out says nothing the
@@ -231,4 +233,229 @@ pub fn suggested_accumulators(shape: Shape) -> usize {
     };
     let recursion = crate::strassen::wants(shape).1.min(usize::MAX as u128) as usize;
     chunked.max(recursion)
+}
+
+// ---------------------------------------------------------------------------
+// The workspace queries, in bytes
+// ---------------------------------------------------------------------------
+
+/// Which traversal an offer buys at a shape.
+///
+/// The names are the traversal's, not a quality tier's: every one computes the
+/// same bytes (`CD-01`, `CD-04`), and which runs is decided by the offer and
+/// the declarations, never the data (R13).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Chunking {
+    /// The panels hold the whole depth: one pass over the packed panels, the
+    /// partial sums in registers. What [`suggested_scratch`] buys wherever the
+    /// lane reaches the depth.
+    FullDepth,
+    /// The reduction is walked in chunks of the named depth, a whole number of
+    /// the kernel's `k`-groups; the exact partial sums live in the accumulator
+    /// offer between chunks. Bounded independent of `k` --- this is the plan
+    /// whose cost stops growing with the depth.
+    Chunked {
+        /// The chunk depth the offer pays for.
+        chunk: usize,
+    },
+    /// One packed group of panel room: both panels repacked for every output
+    /// tile. The smallest offer that buys a packed traversal at all.
+    PerTile,
+    /// Nothing packed: the streaming reference. Zero offer, the same bytes
+    /// (S13).
+    Streaming,
+}
+
+impl core::fmt::Display for Chunking {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::FullDepth => f.write_str("full-depth"),
+            Self::Chunked { chunk } => write!(f, "chunked at {chunk}"),
+            Self::PerTile => f.write_str("per-tile"),
+            Self::Streaming => f.write_str("streaming"),
+        }
+    }
+}
+
+/// One workspace plan, in bytes, with the traversal it buys.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WorkspacePlan {
+    /// Panel room, in bytes --- `Alphabet<E, Bd>` elements, per call.
+    pub panels: usize,
+    /// Exact-accumulator room, in bytes --- `AccOf<E>` elements, per call,
+    /// shared across depth chunks: the block is zeroed per output block, not
+    /// per chunk, so one block serves a reduction of any depth.
+    pub accumulators: usize,
+    /// `panels + accumulators`.
+    pub total: usize,
+    /// The traversal this offer buys.
+    pub chunking: Chunking,
+}
+
+/// What a shape wants, in bytes: the suggested plan and the bounded one.
+///
+/// The tabulated traversal's offers --- table and lanes --- are a separate
+/// offer family with its own queries ([`crate::suggested_tabulation`] and its
+/// siblings) and are not restated here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WorkspaceReport {
+    /// The suggested offer: [`suggested_scratch`] panels plus
+    /// [`suggested_accumulators`] accumulators. Full-depth where the lane
+    /// reaches the reduction; the panel term grows with `k`.
+    pub suggested: WorkspacePlan,
+    /// The largest plan whose cost does not grow with `k`: one chunk of the
+    /// declared blocking (`KC`) of panels plus the accumulator block. Where
+    /// `k <= KC` chunking never engages and this *is* the suggested plan's
+    /// cubic half --- the recursion's wants, where a lane admits one, remain
+    /// the suggested offer's business (`CD-21`).
+    pub bounded: WorkspacePlan,
+}
+
+/// The chunking label the driver's own arithmetic gives an offer.
+///
+/// This is `run()`'s decision read off the same terms it reads --- the
+/// resolved tile spec, the lane depth at the declared bound, the declared
+/// blocking --- with one deliberate blindness: the strides. A layout the
+/// driver can borrow wholesale (a contiguous reduce panel over the whole
+/// extent) runs with no panels at all, and the query cannot see that from a
+/// [`Shape`], so the label is the plan the offer always buys, never the best a
+/// lucky layout might.
+fn chunking_of<E>(
+    shape: Shape,
+    spec: &uor_matmul_kernels::KernelSpec<E, E::Exact>,
+    lane: usize,
+    panels: usize,
+    accumulators: usize,
+) -> Chunking
+where
+    E: crate::kernel::Kernelized,
+{
+    use uor_matmul_core::generated::blocking;
+
+    let (mr, nr) = (spec.mr, spec.nr);
+    let per_step = mr + nr;
+    let pad_to = spec.k_group.max(1);
+
+    // `run`'s full-depth question, with the borrow conservatively false.
+    let kpad = shape.k.div_ceil(pad_to) * pad_to;
+    let kc = (panels / per_step).min(lane) / pad_to * pad_to;
+    let budget = panels.checked_div(kpad).unwrap_or(0);
+    if shape.k <= lane && shape.k <= kc && budget >= per_step {
+        return Chunking::FullDepth;
+    }
+    // `run`'s chunked gate, and `run_chunked_depth`'s chunk arithmetic.
+    if accumulators >= mr * nr && panels >= per_step * pad_to && shape.k > pad_to {
+        let chunk = blocking::KC.min(lane).min(panels / per_step).max(1) / pad_to * pad_to;
+        // `kc == 0` is the driver's decline to the streaming traversal ---
+        // written against the same arithmetic coincidence it guards there.
+        return if chunk == 0 {
+            Chunking::Streaming
+        } else {
+            Chunking::Chunked { chunk }
+        };
+    }
+    if panels >= per_step * pad_to {
+        return Chunking::PerTile;
+    }
+    Chunking::Streaming
+}
+
+/// What the driver would use at this shape, in bytes, term by term.
+///
+/// A *query*, like [`suggested_scratch`]: nothing here is a requirement, and
+/// every offer from none to the suggested total returns the same bytes
+/// (`CD-04`, `CD-10`). The terms are derived from the model's blocking
+/// constants and the resolved kernel's own declarations --- `KC`, `MC`, `NC`,
+/// the tile's `mr`, `nr` and `k_group`, and the lane's depth at the declared
+/// bound --- not restated numerals.
+pub fn workspace_report<E, Bd>(shape: Shape) -> WorkspaceReport
+where
+    E: crate::kernel::Kernelized,
+    Bd: Bound,
+{
+    use uor_matmul_core::generated::blocking;
+
+    let spec = E::exact_spec(Backend::Auto, Bd::VALUE, shape.m);
+    let lane = spec.lane_depth(Bd::VALUE);
+    let e = size_of::<Alphabet<E, Bd>>();
+    let a = size_of::<AccOf<E>>();
+
+    let plan = |panels: usize, accumulators: usize| WorkspacePlan {
+        panels: panels.saturating_mul(e), // R3-ok: a workspace size question
+        accumulators: accumulators.saturating_mul(a), // R3-ok: a workspace size question
+        total: panels
+            .saturating_mul(e) // R3-ok: a workspace size question
+            .saturating_add(accumulators.saturating_mul(a)), // R3-ok: a workspace size question
+        chunking: chunking_of::<E>(shape, &spec, lane, panels, accumulators),
+    };
+
+    let block = shape
+        .m
+        .min(blocking::MC)
+        .saturating_add(shape.n.min(blocking::NC)); // R3-ok: a workspace size question
+    let bounded_panels = shape.k.min(blocking::KC).saturating_mul(block); // R3-ok: a workspace size question
+    let bounded_accumulators = if shape.k > blocking::KC {
+        shape
+            .m
+            .min(blocking::MC)
+            .saturating_mul(shape.n.min(blocking::NC)) // R3-ok: a workspace size question
+    } else {
+        0
+    };
+
+    WorkspaceReport {
+        suggested: plan(suggested_scratch(shape), suggested_accumulators(shape)),
+        bounded: plan(bounded_panels, bounded_accumulators),
+    }
+}
+
+/// The smallest offer that buys a packed traversal at all: one packed group
+/// of panel room, in bytes.
+///
+/// Below it the streaming reference runs, at the same bytes (S13).
+pub fn minimum_workspace<E, Bd>(shape: Shape) -> WorkspacePlan
+where
+    E: crate::kernel::Kernelized,
+    Bd: Bound,
+{
+    let spec = E::exact_spec(Backend::Auto, Bd::VALUE, shape.m);
+    let lane = spec.lane_depth(Bd::VALUE);
+    let e = size_of::<Alphabet<E, Bd>>();
+    let panels = (spec.mr + spec.nr).saturating_mul(spec.k_group.max(1)); // R3-ok: a workspace size question
+    WorkspacePlan {
+        panels: panels.saturating_mul(e), // R3-ok: a workspace size question
+        accumulators: 0,
+        total: panels.saturating_mul(e), // R3-ok: a workspace size question
+        chunking: chunking_of::<E>(shape, &spec, lane, panels, 0),
+    }
+}
+
+/// The largest plan inside a caller's byte budget, and the factorization it
+/// lands.
+///
+/// The ladder is the report's named plans: the suggested plan whole, then the
+/// bounded one, then one packed group, then the streaming reference at no
+/// offer. A budget between two rungs buys the lower one --- offering the rest
+/// is never wrong, only idle, and the bytes do not move either way (`CD-10`).
+pub fn workspace_for_budget<E, Bd>(shape: Shape, bytes: usize) -> WorkspacePlan
+where
+    E: crate::kernel::Kernelized,
+    Bd: Bound,
+{
+    let report = workspace_report::<E, Bd>(shape);
+    let minimum = minimum_workspace::<E, Bd>(shape);
+    if bytes >= report.suggested.total {
+        report.suggested
+    } else if bytes >= report.bounded.total {
+        report.bounded
+    } else if bytes >= minimum.total {
+        minimum
+    } else {
+        WorkspacePlan {
+            panels: 0,
+            accumulators: 0,
+            total: 0,
+            chunking: Chunking::Streaming,
+        }
+    }
 }
