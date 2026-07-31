@@ -294,6 +294,18 @@ bridge-sweep:
     cargo test --release -p uor-matmul-validate --test bridge_sweep -- \
         --ignored --nocapture --test-threads=1
 
+# The block-16 pricing sweep: `Book<256, 16>` against `Book<256, 8>`, in both
+# code widths, on the tabulation-sweep shapes and through the break-even, with
+# byte-identity asserted inside every timed run. Minutes, and every figure is
+# `open`. `--release` is not optional: a throughput figure from an unoptimised
+# build is not a figure. `BLOCK_SWEEP_CHECK=1` is the correctness dry run ---
+# one iteration, the census ratios asserted.
+#
+# The block-16 pricing sweep, measured. Minutes.
+block-sweep:
+    cargo test --release -p uor-matmul-validate --test block_sweep -- \
+        --ignored --nocapture --test-threads=1
+
 # CG-16: the symbol tabulated traversal in the scaled integer lane against the
 # float placement bridge, the dense float driver, and the oracle, on gemv,
 # skinny, and tabulation-sweep shapes, with byte-identity asserted inside

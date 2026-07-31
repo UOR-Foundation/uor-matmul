@@ -545,3 +545,38 @@ a quiet window** --- the development host was loaded when this landed and a
 contaminated measurement is not a result. No figure is claimed anywhere in
 the tree; if the verdict is a decline, the wire comes out and this entry
 becomes the record.
+
+**The block-16 pricing sweep (harness registered; measurement pending).** A
+`Book<256, 16>` tier is expressible today (Phase C's width-parameterized
+`Book`), and the density argument in `model/tiers.toml` says a longer
+codeword improves everything except the codebook: stored codes halve per
+decoded weight (0.125 B/w at `u16`, 0.0625 at `u8`), table reads per decoded
+weight halve, build products stay `code_space * k` per column block, and the
+break-even moves down. One part of that argument needed checking before any
+of it: whether the slab scales with block. It does not --- a slab is
+`slab_codes * rows` lane words whatever the codeword length (one entry per
+addressable code per row of the tile), so the residency question is the
+stack's `depth` slots, and the plan the driver resolves is identical at
+block 8 and block 16 on every shape in the grid. What doubles is the build
+products per slab and the codebook; what halves is the slots.
+
+The harness is `crates/uor-matmul-validate/tests/block_sweep.rs`, run with
+`just block-sweep` (release, single-threaded, `open` figures): four
+configurations (both block widths in both code widths) over the
+tabulation-sweep shapes, printing stored bytes per decoded weight, codebook
+bytes, the resolved plan with the term that binds its depth, slab and stack
+bytes, build / gather / end-to-end times, the census, and the break-even
+recomputed from the host's own declarations. The 16-wide book is built so
+both blocks price the same product (`book16[c] = book8[c] ++ book8[(c + 128)
+% 256]` with streams to match), and byte-identity between the two blocks'
+outputs is asserted inside every timed run. The correctness dry run
+(`BLOCK_SWEEP_CHECK=1`) passed on the development host: the predicted census
+ratios held exactly --- reads halve, build products constant, codebook
+decodes double, plans identical, and the `u8` census equal to the `u16` one
+field for field --- and the derived break-even moved from `n = 2049` at
+block 8 to `n = 1366` at block 16, the direction the density argument
+predicts. **The timed run is pending a quiet window** --- the host was
+loaded when the harness landed, and a contaminated measurement is not a
+result. No figure is recorded; no tier is added to `model/tiers.toml`, and
+none ships until the measured numbers say the longer codeword wins by enough
+to matter.
