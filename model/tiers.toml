@@ -36,29 +36,29 @@ honesty = "build"
 
 [[tier]]
 id = "Book"
-rust = "Book<'a, E, Bd, N, BLK>"
-code = "index"
+rust = "Book<'a, E, Bd, N, BLK, K = u16>"
+code = "index (u16, or u8 where N <= 256)"
 block = "BLK"
 table = "borrowed [[Alphabet<E, Bd>; BLK]; N]"
-note = "any codebook; E8 is Book<256, 8>"
+note = "any codebook; E8 is Book<256, 8>, and Book<256, 8, u8> (e8_codec_u8) stores the index stream at one byte a code --- 0.125 B/decoded weight, the CG-03 figure --- against the u16 spelling's two (CK-15)"
 honesty = "build"
 
 [[tier]]
 id = "Sign"
-rust = "Sign<E, Bd, BLK>"
-code = "u16"
+rust = "Sign<E, Bd, BLK, K = u16>"
+code = "K (u16, or u8 where BLK <= 8)"
 block = "BLK"
 table = "none: the codebook is the constant {-1, +1}"
-note = "weights in {-1, +1}, one bit per element. Bit t of the code is element t; set is +1, clear is -1, low bit first (normative, CK-03's order). The same decode as the Packed<Grid<2>,8> spelling (CK-11) with the code *being* the index, so as_index_stream always answers Some and the traversal builds nothing."
+note = "weights in {-1, +1}, one bit per element. Bit t of the code is element t; set is +1, clear is -1, low bit first (normative, CK-03's order). The same decode as the Packed<Grid<2>,8> spelling (CK-11) with the code *being* the index, so as_index_stream always answers Some and the traversal builds nothing. The u8 spelling stores the stream at half the bytes (CK-15)."
 honesty = "build"
 
 [[tier]]
 id = "Ternary"
-rust = "Ternary<E, Bd, BLK>"
-code = "u16"
+rust = "Ternary<E, Bd, BLK, K = u16>"
+code = "K (u16, or u8 where BLK <= 4)"
 block = "BLK"
 table = "none: the codebook is the constant {-1, 0, +1}"
-note = "weights in {-1, 0, +1}, two bits per element. Digit t of the code (bits 2t and 2t+1) is element t: 0 is -1, 1 is 0, 2 is +1, and 3 --- the dead digit no ternary encoder emits --- decodes to 0, low digit first (normative, the order Packed reads its sub-codes in, CK-03). The same decode as the Packed<Grid<4>,4> spelling (CK-12) with the code *being* the index, so as_index_stream always answers Some and the traversal builds nothing."
+note = "weights in {-1, 0, +1}, two bits per element. Digit t of the code (bits 2t and 2t+1) is element t: 0 is -1, 1 is 0, 2 is +1, and 3 --- the dead digit no ternary encoder emits --- decodes to 0, low digit first (normative, the order Packed reads its sub-codes in, CK-03). The same decode as the Packed<Grid<4>,4> spelling (CK-12) with the code *being* the index, so as_index_stream always answers Some and the traversal builds nothing. The u8 spelling stores the stream at half the bytes (CK-15)."
 honesty = "build"
 
 [[tier]]

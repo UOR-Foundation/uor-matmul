@@ -10,7 +10,7 @@ use core::marker::PhantomData;
 use bytemuck::TransparentWrapper as _;
 use uor_matmul_core::{Alphabet, Bound, FloatElement, IntegerElement, Whole};
 
-use crate::tier::{Codec, Enumerable, TierId};
+use crate::tier::{Codec, Enumerable, IndexStream, TierId};
 
 /// How many codes a `u16`-indexed table can actually be reached with.
 ///
@@ -23,6 +23,10 @@ const U16_CODES: usize = u16::MAX as usize + 1;
 /// output bound, and the element type. Invariant in none of them, so the marker
 /// is a function pointer rather than a `PhantomData<T>`.
 type OffsetMarker<BdIn, BdOut, E> = PhantomData<fn() -> (BdIn, BdOut, E)>;
+
+/// The same marker for the width-parameterized constant-table tiers: the
+/// element, the bound, and the code width, none of them stored.
+type TierMarker<E, Bd, K> = PhantomData<fn() -> (E, Bd, K)>;
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -119,12 +123,14 @@ impl<E: IntegerElement, Bd: Bound, const N: usize> Enumerable<E, Bd> for Grid<'_
         (code as usize) % Self::CODE_SPACE.max(1)
     }
 
-    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[u16]) -> Option<IndexStream<'_>> {
         // `index_of` is `% CODE_SPACE`, which is `& (CODE_SPACE - 1)` exactly
         // when the space is a power of two --- and then the stored `u16` is the
         // index, masked. At any other entry count the two differ and the
         // traversal builds the stream, at the same bytes.
-        Self::CODE_SPACE.is_power_of_two().then_some(codes)
+        Self::CODE_SPACE
+            .is_power_of_two()
+            .then_some(IndexStream::U16(codes))
     }
 }
 
@@ -259,14 +265,29 @@ where
 /// E8 is `Book<256, 8>`. Nothing privileges that shape; `BLK` and `N` are
 /// parameters, and no quality claim attaches to any table (N3).
 #[derive(Clone, Copy, Debug)]
-pub struct Book<'a, E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> {
+pub struct Book<
+    'a,
+    E: IntegerElement,
+    Bd: Bound,
+    const N: usize,
+    const BLK: usize,
+    K: SymbolCode = u16,
+> {
     table: &'a [[Alphabet<E, Bd>; BLK]; N],
+    // The width is a parameter of the decode, not of the table: the struct
+    // stores nothing of it.
+    _code: PhantomData<fn() -> K>,
 }
 
-impl<'a, E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Book<'a, E, Bd, N, BLK> {
+impl<'a, E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize, K: SymbolCode>
+    Book<'a, E, Bd, N, BLK, K>
+{
     /// Borrow a codebook. On an embedded target this is a pointer into flash.
     pub const fn new(table: &'a [[Alphabet<E, Bd>; BLK]; N]) -> Self {
-        Self { table }
+        Self {
+            table,
+            _code: PhantomData,
+        }
     }
 
     /// The codebook.
@@ -275,42 +296,42 @@ impl<'a, E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Book<'a
     }
 }
 
-impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Codec<E, Bd>
-    for Book<'_, E, Bd, N, BLK>
+impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize, K: SymbolCode> Codec<E, Bd>
+    for Book<'_, E, Bd, N, BLK, K>
 {
-    type Code = u16;
+    type Code = K;
     const MAX_BLOCK: usize = BLK;
     const TIER: TierId = TierId::Book;
 
     fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd> {
-        self.table[(code as usize) % N][i % BLK]
+        self.table[K::index(code) % N][i % BLK]
     }
 
     fn decode_into(&self, code: Self::Code, out: &mut [Alphabet<E, Bd>]) -> usize {
-        out[..BLK].copy_from_slice(&self.table[(code as usize) % N]);
+        out[..BLK].copy_from_slice(&self.table[K::index(code) % N]);
         BLK
     }
 }
 
-impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Enumerable<E, Bd>
-    for Book<'_, E, Bd, N, BLK>
+impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize, K: SymbolCode>
+    Enumerable<E, Bd> for Book<'_, E, Bd, N, BLK, K>
 {
-    const CODE_SPACE: usize = if N < U16_CODES { N } else { U16_CODES };
+    const CODE_SPACE: usize = if N < K::CODES { N } else { K::CODES };
 
     fn code_at(index: usize) -> Self::Code {
-        (index % Self::CODE_SPACE.max(1)) as u16
+        K::at(index % Self::CODE_SPACE.max(1))
     }
 
     fn index_of(code: Self::Code) -> usize {
-        (code as usize) % Self::CODE_SPACE.max(1)
+        K::index(code) % Self::CODE_SPACE.max(1)
     }
 
-    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[K]) -> Option<IndexStream<'_>> {
         // `index_of` is `% CODE_SPACE`, which is `& (CODE_SPACE - 1)` exactly
-        // when the space is a power of two --- and then the stored `u16` is the
-        // index, masked. At any other entry count the two differ and the
-        // traversal builds the stream, at the same bytes.
-        Self::CODE_SPACE.is_power_of_two().then_some(codes)
+        // when the space is a power of two --- and then the stored code, at
+        // either width, is the index, masked. At any other entry count the two
+        // differ and the traversal builds the stream, at the same bytes.
+        K::index_stream(codes, Self::CODE_SPACE)
     }
 }
 
@@ -338,11 +359,11 @@ impl<E: IntegerElement, Bd: Bound, const N: usize, const BLK: usize> Enumerable<
 /// the encoder side is out of tree, and this decode is the whole contract
 /// with it.
 #[derive(Clone, Copy, Debug)]
-pub struct Sign<E: IntegerElement, Bd: Bound, const BLK: usize> {
-    _marker: PhantomData<fn() -> (E, Bd)>,
+pub struct Sign<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode = u16> {
+    _marker: TierMarker<E, Bd, K>,
 }
 
-impl<E: IntegerElement, Bd: Bound, const BLK: usize> Sign<E, Bd, BLK> {
+impl<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode> Sign<E, Bd, BLK, K> {
     /// The one non-existence check: an alphabet that does not admit `+-1` has
     /// no sign codec. Decided at construction, before any arithmetic, like
     /// every other non-existence in this library (C6).
@@ -356,17 +377,19 @@ impl<E: IntegerElement, Bd: Bound, const BLK: usize> Sign<E, Bd, BLK> {
     }
 }
 
-impl<E: IntegerElement, Bd: Bound, const BLK: usize> Codec<E, Bd> for Sign<E, Bd, BLK> {
-    type Code = u16;
+impl<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode> Codec<E, Bd>
+    for Sign<E, Bd, BLK, K>
+{
+    type Code = K;
     const MAX_BLOCK: usize = BLK;
     const TIER: TierId = TierId::Sign;
 
     fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd> {
         let bit = i % BLK;
-        // The `bit < 16` guard keeps the shift total past the code type's own
-        // width: at `BLK > 16` a code holds no bit for those positions, and
-        // they decode to `-1` like any clear bit.
-        let v = if bit < u16::BITS as usize && (code >> bit) & 1 == 1 {
+        // The guard keeps the shift total past the code type's own width: at
+        // `BLK > K::BITS` a code holds no bit for those positions, and they
+        // decode to `-1` like any clear bit --- the same rule at either width.
+        let v = if bit < K::BITS as usize && (K::index(code) >> bit) & 1 == 1 {
             E::ONE
         } else {
             // `0 - 1`: exact for every integer element, never a wrap.
@@ -379,28 +402,35 @@ impl<E: IntegerElement, Bd: Bound, const BLK: usize> Codec<E, Bd> for Sign<E, Bd
     }
 }
 
-impl<E: IntegerElement, Bd: Bound, const BLK: usize> Enumerable<E, Bd> for Sign<E, Bd, BLK> {
-    // Every bit pattern of the block, capped at what a `u16` can address ---
-    // the same honesty about the code type's width as `Grid`'s.
-    const CODE_SPACE: usize = if BLK < 16 { 1 << BLK } else { U16_CODES };
+impl<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode> Enumerable<E, Bd>
+    for Sign<E, Bd, BLK, K>
+{
+    // Every bit pattern of the block, capped at what the code type can
+    // address --- the same honesty about the code type's width as `Grid`'s.
+    const CODE_SPACE: usize = if BLK < K::BITS as usize {
+        1 << BLK
+    } else {
+        K::CODES
+    };
 
     fn code_at(index: usize) -> Self::Code {
-        (index % Self::CODE_SPACE.max(1)) as u16
+        K::at(index % Self::CODE_SPACE.max(1))
     }
 
     fn index_of(code: Self::Code) -> usize {
         // A mask, not a remainder: the space is a power of two at every block
         // width, and the stored code *is* the index, which is the whole point
         // of the tier.
-        (code as usize) & (Self::CODE_SPACE - 1)
+        K::index(code) & (Self::CODE_SPACE - 1)
     }
 
-    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[K]) -> Option<IndexStream<'_>> {
         // Always --- not at the power-of-two entry counts, as `Grid` and
         // `Book` answer, but at every block width, because the code addresses
-        // the enumeration unconditionally. This is the answer `Packed` can
-        // never give, and the gap this tier exists to close.
-        Some(codes)
+        // the enumeration unconditionally: the space is a power of two at
+        // every `BLK`. This is the answer `Packed` can never give, and the gap
+        // this tier exists to close.
+        K::index_stream(codes, Self::CODE_SPACE)
     }
 }
 
@@ -429,11 +459,11 @@ impl<E: IntegerElement, Bd: Bound, const BLK: usize> Enumerable<E, Bd> for Sign<
 /// the same byte value. The convention is normative: the encoder side is out
 /// of tree, and this decode is the whole contract with it.
 #[derive(Clone, Copy, Debug)]
-pub struct Ternary<E: IntegerElement, Bd: Bound, const BLK: usize> {
-    _marker: PhantomData<fn() -> (E, Bd)>,
+pub struct Ternary<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode = u16> {
+    _marker: TierMarker<E, Bd, K>,
 }
 
-impl<E: IntegerElement, Bd: Bound, const BLK: usize> Ternary<E, Bd, BLK> {
+impl<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode> Ternary<E, Bd, BLK, K> {
     /// The one non-existence check: an alphabet that does not admit `+-1` has
     /// no ternary codec --- `0` is in every alphabet. Decided at construction,
     /// before any arithmetic, like every other non-existence in this library
@@ -448,18 +478,21 @@ impl<E: IntegerElement, Bd: Bound, const BLK: usize> Ternary<E, Bd, BLK> {
     }
 }
 
-impl<E: IntegerElement, Bd: Bound, const BLK: usize> Codec<E, Bd> for Ternary<E, Bd, BLK> {
-    type Code = u16;
+impl<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode> Codec<E, Bd>
+    for Ternary<E, Bd, BLK, K>
+{
+    type Code = K;
     const MAX_BLOCK: usize = BLK;
     const TIER: TierId = TierId::Ternary;
 
     fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<E, Bd> {
         let shift = 2 * (i % BLK);
-        // The `shift < 16` guard keeps the shift total past the code type's own
-        // width: at `BLK > 8` a code holds no digit for those positions, and
-        // they decode to `-1` like any zero field.
-        let digit = if shift < u16::BITS as usize {
-            (code >> shift) & 3
+        // The guard keeps the shift total past the code type's own width: at
+        // `BLK > K::BITS / 2` a code holds no digit for those positions, and
+        // they decode to `-1` like any zero field --- the same rule at either
+        // width.
+        let digit = if shift < K::BITS as usize {
+            (K::index(code) >> shift) & 3
         } else {
             0
         };
@@ -478,29 +511,34 @@ impl<E: IntegerElement, Bd: Bound, const BLK: usize> Codec<E, Bd> for Ternary<E,
     }
 }
 
-impl<E: IntegerElement, Bd: Bound, const BLK: usize> Enumerable<E, Bd> for Ternary<E, Bd, BLK> {
-    // 4^BLK, capped at what a `u16` can address (BLK = 8 already fills it) ---
-    // a power of two at every block width, the same honesty about the code
-    // type's width as `Grid`'s, and what makes the index stream unconditional
-    // below.
-    const CODE_SPACE: usize = if BLK < 8 { 1 << (2 * BLK) } else { U16_CODES };
+impl<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode> Enumerable<E, Bd>
+    for Ternary<E, Bd, BLK, K>
+{
+    // 4^BLK, capped at what the code type can address --- a power of two at
+    // every block width, the same honesty about the code type's width as
+    // `Grid`'s, and what makes the index stream unconditional below.
+    const CODE_SPACE: usize = if 2 * BLK < K::BITS as usize {
+        1 << (2 * BLK)
+    } else {
+        K::CODES
+    };
 
     fn code_at(index: usize) -> Self::Code {
-        (index % Self::CODE_SPACE.max(1)) as u16
+        K::at(index % Self::CODE_SPACE.max(1))
     }
 
     fn index_of(code: Self::Code) -> usize {
         // A mask, not a remainder: the space is a power of two at every block
         // width, and the stored code *is* the index, which is the whole point
         // of the tier.
-        (code as usize) & (Self::CODE_SPACE - 1)
+        K::index(code) & (Self::CODE_SPACE - 1)
     }
 
-    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[K]) -> Option<IndexStream<'_>> {
         // Always, as `Sign` answers and for one reason more: 4^BLK is 2^(2BLK),
         // so the code addresses the enumeration unconditionally. This is the
         // answer `Packed` can never give, and the gap this tier exists to close.
-        Some(codes)
+        K::index_stream(codes, Self::CODE_SPACE)
     }
 }
 
@@ -593,7 +631,7 @@ where
         C::index_of(code)
     }
 
-    fn as_index_stream(codes: &[Self::Code]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[Self::Code]) -> Option<IndexStream<'_>> {
         // A zero point relabels the image, never the code space, so whether the
         // code addresses the enumeration is the inner codec's answer unchanged.
         C::as_index_stream(codes)
@@ -778,18 +816,24 @@ where
 // Arena
 // ---------------------------------------------------------------------------
 
-/// A code type a borrowed symbol table can be addressed by.
+/// A code type whose own order is an enumeration's order.
 ///
 /// `u16` and `u8`, and nothing else: the width is a fact about the artifact's
-/// storage, and the two widths are the two residencies a one-element block has
-/// a use for --- two bytes a symbol where the dense float is four, and one.
+/// storage, and the two widths are the two residencies a codec has a use for
+/// --- two bytes a symbol, and one where the code space fits a byte.
 ///
-/// The trait exists so that [`Arena`] is one tier at two widths rather than
-/// two tiers with one decode: the table read, the enumeration, and the
-/// canonicalization are written once, against these methods.
+/// The trait exists so that [`Arena`], [`Book`], [`Sign`] and [`Ternary`] are
+/// one tier at two widths rather than two tiers with one decode: the table
+/// read, the bit fields, the enumeration, and the canonicalization are written
+/// once, against these methods.
 pub trait SymbolCode: Copy + Send + Sync + 'static {
     /// How many distinct codes the type holds.
     const CODES: usize;
+
+    /// The type's own width in bits, for the shift guard a bit-field decode
+    /// totals against: a position past it reads as a clear field, at either
+    /// width.
+    const BITS: u32;
 
     /// The code at `index` in the type's own order. Total below `CODES`.
     fn at(index: usize) -> Self;
@@ -797,19 +841,21 @@ pub trait SymbolCode: Copy + Send + Sync + 'static {
     /// Where `code` sits in the type's own order.
     fn index(code: Self) -> usize;
 
-    /// The stored code stream read as the `u16` index stream it already is,
-    /// when it is one.
+    /// The stored code stream read as the index stream it already is, when it
+    /// is one.
     ///
-    /// The tabulated traversal's gather reads a `*const u16`, so a `u16`
-    /// stream at a power-of-two code space *is* the index stream and is
-    /// borrowed, and a `u8` stream never is: the narrow spelling answers
-    /// `None` and the traversal re-spells the codes as indices, at the same
-    /// bytes.
-    fn index_stream(codes: &[Self], space: usize) -> Option<&[u16]>;
+    /// `index_of` is `% space` at every tier here, which is `& (space - 1)`
+    /// exactly when the space is a power of two --- and then the stored code,
+    /// masked, *is* the index, at either width, and the traversal borrows it.
+    /// At any other entry count the two differ and the traversal builds the
+    /// stream, at the same bytes. The variant names the width: a byte stream
+    /// answers [`IndexStream::U8`], and the gather dispatches on it once.
+    fn index_stream(codes: &[Self], space: usize) -> Option<IndexStream<'_>>;
 }
 
 impl SymbolCode for u16 {
     const CODES: usize = U16_CODES;
+    const BITS: u32 = u16::BITS;
 
     fn at(index: usize) -> Self {
         // `index < CODE_SPACE <= CODES` at every call site, so the cast is the
@@ -821,17 +867,14 @@ impl SymbolCode for u16 {
         code as usize
     }
 
-    fn index_stream(codes: &[Self], space: usize) -> Option<&[u16]> {
-        // `index_of` is `% space`, which is `& (space - 1)` exactly when the
-        // space is a power of two --- and then the stored `u16` is the index,
-        // masked. At any other entry count the two differ and the traversal
-        // builds the stream, at the same bytes.
-        space.is_power_of_two().then_some(codes)
+    fn index_stream(codes: &[Self], space: usize) -> Option<IndexStream<'_>> {
+        space.is_power_of_two().then_some(IndexStream::U16(codes))
     }
 }
 
 impl SymbolCode for u8 {
     const CODES: usize = u8::MAX as usize + 1;
+    const BITS: u32 = u8::BITS;
 
     fn at(index: usize) -> Self {
         // As `u16`'s: total on the enumeration's own domain.
@@ -842,12 +885,8 @@ impl SymbolCode for u8 {
         code as usize
     }
 
-    fn index_stream(_: &[Self], _: usize) -> Option<&[u16]> {
-        // A `u8` stream is not the `u16` index stream whatever the space, so
-        // there is nothing to borrow. The gather's index type being `u16` is
-        // the reason, and re-spelling costs the traversal one pass it was
-        // already paying for any code space that is not a power of two.
-        None
+    fn index_stream(codes: &[Self], space: usize) -> Option<IndexStream<'_>> {
+        space.is_power_of_two().then_some(IndexStream::U8(codes))
     }
 }
 
@@ -867,9 +906,10 @@ impl SymbolCode for u8 {
 ///
 /// The code width is a parameter, `u16` by default and `u8` where the
 /// artifact's distinct patterns fit a byte (`CK-14`): one type at two
-/// residencies, not two tiers. A `u8` stream is never the index stream the
-/// tabulated gather borrows --- the gather's index type is `u16` --- so the
-/// narrow spelling re-spells its codes as indices, at the same bytes.
+/// residencies, not two tiers. At a power-of-two code space the stored code
+/// masked *is* the index at either width, so both spellings answer their own
+/// stream to the tabulated gather --- `IndexStream::U16` and
+/// `IndexStream::U8` --- and the traversal builds nothing.
 #[derive(Clone, Copy, Debug)]
 pub struct Arena<'a, E: FloatElement, const N: usize, K: SymbolCode = u16> {
     table: &'a [Alphabet<E, Whole<E>>; N],
@@ -923,7 +963,7 @@ impl<E: FloatElement, const N: usize, K: SymbolCode> Enumerable<E, Whole<E>>
         K::index(code) % Self::CODE_SPACE.max(1)
     }
 
-    fn as_index_stream(codes: &[K]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[K]) -> Option<IndexStream<'_>> {
         K::index_stream(codes, Self::CODE_SPACE)
     }
 }

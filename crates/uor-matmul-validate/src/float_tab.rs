@@ -16,7 +16,7 @@
 //! `IntegerElement` to `f32` --- the shipped `Book` is generic over integer
 //! alphabets only, and a float's bound is [`Whole`].
 
-use uor_matmul_codec::{Codec, Enumerable, TierId};
+use uor_matmul_codec::{Codec, Enumerable, IndexStream, TierId};
 use uor_matmul_core::{Alphabet, Whole};
 
 /// A codebook of `S` codewords of `BLK` `f32` symbols each, `Code = u16`.
@@ -104,10 +104,10 @@ impl<const S: usize, const BLK: usize> Enumerable<f32, Whole<f32>> for FloatBook
         (code as usize) & (S - 1)
     }
 
-    fn as_index_stream(codes: &[u16]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[u16]) -> Option<IndexStream<'_>> {
         // `index_of` *is* the mask, so the stored stream already addresses
         // the enumeration and there is nothing to build.
-        Some(codes)
+        Some(IndexStream::U16(codes))
     }
 }
 

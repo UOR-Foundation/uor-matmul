@@ -312,6 +312,19 @@ pub fn e8_codec<Bd: Bound>(
     Book::new(table)
 }
 
+/// The same codebook, at the byte width.
+///
+/// 256 entries fit a byte, so this spelling stores its index stream at one
+/// byte per codeword --- 0.125 bytes per decoded weight, the residency
+/// `CG-03` records --- against the `u16` spelling's two. The same decode, the
+/// same enumeration, and a gather that reads the operand's own bytes: `CK-15`
+/// pins all three byte for byte.
+pub fn e8_codec_u8<Bd: Bound>(
+    table: &[[Alphabet<i8, Bd>; BLOCK]; ENTRIES],
+) -> Book<'_, i8, Bd, ENTRIES, BLOCK, u8> {
+    Book::new(table)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -606,6 +606,12 @@ suite = "codec"
 statement = """The arena tier at a `u8` code width decodes the same alphabet stream as its `u16` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its codebook is borrowed, never owned"""
 
 [[id]]
+id = "CK-15"
+level = "build"
+suite = "codec"
+statement = """The `u8` spelling of a 256-entry tier --- `Book<256, 8>`, `Sign<8>`, `Ternary<4>` --- stores half the bytes of its `u16` spelling, decodes the same alphabet stream, and its index stream is the code stream, byte-identical through the tabulated driver at every shape and every offer, with the gather dispatched once per call between monomorphic u8 and u16 sequences"""
+
+[[id]]
 id = "CD-18"
 level = "build"
 suite = "determinism"

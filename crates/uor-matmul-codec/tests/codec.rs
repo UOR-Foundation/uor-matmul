@@ -6,8 +6,8 @@
 //! upstream and says nothing about any binary in this repository (§2, R4).
 
 use uor_matmul_codec::{
-    canonicalize, Arena, Book, Codec, CodedMatrix, Enumerable, Grid, Identity, Offset, Packed,
-    Runs, Sign, Ternary, Transcode,
+    canonicalize, Arena, Book, Codec, CodedMatrix, Enumerable, Grid, Identity, IndexStream, Offset,
+    Packed, Runs, Sign, Ternary, Transcode,
 };
 use uor_matmul_core::{
     as_alphabet_full, as_alphabet_whole, dot_ref, Alphabet, Bnd, Bound, Element, FloatElement,
@@ -481,17 +481,25 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
                 C::CODE_SPACE.is_power_of_two(),
                 "{name}: a code addresses the enumeration only if the space is 2^j"
             );
+            let len = match stream {
+                IndexStream::U8(codes) => codes.len(),
+                IndexStream::U16(codes) => codes.len(),
+            };
             assert_eq!(
-                stream.len(),
+                len,
                 sample.len(),
                 "{name}: the index stream is the code stream, not a copy of part of it"
             );
             let mask = C::CODE_SPACE - 1;
             every_code(&mut |code| {
-                let word = C::as_index_stream(core::slice::from_ref(&code))
-                    .expect("the answer does not depend on the slice")[0];
+                let word = match C::as_index_stream(core::slice::from_ref(&code))
+                    .expect("the answer does not depend on the slice")
+                {
+                    IndexStream::U8(codes) => codes[0] as usize,
+                    IndexStream::U16(codes) => codes[0] as usize,
+                };
                 assert_eq!(
-                    word as usize & mask,
+                    word & mask,
                     C::index_of(code),
                     "{name}: the stored code does not address the enumeration"
                 );
@@ -556,11 +564,26 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
         every_code(f)
     });
 
+    // The same three tiers at the byte width (`CK-15`): the laws are about the
+    // enumeration, and the enumeration is the same one a byte shorter.
+    let book8: Book<'_, i8, Full<i8>, 256, 8, u8> = Book::new(&e8);
+    laws("Book<256, 8, u8>", &book8, 8, |f: &mut dyn FnMut(u8)| {
+        for c in 0..=u8::MAX {
+            f(c)
+        }
+    });
+
     // The sign tier. Its code *is* the index at every block width, so the
     // third law's `Some` arm is the whole point of the tier rather than a
     // power-of-two coincidence.
     let sign = Sign::<i8, Full<i8>, 8>::new().expect("the full alphabet admits +-1");
     laws("Sign<8>", &sign, 8, |f: &mut dyn FnMut(u16)| every_code(f));
+    let sign8 = Sign::<i8, Full<i8>, 8, u8>::new().expect("the full alphabet admits +-1");
+    laws("Sign<8, u8>", &sign8, 8, |f: &mut dyn FnMut(u8)| {
+        for c in 0..=u8::MAX {
+            f(c)
+        }
+    });
 
     // The ternary tier, for the same reason one level up: a base-4 digit
     // stream is a power-of-two code space (4^BLK = 2^(2BLK)), so its code is
@@ -568,6 +591,13 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
     let ternary = Ternary::<i8, Full<i8>, 4>::new().expect("the full alphabet admits 0 and +-1");
     laws("Ternary<4>", &ternary, 4, |f: &mut dyn FnMut(u16)| {
         every_code(f)
+    });
+    let ternary8 =
+        Ternary::<i8, Full<i8>, 4, u8>::new().expect("the full alphabet admits 0 and +-1");
+    laws("Ternary<4, u8>", &ternary8, 4, |f: &mut dyn FnMut(u8)| {
+        for c in 0..=u8::MAX {
+            f(c)
+        }
     });
 
     // A zero point relabels the image and not the code space, so the offset
@@ -709,12 +739,25 @@ fn the_u8_arena_decodes_the_u16_spellings_stream_ck_14() {
         256
     );
 
-    // A `u8` stream is not the `u16` index stream the tabulated gather reads,
-    // so the narrow spelling never borrows it: the traversal re-spells the
-    // codes as indices and reads the same table entries, at the same bytes.
+    // A space that is not a power of two still builds the stream: `% 6` is not
+    // `& 5`, so there is nothing to borrow, at either width.
     let codes: Vec<u8> = (0..=u8::MAX).collect();
     assert!(
         <Arena<'_, f32, 6, u8> as Enumerable<f32, Whole<f32>>>::as_index_stream(&codes).is_none()
+    );
+
+    // At a power-of-two space the byte stream *is* the index stream --- the
+    // masked code addresses the enumeration at this width too --- and the
+    // traversal borrows it as `U8` rather than re-spelling it.
+    let byte_codes: Vec<u8> = (0..8).collect();
+    let Some(IndexStream::U8(borrowed)) =
+        <Arena<'_, f32, 8, u8> as Enumerable<f32, Whole<f32>>>::as_index_stream(&byte_codes)
+    else {
+        panic!("a power-of-two space borrows the byte stream");
+    };
+    assert!(
+        core::ptr::eq(borrowed.as_ptr(), byte_codes.as_ptr()),
+        "the stream must be borrowed, not built"
     );
 }
 
@@ -746,8 +789,9 @@ fn the_sign_tier_decodes_the_compositions_stream_ck_11() {
 
     // The index stream is the code stream: the same memory, not a copy of it.
     let codes: Vec<u16> = (0..256).collect();
-    let stream = Sign::<i8, Full<i8>, 8>::as_index_stream(&codes)
-        .expect("a Sign code addresses the enumeration");
+    let Some(IndexStream::U16(stream)) = Sign::<i8, Full<i8>, 8>::as_index_stream(&codes) else {
+        panic!("a Sign code addresses the enumeration, as a u16 stream")
+    };
     assert!(
         core::ptr::eq(stream.as_ptr(), codes.as_ptr()),
         "the stream must be borrowed, not built"
@@ -806,8 +850,9 @@ fn the_ternary_tier_decodes_the_compositions_stream_ck_12() {
 
     // The index stream is the code stream: the same memory, not a copy of it.
     let codes: Vec<u16> = (0..256).collect();
-    let stream = Ternary::<i8, Full<i8>, 4>::as_index_stream(&codes)
-        .expect("a Ternary code addresses the enumeration");
+    let Some(IndexStream::U16(stream)) = Ternary::<i8, Full<i8>, 4>::as_index_stream(&codes) else {
+        panic!("a Ternary code addresses the enumeration, as a u16 stream")
+    };
     assert!(
         core::ptr::eq(stream.as_ptr(), codes.as_ptr()),
         "the stream must be borrowed, not built"

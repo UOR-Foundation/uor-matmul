@@ -83,3 +83,9 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-14
     Then the claim holds byte for byte
+
+  @CK-15 @build
+  Scenario: The u8 spelling of a 256-entry tier stores half the bytes of the u16 spelling, decodes the same alphabet stream, and is byte-identical through the tabulated driver at every shape and offer, with the gather dispatched once per call between monomorphic u8 and u16 sequences
+    Given the standing corpus
+    When the suite exercises CK-15
+    Then the claim holds byte for byte

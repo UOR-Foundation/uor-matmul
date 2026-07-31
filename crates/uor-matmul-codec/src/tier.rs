@@ -16,9 +16,10 @@ use uor_matmul_core::{Alphabet, Bound, Element};
 pub trait Codec<E: Element, Bd: Bound>: Send + Sync {
     /// The stored code type.
     ///
-    /// Any `Copy` type: `i8` for identity, `u8` for a nibble pair or an E8
-    /// index, `u16` for a 65536-entry codebook. The library carries no
-    /// hardcoded code width.
+    /// Any `Copy` type: `i8` for identity, `u8` for a nibble pair or a
+    /// 256-entry codebook's index --- which is what `Book<256, 8, u8>` stores
+    /// --- `u16` for a 65536-entry codebook. The library carries no hardcoded
+    /// code width.
     type Code: Copy + Send + Sync + 'static;
 
     /// The most alphabet elements one code can produce.
@@ -99,6 +100,22 @@ pub trait Codec<E: Element, Bd: Bound>: Send + Sync {
     }
 }
 
+/// A stored code stream, read as the index stream it already is.
+///
+/// The two widths a borrowed stream can be. The tabulated gather is
+/// monomorphic in the code word --- one dispatch at the traversal's boundary,
+/// never a per-code branch --- so the stream names its width in the type
+/// rather than asking the gather to discover it. Both variants make the same
+/// claim: `index_of(c) == (c as usize) & (CODE_SPACE - 1)` for every `c`,
+/// which `CK-09` asserts of any codec that answers `Some`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IndexStream<'a> {
+    /// A byte stream at a code space no wider than 256.
+    U8(&'a [u8]),
+    /// A two-byte stream, the original width.
+    U16(&'a [u16]),
+}
+
 /// A codec whose code space can be enumerated.
 ///
 /// [`Codec`] decodes *from* a code. That is the whole of what a
@@ -164,6 +181,9 @@ pub trait Enumerable<E: Element, Bd: Bound>: Codec<E, Bd> {
     /// needs `CODE_SPACE` to be a power of two and the enumeration to be the
     /// code type's own order. `None` otherwise --- a [`crate::Packed`] byte, for
     /// one, whose index is a mixed-radix decomposition of it and not the byte.
+    /// The variant names the code stream's own width: a codec whose codes are
+    /// bytes answers [`IndexStream::U8`], and the traversal dispatches on it
+    /// once, not per code.
     ///
     /// This is the same rule [`uor_matmul_core::MatView::row_block`] follows on
     /// the dense side: *borrow when the layout already holds what is wanted,
@@ -176,7 +196,7 @@ pub trait Enumerable<E: Element, Bd: Bound>: Codec<E, Bd> {
     /// The default is `None`, so a codec says nothing by saying nothing and the
     /// traversal builds the stream. `CK-09` asserts the claim of any codec that
     /// does answer `Some`.
-    fn as_index_stream(codes: &[Self::Code]) -> Option<&[u16]> {
+    fn as_index_stream(codes: &[Self::Code]) -> Option<IndexStream<'_>> {
         let _ = codes;
         None
     }

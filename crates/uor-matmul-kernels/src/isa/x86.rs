@@ -5,7 +5,9 @@ use core::arch::x86_64::*;
 use uor_matmul_core::Backend;
 
 use crate::spec::{Factorization, KernelSpec, LaneLayout};
-use crate::table::{Mod32, TableBuild, TableGather, TableGatherCodes, TableSpec};
+use crate::table::{
+    Mod32, TableBuild, TableGather, TableGatherCodes, TableGatherCodesU8, TableSpec,
+};
 
 crate::tile_fits!(6, 16);
 crate::tile_fits!(1, 16);
@@ -1603,27 +1605,36 @@ const A2_TABLE_LANES: usize = 8;
 /// the driver walks are `16, 8, 4, 2, 1`, so the top two take this and the rest
 /// take the reference at a tile too narrow for a register to help.
 pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    type Trio = (TableBuild<i8, i32>, TableGather<i32>, TableGatherCodes<i32>);
-    let (build, gather, gather_codes): Trio = match (rows, group) {
+    type Quartet = (
+        TableBuild<i8, i32>,
+        TableGather<i32>,
+        TableGatherCodes<i32>,
+        TableGatherCodesU8<i32>,
+    );
+    let (build, gather, gather_codes, gather_codes_u8): Quartet = match (rows, group) {
         (16, 1) => (
             avx2_table_build_i8_v2,
             avx2_table_gather_i32_v2_u1,
             avx2_codes_v2_u1,
+            avx2_codes_v2_u1_u8,
         ),
         (16, 2) => (
             avx2_table_build_i8_v2,
             avx2_table_gather_i32_v2_u2,
             avx2_codes_v2_u2,
+            avx2_codes_v2_u2_u8,
         ),
         (8, 1) => (
             avx2_table_build_i8_v1,
             avx2_table_gather_i32_v1_u1,
             avx2_codes_v1_u1,
+            avx2_codes_v1_u1_u8,
         ),
         (8, 2) => (
             avx2_table_build_i8_v1,
             avx2_table_gather_i32_v1_u2,
             avx2_codes_v1_u2,
+            avx2_codes_v1_u2_u8,
         ),
         _ => return None,
     };
@@ -1647,6 +1658,7 @@ pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -1657,27 +1669,36 @@ pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
 /// build differs: at bound 1 the `madd` has nothing left to do, and the slot
 /// is a sign mask, an XOR and a subtract (`CB-10`).
 pub fn avx2_table_i8_i32_bound1(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    type Trio = (TableBuild<i8, i32>, TableGather<i32>, TableGatherCodes<i32>);
-    let (build, gather, gather_codes): Trio = match (rows, group) {
+    type Quartet = (
+        TableBuild<i8, i32>,
+        TableGather<i32>,
+        TableGatherCodes<i32>,
+        TableGatherCodesU8<i32>,
+    );
+    let (build, gather, gather_codes, gather_codes_u8): Quartet = match (rows, group) {
         (16, 1) => (
             avx2_table_build_i8_bound1_v2,
             avx2_table_gather_i32_v2_u1,
             avx2_codes_v2_u1,
+            avx2_codes_v2_u1_u8,
         ),
         (16, 2) => (
             avx2_table_build_i8_bound1_v2,
             avx2_table_gather_i32_v2_u2,
             avx2_codes_v2_u2,
+            avx2_codes_v2_u2_u8,
         ),
         (8, 1) => (
             avx2_table_build_i8_bound1_v1,
             avx2_table_gather_i32_v1_u1,
             avx2_codes_v1_u1,
+            avx2_codes_v1_u1_u8,
         ),
         (8, 2) => (
             avx2_table_build_i8_bound1_v1,
             avx2_table_gather_i32_v1_u2,
             avx2_codes_v1_u2,
+            avx2_codes_v1_u2_u8,
         ),
         _ => return None,
     };
@@ -1700,6 +1721,7 @@ pub fn avx2_table_i8_i32_bound1(rows: usize, group: usize) -> Option<TableSpec<i
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -1712,16 +1734,37 @@ const A2_TABLE_LANES_64: usize = 4;
 /// 32-bit lane holds an entry of any block longer than one. Four to a register
 /// rather than eight, which is the whole of the difference.
 pub fn avx2_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i64>> {
-    type Trio16 = (
+    type Quartet16 = (
         TableBuild<i16, i64>,
         TableGather<i64>,
         TableGatherCodes<i64>,
+        TableGatherCodesU8<i64>,
     );
-    let (build, gather, gather_codes): Trio16 = match (rows, group) {
-        (16, 1) => (a2_build16_v4, a2_gather64_v4_u1, a2_codes64_v4_u1),
-        (16, 2) => (a2_build16_v4, a2_gather64_v4_u2, a2_codes64_v4_u2),
-        (8, 1) => (a2_build16_v2, a2_gather64_v2_u1, a2_codes64_v2_u1),
-        (8, 2) => (a2_build16_v2, a2_gather64_v2_u2, a2_codes64_v2_u2),
+    let (build, gather, gather_codes, gather_codes_u8): Quartet16 = match (rows, group) {
+        (16, 1) => (
+            a2_build16_v4,
+            a2_gather64_v4_u1,
+            a2_codes64_v4_u1,
+            a2_codes64_v4_u1_u8,
+        ),
+        (16, 2) => (
+            a2_build16_v4,
+            a2_gather64_v4_u2,
+            a2_codes64_v4_u2,
+            a2_codes64_v4_u2_u8,
+        ),
+        (8, 1) => (
+            a2_build16_v2,
+            a2_gather64_v2_u1,
+            a2_codes64_v2_u1,
+            a2_codes64_v2_u1_u8,
+        ),
+        (8, 2) => (
+            a2_build16_v2,
+            a2_gather64_v2_u2,
+            a2_codes64_v2_u2,
+            a2_codes64_v2_u2_u8,
+        ),
         _ => return None,
     };
     Some(TableSpec {
@@ -1742,6 +1785,7 @@ pub fn avx2_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -1864,14 +1908,14 @@ unsafe fn avx2_gather64<const V: usize, const U: usize>(
 /// [`TableGatherCodes`]'s contract, with `rows == V * 4` and `group == U`.
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn avx2_codes64<const V: usize, const U: usize>(
+unsafe fn avx2_codes64<const V: usize, const U: usize, K: Copy + Into<usize>>(
     rows: usize,
     _group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const i64,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut i64,
 ) {
@@ -1895,7 +1939,8 @@ unsafe fn avx2_codes64<const V: usize, const U: usize>(
         let mut words = stack;
         for _ in 0..depth {
             for (u, cols) in acc.iter_mut().enumerate() {
-                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                let code: usize = (*cursor[u]).into();
+                let entry = words.add((code & mask) << shift);
                 cursor[u] = cursor[u].add(1);
                 for (v, cell) in cols.iter_mut().enumerate() {
                     *cell = _mm256_add_epi64(
@@ -1949,7 +1994,7 @@ unsafe fn a2_build16_v2(
 
 /// Generate the four `(rows, group)` entry points for the 64-bit lane.
 macro_rules! avx2_gathers64 {
-    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+    ($($g:ident, $c:ident, $c8:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
         #[doc = concat!("# Safety\n\n[`TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
         unsafe fn $g(
             rows: usize,
@@ -1979,17 +2024,36 @@ macro_rules! avx2_gathers64 {
         ) {
             // SAFETY: the caller established `avx2` and forwarded the extents.
             unsafe {
-                avx2_codes64::<$v, $u>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+                avx2_codes64::<$v, $u, u16>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`TableGatherCodesU8`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c8(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const i64,
+            codes: *const u8,
+            stride: usize,
+            lane: *mut i64,
+        ) {
+            // SAFETY: the caller established `avx2` and forwarded the extents.
+            unsafe {
+                avx2_codes64::<$v, $u, u8>(rows, group, depth, slab, shift, stack, codes, stride, lane)
             }
         }
     )*};
 }
 
 avx2_gathers64! {
-    a2_gather64_v4_u1, a2_codes64_v4_u1, 4, 1, 16;
-    a2_gather64_v4_u2, a2_codes64_v4_u2, 4, 2, 16;
-    a2_gather64_v2_u1, a2_codes64_v2_u1, 2, 1, 8;
-    a2_gather64_v2_u2, a2_codes64_v2_u2, 2, 2, 8;
+    a2_gather64_v4_u1, a2_codes64_v4_u1, a2_codes64_v4_u1_u8, 4, 1, 16;
+    a2_gather64_v4_u2, a2_codes64_v4_u2, a2_codes64_v4_u2_u8, 4, 2, 16;
+    a2_gather64_v2_u1, a2_codes64_v2_u1, a2_codes64_v2_u1_u8, 2, 1, 8;
+    a2_gather64_v2_u2, a2_codes64_v2_u2, a2_codes64_v2_u2_u8, 2, 2, 8;
 }
 
 /// One column group over a run of slots, at `V` registers of `i32` per column.
@@ -2294,14 +2358,14 @@ unsafe fn avx2_table_build_i8_bound1_v1(
 /// [`TableGatherCodes`]'s contract, with `rows == V * 8` and `group == U`.
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn avx2_table_gather_codes<const V: usize, const U: usize>(
+unsafe fn avx2_table_gather_codes<const V: usize, const U: usize, K: Copy + Into<usize>>(
     rows: usize,
     _group: usize,
     depth: usize,
     slab: usize,
     shift: u32,
     stack: *const i32,
-    codes: *const u16,
+    codes: *const K,
     stride: usize,
     lane: *mut i32,
 ) {
@@ -2326,7 +2390,8 @@ unsafe fn avx2_table_gather_codes<const V: usize, const U: usize>(
         let mut words = stack;
         for _ in 0..depth {
             for (u, cols) in acc.iter_mut().enumerate() {
-                let entry = words.add((*cursor[u] as usize & mask) << shift);
+                let code: usize = (*cursor[u]).into();
+                let entry = words.add((code & mask) << shift);
                 cursor[u] = cursor[u].add(1);
                 for (v, cell) in cols.iter_mut().enumerate() {
                     *cell = _mm256_add_epi32(
@@ -2365,7 +2430,9 @@ unsafe fn avx2_codes_v2_u1(
 ) {
     // SAFETY: the caller established `avx2` and forwarded every extent.
     unsafe {
-        avx2_table_gather_codes::<2, 1>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+        avx2_table_gather_codes::<2, 1, u16>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
     }
 }
 
@@ -2386,7 +2453,9 @@ unsafe fn avx2_codes_v2_u2(
 ) {
     // SAFETY: the caller established `avx2` and forwarded every extent.
     unsafe {
-        avx2_table_gather_codes::<2, 2>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+        avx2_table_gather_codes::<2, 2, u16>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
     }
 }
 
@@ -2407,7 +2476,9 @@ unsafe fn avx2_codes_v1_u1(
 ) {
     // SAFETY: the caller established `avx2` and forwarded every extent.
     unsafe {
-        avx2_table_gather_codes::<1, 1>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+        avx2_table_gather_codes::<1, 1, u16>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
     }
 }
 
@@ -2428,7 +2499,101 @@ unsafe fn avx2_codes_v1_u2(
 ) {
     // SAFETY: the caller established `avx2` and forwarded every extent.
     unsafe {
-        avx2_table_gather_codes::<1, 2>(rows, group, depth, slab, shift, stack, codes, stride, lane)
+        avx2_table_gather_codes::<1, 2, u16>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodesU8`]'s contract at `rows == 16`, `group == 1`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v2_u1_u8(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u8,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<2, 1, u8>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodesU8`]'s contract at `rows == 16`, `group == 2`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v2_u2_u8(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u8,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<2, 2, u8>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodesU8`]'s contract at `rows == 8`, `group == 1`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v1_u1_u8(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u8,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<1, 1, u8>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
+    }
+}
+
+/// # Safety
+///
+/// [`TableGatherCodesU8`]'s contract at `rows == 8`, `group == 2`.
+#[allow(clippy::too_many_arguments)]
+unsafe fn avx2_codes_v1_u2_u8(
+    rows: usize,
+    group: usize,
+    depth: usize,
+    slab: usize,
+    shift: u32,
+    stack: *const i32,
+    codes: *const u8,
+    stride: usize,
+    lane: *mut i32,
+) {
+    // SAFETY: the caller established `avx2` and forwarded every extent.
+    unsafe {
+        avx2_table_gather_codes::<1, 2, u8>(
+            rows, group, depth, slab, shift, stack, codes, stride, lane,
+        )
     }
 }
 
@@ -2446,31 +2611,36 @@ unsafe fn avx2_codes_v1_u2(
 /// Admissibility is the driver's question (`CU-08`); this only answers what
 /// the host can run.
 pub fn avx2_table_i32_mod32(rows: usize, group: usize) -> Option<TableSpec<i32, Mod32>> {
-    type TrioMod = (
+    type QuartetMod = (
         TableBuild<i32, Mod32>,
         TableGather<Mod32>,
         TableGatherCodes<Mod32>,
+        TableGatherCodesU8<Mod32>,
     );
-    let (build, gather, gather_codes): TrioMod = match (rows, group) {
+    let (build, gather, gather_codes, gather_codes_u8): QuartetMod = match (rows, group) {
         (16, 1) => (
             a2_build_mod32_v2,
             a2_gather_mod32_v2_u1,
             a2_codes_mod32_v2_u1,
+            a2_codes_mod32_v2_u1_u8,
         ),
         (16, 2) => (
             a2_build_mod32_v2,
             a2_gather_mod32_v2_u2,
             a2_codes_mod32_v2_u2,
+            a2_codes_mod32_v2_u2_u8,
         ),
         (8, 1) => (
             a2_build_mod32_v1,
             a2_gather_mod32_v1_u1,
             a2_codes_mod32_v1_u1,
+            a2_codes_mod32_v1_u1_u8,
         ),
         (8, 2) => (
             a2_build_mod32_v1,
             a2_gather_mod32_v1_u2,
             a2_codes_mod32_v1_u2,
+            a2_codes_mod32_v1_u2_u8,
         ),
         _ => return None,
     };
@@ -2490,6 +2660,7 @@ pub fn avx2_table_i32_mod32(rows: usize, group: usize) -> Option<TableSpec<i32, 
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -2574,7 +2745,7 @@ unsafe fn a2_build_mod32_v1(
 /// walk, the loads, and the adds are the same words either way --- the ring's
 /// addition and the exact lane's in-capacity addition are one instruction.
 macro_rules! avx2_gathers_mod32 {
-    ($($g:ident, $c:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
+    ($($g:ident, $c:ident, $c8:ident, $v:expr, $u:expr, $rows:expr;)*) => {$(
         #[doc = concat!("# Safety\n\n[`TableGather`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`, in the modular 32-bit lane.")]
         unsafe fn $g(
             rows: usize,
@@ -2616,7 +2787,37 @@ macro_rules! avx2_gathers_mod32 {
             // SAFETY: the caller established `avx2` and forwarded the extents,
             // and `Mod32` is `#[repr(transparent)]` over `i32`.
             unsafe {
-                avx2_table_gather_codes::<$v, $u>(
+                avx2_table_gather_codes::<$v, $u, u16>(
+                    rows,
+                    group,
+                    depth,
+                    slab,
+                    shift,
+                    stack.cast::<i32>(),
+                    codes,
+                    stride,
+                    lane.cast::<i32>(),
+                )
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`TableGatherCodesU8`]'s contract at `rows == ", stringify!($rows), "`, `group == ", stringify!($u), "`, in the modular 32-bit lane.")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c8(
+            rows: usize,
+            group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const Mod32,
+            codes: *const u8,
+            stride: usize,
+            lane: *mut Mod32,
+        ) {
+            // SAFETY: the caller established `avx2` and forwarded the extents,
+            // and `Mod32` is `#[repr(transparent)]` over `i32`.
+            unsafe {
+                avx2_table_gather_codes::<$v, $u, u8>(
                     rows,
                     group,
                     depth,
@@ -2633,10 +2834,10 @@ macro_rules! avx2_gathers_mod32 {
 }
 
 avx2_gathers_mod32! {
-    a2_gather_mod32_v2_u1, a2_codes_mod32_v2_u1, 2, 1, 16;
-    a2_gather_mod32_v2_u2, a2_codes_mod32_v2_u2, 2, 2, 16;
-    a2_gather_mod32_v1_u1, a2_codes_mod32_v1_u1, 1, 1, 8;
-    a2_gather_mod32_v1_u2, a2_codes_mod32_v1_u2, 1, 2, 8;
+    a2_gather_mod32_v2_u1, a2_codes_mod32_v2_u1, a2_codes_mod32_v2_u1_u8, 2, 1, 16;
+    a2_gather_mod32_v2_u2, a2_codes_mod32_v2_u2, a2_codes_mod32_v2_u2_u8, 2, 2, 16;
+    a2_gather_mod32_v1_u1, a2_codes_mod32_v1_u1, a2_codes_mod32_v1_u1_u8, 1, 1, 8;
+    a2_gather_mod32_v1_u2, a2_codes_mod32_v1_u2, a2_codes_mod32_v1_u2_u8, 1, 2, 8;
 }
 
 // ---------------------------------------------------------------------------
@@ -2656,13 +2857,14 @@ const A5_TABLE_LANES: usize = 16;
 /// not: an AVX2 table against a VNNI tile is 64 against 64, and
 /// `tabulation_pays` correctly refuses it at every `n`.
 pub fn avx512_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    let (build, gather, gather_codes): (
+    let (build, gather, gather_codes, gather_codes_u8): (
         TableBuild<i8, i32>,
         TableGather<i32>,
         TableGatherCodes<i32>,
+        TableGatherCodesU8<i32>,
     ) = match (rows, group) {
-        (16, 1) => (a5_build8, a5_gather_u1, a5_codes_u1),
-        (16, 2) => (a5_build8, a5_gather_u2, a5_codes_u2),
+        (16, 1) => (a5_build8, a5_gather_u1, a5_codes_u1, a5_codes_u1_u8),
+        (16, 2) => (a5_build8, a5_gather_u2, a5_codes_u2, a5_codes_u2_u8),
         _ => return None,
     };
     Some(TableSpec {
@@ -2681,18 +2883,20 @@ pub fn avx512_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i3
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
 /// The `i16` table sequence at 512 bits: eight `i64` lanes to a register.
 pub fn avx512_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i64>> {
-    let (build, gather, gather_codes): (
+    let (build, gather, gather_codes, gather_codes_u8): (
         TableBuild<i16, i64>,
         TableGather<i64>,
         TableGatherCodes<i64>,
+        TableGatherCodesU8<i64>,
     ) = match (rows, group) {
-        (16, 1) => (a5_build16, a5_gather64_u1, a5_codes64_u1),
-        (16, 2) => (a5_build16, a5_gather64_u2, a5_codes64_u2),
+        (16, 1) => (a5_build16, a5_gather64_u1, a5_codes64_u1, a5_codes64_u1_u8),
+        (16, 2) => (a5_build16, a5_gather64_u2, a5_codes64_u2, a5_codes64_u2_u8),
         _ => return None,
     };
     Some(TableSpec {
@@ -2708,6 +2912,7 @@ pub fn avx512_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, 
         build,
         gather,
         gather_codes,
+        gather_codes_u8,
     })
 }
 
@@ -2789,7 +2994,7 @@ unsafe fn a5_build16_inner(
 macro_rules! avx512_gathers {
     (
         $lane:ty, $zero:ident, $add:ident, $per:expr,
-        $($g:ident, $c:ident, $u:expr;)*
+        $($g:ident, $c:ident, $c8:ident, $u:expr;)*
     ) => {$(
         #[doc = concat!("# Safety\n\n[`TableGather`]'s contract at `rows == 16`, `group == ", stringify!($u), "`.")]
         #[target_feature(enable = "avx512f,avx512bw")]
@@ -2880,7 +3085,62 @@ macro_rules! avx512_gathers {
                 let mut words = stack;
                 for _ in 0..depth {
                     for (u, cols) in acc.iter_mut().enumerate() {
-                        let entry = words.add((*cursor[u] as usize & mask) << shift);
+                        let code: usize = (*cursor[u]).into();
+                let entry = words.add((code & mask) << shift);
+                        cursor[u] = cursor[u].add(1);
+                        for (v, cell) in cols.iter_mut().enumerate() {
+                            *cell = $add(
+                                *cell,
+                                _mm512_loadu_si512(entry.add(v * $per) as *const __m512i),
+                            );
+                        }
+                    }
+                    words = words.add(slab);
+                }
+                for (u, cols) in acc.iter().enumerate() {
+                    for (v, cell) in cols.iter().enumerate() {
+                        _mm512_storeu_si512(lane.add(u * rows + v * $per) as *mut __m512i, *cell);
+                    }
+                }
+            }
+        }
+
+        #[doc = concat!("# Safety\n\n[`TableGatherCodesU8`]'s contract at `rows == 16`, `group == ", stringify!($u), "`.")]
+        #[target_feature(enable = "avx512f,avx512bw")]
+        #[allow(clippy::too_many_arguments)]
+        unsafe fn $c8(
+            rows: usize,
+            _group: usize,
+            depth: usize,
+            slab: usize,
+            shift: u32,
+            stack: *const $lane,
+            codes: *const u8,
+            stride: usize,
+            lane: *mut $lane,
+        ) {
+            debug_assert_eq!(rows, A5_TABLE_LANES);
+            debug_assert_eq!(_group, $u);
+            let mask = (slab >> shift) - 1;
+            // SAFETY: the caller established every extent.
+            unsafe {
+                let mut acc = [[$zero(); { A5_TABLE_LANES / $per }]; $u];
+                for (u, cols) in acc.iter_mut().enumerate() {
+                    for (v, cell) in cols.iter_mut().enumerate() {
+                        *cell = _mm512_loadu_si512(lane.add(u * rows + v * $per) as *const __m512i);
+                    }
+                }
+                let mut cursor = [codes; $u];
+                let mut at = codes;
+                for c in cursor.iter_mut() {
+                    *c = at;
+                    at = at.add(stride);
+                }
+                let mut words = stack;
+                for _ in 0..depth {
+                    for (u, cols) in acc.iter_mut().enumerate() {
+                        let code: usize = (*cursor[u]).into();
+                        let entry = words.add((code & mask) << shift);
                         cursor[u] = cursor[u].add(1);
                         for (v, cell) in cols.iter_mut().enumerate() {
                             *cell = $add(
@@ -2903,14 +3163,14 @@ macro_rules! avx512_gathers {
 
 avx512_gathers! {
     i32, _mm512_setzero_si512, _mm512_add_epi32, A5_TABLE_LANES,
-    a5_gather_u1, a5_codes_u1, 1;
-    a5_gather_u2, a5_codes_u2, 2;
+    a5_gather_u1, a5_codes_u1, a5_codes_u1_u8, 1;
+    a5_gather_u2, a5_codes_u2, a5_codes_u2_u8, 2;
 }
 
 avx512_gathers! {
     i64, _mm512_setzero_si512, _mm512_add_epi64, { A5_TABLE_LANES / 2 },
-    a5_gather64_u1, a5_codes64_u1, 1;
-    a5_gather64_u2, a5_codes64_u2, 2;
+    a5_gather64_u1, a5_codes64_u1, a5_codes64_u1_u8, 1;
+    a5_gather64_u2, a5_codes64_u2, a5_codes64_u2_u8, 2;
 }
 
 /// # Safety
