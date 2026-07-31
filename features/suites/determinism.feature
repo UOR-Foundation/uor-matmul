@@ -131,3 +131,9 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-21
     Then the claim holds byte for byte
+
+  @CD-22 @build
+  Scenario: The documented default integer entry point selects the kernelized factorization the caller's offer and the host's declarations admit, witnessed by the route census; every route returns the reference traversal's bytes at every offer including none, and the reference remains directly callable
+    Given the standing corpus
+    When the suite exercises CD-22
+    Then the claim holds byte for byte

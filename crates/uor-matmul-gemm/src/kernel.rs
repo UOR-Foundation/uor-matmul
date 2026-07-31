@@ -407,6 +407,92 @@ impl Kernelized for i64 {
 /// it, and no kernel can quietly exceed it (R8).
 const MAX_TILE: usize = MAX_TILE_LANES;
 
+// ---------------------------------------------------------------------------
+// The route census
+// ---------------------------------------------------------------------------
+
+/// Which factorization of the one identity a [`gemm_auto`] call ran.
+///
+/// Selection reads the caller's declarations and the host's --- the shape, the
+/// alphabet bound, the encode mode, the offer, and the kernel table the build
+/// resolves --- and never the data (R13), so one call routes exactly once and
+/// the route is something a test asserts rather than a speed it must trust.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Route {
+    /// A kernel from the CG-13 table ran: the tile or reduce traversal over
+    /// packed panels, exact or modular as the encode mode admitted.
+    Kernel {
+        /// The backend whose instructions ran.
+        backend: Backend,
+        /// Exact, or modular in the quotient the caller named.
+        factorization: Factorization,
+        /// The chosen spec's tile height.
+        mr: usize,
+        /// The chosen spec's tile width.
+        nr: usize,
+        /// The chosen spec's k-group.
+        k_group: usize,
+        /// Tile lanes on the output, or lanes on the reduction.
+        lane_layout: LaneLayout,
+    },
+    /// The sub-cubic recursion ran.
+    Strassen {
+        /// The levels the declarations admitted and the recursion took.
+        levels: usize,
+    },
+    /// The reference traversal ran because the cost model priced the packed
+    /// traversal above it at this shape: the streaming form of the same
+    /// identity, chosen rather than fallen back to.
+    ReferenceByCost,
+    /// The reference traversal ran because the offer could not hold one
+    /// packed group. Zero scratch stays valid, and this is what it runs.
+    ReferenceByOffer,
+}
+
+/// Somewhere to record the route, or nowhere.
+///
+/// The [`crate::Ledger`] idiom at the selection boundary: `()` implements this
+/// with an empty body, so the shipped call records nothing and the optimizer
+/// deletes the call; a [`RouteCensus`] records. There is no second selection
+/// path and no `cfg`, which is what keeps the counted run and the shipped run
+/// the same function (R13).
+pub trait RouteLedger {
+    /// Record the route the call took. Called at most once per call.
+    fn routed(&mut self, route: Route);
+}
+
+impl RouteLedger for () {
+    fn routed(&mut self, _: Route) {}
+}
+
+/// The route a [`gemm_auto_counted`] call took, recorded.
+///
+/// `None` until a call records one --- and a call over a degenerate shape
+/// (`m == 0` or `n == 0`) records nothing, because nothing ran.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct RouteCensus {
+    /// The route the call took, if it took one.
+    pub route: Option<Route>,
+}
+
+impl RouteLedger for RouteCensus {
+    fn routed(&mut self, route: Route) {
+        self.route = Some(route);
+    }
+}
+
+/// What a running tile kernel is, as the census records it.
+fn route_of<E, L>(spec: &KernelSpec<E, L>) -> Route {
+    Route::Kernel {
+        backend: spec.backend,
+        factorization: spec.factorization,
+        mr: spec.mr,
+        nr: spec.nr,
+        k_group: spec.k_group,
+        lane_layout: spec.lane_layout,
+    }
+}
+
 /// `C := epilogue(A * B, C)` through a microkernel, for any element type that
 /// has one.
 ///
@@ -422,7 +508,56 @@ pub fn gemm_packed<E, Bd, O, Ep>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    gemm_packed_impl(triple, epilogue, options, scratch, true);
+    gemm_packed_impl(triple, epilogue, options, scratch, true, &mut ());
+}
+
+/// `C := epilogue(A * B, C)`, through whichever factorization the caller's
+/// offer and the host's declarations admit.
+///
+/// This is [`gemm_packed`] with the same arguments, under the name the
+/// documented API calls: the modular lane when the encode mode admits one, the
+/// sub-cubic recursion when the shape and the offer admit a level, a kernel
+/// from the CG-13 table when the cost model and the offer admit one, and
+/// [`crate::gemm`] --- the reference traversal, which stays directly callable
+/// under its own name --- when none do. Every one of those is the same
+/// identity, so the offer decides which instructions run and never which bytes
+/// come out (`CD-01`, `CD-22`). Returns `()`, for the same reason
+/// [`crate::gemm`] does (R14).
+pub fn gemm_auto<E, Bd, O, Ep>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+{
+    gemm_auto_counted(triple, epilogue, options, scratch, &mut ())
+}
+
+/// [`gemm_auto`], recording which factorization ran.
+///
+/// The counted form exists so that "the default entry point reaches the kernel
+/// table" is something a test asserts rather than something a benchmark
+/// implies (`CD-22`). At `Lg = ()` this *is* [`gemm_auto`]: the record
+/// compiles away, and there is no second selection path for the two to drift
+/// apart on.
+pub fn gemm_auto_counted<E, Bd, O, Ep, Lg>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    ledger: &mut Lg,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: RouteLedger,
+{
+    gemm_packed_impl(triple, epilogue, options, scratch, true, ledger)
 }
 
 /// [`gemm_packed`], with the sub-cubic auto-selection switchable.
@@ -435,6 +570,7 @@ pub(crate) fn gemm_packed_impl<E, Bd, O, Ep>(
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     recurse: bool,
+    ledger: &mut impl RouteLedger,
 ) where
     E: Kernelized,
     Bd: Bound,
@@ -492,14 +628,28 @@ pub(crate) fn gemm_packed_impl<E, Bd, O, Ep>(
                             &mut emit,
                         )
                     };
-                    if !ran {
+                    if ran {
+                        ledger.routed(route_of(&spec));
+                    } else {
+                        ledger.routed(Route::ReferenceByOffer);
                         crate::gemm(triple, epilogue, options, scratch);
                     }
                 }
-                None => crate::gemm(triple, epilogue, options, scratch),
+                None => {
+                    ledger.routed(Route::ReferenceByCost);
+                    crate::gemm(triple, epilogue, options, scratch);
+                }
             }
         }
-        None => gemm_packed_exact_at(triple, epilogue, options, scratch, Bd::VALUE, recurse),
+        None => gemm_packed_exact_at(
+            triple,
+            epilogue,
+            options,
+            scratch,
+            Bd::VALUE,
+            recurse,
+            ledger,
+        ),
     }
 }
 
@@ -525,6 +675,7 @@ pub(crate) fn gemm_packed_exact_at<E, Bd, O, Ep>(
     scratch: &mut Scratch<'_, E, Bd>,
     bound: u128,
     recurse: bool,
+    ledger: &mut impl RouteLedger,
 ) where
     E: Kernelized,
     Bd: Bound,
@@ -555,10 +706,15 @@ pub(crate) fn gemm_packed_exact_at<E, Bd, O, Ep>(
         0
     };
     if take > 0 {
+        // Recorded here rather than inside the recursion: the plan admitted
+        // these levels against this offer, so the carve's own decline guard
+        // cannot fire from this path, and the base-case products below are the
+        // recursion's internals, not a route the caller chose.
+        ledger.routed(Route::Strassen { levels: take });
         crate::strassen::run(triple, epilogue, options, scratch, bound, take);
         return;
     }
-    gemm_packed_cubic_at(triple, epilogue, options, scratch, bound);
+    gemm_packed_cubic_at(triple, epilogue, options, scratch, bound, ledger);
 }
 
 /// The cubic half of [`gemm_packed_exact_at`]: the packed traversal with no
@@ -571,6 +727,7 @@ pub(crate) fn gemm_packed_cubic_at<E, Bd, O, Ep>(
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
     bound: u128,
+    ledger: &mut impl RouteLedger,
 ) where
     E: Kernelized,
     Bd: Bound,
@@ -614,11 +771,17 @@ pub(crate) fn gemm_packed_cubic_at<E, Bd, O, Ep>(
                     &mut emit,
                 )
             };
-            if !ran {
+            if ran {
+                ledger.routed(route_of(&spec));
+            } else {
+                ledger.routed(Route::ReferenceByOffer);
                 crate::gemm(triple, epilogue, options, scratch);
             }
         }
-        None => crate::gemm(triple, epilogue, options, scratch),
+        None => {
+            ledger.routed(Route::ReferenceByCost);
+            crate::gemm(triple, epilogue, options, scratch);
+        }
     }
 }
 

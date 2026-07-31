@@ -18,6 +18,13 @@ uor-matmul-codec = { workspace = true }
 uor-matmul-kernels = { workspace = true }
 bytemuck = { workspace = true }
 
+[features]
+default = []
+# Runtime CPU feature detection, forwarded to the kernel table this driver
+# selects from. Without it the table resolves at compile time only, which is
+# what an embedded target wants (C1); the bytes are the same either way (CA-02).
+std = ["uor-matmul-kernels/std"]
+
 [lints]
 workspace = true
 

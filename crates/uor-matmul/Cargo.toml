@@ -22,10 +22,22 @@ uor-matmul-kernels = { workspace = true }
 default = []
 # `std` buys exactly two things: runtime CPU feature detection and
 # `core::error::Error` impls. Nothing in the numerical path changes when it is
-# off, which is what CA-02 asserts by comparing bytes across targets.
-std = ["uor-matmul-kernels/std"]
+# off, which is what CA-02 asserts by comparing bytes across targets. The gemm
+# entry is named alongside kernels so the graph says explicitly what the
+# feature unification already implies: the driver and its kernel table see the
+# same detection.
+std = ["uor-matmul-gemm/std", "uor-matmul-kernels/std"]
 # Content addressing for weight artifacts.
 kappa = ["uor-matmul-codec/kappa"]
 
 [lints]
 workspace = true
+
+# The facade's tests need the *kernels* crate's runtime feature detection, for
+# the same reason `uor-matmul-gemm`'s do: without it every `available_*`
+# predicate answers from the build's target features, and on a host whose ISA
+# is not the baseline --- AVX2 on x86-64, dotprod on aarch64 --- the CD-22 test
+# would assert the default entry's route against a table no consumer with
+# detection on will run.
+[dev-dependencies]
+uor-matmul-kernels = { workspace = true, features = ["std"] }

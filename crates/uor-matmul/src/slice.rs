@@ -23,10 +23,11 @@
 //! # Scratch
 //!
 //! The library never allocates (R7), so the panel buffer is the caller's here as
-//! everywhere. Pass `&mut []` and the streaming traversal runs, which needs none
-//! and gives the same bytes; pass [`suggested_scratch`] elements and the blocked
-//! traversal runs, which is the fast one. Anything between is a narrower block
-//! at the same bytes (`CD-10`).
+//! everywhere. The offer decides which factorization of the one identity runs
+//! --- never what the bytes are (`CD-22`). Pass `&mut []` and the streaming
+//! reference runs, which needs none; pass [`suggested_scratch`] elements and the
+//! kernelized traversal the host declares runs, which is the fast one. Anything
+//! between is a narrower block at the same bytes (`CD-10`).
 //!
 //! ```
 //! # use uor_matmul::{slice, Shape, suggested_scratch};
@@ -40,12 +41,14 @@
 //! ```
 
 use uor_matmul_core::{
-    as_alphabet_full, as_alphabet_full_mut, AccOf, Element, EncodeFrom, FloatElement,
-    IntegerElement, MatView, MatViewMut, NotAProduct, PackedCode, Strides, Triple,
+    as_alphabet_full, as_alphabet_full_mut, AccOf, Element, EncodeFrom, FloatElement, MatView,
+    MatViewMut, NotAProduct, PackedCode, Strides, Triple,
 };
 use uor_matmul_gemm::epilogue::{AbsorbPrior, PlaceAt, ScaleExact};
 use uor_matmul_gemm::float::SignedPlace;
-use uor_matmul_gemm::{gemm as view_gemm, gemm_float_packed, GemmOptions, Linear, Scratch};
+use uor_matmul_gemm::{
+    gemm_auto as view_gemm, gemm_float_packed, GemmOptions, Kernelized, Linear, Scratch,
+};
 
 /// Which operand a message is about.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -103,6 +106,11 @@ fn does_not_fit(operand: Operand, rows: usize, cols: usize, l: usize, len: usize
 /// `m x n` with `ldc`, all row-major. `alpha` and `beta` are exact integer
 /// scalars applied inside the accumulator, so neither can round (`CS-01`).
 ///
+/// This is the documented default entry point: it runs
+/// [`uor_matmul_gemm::gemm_auto`], which selects the kernelized factorization
+/// the offer and the host's declarations admit and declines to the reference
+/// traversal when they admit none --- the same bytes either way (`CD-22`).
+///
 /// `scratch` is the panel buffer; see the module docs. `&mut []` is valid and
 /// gives the same bytes.
 ///
@@ -133,7 +141,7 @@ pub fn gemm_ex<E, O>(
     scratch: &mut [E],
 ) -> Result<(), NotAProduct>
 where
-    E: IntegerElement,
+    E: Kernelized,
     O: Element + EncodeFrom<AccOf<E>> + Copy,
     AccOf<E>: ScaleExact + AbsorbPrior<O>,
 {
@@ -168,7 +176,7 @@ pub fn gemm<E, O>(
     scratch: &mut [E],
 ) -> Result<(), NotAProduct>
 where
-    E: IntegerElement,
+    E: Kernelized,
     O: Element + EncodeFrom<AccOf<E>> + Copy,
     AccOf<E>: ScaleExact + AbsorbPrior<O>,
 {

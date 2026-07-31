@@ -210,6 +210,12 @@ suite = "determinism"
 statement = """The sub-cubic recursion (Winograd's form of Strassen's) is byte-identical to the cubic packed walk at every shape, depth, requested level count, and offer including none, and to the `CX-01` wrapping oracle at every corpus size; a level the shape, the bound's headroom, or the offer does not admit is declined, and declining changes no byte"""
 
 [[id]]
+id = "CD-22"
+level = "build"
+suite = "determinism"
+statement = """The documented default integer entry point selects, at the caller's offer and the host's declarations, the kernelized factorization the offer admits --- witnessed by the route census, not inferred --- and every route from it returns the reference traversal's bytes at every offer including none; the reference traversal remains directly callable under its own name"""
+
+[[id]]
 id = "CB-01"
 level = "build"
 suite = "backends"

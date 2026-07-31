@@ -48,6 +48,13 @@
 //! assert_eq!(c, [19, 22, 43, 50]);
 //! ```
 //!
+//! The `gemm` every face calls is [`uor_matmul_gemm::gemm_auto`]: it selects,
+//! at the caller's offer and the host's declarations, the kernelized
+//! factorization the offer admits, and declines to the reference traversal
+//! when the offer admits none --- the same bytes on every route, at every
+//! offer including none (`CD-22`). The reference traversal itself stays
+//! directly callable as [`driver::gemm`] (R6).
+//!
 //! # Non-goals
 //!
 //! See `README.md`, which states N1--N5 normatively. In brief: this library
@@ -116,13 +123,14 @@ pub use uor_matmul_core::{
     Strides, Traversal, Triple,
 };
 pub use uor_matmul_gemm::{
-    coded_gemm, gemm, gemm_collapsed, gemm_float, gemm_float_bridged, gemm_float_packed,
-    gemm_packed, gemm_strassen, gemm_tabulated, gemm_tabulated_counted, strassen_levels,
-    strassen_scratch, suggested_accumulators, suggested_bridge_scaled, suggested_collapse_index,
-    suggested_collapse_rows, suggested_float_panels, suggested_scratch, suggested_tabulation,
-    tabulation_fits, tabulation_pays, tabulation_rows, Bias, Census, CodedTriple, Collapse,
-    Epilogue, GemmOptions, Kernelized, Ledger, Linear, Partition, PlaceAt, Scaled, Scratch,
-    SignedPlace, Table, TabulatedTriple, Tile,
+    coded_gemm, gemm_auto, gemm_auto as gemm, gemm_auto_counted, gemm_collapsed, gemm_float,
+    gemm_float_bridged, gemm_float_packed, gemm_packed, gemm_strassen, gemm_tabulated,
+    gemm_tabulated_counted, strassen_levels, strassen_scratch, suggested_accumulators,
+    suggested_bridge_scaled, suggested_collapse_index, suggested_collapse_rows,
+    suggested_float_panels, suggested_scratch, suggested_tabulation, tabulation_fits,
+    tabulation_pays, tabulation_rows, Bias, Census, CodedTriple, Collapse, Epilogue, GemmOptions,
+    Kernelized, Ledger, Linear, Partition, PlaceAt, Route, RouteCensus, RouteLedger, Scaled,
+    Scratch, SignedPlace, Table, TabulatedTriple, Tile,
 };
 pub use uor_matmul_kernels as kernels;
 
@@ -133,7 +141,7 @@ pub mod prelude {
         as_alphabet, as_alphabet_full, Alphabet, Bnd, EncodeMode, Full, IntegerElement, MatView,
         MatViewMut, Strides, Triple,
     };
-    pub use uor_matmul_gemm::{gemm, GemmOptions, Linear, Scratch};
+    pub use uor_matmul_gemm::{gemm_auto as gemm, GemmOptions, Linear, Scratch};
 }
 
 /// The canonical instantiation: `(i8, 127)`, the tier with the most instruction
