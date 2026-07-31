@@ -1700,6 +1700,200 @@ Both are exact on what they declare, which is what makes them two factorizations
 rather than a fast one and a safe one --- outside its alphabet the paired
 sequence does not compute this identity at all.
 
+## Float tabulation at a tiny code space
+
+Measured 2026-07-29 on an Apple M4 Max (aarch64), release build, best of a
+0.30 s budget per cell. Every figure in this section is `open`. The instrument
+is `FloatBook<S, BLK>` in `crates/uor-matmul-validate/src/float_tab.rs` ---
+dev-only scaffolding, not a tier: `S` codewords of `BLK` `f32` symbols each,
+`Code = u16`, `S` a power of two so the stored code *is* the index and
+`as_index_stream` borrows the operand's memory. Nothing here adds a model row,
+an ID, or shipped code; the measurement decides whether building the tier
+properly (R9) is worth starting.
+
+The question exists because the only shipped float codec, the arena tier, is
+`MAX_BLOCK = 1`, which `tabulation_pays` refuses outright: the float table
+route had never carried a measurement. The structural argument said it should
+not pay --- the integer table's win is the narrow lane, and a float has none:
+`AccOf<f32>` is 88 bytes on this host and the lane *is* the complete
+accumulator. The counter-argument is that at `S` of 4 or 16 the slab
+(`S * rows * 88` bytes, 5.6 KB to 22.5 KB at the widest row tile) sits in L1,
+and the column loop trades one exact float mac per product for one table read
+and one exact accumulator combine per `BLK` products.
+
+### The op costs
+
+One primitive per iteration over `k = 4096`, same budget. `mac` is
+`Element::mac` for `f32` --- the encode-to-fixed-point plus placement the
+dense float driver issues once per product. `gather+add` is the column loop's
+step: read one 88-byte table entry by code, `combine` it into the running
+accumulator, covering `BLK` products.
+
+| op | per step | per product covered |
+| --- | --- | --- |
+| gather+add, `S = 4`, `BLK = 4` | 4.19 ns | 1.048 ns |
+| gather+add, `S = 4`, `BLK = 8` | 4.07 ns | 0.509 ns |
+| gather+add, `S = 16`, `BLK = 4` | 4.19 ns | 1.048 ns |
+| gather+add, `S = 16`, `BLK = 8` | 4.15 ns | 0.519 ns |
+| exact float mac | 3.42 ns | 3.42 ns |
+
+Two readings. The combine and the mac cost about the same per *step* --- both
+are an 88-byte multi-limb exact add, and the gather's L1 read is hidden under
+it --- so the table's whole advantage is the block: the same step amortized
+over `BLK` products is 3.3x cheaper at `BLK = 4` and 6.7x at `BLK = 8`. And
+`S` is invisible in these numbers: 4 and 16 entries both sit in L1, so the
+code space costs nothing until it doesn't fit. The build is `m * S * k`
+products once per column block against a column loop of `m * n * k / BLK`
+combines; at `n >= 1024` and `S <= 16` it is under 2% and does not appear in
+what follows.
+
+### End to end
+
+Gmac/s against the nominal `m * k * n`, three routes over the same operands.
+`stream` is `gemm_float` over the decoded weights with no panel offer, which
+is exactly what the tabulated driver's dense decline route runs for `f32`
+(`Tabulated::dense_gemm` calls it with the leftover offer unused). `packed` is
+the same driver with panels --- the placement bridge, both panels prescaled to
+a common base so the inner loop is an integer dot product --- offered
+`m * k` and `k * min(n, 512)` codes. `table` is `Traversal::Tabulated` forced
+at the offer `suggested_tabulation` sizes; every cell is asserted
+byte-identical (`symbol_bits`) to the streaming driver's output, and the
+census asserts the table ran (`table_reads = m*n*k/BLK`, `adds` likewise).
+`picked` is the default `Traversal::Blocked`'s own choice at the same offer,
+read from the census.
+
+#### `FloatBook<4, 4>` --- slab 5632 bytes at the widest tile
+
+| `m x k x n` | stream | packed | table | vs stream | vs packed | picked |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 0.113 | 0.484 | 0.975 | 8.60x | 2.01x | table |
+| `1x1024x4096` | 0.086 | 0.309 | 0.985 | 11.51x | 3.19x | table |
+| `1x4096x1024` | 0.107 | 0.256 | 0.932 | 8.68x | 3.64x | table |
+| `1x4096x4096` | 0.045 | 0.125 | 0.932 | 20.53x | 7.44x | table |
+| `4x1024x1024` | 0.109 | 0.799 | 1.080 | 9.89x | 1.35x | table |
+| `4x1024x4096` | 0.086 | 0.544 | 1.118 | 12.94x | 2.05x | table |
+| `4x4096x1024` | 0.105 | 0.481 | 0.935 | 8.94x | 1.95x | table |
+| `4x4096x4096` | 0.057 | 0.215 | 1.010 | 17.78x | 4.69x | table |
+| `16x1024x1024` | 0.092 | 2.156 | 1.112 | 12.03x | 0.52x | table |
+| `16x1024x4096` | 0.073 | 1.533 | 1.145 | 15.63x | 0.75x | table |
+| `16x4096x1024` | 0.097 | 1.389 | 1.061 | 10.91x | 0.76x | table |
+| `16x4096x4096` | 0.055 | 0.922 | 1.093 | 19.95x | 1.19x | table |
+
+#### `FloatBook<4, 8>` --- slab 5632 bytes at the widest tile
+
+| `m x k x n` | stream | packed | table | vs stream | vs packed | picked |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 0.111 | 0.468 | 1.908 | 17.16x | 4.08x | table |
+| `1x1024x4096` | 0.089 | 0.321 | 1.996 | 22.55x | 6.22x | table |
+| `1x4096x1024` | 0.109 | 0.343 | 1.912 | 17.56x | 5.58x | table |
+| `1x4096x4096` | 0.057 | 0.151 | 1.949 | 34.15x | 12.88x | table |
+| `4x1024x1024` | 0.113 | 1.113 | 2.139 | 19.00x | 1.92x | table |
+| `4x1024x4096` | 0.089 | 0.584 | 2.143 | 24.10x | 3.67x | table |
+| `4x4096x1024` | 0.109 | 0.711 | 2.147 | 19.75x | 3.02x | table |
+| `4x4096x4096` | 0.057 | 0.298 | 2.224 | 38.99x | 7.46x | table |
+| `16x1024x1024` | 0.113 | 2.424 | 2.187 | 19.35x | 0.90x | table |
+| `16x1024x4096` | 0.089 | 1.626 | 2.300 | 25.89x | 1.41x | table |
+| `16x4096x1024` | 0.109 | 1.794 | 2.181 | 20.05x | 1.22x | table |
+| `16x4096x4096` | 0.057 | 0.961 | 2.315 | 40.52x | 2.41x | table |
+
+#### `FloatBook<16, 4>` --- slab 22528 bytes at the widest tile
+
+| `m x k x n` | stream | packed | table | vs stream | vs packed | picked |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 0.113 | 0.484 | 0.887 | 7.82x | 1.83x | table |
+| `1x1024x4096` | 0.090 | 0.344 | 0.931 | 10.39x | 2.71x | table |
+| `1x4096x1024` | 0.110 | 0.361 | 0.884 | 8.04x | 2.45x | table |
+| `1x4096x4096` | 0.057 | 0.152 | 0.949 | 16.64x | 6.24x | table |
+| `4x1024x1024` | 0.112 | 1.107 | 0.875 | 7.79x | 0.79x | table |
+| `4x1024x4096` | 0.089 | 0.594 | 0.948 | 10.71x | 1.60x | table |
+| `4x4096x1024` | 0.109 | 0.693 | 0.845 | 7.77x | 1.22x | table |
+| `4x4096x4096` | 0.057 | 0.298 | 0.930 | 16.34x | 3.12x | table |
+| `16x1024x1024` | 0.111 | 2.443 | 0.931 | 8.40x | 0.38x | table |
+| `16x1024x4096` | 0.087 | 1.571 | 1.040 | 11.91x | 0.66x | table |
+| `16x4096x1024` | 0.108 | 1.826 | 0.926 | 8.60x | 0.51x | table |
+| `16x4096x4096` | 0.057 | 0.970 | 1.029 | 18.01x | 1.06x | table |
+
+#### `FloatBook<16, 8>` --- slab 22528 bytes at the widest tile
+
+| `m x k x n` | stream | packed | table | vs stream | vs packed | picked |
+| --- | --- | --- | --- | --- | --- | --- |
+| `1x1024x1024` | 0.114 | 0.481 | 1.595 | 13.98x | 3.32x | table |
+| `1x1024x4096` | 0.088 | 0.343 | 1.817 | 20.54x | 5.30x | table |
+| `1x4096x1024` | 0.110 | 0.357 | 1.593 | 14.49x | 4.47x | table |
+| `1x4096x4096` | 0.057 | 0.153 | 1.818 | 31.79x | 11.90x | table |
+| `4x1024x1024` | 0.114 | 1.089 | 1.579 | 13.88x | 1.45x | table |
+| `4x1024x4096` | 0.089 | 0.595 | 1.791 | 20.08x | 3.01x | table |
+| `4x4096x1024` | 0.108 | 0.715 | 1.537 | 14.19x | 2.15x | table |
+| `4x4096x4096` | 0.057 | 0.298 | 1.817 | 31.77x | 6.09x | table |
+| `16x1024x1024` | 0.112 | 2.375 | 1.668 | 14.94x | 0.70x | table |
+| `16x1024x4096` | 0.089 | 1.623 | 2.006 | 22.62x | 1.24x | table |
+| `16x4096x1024` | 0.109 | 1.816 | 1.658 | 15.23x | 0.91x | table |
+| `16x4096x4096` | 0.057 | 0.976 | 1.992 | 34.77x | 2.04x | table |
+
+### The reading
+
+**The structural argument is wrong at tiny code spaces, and the numbers say
+why.** The float lane is the complete accumulator, so there is no narrow-word
+win --- but the table's win here was never the lane width. It is the *block*:
+one exact accumulator combine per `BLK` products instead of one exact float
+mac per product, and the two steps cost the same (op table above). The
+premise's L1-fit argument holds exactly as stated: `S` of 4 and 16 are
+indistinguishable in throughput, and the column loop runs at a flat ~0.9--1.15
+Gmac/s at `BLK = 4` and ~1.5--2.3 at `BLK = 8` whatever the shape --- the
+signature of a loop bound by the 88-byte combine at ~4.1 ns each, nothing
+else.
+
+**Against the route the driver would actually decline to, the table wins
+everywhere measured:** 7.8x to 40.5x against `stream`, at all 48 cells. The
+dense factorization `Tabulated::dense_gemm` names for `f32` is the streaming
+traversal, and against it there is no contested region at all.
+
+**Against the placement bridge the win is regional.** `packed` prescales both
+panels and turns the inner loop into an integer dot product; it is the real
+competitor, and the regions are:
+
+- `m = 1`: the table wins at every cell, 1.8x--12.9x. The bridge's own
+  costing declines the prescaling walk at `m * n <= m + n`, so a single row
+  gets neither the walk nor the lane it buys --- and the table's amortization
+  is over `n`, which needs no rows.
+- `m = 4`: the table wins at `BLK = 8` everywhere (1.45x--7.46x); at `BLK = 4`
+  it wins except the smallest cell (`0.79x` at `4x1024x1024`, `S = 16`).
+- `m = 16`: the bridge wins the narrow cells (`0.38x`--`0.91x` at `n = 1024`,
+  and `16x1024x4096` at `BLK = 4`), the table wins the wide ones, and the
+  cross sits near `n * (BLK - 1) ≈ k`: at a wide tile the build's `m * S * k`
+  products are repeated per 512-column packed block on the dense side but only
+  amortized once per output on the table side.
+
+**The predicate already admits all of this.** `picked` is `table` at all 48
+cells under the default `Traversal::Blocked`: with `block > 1`,
+`tabulation_pays`'s terms --- a table step of `BLK` products against the
+float `dense_steps` declaration of one product per step, and the L1 fit ---
+admit every shape tried. That cuts both ways, and the way that matters for a
+decision is the negative one: the predicate prices the table against the
+*streaming* declaration (`dense: 1`), so at `m = 16, n = 1024` it selects the
+table where the placement bridge is 1.1x--2.6x faster. The dense side of the
+float comparison is declared by the weakest float route, not the strongest.
+
+### What this does not say
+
+- The packed column was offered `k * min(n, 512)` panel codes; a caller
+  offering the full `k * n` re-packs `B` less often at `n = 4096`, so the
+  `packed` figures at that width are, if anything, understated.
+- The codebook here is 4--16 arbitrary symbols chosen for the experiment. A
+  real tier's codebook is the artifact's own distinct blocks, and whether
+  realistic float weights have a reachable tiny block codebook is a separate,
+  unmeasured question --- this experiment priced the traversal, not the
+  compression.
+- Byte-identity held at all 48 cells (`symbol_bits` against the streaming
+  driver, with an infinity-free, NaN-free fill). The codec itself is total by
+  the same mask argument the shipped codecs use; the traversal's totality over
+  non-finite symbols is the arena tier's already-shipped claim, unchanged.
+
+The decision-relevant summary: at `BLK = 8` the table beats the *best* dense
+float route by 1.2x--12.9x at `m <= 4` and by 1.2x--2.4x at `m = 16` with wide
+outputs, and loses only at tall-`m`, narrow-`n` shapes (down to 0.38x) ---
+with the caveat that the selection predicate currently cannot see that region,
+because it prices the dense side at the streaming declaration.
 ## The SWAR broadcast, measured and declined
 
 Every figure in this section is `open`: measured on one host under one runtime
