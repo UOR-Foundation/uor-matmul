@@ -1894,6 +1894,15 @@ float route by 1.2x--12.9x at `m <= 4` and by 1.2x--2.4x at `m = 16` with wide
 outputs, and loses only at tall-`m`, narrow-`n` shapes (down to 0.38x) ---
 with the caveat that the selection predicate currently cannot see that region,
 because it prices the dense side at the streaming declaration.
+
+A note on the fill, added when the scaled lane landed (`CD-20`): the figures
+above were measured with a fill spanning about ten binades, which the scaled
+lane's admission (`24 + span <= 31`) declines by design. The instrument's
+fills now stay inside one five-binade band and its offer carries the scaled
+lane's `i64` words (`suggested_tabulation_lanes`), so the forced table runs
+under the merged semantics; the measured economics above are the wide-lane
+tree's, and re-running the instrument today prices the scaled lane instead.
+
 ## The SWAR broadcast, measured and declined
 
 Every figure in this section is `open`: measured on one host under one runtime
