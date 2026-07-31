@@ -2120,8 +2120,9 @@ element to serve one output column; 44x at `8x262144x8`, where the census
 counts 537 million build products against 17 million gathered; and a
 0.76--0.78x wash at `2048x8x2048`, where `k = 8` leaves one placement per
 output and nothing for the table to share. The span narrows it further:
-three binades of `A` against the seven-binade book cut the run from 255 to
-31, and `64x1024x4096` falls from a 1.27x win to a 0.89x loss.
+the fill's three exponents --- a span of two --- against the seven-binade
+book cut the run from 255 to 63, and `64x1024x4096` falls from a 1.27x win
+to a 0.89x loss.
 
 So the predicate stays as it is, and that is a measured decision, not an
 unasked question. `tabulation_pays` counts *instructions*: one table read
