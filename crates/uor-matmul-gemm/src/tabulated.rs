@@ -5845,7 +5845,12 @@ mod tests {
             let stream: Vec<u16> = (0..n * blocks)
                 .map(|i| {
                     let (j, p) = (i / blocks, i % blocks);
-                    ((j / space.pow(p as u32)) % space) as u16
+                    // The `p`-th base-`space` digit of `j`, by repeated
+                    // division: `space.pow(p)` overflows a 32-bit `usize`
+                    // (wasm32) at `p = 4`, and the wrap reads as a divide by
+                    // zero.
+                    let shifted = (0..p).fold(j, |acc, _| acc / space);
+                    (shifted % space) as u16
                 })
                 .collect();
             let w = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
