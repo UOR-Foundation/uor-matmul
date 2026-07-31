@@ -367,6 +367,8 @@ family! {
     true => crate::isa::portable::I32_I64,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_I32_I64_M1,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_I32_I64,
 }
 
 family! {

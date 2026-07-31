@@ -9,6 +9,7 @@ use crate::table::TableSpec;
 
 crate::tile_fits!(4, 8);
 crate::tile_fits!(8, 12);
+crate::tile_fits!(1, 8);
 
 /// Is NEON available? Mandatory on AArch64, so always.
 pub fn neon_available() -> bool {
@@ -209,6 +210,120 @@ unsafe fn neon_dotprod_inner(kc: usize, pa: *const i8, pb: *const i8, acc: *mut 
         for (quad, lane) in row.iter().enumerate() {
             // SAFETY: `i < MR` and `quad * 4 + 4 <= NR`, inside `MR * NR`.
             unsafe { vst1q_s32(acc.as_mut_ptr().add(i * DOT_NR + quad * 4), *lane) };
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// i32 x i32 -> i64, exact
+// ---------------------------------------------------------------------------
+
+/// `i32 x i32 -> i64` through `vmlal_s32`.
+///
+/// The product of two `i32` needs 62 bits, so the lane is 64 and the
+/// instruction is the signed `32 x 32 -> 64` widening multiply-accumulate ---
+/// this family's whole arithmetic in one instruction, two columns at a time.
+/// Unlike `_mm256_mul_epi32` the pairs it covers are adjacent, so the
+/// accumulators store back in column order with no deinterleave.
+pub const NEON_I32_I64: KernelSpec<i32, i64> = KernelSpec {
+    backend: Backend::Neon,
+    factorization: Factorization::Exact,
+    mr: NEON_MR,
+    nr: NEON_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // `vmlal_s32` widens across the *columns* of one `k`-step, not across `k`,
+    // so this kernel consumes one step at a time, as `NEON_I8_I32` does.
+    k_group: 1,
+    products_per_step: 2,
+    lane_cap: i64::MAX as u128,
+    // Each product is computed at its own full width, so every alphabet.
+    max_bound: u128::MAX,
+    mac_tile: neon_i32_exact,
+};
+
+/// The same sequence at a one-row panel.
+///
+/// A tile panel taller than the output is zero-padded, and the kernel does that
+/// padding's arithmetic: at `m = 1` a four-row panel is four times the work the
+/// product needs. So the table offers the heights the shapes fill, and the
+/// driver takes the tallest one the rows do. Same instructions, same answer
+/// (`CB-06`).
+pub const NEON_I32_I64_M1: KernelSpec<i32, i64> = KernelSpec {
+    backend: Backend::Neon,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: NEON_NR,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 1,
+    products_per_step: 2,
+    lane_cap: i64::MAX as u128,
+    // Each product is computed at its own full width, so every alphabet.
+    max_bound: u128::MAX,
+    mac_tile: neon_i32_exact_one,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `8 * kc`, `acc` 32 writable
+/// lanes.
+unsafe fn neon_i32_exact(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
+    // SAFETY: the caller forwarded the length guarantees, and NEON is
+    // unconditionally present on this target.
+    unsafe { neon_i32_exact_inner::<NEON_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`neon_i32_exact`], with a one-row panel.
+unsafe fn neon_i32_exact_one(kc: usize, pa: *const i32, pb: *const i32, acc: *mut i64) {
+    // SAFETY: the caller forwarded the length guarantees, and NEON is
+    // unconditionally present on this target.
+    unsafe { neon_i32_exact_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`neon_i32_exact`].
+#[target_feature(enable = "neon")]
+unsafe fn neon_i32_exact_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i32,
+    pb: *const i32,
+    acc: *mut i64,
+) {
+    const NR: usize = NEON_NR;
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    let mut tile = [[vdupq_n_s64(0); NR / 2]; MR];
+
+    for p in 0..kc {
+        // SAFETY: `pb[p * NR ..][..8]` is in bounds.
+        let bv = unsafe {
+            [
+                vld1_s32(pb[p * NR..].as_ptr()),
+                vld1_s32(pb[p * NR + 2..].as_ptr()),
+                vld1_s32(pb[p * NR + 4..].as_ptr()),
+                vld1_s32(pb[p * NR + 6..].as_ptr()),
+            ]
+        };
+        for i in 0..MR {
+            let av = vdup_n_s32(pa[p * MR + i]);
+            for (pair, lane) in tile[i].iter_mut().enumerate() {
+                *lane = vmlal_s32(*lane, av, bv[pair]);
+            }
+        }
+    }
+
+    for (i, row) in tile.iter().enumerate() {
+        for (pair, lane) in row.iter().enumerate() {
+            // SAFETY: `i < MR` and `pair * 2 + 2 <= NR`, inside `MR * NR`.
+            unsafe { vst1q_s64(acc.as_mut_ptr().add(i * NR + pair * 2), *lane) };
         }
     }
 }

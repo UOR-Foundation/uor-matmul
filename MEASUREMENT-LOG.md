@@ -41,17 +41,14 @@ measurements named:
    the SWAR co-issue experiment (the CG-11 census has the AVX2 i8 tile bound
    on Zn4FP2 with scalar ports idle in the model) are x86 questions this host
    cannot answer locally.
-2. **A NEON `i32`-exact sequence.** One `family!` entry; the bridge runs the
-   portable kernel on aarch64 and a real sequence closes more of the
-   remaining 3.8x to matrixmultiply.
-3. **The op-kind cost model for symbol-table selection.** The measured
+2. **The op-kind cost model for symbol-table selection.** The measured
    boundary is sharp --- the table wins under 2.2x and loses 40--175x --- so
    this is measured per-op-kind constants in `model/tiers.toml` with the
    CM-04 trail, or nothing.
-4. **A Cortex-M executor in CI** (qemu-system mps2/mps3 or renode) before
+3. **A Cortex-M executor in CI** (qemu-system mps2/mps3 or renode) before
    any thumbv6m sequence; CB parity is a run, and no user-mode emulator
    covers Cortex-M.
-5. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
+4. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
    §"Mantissa slicing, and the RNS beside it") is recorded: nine 8-bit
    passes, shift recombination, a wash where the narrow-to-wide ratio is
    two, worth it at eight or better (VNNI, NEON dotprod, tensor units). The
@@ -59,6 +56,45 @@ measurements named:
    composition to measure is the sliced symbol.
 
 ## Measurements
+
+**A NEON sequence for the `i32`-exact lane (CB-02's family, shipped; figures
+`open`).** The queue's NEON item, landed: `NEON_I32_I64` in
+`crates/uor-matmul-kernels/src/isa/arm.rs`, `mr 4 nr 8`, the signed
+`32 x 32 -> 64` widening multiply-accumulate `vmlal_s32` --- the family's
+whole arithmetic in one instruction, two adjacent columns at a time, so the
+accumulators store back in column order where AVX2's even/odd split
+deinterleaves. One `family!` line in `available_i32_exact`; the differential
+walk (`CB-02`, `CB-04`, `CB-07`) and `CG-13` cover it with no test edits, and
+no driver code changed. Measured on an Apple M4 Max (dev machine,
+aarch64-apple-darwin), 2026-07-30, `just bridge-sweep`, Gmac/s, byte-identity
+asserted inside every timed run, as a same-state A/B --- the family line
+removed and restored around two adjacent runs, with the oracle column holding
+at 39.4--39.7 across both, so the runs are comparable:
+
+| fill | `m x k x n` | portable | NEON | |
+| --- | --- | --- | --- | --- |
+| one exponent | `512` cubed explicit | 8.464 | 9.876 | 1.17x |
+| one exponent | `1024` cubed explicit | 10.750 | 13.153 | 1.22x |
+| one exponent | `509x1021x257` explicit | 8.809 | 10.240 | 1.16x |
+| a few binades (3/4) | `1024` cubed explicit | 9.806 | 12.055 | 1.23x |
+
+The reading: a real sequence closes the gap to matrixmultiply on this host
+from 3.7x to 3.0x (39.6 against 13.2 at `1024` cubed) --- partway through the
+3.8x the queue item named, not through it. What remains is structural:
+`vmlal_s32` covers two columns an instruction where the f32 FMA path covers
+four lanes across two units, so this lane's ceiling sits under half the float
+path's on this silicon, and closing the rest is blocking and pack cost
+(`CG-15`'s remaining distance), not a wider instruction. The recursion's
+sweep re-run with the lane in place (`just strassen-sweep`, same host) reads
+a fitted exponent of `2.9031 +/- 0.0432` against `n` --- the interval still
+excludes `3.0`, so `CG-12`'s honesty condition is unaffected by the lane
+change. A same-state Strassen A/B was attempted and discarded: an external
+load generator on the shared host (load average 152, processes unrelated to
+this repository) made the baseline run's figures unusable, and a contaminated
+A/B is not a result. Named follow-ups: an `M1` variant for one-row panels ---
+gemv shapes fall back to the portable kernel today, the gap the x86 family's
+`_M1` entries already close on that ISA --- and the Strassen A/B re-run on a
+quiet machine.
 
 **The sub-cubic recursion on the i32-exact lane (CD-21, CG-12, shipped;
 CG-12 figures `open`).** Winograd's form of Strassen's recursion above the
