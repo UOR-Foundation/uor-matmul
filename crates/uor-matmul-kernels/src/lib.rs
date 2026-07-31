@@ -36,6 +36,8 @@
 extern crate std;
 
 pub mod isa;
+#[doc(hidden)]
+pub mod parity;
 pub mod spec;
 pub mod table;
 

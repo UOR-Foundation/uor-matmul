@@ -30,4 +30,4 @@ workspace = true
 # portable kernel against itself while claiming to cover the host --- which is
 # what it did until `CB-02` was made to assert otherwise.
 [dev-dependencies]
-uor-matmul-kernels = { path = ".", features = ["std"] }
+uor-matmul-kernels = { version = "0.1.0", path = ".", features = ["std"] }

@@ -13,6 +13,7 @@ Which axis of `just vv` discharges which class of claim.
 | `just bdd` | R9 and R4's behavioural half | `CM-02`, `CM-03` |
 | `just checked` | every accumulator operation checked, no overflow | `CT-02` |
 | `just cross` | the corpus digest off the host | `CA-02` |
+| `just cortex-m-run` | the parity checks run on a Cortex-M target under qemu-system, not merely compiled | `CB-11` |
 | `just scaling` | fitted exponents, reported never asserted | `CG-01` .. `CG-07` |
 | `just features` | every optional feature compiles, and `kappa`'s tests run | --- |
 | `just fuzz` | totality over unstructured input | `CT-01`, `CT-03`, `CK-06` |
@@ -67,6 +68,7 @@ of these has been checked by planting the defect it exists to catch:
 | `CK-11` | the `Sign` decode's bit convention inverted (set is `-1`, clear is `+1`) --- both `CK-11` tests failed, the codec-level one on the first exhaustive code and the gemm-level one on the first shape. `CK-09` did *not* fire: the inversion permutes the table, which the enumeration laws are blind to by design --- the cross-spelling byte identity is the gate for the convention, and it held | yes |
 | `CK-12` | the `Ternary` decode's digit convention disturbed, twice: the `-1`/`+1` arms swapped, and the dead digit 3 decoded to `+1` --- each failed the codec-level `CK-12` test on an exhaustive code and the gemm-level one on the first shape; the adds-only bound-1 half did *not* fire under either, because its dense reference shares the tier's decode and only the cross-spelling comparison sees the convention. `CK-09` did not fire under the swap either, for the same reason as under `CK-11`'s | yes |
 | `CD-17` | numeric `==` as the float rows' identity (both the element verdict and the contiguous-run comparison) --- all three `CD-17` tests failed: the unit pass counted five rows where bit identity sees two (NaN rows refuse to collapse under `==`), the bit-witness unit test counted five symbols for four, and the end-to-end census left the per-distinct-row closed form | yes |
+| `CB-11` (the Cortex-M executor) | the portable tile's row index written `i ^ 1` in `isa/portable.rs` --- the thumbv6m executor printed `CB-11: FAIL` with the assert's location and qemu exited 1, so `just cortex-m-run` failed at the first family, before any PASS marker | yes |
 
 `audit-disassembly` deliberately does *not* catch a float add the optimizer
 removed, because such an add is not in the shipped kernel. The gate reports the
