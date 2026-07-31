@@ -90,7 +90,10 @@ pub struct Census {
     /// Widening multiply-accumulates. Zero in the column loop, by construction.
     pub multiplies: u64,
     /// Accumulator combines: exact adds at the accumulator's full width, and
-    /// the bound-1 build's products, which are issued as signed adds (`CB-10`).
+    /// the bound-1 build's adds --- every product issued as a signed add for
+    /// the per-codeword build (`CB-10`), and the walk's own count for the Gray
+    /// sign build, which the spec's `build_adds` names so the census counts
+    /// what ran rather than what the per-codeword build would have run.
     pub adds: u64,
     /// Reads of a tabulated partial sum.
     pub table_reads: u64,
@@ -364,9 +367,11 @@ impl<'s, L: LaneWord> Table<'s, L> {
         if spec.build_multiplies {
             ledger.multiplied(products);
         } else {
-            // The census counts what was issued, and the bound-1 build issues
-            // the products as adds and subtracts (CB-10).
-            ledger.added(products);
+            // The census counts what was issued. The per-codeword bound-1
+            // build issues the products as adds and subtracts (`CB-10`); the
+            // Gray sign build issues the walk's own count, and the spec says
+            // which it is.
+            ledger.added((spec.build_adds)(self.code_space, block, self.rows));
         }
     }
 
@@ -876,9 +881,16 @@ pub trait Tabulated: Element {
     ///
     /// Always present: the reference is exact on every alphabet and every tile,
     /// so narrowing the choice can never empty it.
+    ///
+    /// `sign_book` is the codec's [`uor_matmul_codec::Enumerable::SIGN_BIT_BOOK`]
+    /// declaration, and a family reads it at bound 1 and nowhere else: it is
+    /// what admits the Gray-walk build, whose correctness is the codec's
+    /// declaration and not the alphabet's --- `Ternary` at bound 1 declares
+    /// the same bound, and its book is not the bit decomposition.
     fn table_spec(
         backend: Backend,
         bound: u128,
+        sign_book: bool,
         rows: usize,
         group: usize,
         block: usize,
@@ -1100,10 +1112,18 @@ impl Tabulated for i8 {
     fn table_spec(
         backend: Backend,
         bound: u128,
+        sign_book: bool,
         rows: usize,
         group: usize,
         block: usize,
     ) -> TableSpec<i8, i32> {
+        // The Gray walk is the `Auto` answer exactly when the codec declares
+        // the sign codebook: the walk derives the signs from the code index,
+        // which is the declaration the flag makes. A named backend is the
+        // caller asking for that backend's own build, and gets it.
+        if sign_book && bound == 1 && matches!(backend, Backend::Auto) {
+            return uor_matmul_kernels::gray_sign_table(rows, group);
+        }
         choose_table(available_table_i8(rows, group), backend, bound, block)
             .expect("the reference sequence is always present")
     }
@@ -1119,7 +1139,7 @@ impl Tabulated for i8 {
         // never selects this lane. Written as the exact sequence rather than a
         // panic because the exact `i32` lane is congruent mod `2^32` anyway ---
         // if it ever ran, the bytes would still be the caller's.
-        Self::table_spec(backend, bound, rows, group, block)
+        Self::table_spec(backend, bound, false, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -1183,6 +1203,7 @@ impl Tabulated for i16 {
     fn table_spec(
         backend: Backend,
         bound: u128,
+        _sign_book: bool,
         rows: usize,
         group: usize,
         block: usize,
@@ -1199,7 +1220,7 @@ impl Tabulated for i16 {
         block: usize,
     ) -> TableSpec<i16, i64> {
         // Never reached, as `i8`'s.
-        Self::table_spec(backend, bound, rows, group, block)
+        Self::table_spec(backend, bound, false, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -1271,6 +1292,7 @@ impl Tabulated for i32 {
     fn table_spec(
         backend: Backend,
         bound: u128,
+        _sign_book: bool,
         rows: usize,
         group: usize,
         block: usize,
@@ -1359,6 +1381,7 @@ impl Tabulated for i64 {
     fn table_spec(
         backend: Backend,
         bound: u128,
+        _sign_book: bool,
         rows: usize,
         group: usize,
         block: usize,
@@ -1462,6 +1485,7 @@ impl Tabulated for f32 {
     fn table_spec(
         backend: Backend,
         bound: u128,
+        _sign_book: bool,
         rows: usize,
         group: usize,
         block: usize,
@@ -1482,7 +1506,7 @@ impl Tabulated for f32 {
         block: usize,
     ) -> TableSpec<f32, Scaled64> {
         // Never reached, as `i8`'s.
-        Self::table_spec(backend, bound, rows, group, block)
+        Self::table_spec(backend, bound, false, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -1641,6 +1665,7 @@ impl Tabulated for f64 {
     fn table_spec(
         backend: Backend,
         bound: u128,
+        _sign_book: bool,
         rows: usize,
         group: usize,
         block: usize,
@@ -1659,7 +1684,7 @@ impl Tabulated for f64 {
         block: usize,
     ) -> TableSpec<f64, Wide<AccOf<f64>>> {
         // Never reached, as `f32`'s.
-        Self::table_spec(backend, bound, rows, group, block)
+        Self::table_spec(backend, bound, false, rows, group, block)
     }
 
     fn lanes<'s>(
@@ -1991,7 +2016,9 @@ fn run<E, Bd, C, O, Ep, Lg>(
             words,
             index,
             repeated,
-            E::table_spec_modular,
+            |backend, bound, _sign_book, rows, group, block| {
+                E::table_spec_modular(backend, bound, rows, group, block)
+            },
             E::lanes_modular,
             ledger,
         );
@@ -2014,7 +2041,7 @@ fn run<E, Bd, C, O, Ep, Lg>(
 /// The sequence lookup for one lane, as a function pointer: the family's own
 /// [`Tabulated::table_spec`] or [`Tabulated::table_spec_modular`], named at the
 /// boundary because the two lanes are two types.
-type SpecOf<E, L> = fn(Backend, u128, usize, usize, usize) -> TableSpec<E, L>;
+type SpecOf<E, L> = fn(Backend, u128, bool, usize, usize, usize) -> TableSpec<E, L>;
 
 /// The offer-relabelling half of a lane, likewise: [`Tabulated::lanes`] or
 /// [`Tabulated::lanes_modular`].
@@ -2094,6 +2121,7 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
     let table = spec_of(
         options.backend,
         Bd::VALUE,
+        C::SIGN_BIT_BOOK,
         plan.rows,
         column_group(plan.rows),
         block,
@@ -2581,7 +2609,7 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         single: if group == 1 {
             *spec
         } else {
-            spec_of(options.backend, Bd::VALUE, rows, 1, block)
+            spec_of(options.backend, Bd::VALUE, C::SIGN_BIT_BOOK, rows, 1, block)
         },
         codes,
         stream: C::as_index_stream(codes),
@@ -2883,9 +2911,19 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
             .unwrap_or(1);
         // The sequence for *this* tile height. A narrower tile is a narrower
         // register file, not a different function, and the reference carries
-        // every height no vector sequence has (R13).
+        // every height no vector sequence has (R13). The codec's sign-book
+        // declaration goes with the call: at bound 1 it is what admits the
+        // Gray-walk build, and nothing else does (`Ternary` declares the
+        // bound and not the book).
         let group = column_group(rows);
-        let spec = spec_of(options.backend, Bd::VALUE, rows, group, block);
+        let spec = spec_of(
+            options.backend,
+            Bd::VALUE,
+            C::SIGN_BIT_BOOK,
+            rows,
+            group,
+            block,
+        );
         let Some(mut table) = Table::new(stack, space, rows, plan.depth) else {
             // `Plan::choose` sized the offer for the widest tile it admits and
             // `rows` is never wider, so this cannot be reached. It is written as
@@ -5974,7 +6012,8 @@ mod tests {
             .into_iter()
             .find(|&r| r <= tabulation_rows(space, l1, lane).min(m))
             .expect("a 256-entry table fits L1 at some tile");
-        let spec = <i8 as Tabulated>::table_spec(backend, bound, rows, column_group(rows), block);
+        let spec =
+            <i8 as Tabulated>::table_spec(backend, bound, false, rows, column_group(rows), block);
         let steps =
             <i8 as Tabulated>::dense_steps(backend, bound, rows, block * spec.lanes_per_add);
         let break_even = (1..)

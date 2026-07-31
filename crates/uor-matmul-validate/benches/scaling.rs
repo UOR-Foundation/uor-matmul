@@ -20,8 +20,11 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::mem::size_of;
 use uor_matmul::prelude::*;
-use uor_matmul::{suggested_float_panels, suggested_scratch, workspace_report, Shape};
-use uor_matmul_core::{Alphabet, EncodeMode, Full, PackedCode};
+use uor_matmul::{
+    suggested_collapse_index, suggested_collapse_rows, suggested_float_panels, suggested_scratch,
+    suggested_tabulation, workspace_report, Backend, Collapse, Shape, TabulatedTriple,
+};
+use uor_matmul_core::{Alphabet, EncodeMode, Full, PackedCode, Traversal};
 use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 
 /// Emit the fitted exponents, then time a few shapes so `cargo bench` has
@@ -352,11 +355,146 @@ fn workspace_plans(c: &mut Criterion) {
     group.finish();
 }
 
+/// The Gray-walk sign build, measured: the isolated build against the
+/// per-codeword build it would displace, and the tabulated gemm end to end at
+/// shapes where the build is a visible fraction of the run. The verdict rule
+/// is pre-registered in `MEASUREMENT-LOG.md`: the Gray build stays only if
+/// the isolated build wins *and* the end-to-end run does not regress; an
+/// isolated win with an end-to-end regression is a store-bound decline, and
+/// the table stays per-codeword. Compiled here; the run waits for a quiet
+/// window, so this group has produced no figure yet.
+fn gray_sign(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gray_sign");
+
+    // (a) The isolated build at the widest tile, `Sign<8>` and `Sign<16>`.
+    for &(space, block) in &[(256usize, 8usize), (65536, 16)] {
+        let rows = 16usize;
+        let book: Vec<i8> = (0..space * block)
+            .map(|i| {
+                let (c, t) = (i / block, i % block);
+                if (c >> t) & 1 == 1 {
+                    1
+                } else {
+                    -1
+                }
+            })
+            .collect();
+        let acts = vec![1i8; block * rows];
+        let specs = [
+            (
+                "independent",
+                uor_matmul::kernels::portable_table_bound1(rows, 1),
+            ),
+            ("gray", uor_matmul::kernels::gray_sign_table(rows, 1)),
+        ];
+        for (name, spec) in specs {
+            group.bench_function(format!("build/{name}/space{space}-blk{block}"), |b| {
+                let mut out = vec![0i32; space * rows];
+                b.iter(|| {
+                    spec.build(space, block, &book, &acts, &mut out);
+                    assert!(
+                        out[..rows].iter().all(|&v| v == -(block as i32)),
+                        "T[0] is the negative row sum"
+                    );
+                });
+            });
+        }
+    }
+
+    // (b) End to end: the tabulated traversal at a shape where the build is a
+    // visible fraction --- small `m`, wide `n`, and a slot count that grows
+    // with `k`. `Auto` takes the Gray build at bound 1 with the sign
+    // codebook; a named backend is the per-codeword build it would displace.
+    let sign =
+        uor_matmul::codec::Sign::<i8, uor_matmul::Bnd<1>, 8>::new().expect("bound 1 admits +-1");
+    let isa = if cfg!(target_arch = "aarch64") {
+        Backend::Neon
+    } else if cfg!(target_arch = "x86_64") {
+        Backend::Avx2
+    } else {
+        Backend::Portable
+    };
+    let backends = [
+        ("gray-auto", Backend::Auto),
+        ("independent-portable", Backend::Portable),
+        ("independent-isa", isa),
+    ];
+    for &(m, k, n) in &[(8usize, 1024usize, 2100usize), (8, 4096, 2100)] {
+        let shape = Shape { m, k, n };
+        let (space, block) = (256usize, 8usize);
+        let codes: Vec<u16> = (0..n * (k / block))
+            .map(|i| (i * 37 % 256) as u16)
+            .collect();
+        let a: Vec<i8> = (0..m * k).map(|i| ((i % 3) as i8) - 1).collect();
+        let w = uor_matmul::codec::CodedMatrix::new(sign, n, k, &codes)
+            .expect("the codes describe n x k");
+
+        let run = |backend: Backend, out: &mut Vec<i32>| {
+            let mut panel = vec![
+                Alphabet::<i8, uor_matmul::Bnd<1>>::ZERO;
+                uor_matmul::driver::suggested_tabulation_panel(space, block)
+                    .max(n * k + suggested_scratch(shape))
+            ];
+            let mut accs = vec![
+                0i128;
+                suggested_tabulation::<i8, uor_matmul::Bnd<1>>(shape, space, block)
+                    .max(1)
+            ];
+            let mut lane_words = vec![
+                0i64;
+                uor_matmul::driver::suggested_tabulation_lanes::<
+                    i8,
+                    uor_matmul::Bnd<1>,
+                >(shape, space, block,)
+                .max(1)
+            ];
+            let mut ids = vec![0usize; uor_matmul::driver::suggested_tabulation_index(shape)];
+            let mut collapse_index = vec![0usize; suggested_collapse_index(m)];
+            let mut collapse_rows =
+                vec![Alphabet::<i8, uor_matmul::Bnd<1>>::ZERO; suggested_collapse_rows(shape)];
+            let av = MatView::row_major(
+                as_alphabet::<i8, uor_matmul::Bnd<1>>(&a).expect("the activations fit bound 1"),
+                m,
+                k,
+            )
+            .expect("A fits");
+            let cv = MatViewMut::row_major(out, m, n).expect("C fits");
+            let mut t = TabulatedTriple::new(av, w, cv).expect("the product exists");
+            uor_matmul::gemm_tabulated(
+                &mut t,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    backend,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut accs),
+                &mut uor_matmul::driver::Tabulation::with_index(&mut lane_words, &mut ids),
+                &mut Collapse::new(&mut collapse_index, &mut collapse_rows),
+            );
+        };
+
+        let mut want = vec![0i32; m * n];
+        run(Backend::Portable, &mut want);
+        for (name, backend) in backends {
+            group.bench_function(format!("e2e/{name}/{m}x{k}x{n}"), |b| {
+                let mut out = vec![0i32; m * n];
+                b.iter(|| {
+                    run(backend, &mut out);
+                    assert_eq!(out, want, "the timed call must be correct");
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     scaling_report,
     vs_oracles,
     public_api,
-    workspace_plans
+    workspace_plans,
+    gray_sign
 );
 criterion_main!(benches);

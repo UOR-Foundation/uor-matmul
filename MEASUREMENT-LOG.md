@@ -509,3 +509,39 @@ cache replaces was already folded and what the delta measures is the resolved
 slice against the closure chain; and a single call at `n = 1` lands inside
 one tick of this host's clock, which is why the harness amortizes over a
 batch rather than timing one call.
+
+**The Gray-walk sign build (prototype shipped, verdict pending).** The
+bound-1 table build was per-codeword independent sums: `code_space * block`
+adds per row of the table (2048 at `Sign<8>`), zero multiplies, charged to
+the census as `adds`. The Gray construction walks the code space in reflected
+Gray-code order --- consecutive codes differ in exactly one bit `q`, so
+`T[next] = T[cur] +- 2 * A[q]` --- and stores at the binary code index, not
+the walk ordinal: `2 * block + space - 1` adds per row (271 at `Sign<8>`),
+still zero multiplies, the 256 stores both builds share as their floor. The
+spec is the bound-1 spec the host would otherwise select with only the build
+swapped --- the incumbent keeps its own gathers, so the comparison prices the
+build and not a portable gather --- and the walk has no ISA variant because a
+serial dependency chain does not vectorize. It shipped wired behind the
+codec's own declaration: `Enumerable::SIGN_BIT_BOOK` (`Sign` alone answers
+true --- `Ternary` declares the same bound and its book is not the bit
+decomposition), read at bound 1 under `Auto`; a named backend gets the
+per-codeword build it names. The census's bound-1 charge is now the spec's
+own `build_adds`: every product for the per-codeword build, the walk's count
+for the Gray build. Parity is the differential test in
+`crates/uor-matmul-kernels/tests/parity.rs` (every code, the alphabet's
+extremes, every tile height, slot for slot against the per-codeword build and
+spot-checked against the model) plus the existing bound-1 suite, which now
+runs the Gray build end to end.
+
+*Verdict rule, pre-registered:* the Gray build stays only if the isolated
+build wins *and* the end-to-end run does not regress; an isolated win with an
+end-to-end regression is a store-bound decline, the table stays per-codeword,
+and the outcome is recorded here, exactly like the SWAR item. The harness is
+the `gray_sign` group in `crates/uor-matmul-validate/benches/scaling.rs`:
+isolated builds at `Sign<8>` and `Sign<16>`, and the tabulated gemm at
+`8x1024x2100` and `8x4096x2100` (small `m`, wide `n`, the build a visible
+fraction), `Auto` against the named per-codeword builds. **Timing is pending
+a quiet window** --- the development host was loaded when this landed and a
+contaminated measurement is not a result. No figure is claimed anywhere in
+the tree; if the verdict is a decline, the wire comes out and this entry
+becomes the record.

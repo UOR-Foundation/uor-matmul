@@ -37,6 +37,8 @@
 
 use uor_matmul_core::{Accumulator, Backend, Element, FloatElement};
 
+use crate::MAX_TILE_LANES;
+
 /// The sequences a build can run, reference first.
 ///
 /// A chain of options rather than a fixed array, so the number a family may
@@ -804,6 +806,15 @@ pub struct TableSpec<E, L> {
     /// the driver's census charges it as such (`CB-10`) rather than as the
     /// products it computes.
     pub build_multiplies: bool,
+    /// How many adds [`Self::build`] issues per slot, charged to the census
+    /// when [`Self::build_multiplies`] is false.
+    ///
+    /// The census counts what ran, not what a per-codeword build would have
+    /// run: for the independent bound-1 build that is every product issued as
+    /// an add, and for the Gray sign build it is the walk's own count, which
+    /// is the whole point of walking (`2 * block + space - 1` per row against
+    /// `space * block`).
+    pub build_adds: fn(space: usize, block: usize, rows: usize) -> u64,
     /// Fill one slot.
     pub build: TableBuild<E, L>,
     /// Reduce one column group from an index stream the driver built.
@@ -886,11 +897,26 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
         // intermediate to outgrow and no alphabet it is inexact on.
         max_bound: u128::MAX,
         build_multiplies: true,
+        build_adds: product_build_adds,
         build: portable_build::<E, L>,
         gather,
         gather_codes,
         gather_codes_u8,
     }
+}
+
+/// The per-codeword adds build's census charge: every product, issued as an
+/// add or a subtract (`CB-10`).
+pub const fn product_build_adds(space: usize, block: usize, rows: usize) -> u64 {
+    (space as u64) * (block as u64) * (rows as u64) // R3-ok: a census count
+}
+
+/// The Gray walk's census charge: `T[0]` and the doubled activations (two
+/// passes of `block` adds), then one update per code past the first ---
+/// `2 * block + space - 1` adds per row against the independent build's
+/// `space * block`.
+pub const fn gray_sign_build_adds(space: usize, block: usize, rows: usize) -> u64 {
+    (2 * block + space - 1) as u64 * rows as u64 // R3-ok: a census count
 }
 
 /// The bound-1 build: the table's only multiply, absent.
@@ -922,6 +948,7 @@ pub const fn portable_table_bound1(rows: usize, group: usize) -> TableSpec<i8, i
         // reads.
         max_bound: 1,
         build_multiplies: false,
+        build_adds: product_build_adds,
         build: portable_build_bound1,
         gather: portable_gather::<i32>,
         gather_codes: portable_gather_codes::<i32, u16>,
@@ -1001,6 +1028,189 @@ fn build_any_bound1(rows: usize, block: usize, book: &[i8], acts: &[i8], out: &m
                 };
             }
         }
+    }
+}
+
+/// The Gray-walk sign build: the same bound-1 table, built by walking the
+/// code space in reflected Gray-code order.
+///
+/// For the sign codebook `T[c][i] = sum_t (2 * bit(c, t) - 1) * A[i][t]`, and
+/// consecutive Gray codes differ in exactly one bit `q`, so `T[next]` is
+/// `T[cur] +- 2 * A[q]` --- one add per row per code, against the independent
+/// build's `block` adds per row per code. At `Sign<8>` that is
+/// `2 * 8 + 255 = 271` adds a row against 2048. The doubled activation is
+/// written as `a + a`, so the multiply count stays zero, and every table
+/// entry is stored exactly once, at the binary code index rather than the
+/// walk ordinal: the 256 stores are the floor both builds share, and the win
+/// is the arithmetic between them.
+///
+/// The precondition is the codebook: `space` a power of two and
+/// `book[c * block + t] == 2 * bit(c, t) - 1`. The walk derives the signs
+/// from the code index and reads no book at all, so an ordinary bound-1 book
+/// --- `Ternary`'s, say --- would come out wrong: the driver reaches this
+/// build only where the codec declares [`uor_matmul_codec::Enumerable::
+/// SIGN_BIT_BOOK`], which is what makes ignoring the book a factorization of
+/// the same table rather than a different table.
+///
+/// There are no ISA variants, deliberately: the walk is a serial dependency
+/// chain (`T[next]` needs `T[cur]`), and a vector sequence would widen the
+/// one part both builds already do at full width --- the stores --- while
+/// serializing nothing away. The win is arithmetic per store, and a chain
+/// does not vectorize.
+///
+/// # Safety
+///
+/// [`TableBuild`]'s contract, with the sign-codebook precondition above.
+unsafe fn gray_sign_build(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    let _ = book;
+    // SAFETY: the caller guaranteed the three extents, as in `portable_build`.
+    let (acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(acts, block * rows),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    match rows {
+        1 => gray_sign_run::<1>(space, block, acts, out),
+        2 => gray_sign_run::<2>(space, block, acts, out),
+        4 => gray_sign_run::<4>(space, block, acts, out),
+        8 => gray_sign_run::<8>(space, block, acts, out),
+        16 => gray_sign_run::<16>(space, block, acts, out),
+        _ => gray_sign_any(rows, space, block, acts, out),
+    }
+}
+
+/// The Gray build at a compile-time tile height: the current entry lives in
+/// registers for the whole walk.
+#[inline(always)]
+fn gray_sign_run<const R: usize>(space: usize, block: usize, acts: &[i8], out: &mut [i32]) {
+    let walk = space.trailing_zeros() as usize;
+    debug_assert!(
+        space.is_power_of_two() && walk <= block && walk <= 16,
+        "the sign codebook is a power-of-two space read bit by bit"
+    );
+    // `T[0] = -sum_t A[t]` and the doubled activations, once: every update
+    // below is then one add per row. Terms past `walk` are a constant `-1`
+    // contribution and are in `T[0]` already.
+    let mut cur = [0i32; R];
+    let mut doubled = [[0i32; R]; 16];
+    for t in 0..block {
+        for (cell, &a) in cur.iter_mut().zip(&acts[t * R..][..R]) {
+            *cell -= i32::from(a);
+        }
+        if t < walk {
+            for (d, &a) in doubled[t].iter_mut().zip(&acts[t * R..][..R]) {
+                let a = i32::from(a);
+                // Written as the add it is: the multiply count is zero here
+                // exactly as it is in the per-codeword build (`CB-10`).
+                *d = a + a;
+            }
+        }
+    }
+    out[..R].copy_from_slice(&cur);
+    // The reflected walk: the bit that flips at `step` is
+    // `step.trailing_zeros()`, read off `gray ^ prev` because that is the fact
+    // being used, and `cur` is stored at the binary index `gray`.
+    let mut prev = 0usize;
+    for step in 1..space {
+        let gray = step ^ (step >> 1);
+        let q = (gray ^ prev).trailing_zeros() as usize;
+        if (gray >> q) & 1 == 1 {
+            for (cell, &d) in cur.iter_mut().zip(&doubled[q]) {
+                *cell += d;
+            }
+        } else {
+            for (cell, &d) in cur.iter_mut().zip(&doubled[q]) {
+                *cell -= d;
+            }
+        }
+        out[gray * R..][..R].copy_from_slice(&cur);
+        prev = gray;
+    }
+}
+
+/// The same, at a row count no shipped tile uses: `cur` capped at the tile
+/// lane bound every kernel in this crate already asserts against.
+fn gray_sign_any(rows: usize, space: usize, block: usize, acts: &[i8], out: &mut [i32]) {
+    let walk = space.trailing_zeros() as usize;
+    assert!(
+        space.is_power_of_two() && walk <= block && walk <= 16 && rows <= MAX_TILE_LANES,
+        "the Gray build's register window is the tile lane bound"
+    );
+    let mut cur = [0i32; MAX_TILE_LANES];
+    let mut doubled = [0i32; 16 * MAX_TILE_LANES];
+    for t in 0..block {
+        for (cell, &a) in cur[..rows].iter_mut().zip(&acts[t * rows..][..rows]) {
+            *cell -= i32::from(a);
+        }
+        if t < walk {
+            for (d, &a) in doubled[t * rows..][..rows]
+                .iter_mut()
+                .zip(&acts[t * rows..][..rows])
+            {
+                let a = i32::from(a);
+                *d = a + a;
+            }
+        }
+    }
+    out[..rows].copy_from_slice(&cur[..rows]);
+    let mut prev = 0usize;
+    for step in 1..space {
+        let gray = step ^ (step >> 1);
+        let q = (gray ^ prev).trailing_zeros() as usize;
+        let d = &doubled[q * rows..][..rows];
+        if (gray >> q) & 1 == 1 {
+            for (cell, &d) in cur[..rows].iter_mut().zip(d) {
+                *cell += d;
+            }
+        } else {
+            for (cell, &d) in cur[..rows].iter_mut().zip(d) {
+                *cell -= d;
+            }
+        }
+        out[gray * rows..][..rows].copy_from_slice(&cur[..rows]);
+        prev = gray;
+    }
+}
+
+/// The Gray-walk sign build, as a spec: [`gray_sign_build`] behind the
+/// bound-1 declaration, so selection by declaration reaches it exactly where
+/// the codec also declares the sign codebook.
+///
+/// The spec is the bound-1 spec this host would otherwise select, with only
+/// the build swapped: the walk replaces the per-codeword sums, and the
+/// gathers are the incumbent's own. That is what keeps the comparison honest
+/// --- the build and the gather are separate concerns, and timing the walk
+/// against a portable gather would be timing the gather, not the build. The
+/// walk itself is a serial dependency chain, so it has no ISA variant: the
+/// one part both builds already do at full width is the stores.
+///
+/// **Selection offers this nowhere on its own**: it is not in
+/// [`available_table_i8`], because the bound-1 declaration alone does not
+/// imply the sign codebook --- `Ternary` at bound 1 declares the same bound
+/// and its book is not the bit decomposition. The driver takes this spec only
+/// where [`uor_matmul_codec::Enumerable::SIGN_BIT_BOOK`] says the book *is*
+/// the bit decomposition; everywhere else the per-codeword adds build runs,
+/// at the same bytes. Whether it stays --- the pre-registered verdict of
+/// `MEASUREMENT-LOG.md`, pending a quiet measurement window: ship only if the
+/// isolated build wins *and* the end-to-end run does not regress.
+pub fn gray_sign_table(rows: usize, group: usize) -> TableSpec<i8, i32> {
+    // The incumbent: the spec `Auto` hands a bound-1 alphabet. `block = 1`
+    // because only the build's `k_group` divides one, and the bound-1 builds
+    // are exactly the `k_group: 1` sequences.
+    let incumbent = choose_table(available_table_i8(rows, group), Backend::Auto, 1, 1)
+        .expect("the bound-1 build is always present");
+    TableSpec {
+        build: gray_sign_build,
+        build_adds: gray_sign_build_adds,
+        ..incumbent
     }
 }
 

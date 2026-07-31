@@ -158,6 +158,18 @@ pub trait Enumerable<E: Element, Bd: Bound>: Codec<E, Bd> {
     /// name codes that cannot be stored.
     const CODE_SPACE: usize;
 
+    /// Whether the decoded book is the sign bit-decomposition:
+    /// `CODE_SPACE` is a power of two and `book[c][t] == 2 * bit(c, t) - 1`
+    /// for every code `c` and every `t` below its log.
+    ///
+    /// The tabulated driver's one reader is the Gray-walk table build, which
+    /// derives the signs from the code index and reads no book at all; an
+    /// answer of `true` is what makes that build a factorization of *this*
+    /// codec's table rather than of some other table with the same declared
+    /// bound. `Sign` answers true and everything else leaves the default ---
+    /// `Ternary`'s book is a bound-1 book too, and it is not this one.
+    const SIGN_BIT_BOOK: bool = false;
+
     /// The `index`-th code. Total for `index < CODE_SPACE`.
     fn code_at(index: usize) -> Self::Code;
 

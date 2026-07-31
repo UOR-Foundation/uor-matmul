@@ -573,6 +573,7 @@ pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         // reach --- the same statement `NEON_I8_I32` makes.
         max_bound: u128::MAX,
         build_multiplies: true,
+        build_adds: crate::table::product_build_adds,
         build,
         gather,
         gather_codes,
@@ -635,6 +636,7 @@ pub fn neon_table_i8_i32_bound1(rows: usize, group: usize) -> Option<TableSpec<i
         // `choose_table` reads.
         max_bound: 1,
         build_multiplies: false,
+        build_adds: crate::table::product_build_adds,
         build,
         gather,
         gather_codes,
@@ -694,6 +696,7 @@ pub fn neon_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
         lane_cap: i64::MAX as u128,
         max_bound: u128::MAX,
         build_multiplies: true,
+        build_adds: crate::table::product_build_adds,
         build,
         gather,
         gather_codes,

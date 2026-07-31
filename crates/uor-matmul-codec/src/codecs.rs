@@ -413,6 +413,10 @@ impl<E: IntegerElement, Bd: Bound, const BLK: usize, K: SymbolCode> Enumerable<E
         K::CODES
     };
 
+    // The whole point of the tier: the code *is* the index, and the decode is
+    // the bit test. The Gray-walk build reads this flag and nothing else.
+    const SIGN_BIT_BOOK: bool = true;
+
     fn code_at(index: usize) -> Self::Code {
         K::at(index % Self::CODE_SPACE.max(1))
     }
