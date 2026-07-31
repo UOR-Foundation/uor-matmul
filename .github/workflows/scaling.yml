@@ -35,21 +35,36 @@ jobs:
       # an x86 pass is exactly what this host class is for.
       - name: CG-12, the sub-cubic recursion against the cubic walk
         run: |
+          set -o pipefail
           mkdir -p target/measurements
           just strassen-sweep | tee target/measurements/strassen-x86.txt
       - name: CG-15, the float placement bridge
-        run: just bridge-sweep | tee target/measurements/bridge-x86.txt
+        run: |
+          set -o pipefail
+          just bridge-sweep | tee target/measurements/bridge-x86.txt
       - name: CG-14, the symbol path against the bus
-        run: just symbol-bandwidth | tee target/measurements/symbol-bandwidth-x86.txt
+        run: |
+          set -o pipefail
+          just symbol-bandwidth | tee target/measurements/symbol-bandwidth-x86.txt
       - name: CG-16, the symbol table in the scaled lane
-        run: just symbol-tabulated | tee target/measurements/symbol-tabulated-x86.txt
+        run: |
+          set -o pipefail
+          just symbol-tabulated | tee target/measurements/symbol-tabulated-x86.txt
+      # The repo's rust-toolchain.toml pins a channel whose target list does
+      # not name wasip1, so the action's `targets:` installs it for stable and
+      # the pinned toolchain still lacks it: the swar sweep failed E0463 and
+      # the pipe swallowed it. Add the target to the toolchain that runs.
+      - name: wasm32-wasip1 std for the pinned toolchain
+        run: rustup target add wasm32-wasip1
       # CG-17 is a wasm measurement, so it is architecture-independent by
       # construction; it lives here because this is the measurements workflow.
       - uses: taiki-e/install-action@v2
         with:
           tool: wasmtime
       - name: CG-17, the SWAR broadcast against the dot incumbent
-        run: just swar-sweep | tee target/measurements/swar-wasm.txt
+        run: |
+          set -o pipefail
+          just swar-sweep | tee target/measurements/swar-wasm.txt
       - uses: actions/upload-artifact@v4
         with:
           name: measurements-x86
@@ -70,11 +85,17 @@ jobs:
           mkdir -p target/measurements
           just strassen-sweep | tee target/measurements/strassen-aarch64.txt
       - name: CG-15, the float placement bridge
-        run: just bridge-sweep | tee target/measurements/bridge-aarch64.txt
+        run: |
+          set -o pipefail
+          just bridge-sweep | tee target/measurements/bridge-aarch64.txt
       - name: CG-14, the symbol path against the bus
-        run: just symbol-bandwidth | tee target/measurements/symbol-bandwidth-aarch64.txt
+        run: |
+          set -o pipefail
+          just symbol-bandwidth | tee target/measurements/symbol-bandwidth-aarch64.txt
       - name: CG-16, the symbol table in the scaled lane
-        run: just symbol-tabulated | tee target/measurements/symbol-tabulated-aarch64.txt
+        run: |
+          set -o pipefail
+          just symbol-tabulated | tee target/measurements/symbol-tabulated-aarch64.txt
       - uses: actions/upload-artifact@v4
         with:
           name: measurements-aarch64
