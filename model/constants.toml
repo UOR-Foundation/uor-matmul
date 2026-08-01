@@ -224,11 +224,13 @@ kernel_rows = 6
 # which byte (CD-21).
 strassen_min_extent = 384
 # The smallest base-case extent at which one level of the modular bilinear
-# factorization pays on a modular lane. UNMEASURED --- the lane's crossover
-# has not been priced (MEASUREMENT-LOG.md registers the harness and the
-# pre-registered verdict), so this is `usize::MAX` and the modular arm
-# declines the level everywhere until a quiet-window measurement replaces it.
-# Written as a value past every target's addressable extent; the generator
-# spells it `usize::MAX` so it declines portably on 32- and 64-bit targets
-# alike.
-strassen_modular_min_extent = 9223372036854775807
+# factorization pays on a modular lane. Measured by the `modular_strassen`
+# bench group (2026-07-31, Apple M4 Max, quiet window): at 512 cubed the
+# level loses to the direct packed modular walk on both rings (0.60x at i8,
+# 0.96x at i32) and at 1024 cubed it wins (1.14x, 1.11x), so the crossover is
+# between the two and the threshold is the smallest measured winner. The win
+# widens with size (1.57x at i8 4096 cubed); MEASUREMENT-LOG.md carries the
+# table, and the figure stays `open` as a one-host measurement. Like the rest
+# of the table it changes which traversal produces a byte and never which
+# byte (CD-23).
+strassen_modular_min_extent = 1024

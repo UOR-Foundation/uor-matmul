@@ -142,7 +142,7 @@ pub mod blocking {
     /// factorization pays on a modular lane. `usize::MAX` while the lane has no
     /// measurement: the modular arm consults it and declines until the
     /// pre-registered sweep in `MEASUREMENT-LOG.md` records one.
-    pub const STRASSEN_MODULAR_MIN_EXTENT: usize = usize::MAX;
+    pub const STRASSEN_MODULAR_MIN_EXTENT: usize = 1024;
 }
 
 // R1: the W8A8 threshold, pinned. This is the one place in the shipped

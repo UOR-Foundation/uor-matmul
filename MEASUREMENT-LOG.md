@@ -54,6 +54,28 @@ measurements named:
 
 ## Measurements
 
+**The public-path and workspace benches (CD-22 and the Phase B plans,
+measured; figures `open`).** On the development host (Apple M4 Max, quiet
+window), 2026-07-31, `cargo bench -p uor-matmul-validate`, criterion means
+over 100 samples. The public safe integer API is the kernelized path now,
+measured rather than asserted: `slice::gemm` against `gemm_packed` at 16/64/128
+cubed reads 796/800 ns, 13.29/13.35 us, 60.32/60.22 us --- the same path
+within noise at every size, which is `CD-22`'s claim with a number on it.
+The workspace groups, against the work order's shapes: at `16x400000x16`
+the bounded offer matches the suggested one (16.98 against 16.95 ms) at
+12 KiB against 12.8 MiB of caller memory, a thousandth of the footprint at
+no measurable cost; at `8x262144x8` the bounded offer costs 1.7x against
+the suggested (4.51 against 2.66 ms --- the 1024-deep chunk against a
+full-depth panel) while still beating no offer (6.17 ms) at 800x less
+memory; at `1x1048576x1` the packed path does not pay at all (suggested and
+bounded both 1.80 ms against the streaming reference's 384 us), which is
+the cost model declining a tile at `m = 1` exactly as it should. Against
+the oracles: `gemm_i32` wins at every measured shape (128 cubed 107 us
+against nalgebra's 133 and ndarray's 771; `64x512x1024` 1.42 ms against
+3.64 and 29.8); `gemm_f32` keeps the honest gap --- `64x512x1024` at 3.19 ms
+against matrixmultiply's 696 us (4.6x) and faer's 1.20 ms (2.7x), the
+expected state, not a regression.
+
 **The multi-host pass, first read (CG-12, CG-14, CG-15, CG-16 on the CI
 runners; figures `open`).** The `scaling` workflow's first measurement run
 (`#30657176730`, 2026-07-31, artifacts `measurements-x86` and
@@ -540,11 +562,17 @@ and the outcome is recorded here, exactly like the SWAR item. The harness is
 the `gray_sign` group in `crates/uor-matmul-validate/benches/scaling.rs`:
 isolated builds at `Sign<8>` and `Sign<16>`, and the tabulated gemm at
 `8x1024x2100` and `8x4096x2100` (small `m`, wide `n`, the build a visible
-fraction), `Auto` against the named per-codeword builds. **Timing is pending
-a quiet window** --- the development host was loaded when this landed and a
-contaminated measurement is not a result. No figure is claimed anywhere in
-the tree; if the verdict is a decline, the wire comes out and this entry
-becomes the record.
+fraction), `Auto` against the named per-codeword builds.
+
+*Outcome, measured 2026-07-31 on the development host (Apple M4 Max, quiet
+window; every figure `open`):* **ship**. The isolated build wins at both
+widths --- 1.87 us to 0.35 us at `Sign<8>` (5.3x) and 2.45 ms to 88.7 us at
+`Sign<16>` (27.6x) --- and the end-to-end run does not regress: a wash at
+`8x1024x2100` (214.7 us against the incumbent ISA build's 214.6) and a small
+win at `8x4096x2100` (656.7 against 673.8, +2.6%), byte-identity asserted
+inside every timed closure. The build is a small term at these shapes, so
+the e2e figure is close to parity by construction; the rule asked for no
+regression, and there is none.
 
 **The block-16 pricing sweep (harness registered; measurement pending).** A
 `Book<256, 16>` tier is expressible today (Phase C's width-parameterized
@@ -581,6 +609,23 @@ result. No figure is recorded; no tier is added to `model/tiers.toml`, and
 none ships until the measured numbers say the longer codeword wins by enough
 to matter.
 
+*Outcome, measured 2026-07-31 on the development host (Apple M4 Max, quiet
+window; every figure `open`, byte-identity asserted inside every timed run):*
+the longer codeword wins everywhere the table pays. End-to-end at
+`64x1024x4096`: 8.69--8.88 ms at block 16 against 13.14--15.74 at block 8
+(1.5--1.8x); at `64x4096x4096`: 25.4--25.7 against 39.1--39.4 (1.5x); at
+`8x262144x8`: 419--424 against 628--631 (1.5x, the build-dominated shape,
+where the halved slot count is what pays). The census held the predicted
+ratios exactly (reads halve, build products constant, decodes double), the
+resolved plan is identical at both widths on every shape, and the recomputed
+break-even is `n = 1366` against block 8's `2049`. The stored residency is
+the other half of the result: 0.0625 B/weight at `u8`, 0.125 at `u16`. No
+tier is added: the machinery is already parametric, a caller with a 16-wide
+codebook uses it today, and whether real weight artifacts have reachable
+16-wide codebooks is the per-model question this sweep does not ask.
+
 **The one-level modular bilinear factorization (shipped as an explicit entry; auto-selection pending measurement).** Winograd's form at one level over the quotient `Z/2^w`: eight block sums, seven base block products against the classical decomposition's eight, the base products on the modular packed kernels. The quotient is a ring, so the sums and the combination are exact in it by definition --- the exact lane's `4^L * B` headroom bookkeeping has no modular analogue, and there is no bound to track. One level is `Theta(n^3)`; this is a bilinear factorization, not a subcubic implementation, and there is no recursion below it. It ships as `gemm_strassen_modular`, an explicit entry the caller names: admitted by a `Wrapping` encode, a modular lane for the output width, even extents, and the offer (`modular_level_needs`), declining to the direct packed modular walk at the same bytes otherwise --- `CD-23` pins the bytes at every shape and offer, and the route census counts the seven products (`Route::StrassenModular`). strassen.rs's machinery is shared, not duplicated: the sums formation and the combination are the exact recursion's own loops (`E::add`/`E::sub` are wrapping spellings, which are the ring's operations here), and only the base product is new (`gemm_packed_modular_raw`, the direct modular arm's own traversal at a raw sink).
 
-*Verdict rule, pre-registered:* the modular arm's auto-selection takes the level only if the factorization beats the direct packed modular walk end-to-end at a measured crossover. Until that measurement exists, the model records `strassen_modular_min_extent = usize::MAX` and the arm declines everywhere; the harness is the `modular_strassen` group in `crates/uor-matmul-validate/benches/scaling.rs` (squares 512--4096 on the `i8`-into-`i32` and `i32`-into-`i32` rings, the explicit entry against `gemm_packed` at `Wrapping`, packing and recombination included, byte-identity asserted inside the timed closures). **Timing is pending a quiet window** --- the host was loaded when this landed, and a contaminated measurement is not a result. If the measured crossover admits no win, the wire comes out (the entry stays, like `gemm_strassen` does for a caller who knows its shape) and this entry becomes the record of a measured decline; if it wins, the threshold becomes the measured extent and the arm takes the level it already checks for.
+*Verdict rule, pre-registered:* the modular arm's auto-selection takes the level only if the factorization beats the direct packed modular walk end-to-end at a measured crossover. Until that measurement exists, the model records `strassen_modular_min_extent = usize::MAX` and the arm declines everywhere; the harness is the `modular_strassen` group in `crates/uor-matmul-validate/benches/scaling.rs` (squares 512--4096 on the `i8`-into-`i32` and `i32`-into-`i32` rings, the explicit entry against `gemm_packed` at `Wrapping`, packing and recombination included, byte-identity asserted inside the timed closures).
+
+*Outcome, measured 2026-07-31 on the development host (Apple M4 Max, quiet window; every figure `open`, byte-identity asserted inside every timed closure):* the crossover exists and the arm takes the level. At 512 cubed the level loses on both rings --- 2.09 ms against the direct walk's 1.25 at `i8` (0.60x), 5.15 against 4.95 at `i32` (0.96x), the sums' cost against one level's saved product. At 1024 cubed it wins (9.18 against 10.46 at `i8`, 1.14x; 36.2 against 40.1 at `i32`, 1.11x), and the win widens with size: 1.41x at 2048 and 1.57x at 4096 on the `i8` ring, 1.20x and 1.31x on `i32`. The model's `strassen_modular_min_extent` is now the smallest measured winner, 1024, recorded in `model/constants.toml` with this measurement; the explicit entry is unchanged, and at shapes below the threshold the arm declines to the direct walk exactly as before.
