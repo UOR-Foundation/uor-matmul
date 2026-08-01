@@ -1384,12 +1384,23 @@ fn the_gray_walk_builds_the_sign_table_slot_for_slot() {
     // (space, block, rows, tiles): `Sign<4>` and `Sign<8>` at every tile
     // height, `Sign<16>` --- the `u16` code type's whole space --- at the two
     // ends of it. The tiles hold the alphabet's extremes: a wrong bit flip or
-    // a store at the walk ordinal is visible in at least one entry.
-    let cases: Vec<(usize, usize, Vec<usize>)> = vec![
-        (16, 4, vec![1, 2, 4, 8, 16]),
-        (256, 8, vec![1, 2, 4, 8, 16]),
-        (65536, 16, vec![1, 16]),
-    ];
+    // a store at the walk ordinal is visible in at least one entry. Under
+    // Miri the space is walked once, at one row: sixteen million interpreted
+    // adds a tile is a corpus Miri cannot finish inside the CI budget (the
+    // workspace tests' `HUGE_K` is the same discipline).
+    let cases: Vec<(usize, usize, Vec<usize>)> = if cfg!(miri) {
+        vec![
+            (16, 4, vec![1, 16]),
+            (256, 8, vec![1, 16]),
+            (65536, 16, vec![1]),
+        ]
+    } else {
+        vec![
+            (16, 4, vec![1, 2, 4, 8, 16]),
+            (256, 8, vec![1, 2, 4, 8, 16]),
+            (65536, 16, vec![1, 16]),
+        ]
+    };
     for (space, block, row_list) in cases {
         let book = sign_book(space, block);
         for rows in row_list {
