@@ -137,3 +137,9 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-22
     Then the claim holds byte for byte
+
+  @CD-23 @build
+  Scenario: The one-level modular bilinear factorization returns the direct packed modular walk's bytes at every shape and every offer, with seven base products per level counted by the census, and declines to the direct walk wherever the shape, encode, lane, or offer does not admit it
+    Given the standing corpus
+    When the suite exercises CD-23
+    Then the claim holds byte for byte

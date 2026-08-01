@@ -223,3 +223,12 @@ kernel_rows = 6
 # the table it can change which traversal produces an output byte and never
 # which byte (CD-21).
 strassen_min_extent = 384
+# The smallest base-case extent at which one level of the modular bilinear
+# factorization pays on a modular lane. UNMEASURED --- the lane's crossover
+# has not been priced (MEASUREMENT-LOG.md registers the harness and the
+# pre-registered verdict), so this is `usize::MAX` and the modular arm
+# declines the level everywhere until a quiet-window measurement replaces it.
+# Written as a value past every target's addressable extent; the generator
+# spells it `usize::MAX` so it declines portably on 32- and 64-bit targets
+# alike.
+strassen_modular_min_extent = 9223372036854775807

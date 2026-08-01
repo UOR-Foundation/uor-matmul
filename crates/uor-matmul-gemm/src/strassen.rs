@@ -80,12 +80,12 @@
 
 use uor_matmul_core::{
     as_alphabet_full, as_alphabet_full_mut, AccOf, Accumulator, Alphabet, Backend, Bound, Element,
-    EncodeFrom, Full, IntegerElement, MatView, Shape, Triple,
+    EncodeFrom, EncodeMode, Full, IntegerElement, MatView, Shape, Triple,
 };
 
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
-use crate::kernel::Kernelized;
+use crate::kernel::{Kernelized, Route, RouteLedger};
 use crate::scratch::Scratch;
 
 /// Panels and accumulators one level at `(m, k, n)` carves: four A-side sums
@@ -399,63 +399,8 @@ fn winograd<E: Kernelized>(
     let (b11, b12) = (quadrant(b, 0, 0, k2, n2), quadrant(b, 0, n2, k2, n2));
     let (b21, b22) = (quadrant(b, k2, 0, k2, n2), quadrant(b, k2, n2, k2, n2));
 
-    // The eight sums. `E::add`/`E::sub` are the spelled-wrapping spellings of
-    // arithmetic that cannot wrap: the plan admitted this level only while
-    // `4^level * bound` stays inside the element type. The reads are the
-    // views' own walks --- one add per element rather than an index
-    // recomputed per quadrant --- because at the sizes the recursion pays,
-    // this loop is the whole of the level's `O(n^2)` overhead.
-    for i in 0..m2 {
-        let rows = (
-            &mut s1[i * k2..][..k2],
-            &mut s2[i * k2..][..k2],
-            &mut s3[i * k2..][..k2],
-            &mut s4[i * k2..][..k2],
-        );
-        let walks = (
-            a11.row_walk(i, 0, k2),
-            a12.row_walk(i, 0, k2),
-            a21.row_walk(i, 0, k2),
-            a22.row_walk(i, 0, k2),
-        );
-        for (j, (((x11, x12), x21), x22)) in
-            walks.0.zip(walks.1).zip(walks.2).zip(walks.3).enumerate()
-        {
-            let (x11, x12, x21, x22) = (x11.get(), x12.get(), x21.get(), x22.get());
-            let s1v = E::add(x21, x22);
-            rows.0[j] = s1v;
-            rows.1[j] = E::sub(s1v, x11);
-            rows.2[j] = E::sub(x11, x21);
-            rows.3[j] = E::sub(x12, E::sub(s1v, x11));
-        }
-    }
-    for i in 0..k2 {
-        let rows = (
-            &mut t1[i * n2..][..n2],
-            &mut t2[i * n2..][..n2],
-            &mut t3[i * n2..][..n2],
-            &mut t4[i * n2..][..n2],
-        );
-        let walks = (
-            b11.row_walk(i, 0, n2),
-            b12.row_walk(i, 0, n2),
-            b21.row_walk(i, 0, n2),
-            b22.row_walk(i, 0, n2),
-        );
-        for (j, (((y11, y12), y21), y22)) in
-            walks.0.zip(walks.1).zip(walks.2).zip(walks.3).enumerate()
-        {
-            let (y11, y12, y21, y22) = (y11.get(), y12.get(), y21.get(), y22.get());
-            let t1v = E::sub(y12, y11);
-            let t2v = E::sub(y22, t1v);
-            rows.0[j] = t1v;
-            rows.1[j] = t2v;
-            rows.2[j] = E::sub(y22, y12);
-            // `B21 - T2`, negated against the textbook's `T2 - B21`: the one
-            // subtraction in the combination is folded into this temporary.
-            rows.3[j] = E::sub(y21, t2v);
-        }
-    }
+    form_a_sums(&a11, &a12, &a21, &a22, m2, k2, s1, s2, s3, s4);
+    form_b_sums(&b11, &b12, &b21, &b22, k2, n2, t1, t2, t3, t4);
 
     // The seven products. The sums a product reads are formed already; the
     // pools' remainder is each child's own scratch, and the products are
@@ -538,9 +483,122 @@ fn winograd<E: Kernelized>(
         backend,
     );
 
-    // The combination. Every operand is a complete exact sum and `combine` is
-    // the accumulator's own addition, so the regrouping is invisible in the
-    // result --- which is the whole of `CD-21`'s claim.
+    combine_quadrants(m1, m2b, m3, m4, m5, m6, m7, m2, n2, sink);
+}
+
+/// The A-side sums of one Winograd level: `S1 = A21 + A22`, `S2 = S1 - A11`,
+/// `S3 = A11 - A21`, `S4 = A12 - S2`.
+///
+/// `E::add`/`E::sub` are the spelled-wrapping spellings of the element's
+/// arithmetic --- exact where the exact lane's plan admitted the level, the
+/// ring's own operations where the caller asked for a quotient, and the same
+/// loop either way. The reads are the views' own walks --- one add per
+/// element rather than an index recomputed per quadrant --- because at the
+/// sizes the factorization pays, this loop is the whole of the level's
+/// `O(n^2)` overhead.
+#[allow(clippy::too_many_arguments)]
+fn form_a_sums<E: Kernelized>(
+    a11: &MatView<'_, Alphabet<E, Full<E>>>,
+    a12: &MatView<'_, Alphabet<E, Full<E>>>,
+    a21: &MatView<'_, Alphabet<E, Full<E>>>,
+    a22: &MatView<'_, Alphabet<E, Full<E>>>,
+    m2: usize,
+    k2: usize,
+    s1: &mut [E],
+    s2: &mut [E],
+    s3: &mut [E],
+    s4: &mut [E],
+) {
+    for i in 0..m2 {
+        let rows = (
+            &mut s1[i * k2..][..k2],
+            &mut s2[i * k2..][..k2],
+            &mut s3[i * k2..][..k2],
+            &mut s4[i * k2..][..k2],
+        );
+        let walks = (
+            a11.row_walk(i, 0, k2),
+            a12.row_walk(i, 0, k2),
+            a21.row_walk(i, 0, k2),
+            a22.row_walk(i, 0, k2),
+        );
+        for (j, (((x11, x12), x21), x22)) in
+            walks.0.zip(walks.1).zip(walks.2).zip(walks.3).enumerate()
+        {
+            let (x11, x12, x21, x22) = (x11.get(), x12.get(), x21.get(), x22.get());
+            let s1v = E::add(x21, x22);
+            rows.0[j] = s1v;
+            rows.1[j] = E::sub(s1v, x11);
+            rows.2[j] = E::sub(x11, x21);
+            rows.3[j] = E::sub(x12, E::sub(s1v, x11));
+        }
+    }
+}
+
+/// The B-side sums of one Winograd level: `T1 = B12 - B11`, `T2 = B22 - T1`,
+/// `T3 = B22 - B12`, `T4 = B21 - T2` --- the last negated against the
+/// textbook's `T2 - B21`, so the one subtraction in the combination is folded
+/// into the temporary and the accumulator only ever adds.
+#[allow(clippy::too_many_arguments)]
+fn form_b_sums<E: Kernelized>(
+    b11: &MatView<'_, Alphabet<E, Full<E>>>,
+    b12: &MatView<'_, Alphabet<E, Full<E>>>,
+    b21: &MatView<'_, Alphabet<E, Full<E>>>,
+    b22: &MatView<'_, Alphabet<E, Full<E>>>,
+    k2: usize,
+    n2: usize,
+    t1: &mut [E],
+    t2: &mut [E],
+    t3: &mut [E],
+    t4: &mut [E],
+) {
+    for i in 0..k2 {
+        let rows = (
+            &mut t1[i * n2..][..n2],
+            &mut t2[i * n2..][..n2],
+            &mut t3[i * n2..][..n2],
+            &mut t4[i * n2..][..n2],
+        );
+        let walks = (
+            b11.row_walk(i, 0, n2),
+            b12.row_walk(i, 0, n2),
+            b21.row_walk(i, 0, n2),
+            b22.row_walk(i, 0, n2),
+        );
+        for (j, (((y11, y12), y21), y22)) in
+            walks.0.zip(walks.1).zip(walks.2).zip(walks.3).enumerate()
+        {
+            let (y11, y12, y21, y22) = (y11.get(), y12.get(), y21.get(), y22.get());
+            let t1v = E::sub(y12, y11);
+            let t2v = E::sub(y22, t1v);
+            rows.0[j] = t1v;
+            rows.1[j] = t2v;
+            rows.2[j] = E::sub(y22, y12);
+            rows.3[j] = E::sub(y21, t2v);
+        }
+    }
+}
+
+/// The Winograd combination: each output element's four quadrant sums.
+///
+/// Every operand is a complete sum and `combine` is the accumulator's own
+/// addition, so the regrouping is invisible in the result --- the whole of
+/// `CD-21`'s claim on the exact lane. On a modular lane the same loop is the
+/// ring's: each temporary is already in the quotient, and the quotient's sum
+/// and the exact sum agree once that is true.
+#[allow(clippy::too_many_arguments)]
+fn combine_quadrants<A: Accumulator>(
+    m1: &[A],
+    m2b: &[A],
+    m3: &[A],
+    m4: &[A],
+    m5: &[A],
+    m6: &[A],
+    m7: &[A],
+    m2: usize,
+    n2: usize,
+    sink: &mut impl FnMut(usize, usize, [A; 4]),
+) {
     for i in 0..m2 {
         for j in 0..n2 {
             let at = i * n2 + j;
@@ -623,6 +681,307 @@ fn quadrant<'v, E: IntegerElement>(
 /// view exists.
 fn sums_view<E: IntegerElement>(s: &[E], r: usize, c: usize) -> MatView<'_, Alphabet<E, Full<E>>> {
     MatView::row_major(as_alphabet_full(s), r, c).expect("the carve is the view's extent")
+}
+
+// ---------------------------------------------------------------------------
+// The one-level modular bilinear factorization
+// ---------------------------------------------------------------------------
+//
+// The same Winograd level in the quotient the caller named: `Z/2^w` is a
+// ring, so the block sums and the combination are exact in the quotient by
+// definition --- the exact lane's `4^L * B` headroom bookkeeping has no
+// modular analogue, because there is no bound for a sum to outgrow. That is
+// what makes this the algebraically cleanest case the factorization has: the
+// plan below is shape, encode, lane, and offer, and nothing else.
+//
+// One level is `Theta(n^3)`: this is a bilinear factorization of one block
+// pair, never a subcubic implementation, and there is no recursion below it.
+// The level is admitted by the explicit entry a caller names, and declined
+// by the modular arm's auto-selection until the lane's crossover is measured
+// (`MEASUREMENT-LOG.md`) --- the model records the threshold as `usize::MAX`
+// while there is no measurement.
+
+/// What one level of the modular factorization wants at `shape`: the level's
+/// sums and seven product temporaries, plus the base case's own traversal
+/// offer, as `(panel elements, accumulators)`.
+///
+/// A *query*, like [`strassen_scratch`]: offering less declines the level, it
+/// never fails and never changes a byte.
+pub fn modular_level_needs(shape: Shape) -> (usize, usize) {
+    let (p, q) = level_cost(shape.m, shape.k, shape.n);
+    let base = Shape {
+        m: shape.m / 2,
+        k: shape.k / 2,
+        n: shape.n / 2,
+    };
+    use uor_matmul_core::generated::blocking;
+    let base_accs =
+        (base.m.min(blocking::MC) as u128).saturating_mul(base.n.min(blocking::NC) as u128); // R3-ok: a scratch size question
+    (
+        p.saturating_add(crate::suggested_scratch(base) as u128) // R3-ok: a scratch size question
+            .min(usize::MAX as u128) as usize, // R3-ok: a scratch size question
+        q.saturating_add(base_accs).min(usize::MAX as u128) as usize, // R3-ok: a scratch size question
+    )
+}
+
+/// Does the one-level modular factorization run at this shape and offer?
+///
+/// The terms are all declarations: the encode is `Wrapping` and the output
+/// width admits a modular lane, every extent is even, and the offer holds
+/// [`modular_level_needs`]. `auto` adds the arm wire's own term: the measured
+/// crossover the model records, which is `usize::MAX` while the modular lane
+/// has no measurement, so the auto path declines everywhere until the
+/// pre-registered sweep records one. The explicit entry passes `false` --- a
+/// caller who named the level is in the same position as a caller who asked
+/// [`gemm_strassen`] for a level count.
+pub(crate) fn modular_level_admitted<E, Bd, O>(
+    shape: Shape,
+    options: GemmOptions,
+    scratch: &Scratch<'_, E, Bd>,
+    auto: bool,
+) -> bool
+where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element,
+{
+    use uor_matmul_core::generated::blocking;
+    if !matches!(options.encode, EncodeMode::Wrapping) {
+        return false;
+    }
+    if !shape.m.is_multiple_of(2) || !shape.k.is_multiple_of(2) || !shape.n.is_multiple_of(2) {
+        return false;
+    }
+    if auto
+        && (shape.m / 2 < blocking::STRASSEN_MODULAR_MIN_EXTENT
+            || shape.k / 2 < blocking::STRASSEN_MODULAR_MIN_EXTENT
+            || shape.n / 2 < blocking::STRASSEN_MODULAR_MIN_EXTENT)
+    {
+        return false;
+    }
+    if E::modular_spec(options.backend, O::BITS, Bd::VALUE, shape.m).is_none() {
+        return false;
+    }
+    let (panels, accs) = modular_level_needs(shape);
+    scratch.len() >= panels && scratch.accumulators() >= accs
+}
+
+/// `C := epilogue(A * B, C)` through the one-level modular bilinear
+/// factorization, for a caller asking to wrap into a modular ring.
+///
+/// One level of Winograd's form: eight block sums, seven base block products
+/// against the classical decomposition's eight, on the modular packed kernels
+/// --- and no recursion, so this is `Theta(n^3)` and says so. The quotient is
+/// a ring, so the sums and the combination are exact in it by definition, and
+/// the bytes are the direct packed modular walk's at every shape and every
+/// offer (`CD-23`). Wherever the shape, the encode, the lane, or the offer
+/// does not admit the level, this declines to [`crate::gemm_packed`], which
+/// is the same walk the caller would have gotten --- the same bytes, more
+/// products.
+pub fn gemm_strassen_modular<E, Bd, O, Ep>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+{
+    gemm_strassen_modular_counted(triple, epilogue, options, scratch, &mut ())
+}
+
+/// [`gemm_strassen_modular`], recording the route and the base-product count.
+///
+/// The counted form is what makes "seven products against eight" something a
+/// test asserts rather than a sentence in a comment: the census is the level's
+/// own count, incremented as the products run (`CD-23`).
+pub fn gemm_strassen_modular_counted<E, Bd, O, Ep, Lg>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    ledger: &mut Lg,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: RouteLedger,
+{
+    let shape = triple.shape();
+    if shape.m == 0 || shape.n == 0 {
+        return;
+    }
+    if modular_level_admitted::<E, Bd, O>(shape, options, scratch, false) {
+        run_modular(triple, epilogue, options, scratch, ledger);
+    } else {
+        crate::kernel::gemm_packed(triple, epilogue, options, scratch);
+    }
+}
+
+/// The one-level modular factorization, admitted.
+///
+/// The caller --- the modular arm's wire, or [`gemm_strassen_modular`] ---
+/// has already established the admission; the carve's own guard stays for the
+/// same reason the exact recursion keeps its own: a plan/carve disagreement
+/// is not an input condition, and the direct walk is right there, at the same
+/// bytes.
+pub(crate) fn run_modular<E, Bd, O, Ep>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    ledger: &mut impl RouteLedger,
+) where
+    E: Kernelized,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+{
+    let shape = triple.shape();
+    if shape.m == 0 || shape.n == 0 {
+        return;
+    }
+    let (need_panels, need_accs) = modular_level_needs(shape);
+    if scratch.len() < need_panels || scratch.accumulators() < need_accs {
+        crate::kernel::gemm_packed(triple, epilogue, options, scratch);
+        return;
+    }
+    let av = triple.a().peeled().full_alphabet();
+    let bv = triple.b().peeled().full_alphabet();
+
+    let (panel_count, acc_count) = (scratch.len(), scratch.accumulators());
+    let (panel_offer, acc_offer) = scratch.split(panel_count, acc_count);
+    let panels: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(panel_offer);
+    let accs: &mut [AccOf<E>] = acc_offer;
+
+    let reads_c = epilogue.reads_c();
+    let encode = options.encode;
+    let (m2, n2) = (shape.m / 2, shape.n / 2);
+    // The level's combination is output: the epilogue runs on it, exactly once
+    // per element, on the same accumulator value the direct modular walk's
+    // emit would produce --- the wrapped lane read back through the
+    // accumulator, so the bytes cannot tell which traversal ran (`CD-23`).
+    let mut sink = |i: usize, j: usize, q: [AccOf<E>; 4]| {
+        let c = triple.c_mut();
+        for (ci, cj, acc) in [
+            (i, j, q[0]),
+            (i, j + n2, q[1]),
+            (i + m2, j, q[2]),
+            (i + m2, j + n2, q[3]),
+        ] {
+            let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
+            *c.at_mut(ci, cj) = epilogue.finish(acc, prior, encode);
+        }
+    };
+    let mut products = 0u64;
+    winograd_modular(
+        &av,
+        &bv,
+        O::BITS,
+        &mut sink,
+        panels,
+        accs,
+        options.backend,
+        &mut products,
+    );
+    ledger.routed(Route::StrassenModular { products });
+}
+
+/// One product of the modular level, through the modular packed kernels.
+///
+/// The sums a product reads are formed already; the pool's remainder is each
+/// product's own scratch, and the products are sequential, so they share it
+/// one at a time --- the exact recursion's own discipline, one level up.
+#[allow(clippy::too_many_arguments)]
+fn product_modular<'v, E: Kernelized>(
+    a: &MatView<'v, Alphabet<E, Full<E>>>,
+    b: &MatView<'v, Alphabet<E, Full<E>>>,
+    backend: Backend,
+    out_bits: u32,
+    panels: &mut [E],
+    accs: &mut [AccOf<E>],
+    out: &mut [AccOf<E>],
+    ldc: usize,
+    products: &mut u64,
+) {
+    *products += 1; // R3-ok: a census counter
+    let mut sub = Scratch::with_accumulators(as_alphabet_full_mut(panels), accs);
+    crate::kernel::gemm_packed_modular_raw(a, b, backend, out_bits, &mut sub, out, ldc);
+}
+
+/// One Winograd level in the quotient the caller named: the same arrangement
+/// of sums and the same seven products, with the products run on the modular
+/// lane.
+#[allow(clippy::too_many_arguments)]
+fn winograd_modular<E: Kernelized>(
+    a: &MatView<'_, Alphabet<E, Full<E>>>,
+    b: &MatView<'_, Alphabet<E, Full<E>>>,
+    out_bits: u32,
+    sink: &mut impl FnMut(usize, usize, [AccOf<E>; 4]),
+    mut panels: &mut [E],
+    mut accs: &mut [AccOf<E>],
+    backend: Backend,
+    products: &mut u64,
+) {
+    let (m, k, n) = (a.rows(), a.cols(), b.cols());
+    let (m2, k2, n2) = (m / 2, k / 2, n / 2);
+
+    let s1 = carve(&mut panels, m2 * k2);
+    let s2 = carve(&mut panels, m2 * k2);
+    let s3 = carve(&mut panels, m2 * k2);
+    let s4 = carve(&mut panels, m2 * k2);
+    let t1 = carve(&mut panels, k2 * n2);
+    let t2 = carve(&mut panels, k2 * n2);
+    let t3 = carve(&mut panels, k2 * n2);
+    let t4 = carve(&mut panels, k2 * n2);
+    let m1 = carve(&mut accs, m2 * n2);
+    let m2b = carve(&mut accs, m2 * n2);
+    let m3 = carve(&mut accs, m2 * n2);
+    let m4 = carve(&mut accs, m2 * n2);
+    let m5 = carve(&mut accs, m2 * n2);
+    let m6 = carve(&mut accs, m2 * n2);
+    let m7 = carve(&mut accs, m2 * n2);
+
+    let (a11, a12) = (quadrant(a, 0, 0, m2, k2), quadrant(a, 0, k2, m2, k2));
+    let (a21, a22) = (quadrant(a, m2, 0, m2, k2), quadrant(a, m2, k2, m2, k2));
+    let (b11, b12) = (quadrant(b, 0, 0, k2, n2), quadrant(b, 0, n2, k2, n2));
+    let (b21, b22) = (quadrant(b, k2, 0, k2, n2), quadrant(b, k2, n2, k2, n2));
+
+    form_a_sums(&a11, &a12, &a21, &a22, m2, k2, s1, s2, s3, s4);
+    form_b_sums(&b11, &b12, &b21, &b22, k2, n2, t1, t2, t3, t4);
+
+    // The seven products, counted as they run: the count is the claim the
+    // census makes, so it is incremented here and read nowhere else.
+    product_modular(
+        &a11, &b11, backend, out_bits, panels, accs, m1, n2, products,
+    );
+    product_modular(
+        &a12, &b21, backend, out_bits, panels, accs, m2b, n2, products,
+    );
+    let (s4v, t4v) = (sums_view(s4, m2, k2), sums_view(t4, k2, n2));
+    product_modular(
+        &s4v, &b22, backend, out_bits, panels, accs, m3, n2, products,
+    );
+    product_modular(
+        &a22, &t4v, backend, out_bits, panels, accs, m4, n2, products,
+    );
+    let (s1v, t1v) = (sums_view(s1, m2, k2), sums_view(t1, k2, n2));
+    product_modular(
+        &s1v, &t1v, backend, out_bits, panels, accs, m5, n2, products,
+    );
+    let (s2v, t2v) = (sums_view(s2, m2, k2), sums_view(t2, k2, n2));
+    product_modular(
+        &s2v, &t2v, backend, out_bits, panels, accs, m6, n2, products,
+    );
+    let (s3v, t3v) = (sums_view(s3, m2, k2), sums_view(t3, k2, n2));
+    product_modular(
+        &s3v, &t3v, backend, out_bits, panels, accs, m7, n2, products,
+    );
+
+    combine_quadrants(m1, m2b, m3, m4, m5, m6, m7, m2, n2, sink);
 }
 
 #[cfg(test)]
@@ -992,5 +1351,193 @@ mod tests {
             1,
             "an explicit request is a declaration"
         );
+    }
+
+    /// The direct packed modular walk over the same offer, which is the
+    /// baseline the factorization is compared against --- never the scalar
+    /// reference's walk.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_packed(
+        m: usize,
+        k: usize,
+        n: usize,
+        a: &[i32],
+        b: &[i32],
+        panels: usize,
+        accs: usize,
+        encode: EncodeMode,
+    ) -> Vec<i32> {
+        let mut c = vec![0i32; m * n];
+        let mut panel = vec![Alphabet::<i32, Bnd<128>>::ZERO; panels];
+        let mut acc_buf = vec![0i128; accs];
+        let av = MatView::row_major(as_alphabet::<i32, Bnd<128>>(a).unwrap(), m, k).unwrap();
+        let bv = MatView::row_major(as_alphabet::<i32, Bnd<128>>(b).unwrap(), k, n).unwrap();
+        let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+        let mut t = Triple::new(av, bv, cv).unwrap();
+        crate::kernel::gemm_packed(
+            &mut t,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                encode,
+                ..Default::default()
+            },
+            &mut Scratch::with_accumulators(&mut panel, &mut acc_buf),
+        );
+        c
+    }
+
+    /// The modular level's entry, with the route census.
+    #[allow(clippy::too_many_arguments)]
+    fn modular(
+        m: usize,
+        k: usize,
+        n: usize,
+        a: &[i32],
+        b: &[i32],
+        panels: usize,
+        accs: usize,
+        encode: EncodeMode,
+    ) -> (Vec<i32>, crate::kernel::RouteCensus) {
+        let mut c = vec![0i32; m * n];
+        let mut census = crate::kernel::RouteCensus::default();
+        let mut panel = vec![Alphabet::<i32, Bnd<128>>::ZERO; panels];
+        let mut acc_buf = vec![0i128; accs];
+        let av = MatView::row_major(as_alphabet::<i32, Bnd<128>>(a).unwrap(), m, k).unwrap();
+        let bv = MatView::row_major(as_alphabet::<i32, Bnd<128>>(b).unwrap(), k, n).unwrap();
+        let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+        let mut t = Triple::new(av, bv, cv).unwrap();
+        gemm_strassen_modular_counted(
+            &mut t,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                encode,
+                ..Default::default()
+            },
+            &mut Scratch::with_accumulators(&mut panel, &mut acc_buf),
+            &mut census,
+        );
+        (c, census)
+    }
+
+    /// CD-23: the one-level modular factorization's bytes are the direct
+    /// packed modular walk's and the wrapped reference's, at every shape and
+    /// every offer; the census counts seven base products per level; and every
+    /// decline --- an odd extent, a wrong encode, a starved offer --- returns
+    /// the direct walk's bytes.
+    #[test]
+    fn the_modular_level_returns_the_direct_walks_bytes_cd_23() {
+        // Admitted shapes: even, balanced and rectangular, past every tile.
+        for &(m, k, n) in &[
+            (2usize, 2usize, 2usize),
+            (16, 32, 24),
+            (128, 256, 384),
+            (512, 512, 512),
+        ] {
+            let a = fill(m * k, 0x51, 100);
+            let b = fill(k * n, 0x52, 100);
+            let (panels, accs) = modular_level_needs(Shape { m, k, n });
+            for (p, q) in [(0, 0), (panels / 2, accs / 2), (panels, accs)] {
+                let (got, census) = modular(m, k, n, &a, &b, p, q, EncodeMode::Wrapping);
+                assert_eq!(
+                    got,
+                    direct_packed(m, k, n, &a, &b, p, q, EncodeMode::Wrapping),
+                    "{m}x{k}x{n} at offer ({p}, {q}): the level must equal the direct walk"
+                );
+                assert_eq!(
+                    got,
+                    reference(m, k, n, &a, &b, EncodeMode::Wrapping),
+                    "{m}x{k}x{n} at offer ({p}, {q}): and the reference wrapped once"
+                );
+                if (p, q) == (panels, accs) {
+                    assert_eq!(
+                        census.route,
+                        Some(crate::kernel::Route::StrassenModular { products: 7 }),
+                        "{m}x{k}x{n}: seven base products at one level, counted"
+                    );
+                } else {
+                    assert!(
+                        !matches!(
+                            census.route,
+                            Some(crate::kernel::Route::StrassenModular { .. })
+                        ),
+                        "{m}x{k}x{n} at offer ({p}, {q}): a starved offer declines the level"
+                    );
+                }
+            }
+        }
+
+        // Declined shapes --- an odd extent, a prime, a degenerate one --- at
+        // the full offer: the level declines, and the decline is the direct
+        // walk, at the same bytes.
+        for &(m, k, n) in &[
+            (1usize, 1usize, 1usize),
+            (0, 4, 4),
+            (511, 512, 512),
+            (512, 521, 512),
+            (513, 511, 517),
+        ] {
+            let a = fill(m * k, 0x53, 100);
+            let b = fill(k * n, 0x54, 100);
+            let (panels, accs) = modular_level_needs(Shape { m, k, n });
+            let (got, census) = modular(m, k, n, &a, &b, panels, accs, EncodeMode::Wrapping);
+            assert_eq!(
+                got,
+                direct_packed(m, k, n, &a, &b, panels, accs, EncodeMode::Wrapping),
+                "{m}x{k}x{n}: a declined shape returns the direct walk's bytes"
+            );
+            assert!(
+                !matches!(
+                    census.route,
+                    Some(crate::kernel::Route::StrassenModular { .. })
+                ),
+                "{m}x{k}x{n}: an odd extent must not take the level"
+            );
+        }
+
+        // A non-wrapping encode declines too: the level is the quotient's, and
+        // the caller asked for a different one.
+        let (m, k, n) = (16usize, 32usize, 24usize);
+        let a = fill(m * k, 0x55, 100);
+        let b = fill(k * n, 0x56, 100);
+        let (panels, accs) = modular_level_needs(Shape { m, k, n });
+        let (got, _) = modular(m, k, n, &a, &b, panels, accs, EncodeMode::Saturating);
+        assert_eq!(
+            got,
+            direct_packed(m, k, n, &a, &b, panels, accs, EncodeMode::Saturating),
+            "a saturating encode declines to the same walk the caller would have gotten"
+        );
+
+        // The same identity on the 64-bit ring: `i64` wrapping into `i64`.
+        let a64: Vec<i64> = fill(16 * 32, 0x57, 100)
+            .into_iter()
+            .map(i64::from)
+            .collect();
+        let b64: Vec<i64> = fill(32 * 24, 0x58, 100)
+            .into_iter()
+            .map(i64::from)
+            .collect();
+        let (m, k, n) = (16usize, 32usize, 24usize);
+        let (panels, accs) = modular_level_needs(Shape { m, k, n });
+        let run64 = |strassen: bool| {
+            let mut c = vec![0i64; m * n];
+            let mut panel = vec![Alphabet::<i64, Bnd<128>>::ZERO; panels];
+            let mut acc_buf = vec![<AccOf<i64> as Accumulator>::ZERO; accs];
+            let av = MatView::row_major(as_alphabet::<i64, Bnd<128>>(&a64).unwrap(), m, k).unwrap();
+            let bv = MatView::row_major(as_alphabet::<i64, Bnd<128>>(&b64).unwrap(), k, n).unwrap();
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            let options = GemmOptions {
+                encode: EncodeMode::Wrapping,
+                ..Default::default()
+            };
+            let mut scratch = Scratch::with_accumulators(&mut panel, &mut acc_buf);
+            if strassen {
+                gemm_strassen_modular(&mut t, &Linear::OVERWRITE, options, &mut scratch);
+            } else {
+                crate::kernel::gemm_packed(&mut t, &Linear::OVERWRITE, options, &mut scratch);
+            }
+            c
+        };
+        assert_eq!(run64(true), run64(false), "the 64-bit ring, one level");
     }
 }

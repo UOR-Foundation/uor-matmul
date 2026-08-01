@@ -69,7 +69,10 @@ pub use scratch::{
     minimum_workspace, suggested_accumulators, suggested_scratch, workspace_for_budget,
     workspace_report, Chunking, PanelSplit, Scratch, WorkspacePlan, WorkspaceReport,
 };
-pub use strassen::{gemm_strassen, levels as strassen_levels, strassen_scratch};
+pub use strassen::{
+    gemm_strassen, gemm_strassen_modular, gemm_strassen_modular_counted, levels as strassen_levels,
+    modular_level_needs, strassen_scratch,
+};
 pub use tabulated::{
     gather_reference_i32, gather_reference_wide, gemm_tabulated, gemm_tabulated_counted,
     suggested_tabulation, suggested_tabulation_index, suggested_tabulation_lanes,

@@ -19,6 +19,7 @@
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::mem::size_of;
+use uor_matmul::driver::modular_level_needs;
 use uor_matmul::prelude::*;
 use uor_matmul::{
     suggested_collapse_index, suggested_collapse_rows, suggested_float_panels, suggested_scratch,
@@ -489,12 +490,102 @@ fn gray_sign(c: &mut Criterion) {
     group.finish();
 }
 
+/// The one-level modular bilinear factorization against the direct packed
+/// modular walk it would displace, at the squares the crossover will be read
+/// from. `Auto` and the explicit entry run the level where it is admitted
+/// (which today is only through the explicit entry: the arm's threshold is
+/// `usize::MAX` until the lane is measured); `Packed` is the direct walk.
+/// Byte-identity is asserted inside each timed closure, as everywhere in this
+/// file, and the verdict rule is pre-registered in `MEASUREMENT-LOG.md`.
+/// Compiled here; the run waits for a quiet window.
+fn modular_strassen(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modular_strassen");
+    let wrapping = GemmOptions {
+        encode: EncodeMode::Wrapping,
+        ..Default::default()
+    };
+    for &n in &[512usize, 1024, 2048, 4096] {
+        let (panels, accs) = modular_level_needs(Shape { m: n, k: n, n });
+
+        // The i8 lane: operands in `{-1, 0, 1}` so the fill stays small and
+        // exact at every depth, output wrapped to `i32`.
+        let a8: Vec<i8> = (0..n * n).map(|i| ((i * 37) % 3) as i8 - 1).collect();
+        let b8: Vec<i8> = (0..n * n).map(|i| ((i * 53) % 3) as i8 - 1).collect();
+        let run8 = |strassen: bool, out: &mut Vec<i32>| {
+            let mut panel = vec![Alphabet::<i8, Full<i8>>::ZERO; panels];
+            let mut acc_buf = vec![0i128; accs];
+            let av = MatView::row_major(as_alphabet_full(&a8), n, n).expect("A fits");
+            let bv = MatView::row_major(as_alphabet_full(&b8), n, n).expect("B fits");
+            let cv = MatViewMut::row_major(out, n, n).expect("C fits");
+            let mut t = Triple::new(av, bv, cv).expect("the product exists");
+            let mut scratch = Scratch::with_accumulators(&mut panel, &mut acc_buf);
+            if strassen {
+                uor_matmul::gemm_strassen_modular(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    wrapping,
+                    &mut scratch,
+                );
+            } else {
+                uor_matmul::gemm_packed(&mut t, &Linear::OVERWRITE, wrapping, &mut scratch);
+            }
+        };
+        let mut want8 = vec![0i32; n * n];
+        run8(false, &mut want8);
+        for (name, strassen) in [("packed", false), ("level", true)] {
+            group.bench_function(format!("{name}/i8_{n}cubed"), |bench| {
+                let mut out = vec![0i32; n * n];
+                bench.iter(|| {
+                    run8(strassen, &mut out);
+                    assert_eq!(out, want8, "the timed call must be correct");
+                });
+            });
+        }
+
+        // The i32 lane, output wrapped to `i32`.
+        let a: Vec<i32> = (0..n * n).map(|i| ((i * 37) % 255) as i32 - 127).collect();
+        let b: Vec<i32> = (0..n * n).map(|i| ((i * 53) % 255) as i32 - 127).collect();
+        let run = |strassen: bool, out: &mut Vec<i32>| {
+            let mut panel = vec![Alphabet::<i32, Full<i32>>::ZERO; panels];
+            let mut acc_buf = vec![0i128; accs];
+            let av = MatView::row_major(as_alphabet_full(&a), n, n).expect("A fits");
+            let bv = MatView::row_major(as_alphabet_full(&b), n, n).expect("B fits");
+            let cv = MatViewMut::row_major(out, n, n).expect("C fits");
+            let mut t = Triple::new(av, bv, cv).expect("the product exists");
+            let mut scratch = Scratch::with_accumulators(&mut panel, &mut acc_buf);
+            if strassen {
+                uor_matmul::gemm_strassen_modular(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    wrapping,
+                    &mut scratch,
+                );
+            } else {
+                uor_matmul::gemm_packed(&mut t, &Linear::OVERWRITE, wrapping, &mut scratch);
+            }
+        };
+        let mut want = vec![0i32; n * n];
+        run(false, &mut want);
+        for (name, strassen) in [("packed", false), ("level", true)] {
+            group.bench_function(format!("{name}/i32_{n}cubed"), |bench| {
+                let mut out = vec![0i32; n * n];
+                bench.iter(|| {
+                    run(strassen, &mut out);
+                    assert_eq!(out, want, "the timed call must be correct");
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     scaling_report,
     vs_oracles,
     public_api,
     workspace_plans,
-    gray_sign
+    gray_sign,
+    modular_strassen
 );
 criterion_main!(benches);
