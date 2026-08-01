@@ -34,14 +34,17 @@ The phase's eight items are all landed. What remains are the follow-ups the
 measurements named:
 
 1. **The multi-host remainder.** The first pass is read (the entry below);
-   what it did not cover: the x86 CG-17 figure (the first run's swar step
-   failed on a missing wasip1 std and the pipe hid it --- fixed in this
-   branch, so the next scheduled run answers it), the VNNI break-even rows,
-   which stay `Unmeasured` until the breakeven instrument is wired into the
-   workflow and the runner's VNNI is confirmed, and the scalar-port co-issue
-   experiment, which is still unwritten (the CG-11 census's prediction ---
-   AVX2 i8 tile bound on Zn4FP2, scalar ports idle in the model --- is what
-   it would test).
+   the CG-17 x86 figure is now read too: the `#17` merge's scaling run
+   (2026-08-01) reports the SWAR broadcast at 0.30x of the dot sequence at
+   `k = 64` and 0.20x at `k = 1024` and `16384` on the x86 runner --- worse
+   than the M4 Max's 0.32--0.38x, the same decline on a second host, the
+   incumbent's eight-extends-per-dot beating the field packing there as
+   here. What remains: the VNNI break-even rows, which stay `Unmeasured`
+   until the breakeven instrument is wired into the workflow and the
+   runner's VNNI is confirmed, and the scalar-port co-issue experiment,
+   which is still unwritten (the CG-11 census's prediction --- AVX2 i8 tile
+   bound on Zn4FP2, scalar ports idle in the model --- is what it would
+   test).
 2. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
    §"Mantissa slicing, and the RNS beside it") is recorded: nine 8-bit
    passes, shift recombination, a wash where the narrow-to-wide ratio is
