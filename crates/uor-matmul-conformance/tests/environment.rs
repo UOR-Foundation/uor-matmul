@@ -179,19 +179,24 @@ fn no_float_arithmetic_opcode_in_any_kernel_cu_01() {
 /// list is the point: a list restated here would agree with itself while the job
 /// ran something else, which is precisely the failure this exists to catch.
 fn miri_crates(source: &str, marker: &str) -> Vec<String> {
-    let line = source
-        .lines()
-        .find(|l| l.contains(marker))
-        .unwrap_or_else(|| panic!("no `{marker}` line to read"));
+    // Every matching line, not the first: CI splits the run across parallel
+    // legs (each with its own timeout, so a leg that stops finishing fails
+    // promptly), and the union of the legs' lists is what must equal the
+    // Justfile's single monolithic invocation. Names are stripped of the
+    // YAML/list punctuation the legs carry (`"cargo miri test -p foo",`).
     let mut names = Vec::new();
-    let mut words = line.split_whitespace();
-    while let Some(word) = words.next() {
-        if word == "-p" {
-            if let Some(name) = words.next() {
-                names.push(name.to_string());
+    for line in source.lines().filter(|l| l.contains(marker)) {
+        let mut words = line.split_whitespace();
+        while let Some(word) = words.next() {
+            if word == "-p" {
+                if let Some(name) = words.next() {
+                    names.push(name.trim_matches(|c| c == '"' || c == ',').to_string());
+                }
             }
         }
     }
+    names.sort();
+    names.dedup();
     names
 }
 
