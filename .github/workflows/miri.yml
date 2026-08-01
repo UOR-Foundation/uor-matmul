@@ -30,14 +30,12 @@
 # `timeout-minutes` is set so that a run which stops finishing *fails*, promptly,
 # instead of occupying a runner for six hours and reporting `cancelled` --- which
 # reads like an infrastructure hiccup rather than the regression it would be.
-#
-# The legs: the suite outgrew one 45-minute job (the kernels' parity walk alone
-# is the largest single suite in the workspace, and the facade's whole-matmul
-# byte ladders are the second), so CI runs each group with the same budget and
-# the same strict-provenance flags, and `CU-07` reads the union of the legs'
-# crate lists --- a leg dropped from the matrix fails that test, exactly as a
-# crate dropped from the one list did. The Justfile's `miri` recipe stays one
-# invocation: a dev machine has no 45-minute alarm to preserve.
+# It is 90 because the suite doubled in the pass's last week (the kernels'
+# parity walk alone runs past 45 on the shared runner), and a leg-split matrix
+# was considered and rejected: the ruleset requires a check named exactly
+# `miri`, a matrix renames the checks, and a gate that cannot be asked to
+# report is a gate that silently never runs. A hung run still fails here ---
+# at 90 minutes, not at six hours.
 #
 # The `-p` list below is not prose: `CU-07` reads it out of this file and asserts
 # that every shipped crate either `#![forbid(unsafe_code)]` or appears here, so
@@ -57,14 +55,7 @@ on:
 jobs:
   miri:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      matrix:
-        leg: [
-          "cargo miri test -p uor-matmul-kernels",
-          "cargo miri test -p uor-matmul",
-          "cargo miri test -p uor-matmul-core -p uor-matmul-codec",
-        ]
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -77,7 +68,7 @@ jobs:
       # right for every other job; this is the one that needs nightly, and it says
       # so here rather than by removing the pin. `Justfile`'s `fuzz` recipe has
       # always spelled the same thing `cargo +nightly`.
-      - run: ${{ matrix.leg }}
+      - run: cargo miri test -p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p uor-matmul-codec
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
           RUSTUP_TOOLCHAIN: nightly
