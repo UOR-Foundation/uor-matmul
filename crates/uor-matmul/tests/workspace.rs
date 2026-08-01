@@ -26,6 +26,15 @@ fn operands(m: usize, k: usize, n: usize) -> (Vec<i8>, Vec<i8>) {
     (a, b)
 }
 
+/// The deep `k` the chunk tests run at. Natively it is far past the lane, so
+/// every chunk path engages; under Miri it is just past the panel offer's
+/// full-depth coverage on every tile any host resolves (the smallest bounded
+/// offer covers `256 * 32 / 8 = 1024` steps at the portable tile), which
+/// engages the same gate --- a 262144-deep product is a shape Miri cannot
+/// finish inside the CI budget, and the reduced corpus is the repository's
+/// answer to that everywhere else (`parity.rs`'s `depths`).
+const HUGE_K: usize = if cfg!(miri) { 1025 } else { 262_144 };
+
 /// The reference traversal's answer, from the entry that stays directly
 /// callable under its own name (R6).
 fn reference(m: usize, k: usize, n: usize, a: &[i8], b: &[i8]) -> Vec<i32> {
@@ -157,7 +166,7 @@ fn the_report_is_built_from_the_drivers_own_terms() {
 /// panel plus the block, and the bounded plan exactly.
 #[test]
 fn every_offer_ladder_rung_gives_the_same_bytes_at_huge_k() {
-    let (m, k, n) = (16usize, 262_144usize, 16usize);
+    let (m, k, n) = (16usize, HUGE_K, 16usize);
     let shape = Shape { m, k, n };
     let (a, b) = operands(m, k, n);
     let want = reference(m, k, n, &a, &b);
@@ -191,7 +200,7 @@ fn every_offer_ladder_rung_gives_the_same_bytes_at_huge_k() {
 /// chunks; the bytes are the reference's.
 #[test]
 fn a_bounded_offer_at_huge_k_chunks_and_matches_the_reference() {
-    let (m, k, n) = (16usize, 262_144usize, 16usize);
+    let (m, k, n) = (16usize, HUGE_K, 16usize);
     let shape = Shape { m, k, n };
     let (a, b) = operands(m, k, n);
     let report = workspace_report::<i8, Full<i8>>(shape);
@@ -200,11 +209,24 @@ fn a_bounded_offer_at_huge_k_chunks_and_matches_the_reference() {
         "the bounded plan chunks at a k past the lane, got {:?}",
         report.bounded.chunking
     );
-    assert!(
-        matches!(report.suggested.chunking, Chunking::Chunked { .. }),
-        "at a k past the lane even the suggested offer chunks, got {:?}",
-        report.suggested.chunking
-    );
+    if cfg!(miri) {
+        // At the reduced depth the suggested offer covers the whole reduction
+        // --- that is what it is sized for. The past-the-lane chunk is the
+        // native arm below; Miri cannot run a k past the lane inside the CI
+        // budget, and the offer gate the bounded arm above exercises is the
+        // same gate.
+        assert!(
+            matches!(report.suggested.chunking, Chunking::FullDepth),
+            "at a k inside the lane the suggested offer is full-depth, got {:?}",
+            report.suggested.chunking
+        );
+    } else {
+        assert!(
+            matches!(report.suggested.chunking, Chunking::Chunked { .. }),
+            "at a k past the lane even the suggested offer chunks, got {:?}",
+            report.suggested.chunking
+        );
+    }
 
     let mut panels = vec![0i8; report.bounded.panels];
     let mut accs =
