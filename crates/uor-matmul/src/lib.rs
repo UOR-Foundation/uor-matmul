@@ -131,14 +131,15 @@ pub use uor_matmul_core::{
 };
 pub use uor_matmul_gemm::{
     coded_gemm, gemm_auto, gemm_auto as gemm, gemm_auto_counted, gemm_collapsed, gemm_float,
-    gemm_float_bridged, gemm_float_packed, gemm_packed, gemm_strassen, gemm_tabulated,
-    gemm_tabulated_counted, minimum_workspace, strassen_levels, strassen_scratch,
-    suggested_accumulators, suggested_bridge_scaled, suggested_collapse_index,
-    suggested_collapse_rows, suggested_float_panels, suggested_scratch, suggested_tabulation,
-    tabulation_fits, tabulation_pays, tabulation_rows, workspace_for_budget, workspace_report,
-    Bias, Census, Chunking, CodedTriple, Collapse, Epilogue, GemmOptions, Kernelized, Ledger,
-    Linear, Partition, PlaceAt, Route, RouteCensus, RouteLedger, Scaled, Scratch, SignedPlace,
-    Table, TabulatedTriple, Tile, WorkspacePlan, WorkspaceReport,
+    gemm_float_bridged, gemm_float_packed, gemm_packed, gemm_strassen, gemm_strassen_modular,
+    gemm_strassen_modular_counted, gemm_tabulated, gemm_tabulated_counted, minimum_workspace,
+    modular_level_needs, strassen_levels, strassen_scratch, suggested_accumulators,
+    suggested_bridge_scaled, suggested_collapse_index, suggested_collapse_rows,
+    suggested_float_panels, suggested_scratch, suggested_tabulation, tabulation_fits,
+    tabulation_pays, tabulation_rows, workspace_for_budget, workspace_report, Bias, Census,
+    Chunking, CodedTriple, Collapse, Epilogue, GemmOptions, Kernelized, Ledger, Linear, Partition,
+    PlaceAt, Route, RouteCensus, RouteLedger, Scaled, Scratch, SignedPlace, Table, TabulatedTriple,
+    Tile, WorkspacePlan, WorkspaceReport,
 };
 pub use uor_matmul_kernels as kernels;
 

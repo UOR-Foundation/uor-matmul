@@ -440,6 +440,14 @@ pub enum Route {
         /// The levels the declarations admitted and the recursion took.
         levels: usize,
     },
+    /// The one-level modular bilinear factorization ran: Winograd's form over
+    /// the quotient the caller named, with the base products on the modular
+    /// lane.
+    StrassenModular {
+        /// The base block products the level issued, counted as they ran ---
+        /// seven against the classical decomposition's eight.
+        products: u64,
+    },
     /// The reference traversal ran because the cost model priced the packed
     /// traversal above it at this shape: the streaming form of the same
     /// identity, chosen rather than fallen back to.
@@ -592,6 +600,14 @@ pub(crate) fn gemm_packed_impl<E, Bd, O, Ep>(
 
     match modular {
         Some(tile) => {
+            // The one-level bilinear factorization, admitted by the shape, the
+            // offer, and the measured crossover --- which the model records as
+            // `usize::MAX` while the modular lane has no measurement, so this
+            // declines everywhere until one exists (`MEASUREMENT-LOG.md`).
+            if crate::strassen::modular_level_admitted::<E, Bd, O>(shape, options, scratch, true) {
+                crate::strassen::run_modular(triple, epilogue, options, scratch, ledger);
+                return;
+            }
             match pick(
                 shape,
                 triple.a(),
@@ -844,6 +860,102 @@ pub(crate) fn gemm_packed_exact_raw<E, Bd>(
         }
     }
     raw_stream(shape, a, b, out, ldc);
+}
+
+/// The modular arm of the packed traversal with the encode step replaced by a
+/// store: the base product of the one-level modular bilinear factorization.
+///
+/// The quotient the caller asked for is a ring, so the lane wraps by design
+/// and there is no bound to track --- the exact lane's grown-bound bookkeeping
+/// has no modular analogue. `out` is row-major with leading dimension `ldc`,
+/// and what lands in it is the value the direct modular walk's emit hands the
+/// epilogue: the wrapped lane read back through the accumulator, so the
+/// level's combination and the epilogue below need no conversion.
+pub(crate) fn gemm_packed_modular_raw<E, Bd>(
+    a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    backend: Backend,
+    out_bits: u32,
+    scratch: &mut Scratch<'_, E, Bd>,
+    out: &mut [AccOf<E>],
+    ldc: usize,
+) where
+    E: Kernelized,
+    Bd: Bound,
+{
+    let shape = uor_matmul_core::Shape {
+        m: a.rows(),
+        k: a.cols(),
+        n: b.cols(),
+    };
+    if shape.m == 0 || shape.n == 0 {
+        return;
+    }
+    let picked = E::modular_spec(backend, out_bits, Bd::VALUE, shape.m).and_then(|tile| {
+        pick(
+            shape,
+            a,
+            b,
+            &tile,
+            || E::modular_narrow(backend, out_bits, Bd::VALUE, shape.m),
+            || E::modular_reduce(backend, out_bits, Bd::VALUE, shape.m),
+            scratch.len(),
+        )
+    });
+    if let Some(spec) = picked {
+        // In the quotient the caller asked for, a running partial sum kept in
+        // the accumulator and a lane are the same value, so accumulating one
+        // into the other is the ring's own addition --- the direct modular
+        // arm's own closure, at a raw sink.
+        let accumulate = |acc: &mut AccOf<E>, lane: E::Modular| {
+            *acc = E::modular_as_acc(E::add_modular(E::acc_as_modular(*acc), lane));
+        };
+        let ran = {
+            let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| out[ci * ldc + cj] = acc;
+            run::<E, Bd, E::Modular>(
+                shape,
+                a,
+                b,
+                scratch,
+                spec,
+                E::add_modular,
+                &accumulate,
+                usize::MAX,
+                &mut emit,
+            )
+        };
+        if ran {
+            return;
+        }
+    }
+    raw_stream_modular(shape, a, b, out, ldc);
+}
+
+/// [`raw_stream`] read in the quotient the caller named.
+///
+/// Reduction modulo `2^w` is a ring homomorphism, so the exact accumulation
+/// wrapped once at the store is the value the modular lane computes by
+/// wrapping at every chunk --- the same bytes either way, which is what makes
+/// this a decline and not a different answer.
+fn raw_stream_modular<E, Bd>(
+    shape: uor_matmul_core::Shape,
+    a: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    b: &uor_matmul_core::MatView<'_, Alphabet<E, Bd>>,
+    out: &mut [AccOf<E>],
+    ldc: usize,
+) where
+    E: Kernelized,
+    Bd: Bound,
+{
+    for i in 0..shape.m {
+        for j in 0..shape.n {
+            let mut acc = <AccOf<E> as Accumulator>::ZERO;
+            for p in 0..shape.k {
+                E::mac(&mut acc, a.at(i, p).get(), b.at(p, j).get());
+            }
+            out[i * ldc + j] = E::modular_as_acc(E::acc_as_modular(acc));
+        }
+    }
 }
 
 /// The streaming reference traversal with the encode step replaced by a store.

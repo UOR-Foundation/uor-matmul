@@ -300,6 +300,36 @@ pub fn render(model: &Model) -> String {
         "    pub const STRASSEN_MIN_EXTENT: usize = {};",
         model.constants.blocking.strassen_min_extent
     );
+    let _ = writeln!(
+        w,
+        "    /// The smallest base-case extent at which one level of the modular bilinear"
+    );
+    let _ = writeln!(
+        w,
+        "    /// factorization pays on a modular lane. `usize::MAX` while the lane has no"
+    );
+    let _ = writeln!(
+        w,
+        "    /// measurement: the modular arm consults it and declines until the"
+    );
+    let _ = writeln!(
+        w,
+        "    /// pre-registered sweep in `MEASUREMENT-LOG.md` records one."
+    );
+    let modular = model.constants.blocking.strassen_modular_min_extent;
+    if modular > u32::MAX as usize {
+        // The unmeasured sentinel: a value past every target's addressable
+        // extent, spelled so a 32-bit target declines too.
+        let _ = writeln!(
+            w,
+            "    pub const STRASSEN_MODULAR_MIN_EXTENT: usize = usize::MAX;"
+        );
+    } else {
+        let _ = writeln!(
+            w,
+            "    pub const STRASSEN_MODULAR_MIN_EXTENT: usize = {modular};"
+        );
+    }
     let _ = writeln!(w, "}}");
 
     // R1's pin. The plan permits `133144` to appear inside a `const _` assert

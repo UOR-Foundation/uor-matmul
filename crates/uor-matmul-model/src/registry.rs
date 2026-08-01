@@ -192,6 +192,11 @@ pub struct Blocking {
     /// Below it a level's block sums and temporary traffic cost more than its
     /// product count saves.
     pub strassen_min_extent: usize,
+    /// The smallest base-case extent at which one level of the modular bilinear
+    /// factorization pays on a modular lane. `usize::MAX` while the lane has no
+    /// measurement: the modular arm consults it and declines until the
+    /// pre-registered sweep in `MEASUREMENT-LOG.md` records one.
+    pub strassen_modular_min_extent: usize,
 }
 
 /// `model/widths.toml`.

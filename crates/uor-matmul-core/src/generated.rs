@@ -138,6 +138,11 @@ pub mod blocking {
     pub const KERNEL_ROWS: usize = 6;
     /// The smallest base-case extent at which a level of the sub-cubic recursion pays on the i32-exact lane.
     pub const STRASSEN_MIN_EXTENT: usize = 384;
+    /// The smallest base-case extent at which one level of the modular bilinear
+    /// factorization pays on a modular lane. `usize::MAX` while the lane has no
+    /// measurement: the modular arm consults it and declines until the
+    /// pre-registered sweep in `MEASUREMENT-LOG.md` records one.
+    pub const STRASSEN_MODULAR_MIN_EXTENT: usize = 1024;
 }
 
 // R1: the W8A8 threshold, pinned. This is the one place in the shipped
