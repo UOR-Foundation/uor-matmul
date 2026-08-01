@@ -43,8 +43,9 @@ pub mod table;
 
 pub use table::{
     available_table_i16, available_table_i32_modular, available_table_i64_modular,
-    available_table_i8, choose_table, gather_reference_i32, gather_reference_wide, portable_table,
-    Lane, LaneWord, Mod32, Mod64, Scaled64, TableBuild, TableGather, TableSpec, Wide,
+    available_table_i8, choose_table, gather_reference_i32, gather_reference_wide, gray_sign_table,
+    portable_table, portable_table_bound1, Lane, LaneWord, Mod32, Mod64, Scaled64, TableBuild,
+    TableGather, TableSpec, Wide,
 };
 
 pub use spec::{

@@ -30,6 +30,12 @@
 # `timeout-minutes` is set so that a run which stops finishing *fails*, promptly,
 # instead of occupying a runner for six hours and reporting `cancelled` --- which
 # reads like an infrastructure hiccup rather than the regression it would be.
+# It is 90 because the suite doubled in the pass's last week (the kernels'
+# parity walk alone runs past 45 on the shared runner), and a leg-split matrix
+# was considered and rejected: the ruleset requires a check named exactly
+# `miri`, a matrix renames the checks, and a gate that cannot be asked to
+# report is a gate that silently never runs. A hung run still fails here ---
+# at 90 minutes, not at six hours.
 #
 # The `-p` list below is not prose: `CU-07` reads it out of this file and asserts
 # that every shipped crate either `#![forbid(unsafe_code)]` or appears here, so
@@ -49,7 +55,7 @@ on:
 jobs:
   miri:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

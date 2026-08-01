@@ -1352,3 +1352,106 @@ fn every_bound1_table_build_equals_the_reference_cb_10() {
         }
     }
 }
+
+/// The Gray-walk sign build against the per-codeword build, slot for slot.
+///
+/// No new conformance ID: this is a construction change on a path `CB-10` and
+/// `CU-06` already gate --- the table's bytes and the zero multiply count.
+/// What those gates do not say is *which* construction produced the table,
+/// and that is what this test pins: every code, at the alphabet's extremes,
+/// on activation tiles chosen so a wrong sign on any one bit moves at least
+/// one entry, at every tile height the driver walks. The census charge is a
+/// formula over the spec's own declaration, and it is asserted here against
+/// the same terms the walk executes.
+#[test]
+fn the_gray_walk_builds_the_sign_table_slot_for_slot() {
+    use uor_matmul_kernels::{gray_sign_table, portable_table_bound1};
+
+    // The sign codebook, built the way the codec decodes it.
+    let sign_book = |space: usize, block: usize| -> Vec<i8> {
+        (0..space * block)
+            .map(|i| {
+                let (c, t) = (i / block, i % block);
+                if (c >> t) & 1 == 1 {
+                    1
+                } else {
+                    -1
+                }
+            })
+            .collect()
+    };
+
+    // (space, block, rows, tiles): `Sign<4>` and `Sign<8>` at every tile
+    // height, `Sign<16>` --- the `u16` code type's whole space --- at the two
+    // ends of it. The tiles hold the alphabet's extremes: a wrong bit flip or
+    // a store at the walk ordinal is visible in at least one entry. Under
+    // Miri the largest space is 4096: the claim the big case carries is
+    // slot-for-slot equality of the two builds, which is structural in the
+    // space, and a 65536-entry table is a corpus Miri cannot finish inside
+    // the CI budget (the workspace tests' `HUGE_K` is the same discipline).
+    let (s4, s8, s16) = if cfg!(miri) {
+        (16, 256, 4096)
+    } else {
+        (16, 256, 65536)
+    };
+    let cases: Vec<(usize, usize, Vec<usize>)> = if cfg!(miri) {
+        vec![
+            (s4, 4, vec![1, 16]),
+            (s8, 8, vec![1, 16]),
+            (s16, 16, vec![1]),
+        ]
+    } else {
+        vec![
+            (s4, 4, vec![1, 2, 4, 8, 16]),
+            (s8, 8, vec![1, 2, 4, 8, 16]),
+            (s16, 16, vec![1, 16]),
+        ]
+    };
+    for (space, block, row_list) in cases {
+        let book = sign_book(space, block);
+        for rows in row_list {
+            let tiles: Vec<Vec<i8>> = vec![
+                vec![i8::MIN; block * rows],
+                vec![i8::MAX; block * rows],
+                (0..block * rows)
+                    .map(|i| if i % 2 == 0 { i8::MIN } else { i8::MAX })
+                    .collect(),
+                (0..block * rows).map(|i| ((i * 37) % 255) as i8).collect(),
+            ];
+            let independent = portable_table_bound1(rows, 1);
+            let gray = gray_sign_table(rows, 1);
+            for acts in &tiles {
+                let mut want = vec![0i32; space * rows];
+                let mut got = vec![0i32; space * rows];
+                independent.build(space, block, &book, acts, &mut want);
+                gray.build(space, block, &book, acts, &mut got);
+                assert_eq!(
+                    got, want,
+                    "space {space}, block {block}, rows {rows}: the Gray walk disagrees"
+                );
+                // And the reference itself is checked against the model, so the
+                // comparison above is not two builds sharing a mistake.
+                for &c in &[0usize, space / 2, space - 1] {
+                    for i in 0..rows {
+                        let mut acc = 0i32;
+                        for t in 0..block {
+                            let a = i32::from(acts[t * rows + i]);
+                            acc += if (c >> t) & 1 == 1 { a } else { -a };
+                        }
+                        assert_eq!(
+                            want[c * rows + i],
+                            acc,
+                            "the model at code {c}, row {i} (space {space}, rows {rows})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // The census charge, read off the spec's own declaration: `T[0]` and the
+    // doubled activations, then one update per code past the first.
+    let spec = gray_sign_table(16, 1);
+    assert_eq!((spec.build_adds)(256, 8, 16), (2 * 8 + 256 - 1) as u64 * 16);
+    assert!(!spec.build_multiplies, "the walk is adds and subtracts");
+}
