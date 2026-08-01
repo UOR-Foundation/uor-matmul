@@ -30,8 +30,17 @@
 //! - A column group's tail is padded with raw zeros, which bias to 128 and
 //!   cancel exactly in the same identity, so any scalar width works.
 //!
-//! The vector stream is the AVX2 `i8` tile kernel itself, called through the
-//! kernels crate's public [`uor_matmul::kernels::KernelSpec`] interface ---
+//! # What the timed path measures
+//!
+//! The first version of this harness packed panels and allocated per rep,
+//! and the x86 artifact it produced measured *packing*, not ports ---
+//! recorded as a harness defect in `MEASUREMENT-LOG.md`. The structure now
+//! is the driver's: [`Coissue::prepare`] packs every panel and allocates
+//! every buffer once, and [`Coissue::run`] --- the timed path --- borrows all
+//! of it and allocates nothing, which a counting-allocator test asserts. The
+//! byte-identity assertion stays inside the timed rep, against a reused
+//! output buffer. The vector stream is the AVX2 `i8` tile kernel itself,
+//! called through the kernels crate's public [`KernelSpec`] interface ---
 //! not copied, never reimplemented. The measurement path is x86-only: an
 //! experiment about x86 ports cannot run on aarch64, and it says so. The
 //! byte-identity half runs everywhere, on whatever tile the host offers.
@@ -101,10 +110,10 @@ fn pack_tile(
 /// fields to a `u64`, a chunk of `d` depths per extraction, accumulating into
 /// `acc` at row stride `n`.
 ///
-/// Everything is `u64` arithmetic on purpose: no SIMD intrinsics, no unsafe.
-/// Whether these instructions land on ports the vector kernel leaves idle is
-/// the question the measurement answers; the construction itself is an exact
-/// integer identity on any host.
+/// Everything is `u64` arithmetic on stack arrays: no allocation, no SIMD
+/// intrinsics, no unsafe. Whether these instructions land on ports the vector
+/// kernel leaves idle is the question the measurement answers; the
+/// construction itself is an exact integer identity on any host.
 #[allow(clippy::too_many_arguments)]
 fn scalar_chunk(
     a: &[i8],
@@ -164,65 +173,148 @@ fn scalar_chunk(
     }
 }
 
-/// The interleaved co-issue: the vector tile kernel over columns `[0, nv)`,
-/// the scalar Kronecker stream over `[nv, n)`, in one depth loop --- not two
-/// sequential passes, because the co-issue is the point.
-#[allow(clippy::too_many_arguments)]
-pub fn coissued(
-    spec: &KernelSpec<i8, i32>,
-    a: &[i8],
-    b: &[i8],
+/// One configuration, prepared: every panel packed once, every buffer owned
+/// once. [`Coissue::run`] --- the timed path --- borrows all of it.
+///
+/// The vector panels are packed for the whole depth at preparation, and the
+/// run reads per-chunk slices of them: the packed layout is `k`-major in
+/// `k_group` runs, so a chunk aligned to `k_group` is one contiguous slice,
+/// and the interleave stays one depth loop without any packing inside it.
+pub struct Coissue {
+    spec: KernelSpec<i8, i32>,
     m: usize,
     k: usize,
     n: usize,
     nv: usize,
-) -> Vec<i32> {
-    let mut acc = vec![0i32; m * n];
-    let (mr, nr, k_group) = (spec.mr, spec.nr, spec.k_group.max(1));
-    let mut tile = vec![0i32; mr * nr];
-    let mut c0 = 0usize;
-    while c0 < k {
-        let d = SWAR_CHUNK.min(k - c0);
-        let kc = d.div_ceil(k_group) * k_group;
-        // The vector stream's tiles, over this chunk's depths.
-        let mut mt = 0usize;
-        while mt < m {
-            let mut pa = vec![0i8; mr * kc];
-            pack_tile(a, m, k, mt, c0, mr, kc, k_group, &mut pa);
-            let mut nt = 0usize;
-            while nt < nv {
-                let mut pb = vec![0i8; nr * kc];
-                pack_tile(b, n, k, nt, c0, nr, kc, k_group, &mut pb);
-                spec.mac_tile(kc, &pa, &pb, &mut tile);
-                for i in 0..mr {
-                    for j in 0..nr {
-                        if mt + i < m {
-                            acc[(mt + i) * n + nt + j] += tile[i * nr + j];
+    a: Vec<i8>,
+    b: Vec<i8>,
+    tiles_a: Vec<i8>,
+    tiles_b: Vec<i8>,
+    tile: Vec<i32>,
+    out: Vec<i32>,
+}
+
+impl Coissue {
+    /// Pack every panel and own every buffer, once. The vector columns are
+    /// `[0, nv)`; `nv` must be a whole number of the tile's columns (the
+    /// experiment's splits are chosen so), and the scalar stream takes the
+    /// rest, padding its own tail exactly.
+    pub fn prepare(
+        spec: &KernelSpec<i8, i32>,
+        a: &[i8],
+        b: &[i8],
+        m: usize,
+        k: usize,
+        n: usize,
+        nv: usize,
+    ) -> Self {
+        assert_eq!(a.len(), m * k, "a is m x k");
+        assert_eq!(b.len(), n * k, "b is n x k");
+        assert!(
+            nv <= n && nv.is_multiple_of(spec.nr),
+            "the split must be a whole number of vector tiles"
+        );
+        let (mr, nr, kg) = (spec.mr, spec.nr, spec.k_group.max(1));
+        let k_pad = k.div_ceil(kg) * kg;
+        let m_tiles = m.div_ceil(mr);
+        let v_tiles = nv / nr;
+        let mut tiles_a = vec![0i8; m_tiles * mr * k_pad];
+        for mt in 0..m_tiles {
+            pack_tile(
+                a,
+                m,
+                k,
+                mt * mr,
+                0,
+                mr,
+                k_pad,
+                kg,
+                &mut tiles_a[mt * mr * k_pad..][..mr * k_pad],
+            );
+        }
+        let mut tiles_b = vec![0i8; v_tiles * nr * k_pad];
+        for nt in 0..v_tiles {
+            pack_tile(
+                b,
+                n,
+                k,
+                nt * nr,
+                0,
+                nr,
+                k_pad,
+                kg,
+                &mut tiles_b[nt * nr * k_pad..][..nr * k_pad],
+            );
+        }
+        Self {
+            spec: *spec,
+            m,
+            k,
+            n,
+            nv,
+            a: a.to_vec(),
+            b: b.to_vec(),
+            tiles_a,
+            tiles_b,
+            tile: vec![0i32; mr * nr],
+            out: vec![0i32; m * n],
+        }
+    }
+
+    /// One full pass over the reduction: the vector tile kernel over the
+    /// pre-packed panels, the scalar Kronecker stream over the rest, in one
+    /// depth loop.
+    ///
+    /// The timed path. It borrows every byte it touches and allocates none ---
+    /// the counting-allocator test asserts the count is zero. The output is
+    /// zeroed per pass, the same contract the epilogue's `beta = 0` keeps.
+    pub fn run(&mut self) {
+        self.out.fill(0);
+        let (mr, nr, kg) = (self.spec.mr, self.spec.nr, self.spec.k_group.max(1));
+        let k_pad = self.k.div_ceil(kg) * kg;
+        let m_tiles = self.tiles_a.len() / (mr * k_pad);
+        let v_tiles = self.tiles_b.len() / (nr * k_pad);
+        let mut c0 = 0usize;
+        while c0 < self.k {
+            let d = SWAR_CHUNK.min(self.k - c0);
+            let kc = d.div_ceil(kg) * kg;
+            for mt in 0..m_tiles {
+                // One contiguous slice of the pre-packed panel per chunk:
+                // `packed_slot` is `k`-major in `k_group` runs, so depths
+                // `[c0, c0 + kc)` live at `[c0 * mr, (c0 + kc) * mr)`.
+                let pa = &self.tiles_a[mt * mr * k_pad + c0 * mr..][..mr * kc];
+                for nt in 0..v_tiles {
+                    let pb = &self.tiles_b[nt * nr * k_pad + c0 * nr..][..nr * kc];
+                    self.spec.mac_tile(kc, pa, pb, &mut self.tile);
+                    for i in 0..mr {
+                        for j in 0..nr {
+                            if mt * mr + i < self.m {
+                                self.out[(mt * mr + i) * self.n + nt * nr + j] +=
+                                    self.tile[i * nr + j];
+                            }
                         }
                     }
                 }
-                nt += nr;
             }
-            mt += mr;
+            scalar_chunk(
+                &self.a,
+                &self.b,
+                self.m,
+                self.k,
+                self.n,
+                self.nv,
+                c0,
+                d,
+                &mut self.out,
+            );
+            c0 += d;
         }
-        // The scalar stream's chunk, over the same depths.
-        scalar_chunk(a, b, m, k, n, nv, c0, d, &mut acc);
-        c0 += d;
     }
-    acc
-}
 
-/// The vector-only configuration: the same tile kernel over every column, in
-/// the same depth loop, so the comparison prices the split and nothing else.
-pub fn vector_only(
-    spec: &KernelSpec<i8, i32>,
-    a: &[i8],
-    b: &[i8],
-    m: usize,
-    k: usize,
-    n: usize,
-) -> Vec<i32> {
-    coissued(spec, a, b, m, k, n, n)
+    /// The output of the last [`Coissue::run`].
+    pub fn out(&self) -> &[i32] {
+        &self.out
+    }
 }
 
 /// The scalar-only configuration, for the correctness half that runs on any
@@ -280,6 +372,11 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    // What the timed path allocates, counted. The instrument's discipline is
+    // the driver's: everything the run needs exists before the run.
+    #[global_allocator]
+    static COUNTING: crate::counting::Counting = crate::counting::Counting;
+
     /// Byte-identity for the scalar stream alone and for the interleaved
     /// co-issue, at the alphabet's extremes and at three depths. Runs on any
     /// host: the construction is exact integer arithmetic, and the vector
@@ -303,21 +400,71 @@ mod tests {
                     );
                     let spec = vector_spec();
                     for nv in [48usize, 32] {
+                        let mut run = Coissue::prepare(&spec, &a, &b, m, k, n, nv);
+                        run.run();
                         assert_eq!(
-                            coissued(&spec, &a, &b, m, k, n, nv),
-                            want,
+                            run.out(),
+                            &want[..],
                             "{label} {m}x{k}x{n} split {nv}|{}: the co-issue disagrees",
                             n - nv
                         );
+                        let mut vec_run = Coissue::prepare(&spec, &a, &b, m, k, n, n);
+                        vec_run.run();
                         assert_eq!(
-                            vector_only(&spec, &a, &b, m, k, n),
-                            want,
+                            vec_run.out(),
+                            &want[..],
                             "{label} {m}x{k}x{n}: the vector-only run disagrees"
                         );
                     }
                 }
             }
         }
+    }
+
+    /// The co-issue at the kernel-dominated width: `n = 256`, splits
+    /// 192|64 and 128|128, at two depths.
+    #[test]
+    fn the_co_issue_agrees_at_the_wide_split() {
+        let spec = vector_spec();
+        for &k in &[64usize, 1024] {
+            for &m in &[4usize, 16] {
+                let n = 256usize;
+                let a = fill_full(m * k, (m * k) as u64 + 3);
+                let b = fill_full(n * k, (n * k) as u64 + 4);
+                let want = reference(&a, &b, m, k, n);
+                for nv in [192usize, 128] {
+                    let mut run = Coissue::prepare(&spec, &a, &b, m, k, n, nv);
+                    run.run();
+                    assert_eq!(
+                        run.out(),
+                        &want[..],
+                        "{m}x{k}x{n} split {nv}|{}: the co-issue disagrees",
+                        n - nv
+                    );
+                }
+            }
+        }
+    }
+
+    /// The timed path allocates nothing, counted.
+    ///
+    /// The first version of this harness packed and allocated per rep, and
+    /// measured the packing. This is the assertion that keeps the fixed
+    /// structure honest: everything the run needs exists before the run, so
+    /// the clock reads the reduction and nothing else.
+    #[test]
+    fn the_timed_path_allocates_nothing() {
+        let (m, k, n) = (4usize, 1024usize, 64usize);
+        let a = fill_full(m * k, 1);
+        let b = fill_full(n * k, 2);
+        let spec = vector_spec();
+        let mut run = Coissue::prepare(&spec, &a, &b, m, k, n, 48);
+        let ((), reading) = crate::counting::measure(|| run.run());
+        assert_eq!(
+            reading.allocations, 0,
+            "the timed path must allocate nothing ({reading:?})"
+        );
+        assert_eq!(reading.bytes, 0);
     }
 
     /// The measurement: vector-only against the co-issued split, at i8 full
@@ -334,7 +481,7 @@ mod tests {
                 "coissue: this experiment measures whether a scalar integer stream \
                  co-issues beside the AVX2 tile kernel on x86 ports; there is no \
                  x86 here, so the measurement declines. The scalar stream's \
-                 byte-identity is covered by the always-on test."
+                 byte-identity is covered by the always-on tests."
             );
             return;
         }
@@ -345,37 +492,53 @@ mod tests {
             );
             return;
         };
-        let n = 64usize;
-        for (label, fill) in [
-            ("full", fill_full as fn(usize, u64) -> Vec<i8>),
-            ("w4a8", fill_w4a8),
-        ] {
-            for &k in &[64usize, 1024, 16384] {
-                for &m in &[4usize, 8, 16] {
-                    let a = fill(m * k, (m * k) as u64 + 1);
-                    let b = fill(n * k, (n * k) as u64 + 2);
-                    let want = reference(&a, &b, m, k, n);
-                    // Enough reps to see past the noise floor at the small
-                    // shapes, bounded at the large ones.
-                    let reps = (100_000_000usize / (m * k * n).max(1)).max(2);
-                    for nv in [48usize, 32] {
-                        let started = Instant::now();
-                        for _ in 0..reps {
-                            assert_eq!(vector_only(&spec, &a, &b, m, k, n), want);
+        let groups: [(&str, usize, [usize; 2]); 2] = [
+            ("n=256 (kernel-dominated)", 256, [192, 128]),
+            ("n=64 (small-tile regime)", 64, [48, 32]),
+        ];
+        for (group_name, n, splits) in groups {
+            for (label, fill) in [
+                ("full", fill_full as fn(usize, u64) -> Vec<i8>),
+                ("w4a8", fill_w4a8),
+            ] {
+                for &k in &[64usize, 1024, 16384] {
+                    for &m in &[4usize, 8, 16] {
+                        let a = fill(m * k, (m * k) as u64 + 1);
+                        let b = fill(n * k, (n * k) as u64 + 2);
+                        let want = reference(&a, &b, m, k, n);
+                        // Enough reps to see past the noise floor at the small
+                        // shapes, bounded at the large ones.
+                        let reps = (50_000_000usize / (m * k * n).max(1)).max(2);
+                        for nv in splits {
+                            let mut vec_run = Coissue::prepare(&spec, &a, &b, m, k, n, n);
+                            let started = Instant::now();
+                            for _ in 0..reps {
+                                vec_run.run();
+                                assert_eq!(
+                                    vec_run.out(),
+                                    &want[..],
+                                    "the timed run must be correct"
+                                );
+                            }
+                            let vec_t = started.elapsed();
+                            let mut co_run = Coissue::prepare(&spec, &a, &b, m, k, n, nv);
+                            let started = Instant::now();
+                            for _ in 0..reps {
+                                co_run.run();
+                                assert_eq!(
+                                    co_run.out(),
+                                    &want[..],
+                                    "the timed run must be correct"
+                                );
+                            }
+                            let co_t = started.elapsed();
+                            eprintln!(
+                                "coissue {group_name} {label} {m}x{k}x{n} split {nv}|{}: \
+                                 vector {vec_t:?}, co-issued {co_t:?}, ratio {:.3} ({reps} reps)",
+                                n - nv,
+                                co_t.as_secs_f64() / vec_t.as_secs_f64(),
+                            );
                         }
-                        let vec_t = started.elapsed();
-                        let started = Instant::now();
-                        for _ in 0..reps {
-                            assert_eq!(coissued(&spec, &a, &b, m, k, n, nv), want);
-                        }
-                        let co_t = started.elapsed();
-                        eprintln!(
-                            "coissue {label} {m}x{k}x{n} split {nv}|{}: vector {vec_t:?}, \
-                             co-issued {co_t:?}, ratio {:.3} ({} reps)",
-                            n - nv,
-                            co_t.as_secs_f64() / vec_t.as_secs_f64(),
-                            reps
-                        );
                     }
                 }
             }
