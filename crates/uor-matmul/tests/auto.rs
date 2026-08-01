@@ -20,8 +20,11 @@ use uor_matmul::{
 };
 
 /// The square shape the kernel-table assertions run at: large enough that the
-/// cost model prefers packing, small enough to run everywhere.
-const N: usize = 64;
+/// cost model prefers packing, small enough to run everywhere. Under Miri it
+/// is 32 --- the route the census records is the same at either size, and the
+/// scalar reference traversal the bytes are checked against is the corpus's
+/// cost, not the claim's.
+const N: usize = if cfg!(miri) { 32 } else { 64 };
 
 /// Deterministic operands inside the full `i8` alphabet's bound.
 fn operands() -> (Vec<i8>, Vec<i8>) {
