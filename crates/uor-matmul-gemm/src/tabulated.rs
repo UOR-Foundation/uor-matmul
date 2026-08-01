@@ -2230,7 +2230,10 @@ fn admits(
 /// Every entry computes the same integer. A shape that does not divide walks down
 /// the list; it does not take a different path, and `CD-13` asserts the bytes at
 /// every `m`.
-const ROW_TILES: [usize; 5] = [16, 8, 4, 2, 1];
+///
+/// `pub` so a measurement harness walks the same ladder the traversal does
+/// rather than restating it.
+pub const ROW_TILES: [usize; 5] = [16, 8, 4, 2, 1];
 
 /// Decode the whole codebook once, transposed, into the caller's panel offer.
 ///
@@ -2323,7 +2326,9 @@ const COLUMN_LANES: usize = 16;
 const MAX_GROUP: usize = COLUMN_LANES;
 
 /// Output columns one gather call reduces at once, at a tile of `rows`.
-const fn column_group(rows: usize) -> usize {
+///
+/// `pub` so a measurement harness groups the way the sweep does.
+pub const fn column_group(rows: usize) -> usize {
     if rows >= COLUMN_LANES {
         1
     } else {
