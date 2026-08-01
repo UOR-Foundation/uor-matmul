@@ -45,6 +45,7 @@
 use uor_matmul::prelude::*;
 use uor_matmul_core::EncodeMode;
 
+pub mod coissue;
 pub mod corpus;
 pub mod counting;
 pub mod float_tab;

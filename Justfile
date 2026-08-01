@@ -306,6 +306,18 @@ block-sweep:
     cargo test --release -p uor-matmul-validate --test block_sweep -- \
         --ignored --nocapture --test-threads=1
 
+# The scalar-port co-issue experiment: the AVX2 `i8` tile kernel beside a
+# scalar Kronecker broadcast stream, one exact accumulator, the ratio printed
+# per configuration. x86-only by construction --- the thesis is about x86
+# ports --- and off-x86 the harness prints its decline and why. Minutes, and
+# every figure is `open`. `--release` is not optional: a throughput figure
+# from an unoptimised build is not a figure.
+#
+# The scalar-port co-issue experiment. Minutes, x86 only.
+coissue:
+    cargo test --release -p uor-matmul-validate --lib coissue -- \
+        --ignored --nocapture --test-threads=1
+
 # CG-16: the symbol tabulated traversal in the scaled integer lane against the
 # float placement bridge, the dense float driver, and the oracle, on gemv,
 # skinny, and tabulation-sweep shapes, with byte-identity asserted inside
