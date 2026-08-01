@@ -33,21 +33,19 @@ gates, or by being measured and recorded below as a result.
 The phase's eight items are all landed. What remains are the follow-ups the
 measurements named:
 
-1. **The multi-host remainder.** The first pass is read (the entry below);
-   the CG-17 x86 figure is now read too: the `#17` merge's scaling run
-   (2026-08-01) reports the SWAR broadcast at 0.30x of the dot sequence at
-   `k = 64` and 0.20x at `k = 1024` and `16384` on the x86 runner --- worse
-   than the M4 Max's 0.32--0.38x, the same decline on a second host, the
-   incumbent's eight-extends-per-dot beating the field packing there as
-   here. The VNNI break-even question is answered for this runner class:
-   the runner declares no AVX-512, so the breakeven artifact's flip at the
-   AVX2 pair's derived 683 is the caller-experienced crossing there, and the
-   VNNI rows stay `Unmeasured` with the reason recorded in the rows (the
-   diagnosis is the entry at the bottom of this log). What remains: the
-   scalar-port co-issue experiment's fixed run --- the first artifact
-   measured packing, not ports, and is recorded as a harness defect at the
-   bottom of this log; the verdict (> 5% sustained) awaits the rebuilt
-   harness's x86 run.
+1. **The multi-host remainder.** All read now. The CG-17 x86 figure: the
+   SWAR broadcast at 0.30x of the dot sequence at `k = 64` and 0.20x at
+   `k = 1024` and `16384` on the x86 runner --- worse than the M4 Max's
+   0.32--0.38x, the same decline on a second host. The VNNI break-even
+   question is answered for this runner class: the runner declares no
+   AVX-512, so the breakeven artifact's flip at the AVX2 pair's derived 683
+   is the caller-experienced crossing there, and the VNNI rows stay
+   `Unmeasured` with the reason recorded in the rows and the resolved pair
+   printed in every artifact. The co-issue experiment is answered: with the
+   packing defect removed, the co-issued form is 2.6--11.2x slower than the
+   vector-only tile at every configuration --- the thesis is refuted, no
+   kernel ships, and the instrument stays for a second host. The VNNI rows'
+   measurement now wants one thing: a host that has AVX-512.
 2. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
    §"Mantissa slicing, and the RNS beside it") is recorded: nine 8-bit
    passes, shift recombination, a wash where the narrow-to-wide ratio is
@@ -639,6 +637,8 @@ codebook uses it today, and whether real weight artifacts have reachable
 **The scalar-port co-issue experiment (harness registered; measurement pending, x86 only).** The last unwritten item in the queue. The CG-11 census reads the AVX2 `i8` tile kernel bound on `Zn4FP2` (85 instructions, ~14.5 cycles a tile-step, IPC ~5.88, scheduling-model predictions) with the scalar integer ports idle in the model, so the port-multiplexing thesis says a scalar integer stream should co-issue beside the kernel for a single-digit-percent throughput gain. The census's own caution is the reason this is an experiment and not a kernel: if both streams bind the same port, one bottleneck has been split into two queues for it, and only a measurement answers which. The harness is `crates/uor-matmul-validate/src/coissue.rs`, a dev-only instrument in the FloatBook mould: the vector stream is the AVX2 tile kernel itself, called through the kernels crate's public `KernelSpec` interface (never copied); the scalar stream is Kronecker substitution over the integers in safe-Rust `u64` arithmetic --- three biased fields at 21-bit spacing to a word, one multiply producing three products, guard bits absorbing a chunk of 32 products a field, the `dpbusd` offset identity paid at extraction (the wasm sequence's own construction, `model/constants.toml`'s `wasm_swar_field_w8a8` row) --- interleaved with the kernel in one depth loop, not two passes, because the co-issue is the point. Column splits 48|16 and 32|32 of `n = 64`, `m` in {4, 8, 16}, `k` in {64, 1024, 16384}, at full `i8` range and at W4A8; byte-identity against the schoolbook reference is asserted inside every timed run.
 
 *Verdict rule, pre-registered:* the co-issued form is evidence for or against port multiplexing, and either is a result. Ship a kernel only if the measured gain clears the noise by enough to matter --- pre-registered at **> 5% sustained across the configuration grid** (every split, both bounds, all three depths; a win at one configuration and a loss at another is a split thesis, recorded as such). Below that, the outcome is recorded here and the thesis is answered: the scalar ports were not free, or the scheduler was already using them. **Timing is pending an x86 run** --- the development host is aarch64 and cannot answer the question; the harness declines off-x86 with the reason printed, and CI's `scaling.yml` x86 job runs it as `just coissue | tee target/measurements/coissue-x86.txt` after the breakeven step. The dry-run correctness half passed on the development host: the scalar stream and the co-issue are byte-identical to the schoolbook reference at the alphabet's extremes, at W4A8, at all three depths and every `m`, both splits.
+
+*Outcome, measured 2026-08-01 on the CI x86 runner (scaling run `#30719729460`; every figure `open`, byte-identity asserted inside every timed run):* **the thesis is refuted, and the wire stays out.** With the packing defect removed, the co-issued form is slower than the vector-only tile at *every* configuration --- 2.7--3.4x at the 192|64 split and 4.2--5.8x at 128|128 at `k = 64`, rising to 2.6--11.2x at `k = 16384`, at both bounds --- because the scalar stream's density is two orders below the tile's: three products per `u64` multiply against sixteen products per instruction at several instructions a cycle, so no port the scheduler leaves free is capacity worth using. The census's "scalar ports idle in the model" is true and useless here: the ports are idle because the tile is dense, not because work could profitably move. The verdict rule's answer is decline, and no kernel ships; the instrument stays for a second host, whose scalar-to-vector density ratio could differ. (The workflow now tees stderr as well as stdout, so the artifact carries the figures the CI log carried this time.)
 
 **The coissue harness's first artifact measured packing, not ports (a harness defect, recorded and superseded).** The first x86 run of the co-issue sweep came back with the split winning 10--40% everywhere, at per-call times around 0.7 Gmac/s --- thirty times below the AVX2 tile's real rate. That is the number that gives the defect away: the timed region was allocating and packing panels per tile per rep, and the split "won" because it packed fewer tiles. A measurement that answers a different question than it asked is the falsifiability table's own tradition, and the artifact is recorded here as one, not cited anywhere. The harness was rebuilt on the driver's structure: `Coissue::prepare` packs every panel and owns every buffer once, and `Coissue::run` --- the timed path --- borrows all of it (per-chunk contiguous slices of the pre-packed panels, the scalar stream's stack arrays, one reused output buffer), with byte-identity asserted inside the timed rep against that buffer and a counting-allocator test asserting the timed path's allocation count is zero. The width was also raised so the vector part is kernel-dominated: `n = 256` at splits 192|64 and 128|128, with the `n = 64` configurations kept as a second group labelled small-tile regime. The verdict rule stands unchanged: ship only if the co-issued form clears **> 5% sustained across the grid**. The first artifact is void; the fixed run supersedes it when CI next runs `just coissue`.
 
