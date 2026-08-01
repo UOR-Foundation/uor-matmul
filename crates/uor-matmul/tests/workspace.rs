@@ -47,15 +47,14 @@ const LADDER_K: usize = if cfg!(miri) { 257 } else { 262_144 };
 /// intrinsic at a thousand times the cost of a plain loop and the
 /// memory-safety question does not depend on which factorization runs.
 fn run_two_offers(
-    m: usize,
-    k: usize,
-    n: usize,
+    shape: Shape,
     a: &[i8],
     b: &[i8],
     c: &mut [i32],
     panels: &mut [i8],
     accs: &mut [AccOf<i8>],
 ) {
+    let (m, k, n) = (shape.m, shape.k, shape.n);
     if cfg!(miri) {
         let av = MatView::row_major(as_alphabet_full(a), m, k).expect("A fits");
         let bv = MatView::row_major(as_alphabet_full(b), k, n).expect("B fits");
@@ -231,7 +230,7 @@ fn every_offer_ladder_rung_gives_the_same_bytes_at_huge_k() {
         let mut panels_buf = vec![0i8; panels];
         let mut acc_buf = vec![AccOf::<i8>::default(); accs];
         let mut c = vec![0i32; m * n];
-        run_two_offers(m, k, n, &a, &b, &mut c, &mut panels_buf, &mut acc_buf);
+        run_two_offers(shape, &a, &b, &mut c, &mut panels_buf, &mut acc_buf);
         assert_eq!(c, want, "panels {panels}, accumulators {accs}");
     }
 }
