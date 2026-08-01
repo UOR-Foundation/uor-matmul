@@ -37,19 +37,19 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target/measurements
-          just strassen-sweep | tee target/measurements/strassen-x86.txt
+          just strassen-sweep 2>&1 | tee target/measurements/strassen-x86.txt
       - name: CG-15, the float placement bridge
         run: |
           set -o pipefail
-          just bridge-sweep | tee target/measurements/bridge-x86.txt
+          just bridge-sweep 2>&1 | tee target/measurements/bridge-x86.txt
       - name: CG-14, the symbol path against the bus
         run: |
           set -o pipefail
-          just symbol-bandwidth | tee target/measurements/symbol-bandwidth-x86.txt
+          just symbol-bandwidth 2>&1 | tee target/measurements/symbol-bandwidth-x86.txt
       - name: CG-16, the symbol table in the scaled lane
         run: |
           set -o pipefail
-          just symbol-tabulated | tee target/measurements/symbol-tabulated-x86.txt
+          just symbol-tabulated 2>&1 | tee target/measurements/symbol-tabulated-x86.txt
       # The VNNI break-even rows in model/tiers.toml are `Unmeasured` until a
       # VNNI host runs the instrument: the first line is the host's own
       # answer, printed rather than assumed; the sweep measures the shipped
@@ -60,7 +60,7 @@ jobs:
       - name: the tabulation break-even, measured at the runner's own declarations
         run: |
           set -o pipefail
-          just breakeven | tee target/measurements/breakeven-x86.txt
+          just breakeven 2>&1 | tee target/measurements/breakeven-x86.txt
       # The scalar-port co-issue experiment (the port-multiplexing thesis, the
       # last item in MEASUREMENT-LOG.md's queue): x86-only by construction,
       # and the runner above just printed what it has. The harness asserts
@@ -69,7 +69,7 @@ jobs:
       - name: the scalar-port co-issue experiment
         run: |
           set -o pipefail
-          just coissue | tee target/measurements/coissue-x86.txt
+          just coissue 2>&1 | tee target/measurements/coissue-x86.txt
       # The repo's rust-toolchain.toml pins a channel whose target list does
       # not name wasip1, so the action's `targets:` installs it for stable and
       # the pinned toolchain still lacks it: the swar sweep failed E0463 and
@@ -84,7 +84,7 @@ jobs:
       - name: CG-17, the SWAR broadcast against the dot incumbent
         run: |
           set -o pipefail
-          just swar-sweep | tee target/measurements/swar-wasm.txt
+          just swar-sweep 2>&1 | tee target/measurements/swar-wasm.txt
       - uses: actions/upload-artifact@v4
         with:
           name: measurements-x86
@@ -103,19 +103,19 @@ jobs:
       - name: CG-12, the sub-cubic recursion against the cubic walk
         run: |
           mkdir -p target/measurements
-          just strassen-sweep | tee target/measurements/strassen-aarch64.txt
+          just strassen-sweep 2>&1 | tee target/measurements/strassen-aarch64.txt
       - name: CG-15, the float placement bridge
         run: |
           set -o pipefail
-          just bridge-sweep | tee target/measurements/bridge-aarch64.txt
+          just bridge-sweep 2>&1 | tee target/measurements/bridge-aarch64.txt
       - name: CG-14, the symbol path against the bus
         run: |
           set -o pipefail
-          just symbol-bandwidth | tee target/measurements/symbol-bandwidth-aarch64.txt
+          just symbol-bandwidth 2>&1 | tee target/measurements/symbol-bandwidth-aarch64.txt
       - name: CG-16, the symbol table in the scaled lane
         run: |
           set -o pipefail
-          just symbol-tabulated | tee target/measurements/symbol-tabulated-aarch64.txt
+          just symbol-tabulated 2>&1 | tee target/measurements/symbol-tabulated-aarch64.txt
       - uses: actions/upload-artifact@v4
         with:
           name: measurements-aarch64
