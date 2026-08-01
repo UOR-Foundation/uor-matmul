@@ -34,14 +34,17 @@ The phase's eight items are all landed. What remains are the follow-ups the
 measurements named:
 
 1. **The multi-host remainder.** The first pass is read (the entry below);
-   what it did not cover: the x86 CG-17 figure (the first run's swar step
-   failed on a missing wasip1 std and the pipe hid it --- fixed in this
-   branch, so the next scheduled run answers it), the VNNI break-even rows,
-   which stay `Unmeasured` until the breakeven instrument is wired into the
-   workflow and the runner's VNNI is confirmed, and the scalar-port co-issue
-   experiment, which is still unwritten (the CG-11 census's prediction ---
-   AVX2 i8 tile bound on Zn4FP2, scalar ports idle in the model --- is what
-   it would test).
+   the CG-17 x86 figure is now read too: the `#17` merge's scaling run
+   (2026-08-01) reports the SWAR broadcast at 0.30x of the dot sequence at
+   `k = 64` and 0.20x at `k = 1024` and `16384` on the x86 runner --- worse
+   than the M4 Max's 0.32--0.38x, the same decline on a second host, the
+   incumbent's eight-extends-per-dot beating the field packing there as
+   here. What remains: the VNNI break-even rows, which stay `Unmeasured`
+   until the breakeven instrument is wired into the workflow and the
+   runner's VNNI is confirmed, and the scalar-port co-issue experiment,
+   which is still unwritten (the CG-11 census's prediction --- AVX2 i8 tile
+   bound on Zn4FP2, scalar ports idle in the model --- is what it would
+   test).
 2. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
    §"Mantissa slicing, and the RNS beside it") is recorded: nine 8-bit
    passes, shift recombination, a wash where the narrow-to-wide ratio is
@@ -629,3 +632,7 @@ codebook uses it today, and whether real weight artifacts have reachable
 *Verdict rule, pre-registered:* the modular arm's auto-selection takes the level only if the factorization beats the direct packed modular walk end-to-end at a measured crossover. Until that measurement exists, the model records `strassen_modular_min_extent = usize::MAX` and the arm declines everywhere; the harness is the `modular_strassen` group in `crates/uor-matmul-validate/benches/scaling.rs` (squares 512--4096 on the `i8`-into-`i32` and `i32`-into-`i32` rings, the explicit entry against `gemm_packed` at `Wrapping`, packing and recombination included, byte-identity asserted inside the timed closures).
 
 *Outcome, measured 2026-07-31 on the development host (Apple M4 Max, quiet window; every figure `open`, byte-identity asserted inside every timed closure):* the crossover exists and the arm takes the level. At 512 cubed the level loses on both rings --- 2.09 ms against the direct walk's 1.25 at `i8` (0.60x), 5.15 against 4.95 at `i32` (0.96x), the sums' cost against one level's saved product. At 1024 cubed it wins (9.18 against 10.46 at `i8`, 1.14x; 36.2 against 40.1 at `i32`, 1.11x), and the win widens with size: 1.41x at 2048 and 1.57x at 4096 on the `i8` ring, 1.20x and 1.31x on `i32`. The model's `strassen_modular_min_extent` is now the smallest measured winner, 1024, recorded in `model/constants.toml` with this measurement; the explicit entry is unchanged, and at shapes below the threshold the arm declines to the direct walk exactly as before.
+
+**The scalar-port co-issue experiment (harness registered; measurement pending, x86 only).** The last unwritten item in the queue. The CG-11 census reads the AVX2 `i8` tile kernel bound on `Zn4FP2` (85 instructions, ~14.5 cycles a tile-step, IPC ~5.88, scheduling-model predictions) with the scalar integer ports idle in the model, so the port-multiplexing thesis says a scalar integer stream should co-issue beside the kernel for a single-digit-percent throughput gain. The census's own caution is the reason this is an experiment and not a kernel: if both streams bind the same port, one bottleneck has been split into two queues for it, and only a measurement answers which. The harness is `crates/uor-matmul-validate/src/coissue.rs`, a dev-only instrument in the FloatBook mould: the vector stream is the AVX2 tile kernel itself, called through the kernels crate's public `KernelSpec` interface (never copied); the scalar stream is Kronecker substitution over the integers in safe-Rust `u64` arithmetic --- three biased fields at 21-bit spacing to a word, one multiply producing three products, guard bits absorbing a chunk of 32 products a field, the `dpbusd` offset identity paid at extraction (the wasm sequence's own construction, `model/constants.toml`'s `wasm_swar_field_w8a8` row) --- interleaved with the kernel in one depth loop, not two passes, because the co-issue is the point. Column splits 48|16 and 32|32 of `n = 64`, `m` in {4, 8, 16}, `k` in {64, 1024, 16384}, at full `i8` range and at W4A8; byte-identity against the schoolbook reference is asserted inside every timed run.
+
+*Verdict rule, pre-registered:* the co-issued form is evidence for or against port multiplexing, and either is a result. Ship a kernel only if the measured gain clears the noise by enough to matter --- pre-registered at **> 5% sustained across the configuration grid** (every split, both bounds, all three depths; a win at one configuration and a loss at another is a split thesis, recorded as such). Below that, the outcome is recorded here and the thesis is answered: the scalar ports were not free, or the scheduler was already using them. **Timing is pending an x86 run** --- the development host is aarch64 and cannot answer the question; the harness declines off-x86 with the reason printed, and CI's `scaling.yml` x86 job runs it as `just coissue | tee target/measurements/coissue-x86.txt` after the breakeven step. The dry-run correctness half passed on the development host: the scalar stream and the co-issue are byte-identical to the schoolbook reference at the alphabet's extremes, at W4A8, at all three depths and every `m`, both splits.

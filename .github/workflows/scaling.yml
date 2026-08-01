@@ -50,6 +50,26 @@ jobs:
         run: |
           set -o pipefail
           just symbol-tabulated | tee target/measurements/symbol-tabulated-x86.txt
+      # The VNNI break-even rows in model/tiers.toml are `Unmeasured` until a
+      # VNNI host runs the instrument: the first line is the host's own
+      # answer, printed rather than assumed; the sweep measures the shipped
+      # predicate's crossing against the derived one at whatever the runner
+      # declares, and if that is not VNNI the rows say why they still stand.
+      - name: the runner's ISA, printed not assumed
+        run: lscpu | grep -i 'flags\|model name' | head -2
+      - name: the tabulation break-even, measured at the runner's own declarations
+        run: |
+          set -o pipefail
+          just breakeven | tee target/measurements/breakeven-x86.txt
+      # The scalar-port co-issue experiment (the port-multiplexing thesis, the
+      # last item in MEASUREMENT-LOG.md's queue): x86-only by construction,
+      # and the runner above just printed what it has. The harness asserts
+      # byte-identity inside every timed run, so a red step is a correctness
+      # failure and never a slow day.
+      - name: the scalar-port co-issue experiment
+        run: |
+          set -o pipefail
+          just coissue | tee target/measurements/coissue-x86.txt
       # The repo's rust-toolchain.toml pins a channel whose target list does
       # not name wasip1, so the action's `targets:` installs it for stable and
       # the pinned toolchain still lacks it: the swar sweep failed E0463 and
