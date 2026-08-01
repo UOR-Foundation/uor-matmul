@@ -35,6 +35,48 @@ fn operands(m: usize, k: usize, n: usize) -> (Vec<i8>, Vec<i8>) {
 /// answer to that everywhere else (`parity.rs`'s `depths`).
 const HUGE_K: usize = if cfg!(miri) { 1025 } else { 262_144 };
 
+/// The ladder test's `k`: the claim is byte-identity across the offer rungs,
+/// not chunk engagement, so under Miri it runs just past `KC` --- the chunked
+/// traversal still runs, and the scalar reference the bytes are checked
+/// against stops being the corpus's whole cost.
+const LADDER_K: usize = if cfg!(miri) { 257 } else { 262_144 };
+
+/// The two-offer call at the byte level. Natively it is the slice face, the
+/// spelling a caller uses; under Miri it is the same traversal with the
+/// portable sequence named, because the interpreter executes an AVX2
+/// intrinsic at a thousand times the cost of a plain loop and the
+/// memory-safety question does not depend on which factorization runs.
+fn run_two_offers(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: &[i8],
+    b: &[i8],
+    c: &mut [i32],
+    panels: &mut [i8],
+    accs: &mut [AccOf<i8>],
+) {
+    if cfg!(miri) {
+        let av = MatView::row_major(as_alphabet_full(a), m, k).expect("A fits");
+        let bv = MatView::row_major(as_alphabet_full(b), k, n).expect("B fits");
+        let cv = MatViewMut::row_major(c, m, n).expect("C fits");
+        let mut t = Triple::new(av, bv, cv).expect("the product exists");
+        let mut scratch =
+            Scratch::with_accumulators(uor_matmul::core_types::as_alphabet_full_mut(panels), accs);
+        uor_matmul::gemm_auto(
+            &mut t,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                backend: Backend::Portable,
+                ..Default::default()
+            },
+            &mut scratch,
+        );
+    } else {
+        slice::gemm_full(m, k, n, a, b, c, panels, accs).expect("the product exists");
+    }
+}
+
 /// The reference traversal's answer, from the entry that stays directly
 /// callable under its own name (R6).
 fn reference(m: usize, k: usize, n: usize, a: &[i8], b: &[i8]) -> Vec<i32> {
@@ -166,7 +208,7 @@ fn the_report_is_built_from_the_drivers_own_terms() {
 /// panel plus the block, and the bounded plan exactly.
 #[test]
 fn every_offer_ladder_rung_gives_the_same_bytes_at_huge_k() {
-    let (m, k, n) = (16usize, HUGE_K, 16usize);
+    let (m, k, n) = (16usize, LADDER_K, 16usize);
     let shape = Shape { m, k, n };
     let (a, b) = operands(m, k, n);
     let want = reference(m, k, n, &a, &b);
@@ -189,8 +231,7 @@ fn every_offer_ladder_rung_gives_the_same_bytes_at_huge_k() {
         let mut panels_buf = vec![0i8; panels];
         let mut acc_buf = vec![AccOf::<i8>::default(); accs];
         let mut c = vec![0i32; m * n];
-        slice::gemm_full(m, k, n, &a, &b, &mut c, &mut panels_buf, &mut acc_buf)
-            .expect("the product exists");
+        run_two_offers(m, k, n, &a, &b, &mut c, &mut panels_buf, &mut acc_buf);
         assert_eq!(c, want, "panels {panels}, accumulators {accs}");
     }
 }
@@ -245,7 +286,16 @@ fn a_bounded_offer_at_huge_k_chunks_and_matches_the_reference() {
         gemm_auto_counted(
             &mut t,
             &Linear::OVERWRITE,
-            GemmOptions::default(),
+            if cfg!(miri) {
+                // Portable under the interpreter, as in `run_two_offers`; the
+                // route is a kernel either way, which is the assertion below.
+                GemmOptions {
+                    backend: Backend::Portable,
+                    ..Default::default()
+                }
+            } else {
+                GemmOptions::default()
+            },
             &mut scratch,
             &mut census,
         );
