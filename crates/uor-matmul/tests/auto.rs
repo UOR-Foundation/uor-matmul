@@ -61,10 +61,22 @@ fn counted_auto(offer: &mut [i8], a: &[i8], b: &[i8]) -> (Vec<i32>, RouteCensus)
         let cv = MatViewMut::row_major(&mut c, N, N).expect("C fits");
         let mut t = Triple::new(av, bv, cv).expect("the product exists");
         let mut scratch = Scratch::new(uor_matmul::core_types::as_alphabet_full_mut(offer));
+        // Under Miri the portable sequence runs: the interpreter executes an
+        // AVX2 intrinsic at a thousand times the cost of a plain loop, and the
+        // memory-safety question Miri is answering does not depend on which
+        // factorization runs. The route assertions are native business.
+        let options = if cfg!(miri) {
+            GemmOptions {
+                backend: Backend::Portable,
+                ..Default::default()
+            }
+        } else {
+            GemmOptions::default()
+        };
         gemm_auto_counted(
             &mut t,
             &Linear::OVERWRITE,
-            GemmOptions::default(),
+            options,
             &mut scratch,
             &mut census,
         );
@@ -93,33 +105,41 @@ fn the_default_entry_runs_a_host_kernel_and_returns_the_reference_bytes_cd_22() 
     let (a, b) = operands();
     let suggested = suggested_scratch(Shape { m: N, k: N, n: N });
 
-    // The documented call, exactly as the README spells it, over an offer
-    // filled with a sentinel: the packed traversal packs its panels into the
-    // offer, the reference traversal never writes it, so a changed byte is the
-    // packed traversal's fingerprint on the public call itself.
-    const SENTINEL: i8 = 0x5A;
-    let mut scratch = vec![SENTINEL; suggested];
-    let mut c = vec![0i32; N * N];
-    slice::gemm(N, N, N, &a, &b, &mut c, &mut scratch).expect("the product exists");
-    assert!(
-        scratch.iter().any(|&x| x != SENTINEL),
-        "the suggested offer was never written: the public call did not run the packed traversal"
-    );
+    // The route half is native business: selection is not what Miri verifies,
+    // and the interpreted-SIMD cost of running it there buys nothing.
+    if !cfg!(miri) {
+        // The documented call, exactly as the README spells it, over an offer
+        // filled with a sentinel: the packed traversal packs its panels into
+        // the offer, the reference traversal never writes it, so a changed
+        // byte is the packed traversal's fingerprint on the public call
+        // itself.
+        const SENTINEL: i8 = 0x5A;
+        let mut scratch = vec![SENTINEL; suggested];
+        let mut c = vec![0i32; N * N];
+        slice::gemm(N, N, N, &a, &b, &mut c, &mut scratch).expect("the product exists");
+        assert!(
+            scratch.iter().any(|&x| x != SENTINEL),
+            "the suggested offer was never written: the public call did not run the packed traversal"
+        );
 
-    // The route the same shape and offer take through the counted twin.
-    let mut offer = vec![0i8; suggested];
-    let (counted, census) = counted_auto(&mut offer, &a, &b);
-    match census.route {
-        Some(Route::Kernel { backend, .. }) => assert!(
-            host.contains(&backend),
-            "the route ran {backend:?}, not one of the host's non-portable sequences {host:?}"
-        ),
-        route => panic!("the suggested offer at {N}^3 must run a table kernel, got {route:?}"),
+        // The route the same shape and offer take through the counted twin.
+        let mut offer = vec![0i8; suggested];
+        let (counted, census) = counted_auto(&mut offer, &a, &b);
+        match census.route {
+            Some(Route::Kernel { backend, .. }) => assert!(
+                host.contains(&backend),
+                "the route ran {backend:?}, not one of the host's non-portable sequences {host:?}"
+            ),
+            route => panic!("the suggested offer at {N}^3 must run a table kernel, got {route:?}"),
+        }
+        assert_eq!(c, counted);
     }
 
-    // Every route returns the reference's bytes.
+    // Every route returns the reference's bytes --- the portable sequence too,
+    // which is the one Miri runs.
+    let mut offer = vec![0i8; suggested];
+    let (counted, _) = counted_auto(&mut offer, &a, &b);
     assert_eq!(counted, reference(&a, &b));
-    assert_eq!(c, counted);
 }
 
 /// CD-22, the decline half: no offer runs the reference traversal --- through
@@ -160,7 +180,15 @@ fn every_offer_from_none_to_suggested_gives_the_same_bytes() {
     for offer in [0usize, 1, suggested - 1, suggested] {
         let mut scratch = vec![0i8; offer];
         let mut c = vec![0i32; N * N];
-        slice::gemm(N, N, N, &a, &b, &mut c, &mut scratch).expect("the product exists");
-        assert_eq!(c, want, "offer {offer} (suggested {suggested})");
+        if cfg!(miri) {
+            // The counted twin at the portable sequence, as in the workspace
+            // tests: the slice face names no backend, and the interpreter
+            // cannot run the host's assembly.
+            let (got, _) = counted_auto(&mut scratch, &a, &b);
+            assert_eq!(got, want, "offer {offer} (suggested {suggested})");
+        } else {
+            slice::gemm(N, N, N, &a, &b, &mut c, &mut scratch).expect("the product exists");
+            assert_eq!(c, want, "offer {offer} (suggested {suggested})");
+        }
     }
 }
