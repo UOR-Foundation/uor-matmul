@@ -80,6 +80,37 @@ fn main() {
     println!("`picked` is which side `Traversal::Blocked` --- the default a caller");
     println!("gets --- actually ran, read from the census.");
     println!();
+
+    // The pair this host resolves, printed so the artifact says which
+    // sequences it measured. These are the same declarations the predicate's
+    // own derivation reads --- `table_spec(Auto)` at the sweep's tile and
+    // `exact_spec(Auto)` against it --- not a re-derivation: a flip at the
+    // AVX2 pair's 683 on a host whose resolved table is the 512-bit one
+    // would be a selection defect, and this line is what would show it.
+    {
+        use uor_matmul_core::Bound;
+        let bound = <Full<i8> as Bound>::VALUE;
+        let rows = 16usize;
+        let t = <i8 as uor_matmul_gemm::Tabulated>::table_spec(
+            uor_matmul_core::Backend::Auto,
+            bound,
+            false,
+            rows,
+            uor_matmul_gemm::tabulated::column_group(rows),
+            block,
+        );
+        let dense = <i8 as uor_matmul_gemm::Kernelized>::exact_spec(
+            uor_matmul_core::Backend::Auto,
+            bound,
+            rows,
+        );
+        println!(
+            "resolved pair on this host: table {:?} (lanes_per_add {}), dense {:?} (products_per_step {})",
+            t.backend, t.lanes_per_add, dense.backend, dense.products_per_step
+        );
+        println!();
+    }
+
     println!("| `m x k x n` | tabulated | packed | tab/packed | picked |");
     println!("| --- | --- | --- | --- | --- |");
 

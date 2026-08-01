@@ -200,7 +200,7 @@ block = 8
 rows = 16
 lanes_per_add = 8
 break_even_n = 683
-note = "E8. The row to read first: 683 is below every transformer layer width in practical use, and the amortization is over n, so it holds for a single decoded token as much as for a prefill."
+note = "E8. The row to read first: 683 is below every transformer layer width in practical use, and the amortization is over n, so it holds for a single decoded token as much as for a prefill. Measured, consistent with this derivation: the breakeven instrument (scaling.yml's x86 job, `just breakeven`) flips kernels to table between n = 512 and n = 683 on the CI x86 runner, which declares no AVX-512 and therefore resolves exactly this pair --- the crossing the runner's own lscpu line names."
 honesty = "build"
 
 [[tabulation]]
@@ -373,7 +373,7 @@ rows = 16
 lanes_per_add = 16
 kernel_products_per_step = 64
 break_even_n = 2049
-note = "E8 on a VNNI host. The AVX2 table against this dense tile is the pair that never pays --- sixty-four against sixty-four, which CM-04's gemm half asserts --- but a VNNI host's table at a sixteen-row tile is the 512-bit one, twice the density of the dense instruction, and it wins from 2049. Unmeasured: no VNNI host here."
+note = "E8 on a VNNI host. The AVX2 table against this dense tile is the pair that never pays --- sixty-four against sixty-four, which CM-04's gemm half asserts --- but a VNNI host's table at a sixteen-row tile is the 512-bit one, twice the density of the dense instruction, and it wins from 2049. Unmeasured: no VNNI host here. The CI x86 runner is not one either --- its lscpu line and the breakeven instrument's resolved-pair print show it declares no AVX-512 at all (avx512_available() answers from avx512f and avx512bw, and without them the last admissible table is the AVX2 one and the dense side the AVX2 tile), so the artifact's flip between 512 and 683 is the AVX2 pair's crossing, not this one's. A flip at 683 on a host that resolved the 512-bit table would be a selection defect; the resolved-pair print is what would show it."
 honesty = "build"
 
 [[tabulation]]
