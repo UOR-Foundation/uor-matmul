@@ -77,28 +77,39 @@ jobs:
   vnni-emulated:
     # The AVX-512 VNNI sequences are validated only where hardware exists, and
     # the fleet's x86 runner declares no AVX-512 at all (the breakeven
-    # instrument's resolved-pair print, 2026-08-01). qemu-user with the
-    # Icelake-Server model executes real AVX512VNNI instructions, so the
-    # parity suite runs the sequences it skips on every current runner. This
-    # is a correctness leg, never a timing one: TCG's clock is not silicon's,
-    # and the VNNI break-even rows stay Unmeasured until a real host exists.
-    name: CB-02, AVX-512 VNNI parity under qemu-user Icelake
+    # instrument's resolved-pair print, 2026-08-01). qemu's TCG does not
+    # implement AVX-512 at all --- it says so in its own warnings, and the
+    # first version of this leg passed vacuously, which is the defect the
+    # skip-guard below exists against. Intel's SDE executes AVX512VNNI
+    # (its Icelake model), so the parity suite runs the sequences it skips
+    # on every current runner. This is a correctness leg, never a timing
+    # one: an emulator's clock is not silicon's, and the VNNI break-even
+    # rows stay Unmeasured until a real host exists.
+    name: CB-02, AVX-512 VNNI parity under Intel SDE Icelake
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user
       - uses: Swatinem/rust-cache@v2
+      - name: Intel SDE (pinned, digest-checked)
+        run: |
+          curl -sSL -o /tmp/sde.tar.xz https://downloadmirror.intel.com/843185/sde-external-9.48.0-2024-11-25-lin.tar.xz
+          echo "3173d2a5369e3385226b488d8b75403951bc14af601435fe707d9f83e0b533e6  /tmp/sde.tar.xz" | sha256sum -c -
+          cd /tmp && tar -xf sde.tar.xz
       - run: cargo build --release -p uor-matmul-kernels --test parity
-      # The deps glob names one file per build; -executable rejects the .d
-      # stubs. `timeout` because a hung emulation should fail the leg, not
-      # occupy the runner. `TCG` does not model the vector units' timing ---
-      # it does not have to: parity is a byte claim, and the bytes are the
-      # same at any speed.
+      # The guard, because the first version of this leg passed with the
+      # VNNI sequences unexecuted: a parity suite that skipped them is the
+      # failure this job exists against, so the skip message is the failure.
       - run: |
           BIN=$(find target/release/deps -maxdepth 1 -name 'parity-*' -type f -executable | head -1)
-          echo "running $BIN under qemu-x86_64 -cpu Icelake-Server"
-          timeout 900 qemu-x86_64 -cpu Icelake-Server "$BIN"
+          echo "running $BIN under SDE (Icelake)"
+          OUT=$(/tmp/sde-external-9.48.0-2024-11-25-lin/sde -icl -- "$BIN" --nocapture 2>&1)
+          echo "$OUT"
+          if echo "$OUT" | grep -q "Avx512Vnni: not available"; then
+            echo "the VNNI sequences did not execute; the leg is vacuous" >&2
+            exit 1
+          fi
+          echo "$OUT" | grep -q "avx512vnni_equals_portable_cb_03 ... ok"
 
   wasm:
     name: CB-05, wasm with and without SIMD128
