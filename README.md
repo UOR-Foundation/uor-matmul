@@ -31,6 +31,8 @@ let mut c = [0i32; 4];
 
 // The panel buffer is the caller's, because the library never allocates.
 // `&mut []` is valid and gives the same bytes, more slowly.
+// `workspace_report` names the plans in bytes: the full-depth suggested
+// offer, and the bounded one, which stops growing with `k`.
 let mut scratch = vec![0i8; suggested_scratch(Shape { m: 2, k: 2, n: 2 })];
 
 slice::gemm(2, 2, 2, &a, &b, &mut c, &mut scratch).unwrap();
@@ -267,6 +269,7 @@ the documentation.
 | `crates/uor-matmul-kernels` | one module per ISA: the dense tile sequences and the table sequences. The only crate that writes `#[target_feature]`, which is why every sequence lives here |
 | `crates/uor-matmul-gemm` | the driver: traversal, scratch, epilogue, tile partition |
 | `crates/uor-matmul` | the facade, and the raw-pointer face |
+| `crates/uor-matmul-executor` | dev/CI only: the Cortex-M runner --- CB parity executed under qemu-system, because parity is a run, not a compile |
 | `crates/uor-matmul-model` | build-time: parses `model/*.toml`, generates the Rust consts and `CONFORMANCE.md` |
 | `crates/uor-matmul-validate` | dev/CI only: oracle adapters, the differential harness, the scaling fits |
 | `crates/uor-matmul-conformance` | dev/CI only: the BDD runner and the honesty meta-gate |
@@ -281,7 +284,9 @@ without trusting this repository.
 ## The `std` feature and which kernel runs
 
 `std` buys runtime CPU feature detection and nothing else in the numerical
-path. Without it a backend is available only if the *build* declared its target
+path. The facade's `std` forwards to both numerical crates; a consumer of
+`uor-matmul-gemm` directly enables *its* `std` for the same thing. Without it a
+backend is available only if the *build* declared its target
 feature, so a hosted build with neither `std` nor `-C target-cpu=native` runs
 the portable kernel --- correctly, and several times slower than the machine can
 manage. On an embedded target that is right; on a server it is not what was
@@ -290,8 +295,14 @@ meant. `uor_matmul::kernels::available_i8()` says which kernels a build can run.
 ## Performance
 
 `ANALYSIS.md` §"Against the oracles" has the sweep --- throughput, latency, and
-fitted exponents from `n = 1` to `n = 1024`, beside every oracle. In short, on a
-two-core runner with AVX2:
+fitted exponents from `n = 1` to `n = 1024`, beside every oracle. Two sections,
+kept separate because confusing them is the oldest mistake in this repository's
+performance prose: **arbitrary-data results** (dense kernels, exponents,
+fraction of peak --- caller-supplied seed, operands generated at runtime, no
+structural assumption) and **structured-data results** (tabulation, collapse,
+the symbol path --- these win because the data has a small effective alphabet,
+and every figure comes with its corpus). In short, on a two-core runner with
+AVX2, arbitrary data:
 
 | | uor-matmul | oracle | |
 | --- | --- | --- | --- |
@@ -300,48 +311,63 @@ two-core runner with AVX2:
 | `i32`, `n = 1024` | 29.1 Gmac/s | nalgebra 4.58 | **6.3x ahead** |
 | `i8`, `1024x1024x1` | 37.5 Gmac/s | ndarray 3.24 | **12x ahead** |
 | `i8`, `1x1048576x1` | 40.1 Gmac/s | ndarray 2.41 | **17x ahead** |
-| `f32`, `n = 1024` | 1.12 Gmac/s | matrixmultiply 43.3 | 39x behind |
-| latency at `n = 1` | 140 ns | ndarray 60 ns | 2.3x behind |
+| `f32`, `n = 1024` | 15.3 Gmac/s | matrixmultiply 58.6 | 3.8x behind, cross-type and expected |
+| latency at `n = 1` | 22.5 ns (`i8`) | ndarray 60 ns (measured on an M4 Max; the x86 runner's figure was 140 ns before the resolved-kernel cache) | |
 
 The integer paths are ahead of both integer oracles at every size that is not
 latency-bound, and hold their throughput from `n = 128` upward while `ndarray`
-falls away. `ANALYSIS.md` §"The constraint that is nobody's" has the
-one figure that is not a constant factor: the collapse traversal charges per
-*distinct* row of `A` rather than per row, so at `4096 x 512 x 512` with one
-distinct row it runs at **715 Gmac/s** --- 17.8x this library's own packed
-traversal and 1350x `ndarray` --- on an answer asserted byte for byte against
-both. An operand with no repeated rows pays 4% for the question and is told so in
-the same table. The float path is 39x behind, and most of what used to be a 134x gap was not the
-price of exactness: it was a placement done once per product that can be done
-once per reduction. Scaling both panels' significands to a common base turns the
-exact float dot product into an exact *integer* dot product at one known scale
---- see `ANALYSIS.md` §"The float placement" for the three lanes that follow, the
-bit counts that choose between them, and what is still left on the table.
+falls away --- with the caveat, stated wherever these figures appear, that the
+integer oracles have no integer BLAS and their paths are generic kernels, so a
+production integer baseline is still owed and every integer figure is `open`
+until it lands. The float path was once 134x behind `matrixmultiply`; most of
+that was not the price of exactness. Scaling both panels' significands to a
+common base turns the exact float dot into an exact *integer* dot at one known
+scale, handed to the integer kernel table --- the placement bridge, now the
+default driver's own selection (`CD-19`), worth 3.0--3.5x over the scalar lanes
+and closing the gap to ~3.8x on the measured hosts. What is left of the gap is
+structural: the widening multiply covers two columns an instruction where the
+FMA path covers four lanes across two units.
 
-The second figure that is not a constant factor is what a *code* costs. When the
-weights are coded, a partial sum of one row of `A` against every codeword can be
-computed once per block of the reduction and then read; the column loop below it
-is one table read and one add per code, covering `MAX_BLOCK` weights, with no
-multiply in it at all. Over the E8 codebook that is **16x fewer multiplies and
-5.3x fewer operations** than the dense traversal at `n = 4096`, counted by an
-operation census rather than timed, and the census and the clock cross the
-derived break-even at the same `n`. Against this library's own packed AVX2 path
-over the *already decoded* weights it is **8.8x ahead at `m = 1`**, **3.6x at
-`m = 8`**, and **1.1x to 1.7x** through `m = 64` and `k = 4096` --- and the first
-working version of it was four times *slower* than the kernels. Everything between
-was overhead: a runtime length where a compile-time one belonged, an exact
-accumulator moved a gigabyte per quarter-billion products, and a codebook decoded
-once per tile instead of once per call. Where the table does not pay --- a shape below its break-even --- a caller
-who offers room for the decoded operand gets the tile kernels instead, at
-**parity with a dense operand handed over free**. Three factorizations of one
-identity, chosen by the offer and the shape, byte-identical under `CD-13`. And
-the operand's *columns* collapse too: two columns whose code streams agree
-accumulate identically, so an operand with repeated columns is charged for the
-ones it has --- **2.06x** at high degeneracy, 4% for the question when there are
-none.
-`ANALYSIS.md` §"The other constraint that is nobody's" has the nine-row table of
-what each removal was worth and the two tuning constants that changed sign when
-the loop around them changed.
+`ANALYSIS.md` §"The constraint that is nobody's" has the structured-data
+figures: the collapse traversal charges per *distinct* row of `A` rather than
+per row, so at `4096 x 512 x 512` with one distinct row it runs at **715
+Gmac/s** --- 17.8x this library's own packed traversal and 1350x `ndarray` ---
+on an answer asserted byte for byte against both, and an operand with no
+repeated rows pays 4% for the question and is told so in the same table. The
+second such figure is tabulation: a partial sum of one row of `A` against every
+codeword is computed once per block of the reduction and then *read*; the
+column loop below it is one table read and one add per code, covering
+`MAX_BLOCK` weights, with no multiply in it at all. Over the E8 codebook that
+is **16x fewer multiplies and 5.3x fewer operations** than the dense traversal
+at `n = 4096`, counted by an operation census rather than timed, and the census
+and the clock cross the derived break-even at the same `n`. Against this
+library's own packed AVX2 path over the *already decoded* weights it is **8.8x
+ahead at `m = 1`**, **3.6x at `m = 8`**, and **1.1x to 1.7x** through `m = 64`
+and `k = 4096`. And the third: one level of the sub-cubic recursion, which over
+the integers is add, subtract, and multiply only, so it returns the same
+integer the naive loop returns, bit for bit --- `CD-21` pins the bytes, and at
+`4096` cubed on the measured host it runs **+56%** over the lane it factorizes
+with a fitted time exponent of `2.87 +/- 0.01`, the interval excluding 3.0 on
+three host classes.
+
+The weights' residency halves too: a 256-entry codebook's index stream is one
+byte per code, not two (`CK-15`) --- E8 at **0.125 bytes per decoded weight**,
+`Sign<8>` and `Ternary<4>` halved likewise, with the gather dispatched once per
+call between monomorphic `u8` and `u16` sequences. A longer codeword is a
+denser instruction and a smaller stream: `Book<256,16>` stores **0.0625**
+bytes per weight and reads 1.5--1.8x faster than `Book<256,8>` at the shapes
+where the table pays, at an identical slab and plan.
+
+Where the table does not pay --- a shape below its break-even --- a caller who
+offers room for the decoded operand gets the tile kernels instead, at **parity
+with a dense operand handed over free**. Factorizations of one identity, chosen
+by the offer and the shape, byte-identical under `CD-13`. And the operand's
+*columns* collapse too: two columns whose code streams agree accumulate
+identically, so an operand with repeated columns is charged for the ones it has
+--- **2.06x** at high degeneracy, 4% for the question when there are none.
+`ANALYSIS.md` §"The other constraint that is nobody's" has the nine-row table
+of what each removal was worth and the two tuning constants that changed sign
+when the loop around them changed.
 
 ## Licence
 
