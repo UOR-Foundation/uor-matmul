@@ -187,9 +187,16 @@ cross: no-alloc cross-run
 # against your own last run is a criterion baseline away ---
 # `--save-baseline before` before the change, `--baseline before` after.
 #
-# "Are we faster?", beside every enabled oracle. Seconds.
+# "Are we faster?", beside every enabled oracle. Seconds. The completed
+# Criterion measurements are consolidated into target/criterion/REPORT.md and
+# target/criterion/REPORT.html after the run.
 bench:
     cargo bench -p uor-matmul-validate
+    cargo run --release -p uor-matmul-validate --bin benchmark_report
+
+# Regenerate the comparison report from an existing Criterion directory.
+bench-report:
+    cargo run --release -p uor-matmul-validate --bin benchmark_report
 
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a
 # fitted exponent with a confidence interval, against the same fit for the
