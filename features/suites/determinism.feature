@@ -143,3 +143,39 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-23
     Then the claim holds byte for byte
+
+  @CD-24 @build
+  Scenario: The selection witness is invariant under partition, count and order, because the order on `(value, index)` is total
+    Given the standing corpus
+    When the suite exercises CD-24
+    Then the claim holds byte for byte
+
+  @CD-25 @build
+  Scenario: Both witness mechanisms give identical bytes at every shape, degeneracy, and offer including none
+    Given the standing corpus
+    When the suite exercises CD-25
+    Then the claim holds byte for byte
+
+  @CD-26 @build
+  Scenario: Recentring is the canonical section of the shift gauge: gauge-invariant, idempotent, and its representative's maximum is exactly zero
+    Given the standing corpus
+    When the suite exercises CD-26
+    Then the claim holds byte for byte
+
+  @CD-27 @build
+  Scenario: The dyadic section is exact, and equals the arithmetic shift at every `k` where that shift exists
+    Given the standing corpus
+    When the suite exercises CD-27
+    Then the claim holds byte for byte
+
+  @CD-28 @build
+  Scenario: Within one element type, encode mode is the only thing that changes the output bytes
+    Given the standing corpus
+    When the suite exercises CD-28
+    Then the claim holds byte for byte
+
+  @CD-29 @build
+  Scenario: One traversal computes both products of the operation census: the dense driver is parametric in the semiring
+    Given the standing corpus
+    When the suite exercises CD-29
+    Then the claim holds byte for byte

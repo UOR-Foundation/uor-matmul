@@ -124,10 +124,23 @@ pub struct KernelSpec<E, L> {
     /// It cannot change a value --- it is a claim about instructions, and
     /// `CD-01` asserts every traversal gives the same bytes whatever it says.
     pub products_per_step: usize,
-    /// The largest magnitude one lane holds.
+    /// The magnitude at which one lane fills, and therefore what bounds its
+    /// depth.
     ///
     /// Ignored for [`Factorization::Modular`], where the lane wraps by design
     /// and the depth is unbounded.
+    ///
+    /// `u128::MAX` names a lane that **does not fill**, and so has no depth to
+    /// bound. That is the same spelling and the same meaning
+    /// [`crate::TableSpec::lane_cap`] already carries, so it is one convention
+    /// rather than two. A `(max, +)` sequence declares it: `⊕` is a selection,
+    /// which has no per-step growth, so `max_p (a_p ⊗ b_p)` is bounded by
+    /// `max_p a_p ⊗ max_p b_p` whatever `k` is --- the same fact
+    /// `uor_matmul_core::trop_acc_bits` states by having no depth term
+    /// (`CA-04`). The magnitude such a lane actually reaches is a property of
+    /// its packed representation and is pinned there, by
+    /// `crate::tropical`'s own const assertions, rather than here, because here
+    /// it would be read as a depth answer and it is not one.
     pub lane_cap: u128,
     /// The widest alphabet bound at which this sequence is exact.
     ///
@@ -204,9 +217,14 @@ impl<E, L> KernelSpec<E, L> {
     ///
     /// A question about a register, not a limit on `k`: a deeper accumulation
     /// is split into more chunks, and the chunks combine exactly. For a modular
-    /// lane there is nothing to bound --- the wrap *is* the encode.
+    /// lane there is nothing to bound --- the wrap *is* the encode --- and for a
+    /// lane that declares [`Self::lane_cap`] as `u128::MAX` there is nothing to
+    /// bound either, because it does not fill: a `(max, +)` sequence's `⊕` is a
+    /// selection, which has no per-step growth, so the register that holds one
+    /// product holds the whole reduction (`CA-04`). Both are the same early
+    /// return [`crate::TableSpec::lane_depth`] takes, for the same two reasons.
     pub fn lane_depth(&self, bound: u128) -> usize {
-        if matches!(self.factorization, Factorization::Modular) {
+        if matches!(self.factorization, Factorization::Modular) || self.lane_cap == u128::MAX {
             return usize::MAX;
         }
         let per_step = bound.saturating_mul(bound); // R3-ok: a lane-width question, not an accumulation
@@ -517,6 +535,37 @@ family! {
     true => crate::isa::portable::R_I64_MOD,
 }
 
+family! {
+    /// Every packed tropical `(max, +)` sequence this build can run.
+    ///
+    /// `max_p (a_p ⊗ b_p)` with `⊗` a saturating add and `⊕` a signed max, over
+    /// the packed `i16` lane [`crate::tropical`] derives. The second product of
+    /// the operation census, factored across vector lanes exactly as the first
+    /// one is --- and factored more cheaply, because a `max` has no carry and
+    /// no growth, so the lane the reference uses is the lane every sequence
+    /// uses and there is no widening step anywhere in the family.
+    ///
+    /// Every entry declares the same [`crate::tropical::TROP_I16_MAX_BOUND`],
+    /// the reference included, because here the bound belongs to the
+    /// representation rather than to an instruction. So [`choose`] never picks
+    /// between two alphabets in this family --- it picks between panel widths,
+    /// and past the declared bound it offers nothing at all, which is the
+    /// honest answer when the packing itself has run out.
+    ///
+    /// Deliberately no AVX-512 entry. VNNI is a *dot product* extension and a
+    /// `(max, +)` reduction issues no dot product, so the widening it buys is
+    /// width this family has no use for; and the measurement log records that
+    /// no runner in this project's CI has AVX-512 at all, so an entry here
+    /// would be a sequence nothing ever executed --- which `CB-04`'s history
+    /// says is worth nothing (`CB-13`).
+    available_tropical_i16, cached_tropical_i16, TROPICAL_I16, i16, i16;
+    true => crate::isa::portable::TROP_I16,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_TROP_I16_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_TROP_I16,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_TROP_I16,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_TROP_I16,
+}
+
 /// The same lists, with each family's resolved once per process instead of
 /// once per call.
 ///
@@ -564,6 +613,8 @@ pub mod cached {
     pub use super::cached_reduce_i64_modular as available_reduce_i64_modular;
     /// The `i8` reduce list, resolved once per process.
     pub use super::cached_reduce_i8 as available_reduce_i8;
+    /// The packed tropical `(max, +)` list, resolved once per process.
+    pub use super::cached_tropical_i16 as available_tropical_i16;
 
     /// How many availability lists this process has materialized.
     ///

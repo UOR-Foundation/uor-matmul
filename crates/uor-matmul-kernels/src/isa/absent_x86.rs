@@ -77,6 +77,11 @@ pub const AVX2_I32_MOD_M1: KernelSpec<i32, i32> = portable::I32_MOD;
 /// Absent here; the reference sequence carries this family.
 pub const AVX2_I16_MOD_M1: KernelSpec<i16, i32> = portable::I16_MOD;
 
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_TROP_I16: KernelSpec<i16, i16> = portable::TROP_I16;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_TROP_I16_M1: KernelSpec<i16, i16> = portable::TROP_I16;
+
 // ---------------------------------------------------------------------------
 // The table sequences (§7.3)
 // ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ crate::tile_fits!(1, 16);
 crate::tile_fits!(1, 8);
 crate::tile_fits!(4, 8);
 crate::tile_fits!(8, 16);
+crate::tile_fits!(4, 16);
 
 /// Is AVX2 available?
 pub fn avx2_available() -> bool {
@@ -839,6 +840,131 @@ unsafe fn vnni_store(acc: &mut [i32], tile: &[__m512i; V_MR]) {
     for (i, lane) in tile.iter().enumerate() {
         // SAFETY: `i < V_MR`, so this 512-bit store lands inside `MR * NR`.
         unsafe { _mm512_storeu_si512(acc.as_mut_ptr().add(i * V_NR).cast(), *lane) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The (max, +) reduction in a packed i16 lane
+// ---------------------------------------------------------------------------
+
+/// Rows of the tropical tile: four `__m256i` accumulators, which leaves the
+/// other twelve registers for the broadcast and the column load.
+const A2_TROP_MR: usize = 4;
+/// Columns: sixteen `i16`, which is one `__m256i` exactly.
+const A2_TROP_NR: usize = 16;
+
+/// AVX2 `(max, +)`: `_mm256_adds_epi16` is `⊗` and `_mm256_max_epi16` is `⊕`.
+///
+/// Two instructions per sixteen products, against the ring family's widen-and-
+/// `madd`, and the reason is structural rather than a matter of tuning: `⊕` is
+/// a `max`, so nothing carries and nothing grows, so no lane ever has to be
+/// widened. The packed `i16` the operands arrive in is the same `i16` the
+/// answer leaves in.
+///
+/// `adds` and not `add`: the saturation is the absorbing law `-inf ⊗ a = -inf`,
+/// and [`crate::tropical`] derives why a wrap would be wrong at exactly the
+/// input a random sweep never generates --- two masked operands, where
+/// `i16::MIN + i16::MIN` wraps to `0` and becomes the *largest* value in the
+/// reduction instead of the smallest.
+///
+/// Deliberately AVX2 and not AVX-512: this sequence issues no dot product, so
+/// VNNI has nothing to offer it, and no runner in this project's CI has
+/// AVX-512 at all --- a sequence nobody executes is worth nothing here
+/// (`CB-13`).
+pub const AVX2_TROP_I16: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: A2_TROP_MR,
+    nr: A2_TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // One `k`-step per instruction: the broadcast covers `A` and the load
+    // covers a whole row of `B`, so there is nothing a pair would fold.
+    k_group: 1,
+    products_per_step: A2_TROP_NR,
+    lane_cap: u128::MAX,
+    max_bound: crate::tropical::TROP_I16_MAX_BOUND,
+    mac_tile: avx2_trop_i16,
+};
+
+/// The same sequence at a one-row panel.
+///
+/// The tropical twin of [`AVX2_I8_I32_M1`], and for the same reason: a panel
+/// taller than the output is zero-padded and the kernel does that padding's
+/// arithmetic. Here the padding is the semiring zero, so the padded rows
+/// compute `-inf` --- correct, and still four times the instructions a
+/// single-row product needs.
+pub const AVX2_TROP_I16_M1: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: A2_TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 1,
+    products_per_step: A2_TROP_NR,
+    lane_cap: u128::MAX,
+    max_bound: crate::tropical::TROP_I16_MAX_BOUND,
+    mac_tile: avx2_trop_i16_one,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `16 * kc`, `acc` 64 writable
+/// lanes, and the host must have `avx2`.
+unsafe fn avx2_trop_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_trop_i16_inner::<A2_TROP_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_trop_i16`], with a one-row panel: `pa` must have `kc` readable
+/// elements and `acc` 16 writable lanes.
+unsafe fn avx2_trop_i16_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_trop_i16_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_trop_i16`], at the panel height `MR` names.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_trop_i16_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i16,
+) {
+    const NR: usize = A2_TROP_NR;
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    // The identity of `max`, which is the semiring zero and not zero. At
+    // `kc == 0` this is the whole answer, and a tile of zeros would have been
+    // the largest finite one instead of the empty reduction.
+    let mut tile = [_mm256_set1_epi16(crate::tropical::TROP_ZERO); MR];
+
+    for p in 0..kc {
+        // The panel is `k`-major at `k_group == 1`, so one 256-bit load is a
+        // whole `k`-step of `B`: sixteen columns, in lane order.
+        //
+        // SAFETY: `pb[p * NR ..][..16]` is in bounds: one 256-bit load.
+        let bv = unsafe { _mm256_loadu_si256(pb.as_ptr().add(p * NR).cast::<__m256i>()) };
+        for (i, cell) in tile.iter_mut().enumerate() {
+            let av = _mm256_set1_epi16(pa[p * MR + i]);
+            *cell = _mm256_max_epi16(*cell, _mm256_adds_epi16(av, bv));
+        }
+    }
+
+    for (i, cell) in tile.iter().enumerate() {
+        // SAFETY: `i < MR`, so this 256-bit store lands inside `MR * NR`.
+        unsafe {
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast::<__m256i>(), *cell);
+        }
     }
 }
 

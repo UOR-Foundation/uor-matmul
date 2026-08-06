@@ -13,6 +13,13 @@
 # Every row here has a scenario in `features/` and a test whose name ends in the
 # ID (R9, R15, CM-02). There is no "pending" state: a capability that is not
 # built does not get a row, and every row in this file is built.
+#
+# `refuted_by` is the observation that would break the row, in the sense the
+# upstream formalization's "Refuted by." line means: not a caveat and not a
+# limitation, but the experiment whose outcome decides the claim. It is
+# required, because a row that named no such experiment would be indexed,
+# scenarioed, tested, and about nothing --- and the omission would read as
+# "there is none". `check-model` refuses an empty one.
 
 spec = "uor-matmul/1"
 
@@ -22,645 +29,880 @@ id = "CS-01"
 level = "build"
 suite = "structural"
 statement = """`C <- alpha*A*B + beta*C` with A `m x k`, B `k x n`, C `m x n`"""
+refuted_by = """a conformant triple whose computed `C` differs from the defining sum at one cell"""
 
 [[id]]
 id = "CS-02"
 level = "build"
 suite = "structural"
 statement = """A and B strides are arbitrary: negative, zero, and non-contiguous all give the defined result"""
+refuted_by = """one stride pattern --- negative, zero, or non-contiguous --- giving different bytes from the contiguous spelling of the same operand"""
 
 [[id]]
 id = "CS-03"
 level = "build"
 suite = "structural"
 statement = """Output strides that alias are rejected at `Triple::new` and nowhere else"""
+refuted_by = """an aliasing output accepted by `Triple::new`, a non-aliasing one refused by it, or the condition reported anywhere later"""
 
 [[id]]
 id = "CS-04"
 level = "build"
 suite = "structural"
 statement = """`beta == 0` overwrites C without reading it, so uninitialized or NaN-filled C is admissible"""
+refuted_by = """a run at `beta == 0` whose output depends on the bytes `C` held on entry"""
 
 [[id]]
 id = "CS-05"
 level = "build"
 suite = "structural"
 statement = """The raw-pointer entry points are signature-identical to `matrixmultiply` and produce the same bytes as the safe API on the same inputs"""
+refuted_by = """the raw face giving different bytes from the safe API on the same operands, or a signature that is not `matrixmultiply`'s"""
 
 [[id]]
 id = "CS-06"
 level = "build"
 suite = "structural"
 statement = """`m`, `n`, `k` that are not multiples of `MR`, `NR`, or `K_GROUP` take the same path and give the same result"""
+refuted_by = """a shape that is not a multiple of `MR`, `NR`, or `K_GROUP` taking a different path, or giving different bytes from the padded spelling of the same operand"""
 
 [[id]]
 id = "CS-07"
 level = "build"
 suite = "structural"
 statement = """The generated `133144` pin equals `k_max(127, i32::MAX)` recomputed at test time"""
+refuted_by = """the generated pin disagreeing with `k_max(127, i32::MAX)` recomputed at test time"""
 
 [[id]]
 id = "CS-08"
 level = "build"
 suite = "structural"
 statement = """The slice entry points take `(m, k, n)`, leading dimensions, `alpha` and `beta` like any GEMM, and give the same bytes as the view API on the same operands"""
+refuted_by = """one slice call giving different bytes from the view call on the same operands and leading dimensions"""
+
+[[id]]
+id = "CS-12"
+level = "build"
+suite = "structural"
+statement = """The tropical epilogue's `alpha` and `beta` are applied exactly, in the accumulator's width, once per output element"""
+refuted_by = """a scalar the epilogue discards, a `-inf` in C absorbed to a finite zero rather than contributing nothing, or an `alpha` at the semiring zero that fails to absorb the product"""
 
 [[id]]
 id = "CT-01"
 level = "build"
 suite = "totality"
 statement = """No representable input errors or panics: fuzzed shapes, strides, magnitudes, and depths, under a checked-arithmetic build"""
+refuted_by = """one representable shape, stride, magnitude, or depth on which the library panics or reports"""
 
 [[id]]
 id = "CT-02"
 level = "build"
 suite = "totality"
 statement = """No accumulation overflows: the whole corpus under checked arithmetic, zero overflow events"""
+refuted_by = """one overflow event in the checked build over the whole corpus"""
 
 [[id]]
 id = "CT-03"
 level = "build"
 suite = "totality"
 statement = """Non-finite float codes propagate by the IEEE rules and never error"""
+refuted_by = """a NaN or infinity code that reports, or that propagates otherwise than clause 6 says"""
 
 [[id]]
 id = "CT-04"
 level = "build"
 suite = "totality"
 statement = """Zero, one, and prime dimensions take the same path as any other, and a zero-extent view constructs rather than erroring"""
+refuted_by = """a zero, one, or prime dimension taking a different path, or a zero-extent view refusing to construct"""
 
 [[id]]
 id = "CT-05"
 level = "build"
 suite = "totality"
 statement = """The two reportable conditions --- a non-conformant shape and an output whose strides map two coordinates onto one cell --- are the only ones, and both are decided at view construction before any arithmetic is named"""
+refuted_by = """a third reportable condition, or either of the two decided after view construction rather than at it"""
 
 [[id]]
 id = "CT-06"
 level = "build"
 suite = "totality"
 statement = """A super-massive product --- operands past the last level of cache, a depth past every lane's capacity, and an extent past every block --- is exact, on every traversal the offer admits"""
+refuted_by = """one traversal the offer admits disagreeing with the exact reference on the super-massive product"""
 
 [[id]]
 id = "CT-07"
 level = "build"
 suite = "totality"
 statement = """Tabulation is total: every code value the codec can hold indexes a live table entry, so no input can produce a miss, a bounds failure, or a panic"""
+refuted_by = """one code value the codec can hold that indexes no live table entry"""
 
 [[id]]
 id = "CD-01"
 level = "build"
 suite = "determinism"
 statement = """Backend choice does not change output bytes"""
+refuted_by = """two backends producing different bytes for one input"""
 
 [[id]]
 id = "CD-02"
 level = "build"
 suite = "determinism"
 statement = """Tile count and completion order do not change output bytes, over `{1,2,3,5,8,64,m*n}` and shuffled orders"""
+refuted_by = """one tile count or completion order producing different bytes from another"""
 
 [[id]]
 id = "CD-03"
 level = "build"
 suite = "determinism"
 statement = """Every partial sum stays inside the accumulator, measured by `dot_instrumented`, never inferred"""
+refuted_by = """`dot_instrumented` reporting one partial sum outside the accumulator's declared width"""
 
 [[id]]
 id = "CD-04"
 level = "build"
 suite = "determinism"
 statement = """Traversal and blocking preset do not change output bytes, including deliberately bad presets"""
+refuted_by = """one traversal or blocking preset, including a deliberately bad one, producing different bytes from another"""
 
 [[id]]
 id = "CD-05"
 level = "build"
 suite = "determinism"
 statement = """Encode mode is the only thing that changes the output bytes for a fixed accumulation"""
+refuted_by = """anything other than the encode mode changing an output byte at a fixed accumulation"""
 
 [[id]]
 id = "CD-06"
 level = "build"
 suite = "determinism"
 statement = """Big-endian and little-endian targets agree on the serialized output"""
+refuted_by = """a big-endian target's serialized output differing from a little-endian target's"""
 
 [[id]]
 id = "CD-07"
 level = "build"
 suite = "determinism"
 statement = """Splitting the operand stream at any index sums the parts"""
+refuted_by = """one split index at which the parts do not sum to the whole"""
 
 [[id]]
 id = "CD-08"
 level = "build"
 suite = "determinism"
 statement = """Two tiles reduce in either order"""
+refuted_by = """two tiles whose reduction depends on the order they complete in"""
 
 [[id]]
 id = "CD-09"
 level = "build"
 suite = "determinism"
 statement = """The narrow-register tile path agrees with `dot_wide`"""
+refuted_by = """one depth at which the narrow tile path disagrees with `dot_wide`"""
 
 [[id]]
 id = "CD-10"
 level = "build"
 suite = "determinism"
 statement = """`Scratch::None`, one byte, `suggested_scratch - 1`, `suggested_scratch`, and ten times it all give the same bytes"""
+refuted_by = """one scratch amount producing different bytes from another"""
 
 [[id]]
 id = "CD-11"
 level = "build"
 suite = "determinism"
 statement = """Forcing a wider accumulator than necessary changes nothing but the room"""
+refuted_by = """a forced wider accumulator changing an output byte"""
 
 [[id]]
 id = "CD-12"
 level = "build"
 suite = "determinism"
 statement = """Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer"""
+refuted_by = """one degeneracy or offer at which the collapsed walk differs by a byte from the uncollapsed one"""
 
 [[id]]
 id = "CD-13"
 level = "build"
 suite = "determinism"
 statement = """`Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all"""
+refuted_by = """one shape --- on either side of `tabulation_pays`, or with no offer --- at which the three traversals differ by a byte"""
 
 [[id]]
 id = "CD-15"
 level = "build"
 suite = "determinism"
 statement = """Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer"""
+refuted_by = """one degeneracy or offer at which the collapsed tabulated walk differs by a byte from the uncollapsed one"""
 
 [[id]]
 id = "CD-16"
 level = "build"
 suite = "determinism"
 statement = """Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block"""
+refuted_by = """one column-block width at which the collapsed walk differs by a byte, or a repeated column charged twice inside its block"""
 
 [[id]]
 id = "CD-17"
 level = "build"
 suite = "determinism"
 statement = """Collapsing bit-identical rows of A in the float tabulated traversal cannot change a byte, at every degeneracy and every offer; rows differing only in the sign of zero or in a NaN payload are distinct"""
+refuted_by = """two bit-identical rows failing to collapse, or two rows differing only in the sign of zero or in a NaN payload collapsing together"""
 
 [[id]]
 id = "CD-21"
 level = "build"
 suite = "determinism"
 statement = """The sub-cubic recursion (Winograd's form of Strassen's) is byte-identical to the cubic packed walk at every shape, depth, requested level count, and offer including none, and to the `CX-01` wrapping oracle at every corpus size; a level the shape, the bound's headroom, or the offer does not admit is declined, and declining changes no byte"""
+refuted_by = """one shape, depth, level count, or offer at which the sub-cubic recursion differs by a byte from the cubic packed walk, or a declined level changing a byte"""
 
 [[id]]
 id = "CD-22"
 level = "build"
 suite = "determinism"
 statement = """The documented default integer entry point selects, at the caller's offer and the host's declarations, the kernelized factorization the offer admits --- witnessed by the route census, not inferred --- and every route from it returns the reference traversal's bytes at every offer including none; the reference traversal remains directly callable under its own name"""
+refuted_by = """a route census that names no route, or one route returning bytes the reference traversal does not"""
 
 [[id]]
 id = "CD-23"
 level = "build"
 suite = "determinism"
 statement = """The one-level modular bilinear factorization (Winograd's form over the quotient `Z/2^w`, seven base block products against the classical decomposition's eight, counted by the census) returns the direct packed modular walk's bytes at every shape --- even, odd, prime, ragged, rectangular, degenerate --- and every offer including none, and declines to the direct walk wherever the shape, the encode, the lane, or the offer does not admit it"""
+refuted_by = """one shape or offer at which the modular level differs by a byte from the direct packed modular walk, an eighth base product counted, or a level taken where the shape, encode, lane, or offer does not admit it"""
 
 [[id]]
 id = "CB-01"
 level = "build"
 suite = "backends"
 statement = """Portable equals `dot_ref` on the whole corpus"""
+refuted_by = """one corpus entry at which the portable sequence differs from `dot_ref`"""
 
 [[id]]
 id = "CB-02"
 level = "build"
 suite = "backends"
 statement = """AVX2 equals portable"""
+refuted_by = """one corpus entry at which AVX2 differs from portable"""
 
 [[id]]
 id = "CB-03"
 level = "build"
 suite = "backends"
 statement = """AVX-512 VNNI equals portable, on all three of its sequences"""
+refuted_by = """one of the three VNNI sequences differing from portable on a corpus entry"""
 
 [[id]]
 id = "CB-04"
 level = "build"
 suite = "backends"
 statement = """NEON and NEON dotprod equal portable"""
+refuted_by = """NEON or NEON dotprod differing from portable on a corpus entry"""
 
 [[id]]
 id = "CB-05"
 level = "build"
 suite = "backends"
 statement = """wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on"""
+refuted_by = """SIMD128 differing from portable, or a SIMD128-off build differing from a SIMD128-on one"""
 
 [[id]]
 id = "CB-06"
 level = "build"
 suite = "backends"
 statement = """Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes"""
+refuted_by = """one declared panel width, or a shape narrower than a tile, at which a reduce sequence differs from its own reference"""
 
 [[id]]
 id = "CB-07"
 level = "build"
 suite = "backends"
 statement = """Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet"""
+refuted_by = """one sequence inexact at an extreme of the alphabet it declares, or selection offering one outside its declared alphabet"""
 
 [[id]]
 id = "CB-08"
 level = "build"
 suite = "backends"
 statement = """Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two"""
+refuted_by = """one tile height, column group, or code space --- including a code space that is not a power of two --- at which a table sequence differs from the reference in a single lane"""
 
 [[id]]
 id = "CB-09"
 level = "build"
 suite = "backends"
 statement = """Every modular table sequence equals the portable modular reference lane for lane"""
+refuted_by = """one modular table sequence differing from the portable modular reference in a single lane"""
 
 [[id]]
 id = "CB-10"
 level = "build"
 suite = "backends"
 statement = """At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run"""
+refuted_by = """a bound-1 build differing from the portable reference in one slot, selection offering the adds-only build where the declared bound does not admit it, or the census counting one multiply in a bound-1 tabulated run"""
 
 [[id]]
 id = "CB-11"
 level = "build"
 suite = "backends"
 statement = """Every sequence a Cortex-M build offers equals its reference, run under qemu-system on an mps2 machine --- parity there is a run, not a compile, and no user-mode emulator covers Cortex-M"""
+refuted_by = """one sequence a Cortex-M build offers disagreeing with its reference under qemu-system on an mps2 machine, or the parity never running there at all"""
 
 [[id]]
 id = "CB-12"
 level = "build"
 suite = "backends"
 statement = """The wasm SIMD128 SWAR sequence --- three B-row elements packed at 21-bit spacing in each 64-bit lane, multiplied by one broadcast scalar --- equals the portable reference lane for lane at every packed depth, at the alphabet's extremes, and at the W4A8 bound; selection offers it nowhere, because CG-17 measured it slower than the dot sequence it would displace"""
+refuted_by = """one packed depth, alphabet extreme, or the W4A8 bound at which the SWAR sequence differs from the portable reference, or selection offering it anywhere"""
 
 [[id]]
 id = "CU-01"
 level = "build"
 suite = "purity"
 statement = """No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target --- except inside a function holding the `F64Exact` witness, where the declared alphabet bound and panel depth keep every product and every partial sum below 2^53, so the opcode computes the same integer the exact accumulator does. The witness's only constructor is a compile-time proof of that bound; the gates check the type, not a comment"""
+refuted_by = """one float add, subtract, multiply, or FMA opcode in a shipped kernel's disassembly, outside a function holding the `F64Exact` witness"""
 
 [[id]]
 id = "CU-02"
 level = "build"
 suite = "purity"
 statement = """The instrumented count of narrow-path tiles matches `fits_narrow` exactly, so no tile takes an unintended path"""
+refuted_by = """the instrumented narrow-path tile count differing from `fits_narrow`'s answer by one tile"""
 
 [[id]]
 id = "CU-03"
 level = "build"
 suite = "purity"
 statement = """Every instruction sequence agrees at depths straddling its own threshold"""
+refuted_by = """one sequence disagreeing with another at a depth on either side of its own threshold"""
 
 [[id]]
 id = "CU-04"
 level = "build"
 suite = "purity"
 statement = """Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases"""
+refuted_by = """one shuffled tile order or one backend changing a single bit of a float accumulation, catastrophic cancellation included"""
 
 [[id]]
 id = "CU-05"
 level = "build"
 suite = "purity"
 statement = """There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph"""
+refuted_by = """a second accumulation path for one element family in the call graph `audit-purity` walks"""
 
 [[id]]
 id = "CU-06"
 level = "build"
 suite = "purity"
 statement = """The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop"""
+refuted_by = """one integer-multiply mnemonic in the emitted tabulated column loop, or one multiply charged to it by the census"""
 
 [[id]]
 id = "CU-07"
 level = "build"
 suite = "purity"
 statement = """Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked"""
+refuted_by = """a shipped crate that neither forbids `unsafe_code` nor is a crate the Miri job runs"""
 
 [[id]]
 id = "CU-08"
 level = "build"
 suite = "purity"
 statement = """The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound"""
+refuted_by = """the modular table lane running under an encode that is not `Wrapping`, or at an output wider than the lane, or declining where both hold"""
 
 [[id]]
 id = "CK-01"
 level = "build"
 suite = "codec"
 statement = """Two codecs with equal decodes give equal output bytes"""
+refuted_by = """two codecs with equal decoded streams producing different output bytes"""
 
 [[id]]
 id = "CK-02"
 level = "build"
 suite = "codec"
 statement = """Codec-invariance holds when both operands are coded"""
+refuted_by = """one input on which codec-invariance fails where both operands are coded"""
 
 [[id]]
 id = "CK-03"
 level = "build"
 suite = "codec"
 statement = """The packed panels themselves are byte-equal across codecs that decode equally"""
+refuted_by = """two codecs that decode equally packing different panel bytes"""
 
 [[id]]
 id = "CK-04"
 level = "build"
 suite = "codec"
 statement = """A transcoded stream equals the composite codec"""
+refuted_by = """a transcoded stream decoding otherwise than the composite codec does"""
 
 [[id]]
 id = "CK-05"
 level = "build"
 suite = "codec"
 statement = """Two `CodedMatrix` values with different kappa labels and equal decodes give equal output bytes"""
+refuted_by = """two coded matrices with different kappa labels and equal decodes producing different output bytes"""
 
 [[id]]
 id = "CK-06"
 level = "build"
 suite = "codec"
 statement = """A run codec's returned counts sum to the declared row width on every row"""
+refuted_by = """one row on which a run codec's returned counts do not sum to the declared width"""
 
 [[id]]
 id = "CX-01"
 level = "build"
 suite = "cross-library"
 statement = """`ndarray` `i32`, byte-identical over the whole corpus under `EncodeMode::Wrapping`"""
+refuted_by = """one corpus entry at which `ndarray`'s `i32` product differs by a byte under `EncodeMode::Wrapping`"""
 
 [[id]]
 id = "CX-02"
 level = "build"
 suite = "cross-library"
 statement = """`nalgebra` `i32`, likewise"""
+refuted_by = """one corpus entry at which `nalgebra`'s `i32` product differs by a byte under `EncodeMode::Wrapping`"""
 
 [[id]]
 id = "CX-03"
 level = "build"
 suite = "cross-library"
 statement = """`ndarray` `i32` against our `i8` kernels on widened inputs"""
+refuted_by = """one corpus entry at which the widened `i8` kernels differ by a byte from `ndarray`'s `i32`"""
 
 [[id]]
 id = "CX-04"
 level = "build"
 suite = "cross-library"
 statement = """`nalgebra` `i32` against our coded kernels on decoded weights"""
+refuted_by = """one corpus entry at which the coded kernels differ by a byte from `nalgebra` on the decoded weights"""
 
 [[id]]
 id = "CX-05"
 level = "open"
 suite = "cross-library"
 statement = """`matrixmultiply` `sgemm`: deviation from our exact value, in ulps"""
+refuted_by = """the recorded `sgemm` deviation not reproducing at the host, seed, and harness the record names"""
 
 [[id]]
 id = "CX-06"
 level = "open"
 suite = "cross-library"
 statement = """`faer` `f32`: likewise"""
+refuted_by = """the recorded `faer` deviation not reproducing at the host, seed, and harness the record names"""
 
 [[id]]
 id = "CX-07"
 level = "open"
 suite = "cross-library"
 statement = """`ndarray` `f32`: likewise, recorded as not independent of `CX-05`"""
+refuted_by = """the recorded `ndarray` `f32` deviation not reproducing at the recorded host and seed, or the record dropping that its lineage is not independent of `CX-05`"""
 
 [[id]]
 id = "CX-08"
 level = "open"
 suite = "cross-library"
 statement = """`gemm` crate `f32`: likewise"""
+refuted_by = """the recorded `gemm` deviation not reproducing at the host, seed, and harness the record names"""
 
 [[id]]
 id = "CX-09"
 level = "open"
 suite = "cross-library"
 statement = """`matrixmultiply` `dgemm`: likewise at f64"""
+refuted_by = """the recorded `dgemm` deviation not reproducing at the host, seed, and harness the record names"""
 
 [[id]]
 id = "CX-10"
 level = "build"
 suite = "cross-library"
 statement = """NumPy `int64` out of process, byte-identical"""
+refuted_by = """one corpus entry at which NumPy's `int64` product differs by a byte, or a transported digest that is not the one NumPy computed"""
+
+[[id]]
+id = "CX-11"
+level = "build"
+suite = "cross-library"
+statement = """NumPy `(max, +)` out of process, byte-identical"""
+refuted_by = """one corpus entry at which the NumPy max-plus product differs by a byte, or a transported digest that is not the one NumPy computed"""
 
 [[id]]
 id = "CA-01"
 level = "build"
 suite = "environment"
 statement = """Zero allocations during any call, on every hosted target"""
+refuted_by = """one allocation observed during a call, on any hosted target"""
 
 [[id]]
 id = "CA-02"
 level = "build"
 suite = "environment"
 statement = """Identical bytes on `thumbv7em-none-eabihf` and both wasm targets as on x86-64"""
+refuted_by = """a corpus digest from `thumbv7em-none-eabihf` or either wasm target differing from the x86-64 digest"""
 
 [[id]]
 id = "CA-03"
 level = "build"
 suite = "environment"
 statement = """No shipped crate links an allocator symbol on a `no_std` target"""
+refuted_by = """an allocator symbol linked by a shipped crate on a `no_std` target"""
 
 [[id]]
 id = "CP-01"
 level = "build"
 suite = "property"
 statement = """The randomized differential suite at the sample size derived in `ANALYSIS.md`, seeds recorded"""
+refuted_by = """one seeded case in the differential suite disagreeing with the reference, or a run at fewer samples than `ANALYSIS.md` derives"""
 
 [[id]]
 id = "CK-08"
 level = "build"
 suite = "codec"
 statement = """The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected"""
+refuted_by = """a manifest whose bytes move under a key reordering or insignificant whitespace, a short buffer that does not report its need, or a malformed digest accepted"""
 
 [[id]]
 id = "CK-09"
 level = "build"
 suite = "codec"
 statement = """`Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type"""
+refuted_by = """one index at which `index_of(code_at(i)) != i`, or one code value on which `index_of` is not defined"""
 
 [[id]]
 id = "CK-11"
 level = "build"
 suite = "codec"
 statement = """The `Sign` tier decodes the same alphabet stream as the `Packed<Grid<2>,8>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream"""
+refuted_by = """the `Sign` tier decoding a different alphabet stream from `Packed<Grid<2>,8>`, or its index stream differing from its code stream"""
 
 [[id]]
 id = "CK-12"
 level = "build"
 suite = "codec"
 statement = """The `Ternary` tier decodes the same alphabet stream as the `Packed<Grid<4>,4>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream"""
+refuted_by = """the `Ternary` tier decoding a different alphabet stream from `Packed<Grid<4>,4>`, or its index stream differing from its code stream"""
 
 [[id]]
 id = "CK-13"
 level = "build"
 suite = "codec"
 statement = """Sign-coded weights (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) produce byte-identical output to the dense spelling of the same decoded operand, packed and tabulated, and the ternary spelling (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) likewise"""
+refuted_by = """one shape at which sign-coded or ternary-coded weights differ by a byte from the dense spelling of the same decoded operand"""
 
 [[id]]
 id = "CG-01"
 level = "open"
 suite = "scaling"
 statement = """Arithmetic scaling exponent, this library and every oracle"""
+refuted_by = """the recorded exponent not reproducing at the host, sweep, and seed the record names, or a fit reported without its interval"""
 
 [[id]]
 id = "CG-02"
 level = "open"
 suite = "scaling"
 statement = """Per-axis scaling exponents for `m`, `n`, `k` separately"""
+refuted_by = """one per-axis exponent not reproducing at the recorded host and seed, or an axis reported without a fit of its own"""
 
 [[id]]
 id = "CG-03"
 level = "open"
 suite = "scaling"
 statement = """Residency scaling: bytes of weight storage touched, per codec, against every oracle"""
+refuted_by = """the recorded bytes-touched figure not reproducing at the host and codec the record names"""
 
 [[id]]
 id = "CG-04"
 level = "open"
 suite = "scaling"
 statement = """Working-set scaling, `suggested_scratch` against each oracle's measured internal allocation"""
+refuted_by = """the recorded `suggested_scratch` comparison not reproducing against the oracle's measured allocation on the recorded host"""
 
 [[id]]
 id = "CG-05"
 level = "open"
 suite = "scaling"
 statement = """Allocation count and peak bytes: zero here, whatever the oracle does there"""
+refuted_by = """the recorded allocation count or peak not reproducing at the host and harness the record names"""
 
 [[id]]
 id = "CG-06"
 level = "open"
 suite = "scaling"
 statement = """Parallel speedup against tile count, with byte-equality asserted inside the timed harness"""
+refuted_by = """the recorded speedup not reproducing at the host and tile count the record names, or the byte-equality assertion inside the timed region failing"""
 
 [[id]]
 id = "CG-08"
 level = "open"
 suite = "scaling"
 statement = """Sustained throughput on super-massive input, reported per pass, against every oracle that finishes"""
+refuted_by = """the recorded sustained rate not reproducing at the host and pass the record names, or an oracle that did not finish recorded as though it had"""
 
 [[id]]
 id = "CG-09"
 level = "open"
 suite = "scaling"
 statement = """Throughput against the degeneracy of the operand, including the price of looking when there is none"""
+refuted_by = """the recorded throughput against degeneracy not reproducing at the recorded host, or the price of looking left out of the sweep"""
 
 [[id]]
 id = "CG-07"
 level = "open"
 suite = "scaling"
 statement = """Small-shape latency, where a heavyweight prologue costs more than an asymptote"""
+refuted_by = """the recorded small-shape latency not reproducing at the host and shapes the record names"""
 
 [[id]]
 id = "CG-10"
 level = "open"
 suite = "scaling"
 statement = """Operation census and wall time for `Tabulated` against `Blocked` and against every oracle, swept over `n` through the derived break-even, with the duplicate-entry ratio of the enumeration reported"""
+refuted_by = """the recorded census or wall time not reproducing at the host and sweep the record names, or a duplicate-entry ratio recorded apart from the enumeration it came from"""
 
 [[id]]
 id = "CG-11"
 level = "build"
 suite = "scaling"
 statement = """Static issue analysis (`llvm-mca`) over the emitted inner loops reports, for each kernel sequence, per-port occupancy, the critical path, predicted throughput, and a named bottleneck resource --- scheduling-model predictions, reported, never asserted as measurements"""
+refuted_by = """one kernel sequence the census analyses reported without a named bottleneck resource, or a tool that is not `llvm-mca` accepted as one"""
 
 [[id]]
 id = "CG-12"
 level = "open"
 suite = "scaling"
 statement = """Achieved MACs per second of the sub-cubic recursion against the cubic packed walk on the i32-exact lane, swept through the crossover with the fitted exponent's interval and sample count and the host's fastest sustained product rate on the same axes, with byte-identity asserted inside the timed region"""
+refuted_by = """the recorded rates not reproducing at the host and crossover the record names, or the byte-identity assertion inside the timed region failing"""
 
 [[id]]
 id = "CG-13"
 level = "build"
 suite = "scaling"
 statement = """The resolved kernel sequence is cached per element family; a cached selection returns the same sequence the full walk returns (asserted), and the latency this buys is reported under CG-07 and never asserted"""
+refuted_by = """one family, bound, or panel height at which a cached selection returns a sequence the full walk does not"""
 
 [[id]]
 id = "CM-01"
 level = "build"
 suite = "model"
 statement = """The generated Rust consts equal `model/constants.toml`"""
+refuted_by = """one generated const differing from the value `model/constants.toml` carries"""
 
 [[id]]
 id = "CM-02"
 level = "build"
 suite = "model"
 statement = """Every ID in `model/ids.toml` has a scenario and a test, and every test's ID is in the register"""
+refuted_by = """a registered ID with no scenario or no test, or a test naming an ID the register does not carry"""
 
 [[id]]
 id = "CM-03"
 level = "build"
 suite = "model"
 statement = """Every `some-true` claim has a row in `model/authorities.toml` with a citation"""
+refuted_by = """a `some-true` claim naming an authority with no row here, or a row with no citation"""
 
 [[id]]
 id = "CM-04"
 level = "build"
 suite = "model"
 statement = """`tabulation_pays`'s inputs come from `model/tiers.toml`, and the resolved break-even matches the model's recorded value for every enumerable codec"""
+refuted_by = """one enumerable codec whose recorded break-even differs from the derivation recomputed at test time"""
 
 [[id]]
 id = "CK-10"
 level = "build"
 suite = "codec"
 statement = """An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols"""
+refuted_by = """a codebook that is not the source's distinct bit patterns sorted as unsigned integers and deduplicated --- `-0.0` merged with `+0.0`, or two NaN payloads merged"""
 
 [[id]]
 id = "CD-14"
 level = "build"
 suite = "determinism"
 statement = """An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all"""
+refuted_by = """one shape, with the tabulated traversal forced or declined, at which the arena-coded operand differs by a byte from the dense float driver"""
 
 [[id]]
 id = "CK-14"
 level = "build"
 suite = "codec"
 statement = """The arena tier at a `u8` code width decodes the same alphabet stream as its `u16` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its codebook is borrowed, never owned"""
+refuted_by = """the u8 arena spelling decoding a different alphabet stream from the u16 one, or a codebook that is owned rather than borrowed"""
 
 [[id]]
 id = "CK-15"
 level = "build"
 suite = "codec"
 statement = """The `u8` spelling of a 256-entry tier --- `Book<256, 8>`, `Sign<8>`, `Ternary<4>` --- stores half the bytes of its `u16` spelling, decodes the same alphabet stream, and its index stream is the code stream, byte-identical through the tabulated driver at every shape and every offer, with the gather dispatched once per call between monomorphic u8 and u16 sequences"""
+refuted_by = """a u8 spelling storing as many bytes as its u16 spelling, decoding a different stream, or a gather dispatched more than once per call"""
 
 [[id]]
 id = "CD-18"
 level = "build"
 suite = "determinism"
 statement = """A u8-symbol-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, at every offer including none, and under an epilogue that reads `C`"""
+refuted_by = """one shape or offer at which the u8-symbol-coded operand differs by a byte from the dense float driver, including under an epilogue that reads `C`"""
 
 [[id]]
 id = "CD-19"
 level = "build"
 suite = "determinism"
 statement = """The float driver's scaled lanes give byte-identical output whether the integer dot product runs as the scalar loop or on the integer kernel table, at every shape and every offer, including none"""
+refuted_by = """one shape or offer at which the scalar integer dot and the integer kernel table give different bytes through the scaled lanes"""
 
 [[id]]
 id = "CD-20"
 level = "build"
 suite = "determinism"
 statement = """A u8-symbol-coded float weight matrix tabulated in the scaled integer lane gives byte-identical output to the dense float driver at every shape and every offer, including none, with the span walk admitted and declined alike, and a depth past the lane's run is chunked exactly"""
+refuted_by = """one shape or offer at which the symbol-tabulated scaled lane differs by a byte from the dense float driver, or a depth past the lane's run chunked inexactly"""
 
 [[id]]
 id = "CG-14"
 level = "open"
 suite = "scaling"
 statement = """Achieved bytes per second for a u8-symbol-coded gemv and skinny GEMM, and for an f32 oracle, against the host's STREAM triad number measured in the same harness, with byte-identity asserted inside the timed region"""
+refuted_by = """the recorded bytes per second not reproducing at the host and shapes the record names, or the byte-identity assertion inside the timed region failing"""
 
 [[id]]
 id = "CG-15"
 level = "open"
 suite = "scaling"
 statement = """Achieved MACs per second of the float placement bridge --- the default driver's auto-selected lane against the explicit entry's richer offers, with the decline fills pricing the scalar lanes both fall to --- measured on the shapes ANALYSIS tables, with byte-identity asserted inside the timed region"""
+refuted_by = """the recorded MACs per second not reproducing at the host and shapes the record names, or the byte-identity assertion inside the timed region failing"""
 
 [[id]]
 id = "CG-16"
 level = "open"
 suite = "scaling"
 statement = """Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes, with byte-identity asserted inside the timed region"""
+refuted_by = """the recorded MACs per second not reproducing at the host and shapes the record names, or the byte-identity assertion inside the timed region failing"""
 
 [[id]]
 id = "CG-17"
 level = "open"
 suite = "scaling"
 statement = """Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime, per panel depth and bound, with byte-identity asserted inside the timed region"""
+refuted_by = """the recorded MACs per second not reproducing under wasmtime at the host, depth, and bound the record names, or the byte-identity assertion inside the timed region failing"""
 
 [[id]]
 id = "CG-18"
 level = "build"
 suite = "scaling"
 statement = """The operation census is the performance gate, asserted where the clock cannot be: at shapes straddling the break-even recomputed from the sequences' own per-ISA declarations, auto-selection runs the dense route below it (`kernel_calls`, no `table_reads`) and the table at and above it; the running table's multiplies are exactly the build's `code_space * block * rows` per slot (charged as adds at bound 1, `CB-10`), and a codec the derivation declines at `block = 1` shows the dense route at every size"""
+refuted_by = """auto-selection running the table below the recomputed break-even, or the dense route at and above it, or the running table charging one multiply beyond the build's `code_space * block * rows` per slot"""
+
+# ==========================================================================
+# The selection half of the D-8 census: the `(max, +)` semiring as an element
+# family, its two gauge sections, and the witness. Nothing below is a second
+# method --- every row is the one method (decode, accumulate exactly, encode
+# once) at the second instantiation of the two operations the accumulation is
+# written against.
+# ==========================================================================
+
+[[id]]
+id = "CK-16"
+level = "build"
+suite = "codec"
+statement = """The semiring laws hold at every instance, and idempotence holds precisely at the tropical instance and fails precisely at the ring"""
+refuted_by = """one instance at which a semiring law fails, an idempotent `+` at the ring instance, or a non-idempotent `max` at the tropical one"""
+
+[[id]]
+id = "CK-17"
+level = "build"
+suite = "codec"
+statement = """The semiring zero is simultaneously the pad and the mask, so a masked shape and a zero-padded shape are byte-identical"""
+refuted_by = """a masked shape and the zero-padded shape of the same operand differing by a byte, or a pad that decodes to anything but `Element::ZERO`"""
+
+[[id]]
+id = "CS-10"
+level = "build"
+suite = "structural"
+statement = """Traversal selection reads the operand's orientation from its declared manifest and never probes the operand"""
+refuted_by = """a selection that changes when only the operand's values change with the manifest held fixed, or an orientation read from anywhere but the declared manifest"""
+
+[[id]]
+id = "CS-11"
+level = "build"
+suite = "structural"
+statement = """The semiring zero as `beta` overwrites C without reading it, so a masked or uninitialized output buffer is admissible"""
+refuted_by = """a run with `beta` at the semiring zero whose output depends on the bytes C held on entry"""
+
+[[id]]
+id = "CT-08"
+level = "build"
+suite = "totality"
+statement = """No tropical operation overflows under the checked profile, at every bound and depth, including a masked lane at the semiring zero"""
+refuted_by = """one overflow event in a checked tropical build, at any bound, at any depth, or on a lane held at the semiring zero"""
+
+[[id]]
+id = "CD-24"
+level = "build"
+suite = "determinism"
+statement = """The selection witness is invariant under partition, count and order, because the order on `(value, index)` is total"""
+refuted_by = """one partition, completion count, or order of combination at which the witness index differs"""
+
+[[id]]
+id = "CD-25"
+level = "build"
+suite = "determinism"
+statement = """Both witness mechanisms give identical bytes at every shape, degeneracy, and offer including none"""
+refuted_by = """one shape, degeneracy, or offer at which `Lexicographic` and `ComparePass` write different witness bytes"""
+
+[[id]]
+id = "CD-26"
+level = "build"
+suite = "determinism"
+statement = """Recentring is the canonical section of the shift gauge: gauge-invariant, idempotent, and its representative's maximum is exactly zero"""
+refuted_by = """a shift the section leaves in, a second application that moves a value, or a representative whose maximum is not exactly zero"""
+
+[[id]]
+id = "CD-27"
+level = "build"
+suite = "determinism"
+statement = """The dyadic section is exact, and equals the arithmetic shift at every `k` where that shift exists"""
+refuted_by = """one `k` at which the dyadic placement differs from the arithmetic shift, or one input the placement rounds"""
+
+[[id]]
+id = "CD-28"
+level = "build"
+suite = "determinism"
+statement = """Within one element type, encode mode is the only thing that changes the output bytes"""
+refuted_by = """anything other than the encode mode changing an output byte within one element type"""
+
+[[id]]
+id = "CD-29"
+level = "build"
+suite = "determinism"
+statement = """One traversal computes both products of the operation census: the dense driver is parametric in the semiring"""
+refuted_by = """a second driver, a branch on the semiring inside the traversal, or a census product the driver cannot compute from `E::mac` and `Accumulator::combine` alone"""
+
+[[id]]
+id = "CA-04"
+level = "build"
+suite = "environment"
+statement = """The tropical accumulator's width is independent of `k`, and is the same width at depth one and at the deepest reduction the machine can address"""
+refuted_by = """a tropical accumulator width that differs between depth one and `2^MAX_K_BITS`, or one that carries a depth term at all"""
+
+[[id]]
+id = "CB-13"
+level = "build"
+suite = "backends"
+statement = """Every tropical instruction sequence agrees with the portable tropical reference, lane for lane, at every bound and depth"""
+refuted_by = """one tropical sequence differing from `dot_tropical_ref` in a single lane, at any bound or depth"""
+
+[[id]]
+id = "CU-10"
+level = "build"
+suite = "purity"
+statement = """No tropical sequence issues a multiply, read from the emitted instructions"""
+refuted_by = """one integer-multiply mnemonic in the emitted instructions of a tropical sequence"""
+
+[[id]]
+id = "CG-19"
+level = "open"
+suite = "scaling"
+statement = """Tropical selection throughput against the ring lane at matched shapes, and witness mechanism A against B"""
+refuted_by = """the recorded rates not reproducing at the host, shapes, and seed the record names"""

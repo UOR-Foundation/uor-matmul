@@ -89,3 +89,15 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-15
     Then the claim holds byte for byte
+
+  @CK-16 @build
+  Scenario: The semiring laws hold at every instance, and idempotence holds precisely at the tropical instance and fails precisely at the ring
+    Given the standing corpus
+    When the suite exercises CK-16
+    Then the claim holds byte for byte
+
+  @CK-17 @build
+  Scenario: The semiring zero is simultaneously the pad and the mask, so a masked shape and a zero-padded shape are byte-identical
+    Given the standing corpus
+    When the suite exercises CK-17
+    Then the claim holds byte for byte

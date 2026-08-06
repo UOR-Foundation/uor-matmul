@@ -329,6 +329,95 @@ unsafe fn neon_i32_exact_inner<const MR: usize>(
 }
 
 // ---------------------------------------------------------------------------
+// The (max, +) reduction in a packed i16 lane
+// ---------------------------------------------------------------------------
+
+/// Rows of the tropical tile: four `int16x8_t` accumulators.
+const NEON_TROP_MR: usize = 4;
+/// Columns: eight `i16`, which is one Q register exactly.
+const NEON_TROP_NR: usize = 8;
+
+crate::tile_fits!(NEON_TROP_MR, NEON_TROP_NR);
+
+/// NEON `(max, +)`: `vqaddq_s16` is `⊗` and `vmaxq_s16` is `⊕`.
+///
+/// The AVX2 sequence at half the width and with the same two instructions,
+/// which is the point of the family: `⊕` is a `max`, so nothing carries and
+/// nothing grows, and there is no widening step for an ISA to differ about.
+///
+/// `vqaddq_s16` and not `vaddq_s16`: the saturating variant *is* the absorbing
+/// law `-inf ⊗ a = -inf`, and [`crate::tropical`] derives why the wrapping one
+/// is wrong at exactly the input a random sweep never generates. This is the
+/// same distinction [`NEON_I8_I32`] draws between an exact kernel and one that
+/// silently saturates, read the other way round: there saturation would have
+/// been the defect, and here it is the semiring.
+pub const NEON_TROP_I16: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::Neon,
+    factorization: Factorization::Exact,
+    mr: NEON_TROP_MR,
+    nr: NEON_TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // One `k`-step per instruction, as on AVX2: the broadcast covers `A` and
+    // the load covers a whole `k`-step of `B`.
+    k_group: 1,
+    products_per_step: NEON_TROP_NR,
+    lane_cap: u128::MAX,
+    max_bound: crate::tropical::TROP_I16_MAX_BOUND,
+    mac_tile: neon_trop_i16,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `8 * kc`, and `acc` 32
+/// writable lanes.
+unsafe fn neon_trop_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller forwarded the lengths, and NEON is unconditionally
+    // present on this target.
+    unsafe { neon_trop_i16_inner::<NEON_TROP_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`neon_trop_i16`].
+#[target_feature(enable = "neon")]
+unsafe fn neon_trop_i16_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i16,
+) {
+    const NR: usize = NEON_TROP_NR;
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    // The identity of `max`, which is the semiring zero and not zero: at
+    // `kc == 0` this is the whole answer.
+    let mut tile = [vdupq_n_s16(crate::tropical::TROP_ZERO); MR];
+
+    for p in 0..kc {
+        // The panel is `k`-major at `k_group == 1`, so one Q load is a whole
+        // `k`-step of `B`: eight columns, in lane order.
+        //
+        // SAFETY: `pb[p * NR ..][..8]` is in bounds: one 128-bit load.
+        let bv = unsafe { vld1q_s16(pb.as_ptr().add(p * NR)) };
+        for (i, cell) in tile.iter_mut().enumerate() {
+            let av = vdupq_n_s16(pa[p * MR + i]);
+            *cell = vmaxq_s16(*cell, vqaddq_s16(av, bv));
+        }
+    }
+
+    for (i, cell) in tile.iter().enumerate() {
+        // SAFETY: `i < MR`, so this 128-bit store lands inside `MR * NR`.
+        unsafe { vst1q_s16(acc.as_mut_ptr().add(i * NR), *cell) };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The reduce factorization: vector lanes on `k` rather than on the output
 // ---------------------------------------------------------------------------
 

@@ -48,7 +48,7 @@
 //! and it is the orientation in which a code names `Bk` consecutive *outputs*.
 //! Tabulation simply has nothing to sum there.
 
-use uor_matmul_codec::{CodedMatrix, Enumerable};
+use uor_matmul_codec::{Addressing, CodedMatrix, Enumerable};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
     AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, EncodeMode, FloatElement, MatView,
@@ -401,6 +401,13 @@ impl<'a, 'w, 'c, E: Element, Bd: Bound, C: Enumerable<E, Bd>, O>
     TabulatedTriple<'a, 'w, 'c, E, Bd, C, O>
 {
     /// Report non-existence once, before any arithmetic is named.
+    ///
+    /// This is where the coded operand's *orientation* is decided, and it is
+    /// decided from `w.rows()` and `w.cols()` --- the two the canonical manifest
+    /// records as `rows` and `cols`. A caller holding a manifest and no operand
+    /// gets the same answer in advance from
+    /// `uor_matmul_codec::Manifest::reduces_along_the_block`, and `CS-10`
+    /// asserts that the two agree at every shape.
     pub fn new(
         a: MatView<'a, Alphabet<E, Bd>>,
         w: CodedMatrix<'w, E, Bd, C>,
@@ -1976,12 +1983,28 @@ fn run<E, Bd, C, O, Ep, Lg>(
 
     let space = C::CODE_SPACE;
     let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
+    // What the operand's *declaration* says about addressing it, read from the
+    // three facts `Manifest::of` mints this artifact's address from --- the
+    // tier, the block and the bound --- and from nothing the operand holds. The
+    // manifest's other value-bearing fields are its two digests, and no term
+    // here reads one, so no run of this traversal can have probed a code to
+    // decide which factorization to take (`CS-10`). The orientation half of the
+    // same claim was settled at `TabulatedTriple::new`, which is where `W` was
+    // declared `n x k`.
+    let addressing = Addressing::of(
+        <C as uor_matmul_codec::Codec<E, Bd>>::TIER,
+        block,
+        Bd::VALUE,
+    );
     // A code stream whose blocks are not a fixed width has no `p`-th block to
-    // index, so there is nothing for a table to be built per block of. The one
-    // such tier does not implement `Enumerable`, so this is unreachable through
-    // the shipped codecs; it is here because the trait does not forbid it.
-    let addressable =
-        <C as uor_matmul_codec::Codec<E, Bd>>::IS_FIXED_WIDTH && block >= 1 && space > 0;
+    // index, so there is nothing for a table to be built per block of. Asked of
+    // the *type* and not of the tier, because a composing tier reports its own
+    // token while inheriting its inner codec's width. The one variable-length
+    // tier does not implement `Enumerable`, so this is unreachable through the
+    // shipped codecs; it is here because the trait does not forbid it.
+    let addressable = <C as uor_matmul_codec::Codec<E, Bd>>::IS_FIXED_WIDTH
+        && addressing.addresses_an_element()
+        && space > 0;
     if !addressable || options.traversal == Traversal::OutputMajor {
         decline(triple, epilogue, options, scratch, ledger);
         return;
@@ -3136,19 +3159,22 @@ fn stream<E, Bd, C, O, Ep, Lg>(
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use crate::coded::CodedTriple;
     use crate::collapse::suggested_collapse_index;
     use crate::driver::gemm;
-    use crate::epilogue::Linear;
+    use crate::epilogue::{Linear, MaxPlus};
+    use crate::partition::Partition;
     use std::format;
+    use std::string::String;
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_codec::{
-        canonicalize, e8_codec, e8_codec_u8, e8_table, Arena, Book, Grid, Packed, Sign, SymbolCode,
-        Ternary,
+        canonicalize, e8_codec, e8_codec_u8, e8_table, Arena, Book, Grid, Manifest, Packed, Sign,
+        SymbolCode, Ternary, TierId,
     };
     use uor_matmul_core::{
-        as_alphabet, as_alphabet_full, as_alphabet_whole, Bnd, EncodeMode, FloatElement, Full,
-        Triple, Whole,
+        as_alphabet, as_alphabet_full, as_alphabet_tropical, as_alphabet_whole, Bnd, EncodeMode,
+        FloatElement, Full, Triple, Trop, Whole,
     };
 
     type A8 = Alphabet<i8, Full<i8>>;
@@ -6177,5 +6203,579 @@ mod tests {
                 "and the dense route is what ran at n = {n}: {census:?}"
             );
         }
+    }
+
+    /// Which factorization ran, read from the census.
+    ///
+    /// The census's *counts* move with the operand's degeneracy --- that is what
+    /// `CD-15` and `CD-16` are about, and it is a different claim --- so what is
+    /// read here is which of the three routes issued anything at all.
+    fn ran(census: &Census) -> Traversal {
+        if census.table_reads > 0 {
+            Traversal::Tabulated
+        } else if census.kernel_calls > 0 {
+            Traversal::Blocked
+        } else {
+            Traversal::OutputMajor
+        }
+    }
+
+    /// A recorded 64-bit hash of a code stream, rendered in the manifest's
+    /// digest shape.
+    ///
+    /// Not SHA-256, and not offered as one. What `CS-10` needs of a digest field
+    /// is that it *moves with the bytes*, and a cryptographic digest would need
+    /// a dependency this workspace does not carry.
+    /// [`Manifest::write_canonical_json`] checks the shape and nothing else,
+    /// which is what makes the stand-in usable and what makes the manifests
+    /// below genuinely different rather than declared different.
+    fn digest_of(codes: &[u16]) -> String {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &c in codes {
+            for b in c.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        // Sixteen hex digits, four times: the field is 64 lowercase hex
+        // characters wide and this fills it from the one number it has.
+        let word = format!("{h:016x}");
+        format!("sha256:{word}{word}{word}{word}")
+    }
+
+    /// `CS-10`: the traversal is selected from the coded operand's declaration,
+    /// and that declaration is what the artifact's address is minted from.
+    ///
+    /// Both directions, because a one-sided version passes for a selector that
+    /// reads neither the declaration nor the operand:
+    ///
+    /// - Hold the declaration and move the *values*. Five operands of one shape,
+    ///   at the extremes of the code space and of the alphabet and at a recorded
+    ///   fill between them, on both sides of the break-even. Each mints a
+    ///   different artifact --- the digest is the manifest's one field that moves
+    ///   with the bytes --- and each selects the same traversal.
+    /// - Hold the values and move the *declaration*. The same code bytes
+    ///   declared `n x k` and `k x n` admit exactly one triple each, opposite
+    ///   ways round. And one decoded operand under two declarations differing in
+    ///   the block alone takes two factorizations to one answer.
+    #[test]
+    fn traversal_selection_reads_the_declaration_and_never_the_operand_cs_10() {
+        const SPEC: &str = "uor-matmul/1";
+        const NO_TABLE: &str =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        let space = 256usize;
+        let block = 8usize;
+        let (m, k) = (16usize, 64usize);
+        let blocks = k / block;
+        let lane = core::mem::size_of::<<i8 as Tabulated>::Lane>();
+        let l1 = blocking::L1_BYTES;
+        let bound = <Full<i8> as Bound>::VALUE;
+        let backend = GemmOptions::default().backend;
+
+        // The break-even, recomputed from the host's own declarations exactly as
+        // `CG-18` recomputes it: a recorded number would make this test about
+        // one ISA rather than about the selection.
+        let rows = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= tabulation_rows(space, l1, lane).min(m))
+            .expect("a 256-entry table fits L1 at some tile");
+        let spec =
+            <i8 as Tabulated>::table_spec(backend, bound, false, rows, column_group(rows), block);
+        let steps =
+            <i8 as Tabulated>::dense_steps(backend, bound, rows, block * spec.lanes_per_add);
+        let break_even = (1..)
+            .find(|&cols| tabulation_pays(space, block, cols, rows, steps, l1, lane))
+            .expect("E8 pays at some column width on every pair this workspace ships");
+
+        // One side of the predicate and the other: the selection has to be
+        // value-independent where the table runs and where it declines, or the
+        // invariance is an accident of always answering the same thing.
+        for n in [8usize, break_even] {
+            let shape = Shape { m, k, n };
+            let codes = n * blocks;
+            let operands: Vec<(&str, Vec<u16>, Vec<i8>)> = vec![
+                (
+                    "one code and one activation, repeated",
+                    vec![0u16; codes],
+                    vec![0i8; m * k],
+                ),
+                (
+                    "the top of the code space against the bottom of the alphabet",
+                    vec![(space - 1) as u16; codes],
+                    vec![-128i8; m * k],
+                ),
+                (
+                    "the two ends of the code space, alternating, against the top of the alphabet",
+                    (0..codes)
+                        .map(|i| if i % 2 == 0 { 0 } else { (space - 1) as u16 })
+                        .collect(),
+                    vec![127i8; m * k],
+                ),
+                (
+                    "no two columns alike",
+                    (0..codes)
+                        .map(|i| {
+                            let (j, p) = (i / blocks, i % blocks);
+                            ((0..p).fold(j, |acc, _| acc / space) % space) as u16
+                        })
+                        .collect(),
+                    (0..m * k).map(|i| ((i % 255) as i64 - 127) as i8).collect(),
+                ),
+                (
+                    "a recorded pseudorandom fill",
+                    fill(codes, 0xc510, |x| (x % space as u64) as u16),
+                    fill(m * k, 0xc511, |x| ((x % 255) as i64 - 127) as i8),
+                ),
+            ];
+
+            let mut selected: Option<(&str, Traversal)> = None;
+            let mut minted: Vec<(&str, String)> = Vec::new();
+            for (label, stream, a) in &operands {
+                let w = CodedMatrix::new(book, n, k, stream).expect("the codes describe n x k");
+                // Every field but the digest comes from the operand itself, so
+                // this is that artifact's manifest and not a stand-in written
+                // beside it.
+                let declared = Manifest::of(&w, NO_TABLE, NO_TABLE, SPEC);
+                let digest = digest_of(stream);
+                let artifact = Manifest {
+                    codes_sha256: &digest,
+                    ..declared
+                };
+                let mut buf = vec![0u8; 512];
+                let len = artifact
+                    .write_canonical_json(&mut buf)
+                    .expect("a canonical manifest");
+                minted.push((
+                    label,
+                    String::from_utf8(buf[..len].to_vec()).expect("the manifest is ascii"),
+                ));
+
+                assert!(
+                    artifact.reduces_along_the_block(shape),
+                    "the operand is declared n x k at {label}"
+                );
+                assert_eq!(
+                    artifact.addressing(),
+                    Addressing::of(TierId::Book, block, bound),
+                    "the addressing is the declaration's and nothing else's at {label}"
+                );
+
+                let (got, census) =
+                    tabulated(&w, a, m, n, Traversal::Blocked, OFFER_STEPS, OFFER_STEPS, 0);
+                assert_eq!(
+                    got,
+                    reference(&w, a, m, k, n),
+                    "the product at n = {n}, {label} ({census:?})"
+                );
+                match selected {
+                    None => selected = Some((label, ran(&census))),
+                    Some((first, want)) => assert_eq!(
+                        ran(&census),
+                        want,
+                        "at n = {n} the selection moved from {first} to {label}: {census:?}"
+                    ),
+                }
+            }
+
+            // And the artifacts really are different artifacts: the field that
+            // moved with the values is the field the derivation does not read.
+            for (i, (x, xs)) in minted.iter().enumerate() {
+                for (y, ys) in &minted[i + 1..] {
+                    assert_ne!(xs, ys, "at n = {n}, {x} and {y} minted one manifest");
+                }
+            }
+        }
+
+        // ---- the declaration moves: orientation ----
+        //
+        // The same 64 code words declared `8 x 64` and then `64 x 8`. Not one
+        // byte of the operand differs between the two, and each declaration
+        // admits exactly one of the two triples --- opposite ways round.
+        let n = 8usize;
+        let shape = Shape { m, k, n };
+        let stream: Vec<u16> = fill(n * blocks, 0xc512, |x| (x % space as u64) as u16);
+        let a: Vec<i8> = fill(m * k, 0xc513, |x| ((x % 255) as i64 - 127) as i8);
+        let along = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let across = CodedMatrix::new(book, k, n, &stream).expect("the same codes describe k x n");
+        let ma = Manifest::of(&along, NO_TABLE, NO_TABLE, SPEC);
+        let mx = Manifest::of(&across, NO_TABLE, NO_TABLE, SPEC);
+        assert_eq!(
+            ma.addressing(),
+            mx.addressing(),
+            "only the orientation moved, so the code declaration did not"
+        );
+        assert!(ma.reduces_along_the_block(shape));
+        assert!(!ma.reduces_across_the_block(shape));
+        assert!(mx.reduces_across_the_block(shape));
+        assert!(!mx.reduces_along_the_block(shape));
+
+        // The constructors answer the same question the declaration answered,
+        // and they answer it the same way. This is the whole orientation half of
+        // `CS-10`: the traversal that exists at all is decided here, from
+        // `rows` and `cols`, before a code has been looked at.
+        let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+        let mut c = vec![0i32; m * n];
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                TabulatedTriple::new(av, along, cv).is_ok(),
+                "the n x k declaration is the tabulated orientation"
+            );
+        }
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                matches!(
+                    TabulatedTriple::new(av, across, cv),
+                    Err(NotAProduct::Nonconformant { .. })
+                ),
+                "and the k x n declaration is not"
+            );
+        }
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                CodedTriple::new(av, across, cv).is_ok(),
+                "the k x n declaration is the streaming orientation"
+            );
+        }
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                matches!(
+                    CodedTriple::new(av, along, cv),
+                    Err(NotAProduct::Nonconformant { .. })
+                ),
+                "and the n x k declaration is not"
+            );
+        }
+
+        // ---- the declaration moves: the block ----
+        //
+        // One decoded operand under two declarations differing in the block
+        // alone: a 16-entry grid at one element per code, and a 16-codeword
+        // book whose `c`-th codeword is eight copies of the grid's `c`-th
+        // element. The code space is 16 either way, so the block is what moved.
+        let vals: [A8; 16] = core::array::from_fn(|i| Alphabet::of((i as i8) - 8));
+        let grid = Grid::<i8, Full<i8>, 16>::new(&vals);
+        let words: [[A8; 8]; 16] = core::array::from_fn(|c| [vals[c]; 8]);
+        let runs = Book::<i8, Full<i8>, 16, 8, u16>::new(&words);
+        let small = 16usize;
+
+        let rows16 = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= tabulation_rows(small, l1, lane).min(m))
+            .expect("a 16-entry table fits L1 at some tile");
+        let spec16 =
+            <i8 as Tabulated>::table_spec(backend, bound, false, rows16, column_group(rows16), 8);
+        let steps16 =
+            <i8 as Tabulated>::dense_steps(backend, bound, rows16, 8 * spec16.lanes_per_add);
+        let pays_at = (1..)
+            .find(|&cols| tabulation_pays(small, 8, cols, rows16, steps16, l1, lane))
+            .expect("a 16-entry codebook of eight-element codewords pays at some column width");
+        // The block-1 declaration is refused at every width there is --- which is
+        // `tabulation_pays` routing the arena tier back to the dense traversal,
+        // stated where the derived declaration says the same thing.
+        let spec1 =
+            <i8 as Tabulated>::table_spec(backend, bound, false, rows16, column_group(rows16), 1);
+        let steps1 = <i8 as Tabulated>::dense_steps(backend, bound, rows16, spec1.lanes_per_add);
+        assert!(
+            !tabulation_pays(small, 1, usize::MAX, rows16, steps1, l1, lane),
+            "one element per code repays no build at any width"
+        );
+        assert!(Addressing::of(TierId::Book, 8, bound).addresses_a_run());
+        assert!(!Addressing::of(TierId::Grid, 1, bound).addresses_a_run());
+        assert!(Addressing::of(TierId::Grid, 1, bound).addresses_an_element());
+
+        let n = pays_at;
+        let shape = Shape { m, k, n };
+        let a: Vec<i8> = fill(m * k, 0xc514, |x| ((x % 255) as i64 - 127) as i8);
+        let coarse: Vec<u16> = fill(n * blocks, 0xc515, |x| (x % 16) as u16);
+        let fine: Vec<u16> = (0..n * k).map(|i| coarse[i / block]).collect();
+        let wb = CodedMatrix::new(runs, n, k, &coarse).expect("n x k at a block of eight");
+        let wg = CodedMatrix::new(grid, n, k, &fine).expect("n x k at a block of one");
+        for j in 0..n {
+            for t in 0..k {
+                assert_eq!(
+                    wb.at(j, t),
+                    wg.at(j, t),
+                    "one operand, two declarations, at ({j}, {t})"
+                );
+            }
+        }
+        let mb = Manifest::of(&wb, NO_TABLE, NO_TABLE, SPEC);
+        let mg = Manifest::of(&wg, NO_TABLE, NO_TABLE, SPEC);
+        assert!(mb.reduces_along_the_block(shape));
+        assert!(mg.reduces_along_the_block(shape));
+        assert!(mb.addressing().addresses_a_run());
+        assert!(!mg.addressing().addresses_a_run());
+
+        // The plan the two calls resolve to, recomputed from the offers the
+        // helper passes, so a decline for want of room reads as the failure it
+        // would be rather than as the claim.
+        let plan = Plan::choose(
+            small,
+            shape,
+            lane,
+            suggested_tabulation::<i8, Full<i8>>(shape, small, 8).max(1),
+            suggested_tabulation_lanes::<i8, Full<i8>>(shape, small, 8).max(1) * 8 / lane,
+            8,
+            <i8 as Tabulated>::probe_capacity::<<i8 as Tabulated>::Lane>(bound),
+        )
+        .expect("the suggested offers admit a plan");
+        assert_eq!(plan.cols, n, "the amortization axis is `n` itself");
+        assert_eq!(plan.rows, rows16, "the tile the derivation priced");
+
+        let (got_b, cen_b) = tabulated(
+            &wb,
+            &a,
+            m,
+            n,
+            Traversal::Blocked,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        let (got_g, cen_g) = tabulated(
+            &wg,
+            &a,
+            m,
+            n,
+            Traversal::Blocked,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        assert_eq!(got_b, reference(&wb, &a, m, k, n));
+        assert_eq!(
+            got_b, got_g,
+            "the declaration moved the factorization and not the answer"
+        );
+        assert_eq!(
+            ran(&cen_b),
+            Traversal::Tabulated,
+            "a block of eight is tabulated at n = {n}: {cen_b:?}"
+        );
+        assert_eq!(
+            ran(&cen_g),
+            Traversal::Blocked,
+            "and a block of one is not, on the same decoded operand: {cen_g:?}"
+        );
+    }
+
+    /// Every knob but the encode mode, at one element type and one pair of
+    /// operands: the traversal, the backend, the panel offer, and the tile
+    /// partition the caller writes its output through.
+    ///
+    /// Asserts byte identity across the whole sweep and returns those bytes, so
+    /// a caller can hold them against another mode's.
+    fn one_answer<E, Bd, O, Ep>(
+        a: &[Alphabet<E, Bd>],
+        b: &[Alphabet<E, Bd>],
+        shape: Shape,
+        epilogue: &Ep,
+        encode: EncodeMode,
+    ) -> Vec<O>
+    where
+        E: Element,
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<E>>,
+        Ep: Epilogue<E, O>,
+    {
+        let Shape { m, k, n } = shape;
+        let mut answer: Option<Vec<O>> = None;
+        for traversal in [
+            Traversal::OutputMajor,
+            Traversal::Blocked,
+            Traversal::Tabulated,
+        ] {
+            for backend in core::iter::once(Backend::Auto).chain(Backend::ALL) {
+                for panel in [0usize, 1, k, crate::suggested_scratch(shape)] {
+                    for (tr, tc) in [(m, n), (1, 1), (2, 3), (m, 1), (1, n)] {
+                        let mut c = vec![O::ZERO; m * n];
+                        let mut buf = vec![Alphabet::<E, Bd>::ZERO; panel];
+                        let mut scratch = Scratch::new(&mut buf);
+                        // One tile at a time, into its own region of `C`
+                        // through its own strides: the partition is a knob a
+                        // caller turns, and the sum a tile computes cannot
+                        // depend on which tiles ran beside it (`CD-08`).
+                        for tile in Partition::new(shape, tr, tc) {
+                            let av = MatView::new(
+                                &a[tile.row * k..],
+                                tile.rows,
+                                k,
+                                Strides::row_major(k),
+                            )
+                            .expect("a row block of A");
+                            let bv = MatView::new(
+                                &b[tile.col..],
+                                k,
+                                tile.cols,
+                                Strides {
+                                    rs: n as isize,
+                                    cs: 1,
+                                },
+                            )
+                            .expect("a column block of B");
+                            let cv = MatViewMut::new(
+                                &mut c[tile.row * n + tile.col..],
+                                tile.rows,
+                                tile.cols,
+                                Strides {
+                                    rs: n as isize,
+                                    cs: 1,
+                                },
+                            )
+                            .expect("the tile's own region of C");
+                            let mut t = Triple::new(av, bv, cv).expect("a product");
+                            gemm(
+                                &mut t,
+                                epilogue,
+                                GemmOptions {
+                                    traversal,
+                                    backend,
+                                    encode,
+                                },
+                                &mut scratch,
+                            );
+                        }
+                        match &answer {
+                            None => answer = Some(c),
+                            Some(want) => assert_eq!(
+                                &c, want,
+                                "{traversal:?} on {backend:?}, a panel offer of {panel}, \
+                                 tiled {tr}x{tc}, at {encode:?}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        answer.expect("the sweep names at least one setting of every knob")
+    }
+
+    /// `CD-28`: within one element type, the encode mode is the only knob that
+    /// moves the output bytes.
+    ///
+    /// `CD-05` says the encode mode is the only thing that changes the output
+    /// bytes, and with a second semiring in the workspace that reads as
+    /// falsified: the ring product and the `(max, +)` product of one pair of
+    /// operands write different bytes, and neither changed mode. It is not
+    /// falsified. The quantifier is *per element type* --- the element type is
+    /// what carries the semiring, so two element types are two functions and
+    /// were never obliged to agree --- and this is that quantifier asserted at
+    /// both families, so the row is about the quantifier and not about one
+    /// algebra.
+    ///
+    /// Two-sided at each family: every other knob held against byte identity,
+    /// then the mode moved and the bytes with it.
+    #[test]
+    fn within_one_element_type_the_encode_mode_is_the_only_mover_cd_28() {
+        let (m, k, n) = (5usize, 7usize, 6usize);
+        let shape = Shape { m, k, n };
+        let modes = [
+            EncodeMode::Nearest,
+            EncodeMode::TowardZero,
+            EncodeMode::Saturating,
+            EncodeMode::Wrapping,
+        ];
+
+        // The output alphabet is as narrow as the input's, so the accumulation
+        // leaves its range and the mode has something to decide. The extreme is
+        // placed rather than hoped for: the first row of `A` and the first
+        // column of `B` sit at the top of the alphabet, so cell `(0, 0)` is past
+        // `i8` by construction.
+        let mut ring_a: Vec<i8> = fill(m * k, 0xcd28, |x| ((x % 255) as i64 - 127) as i8);
+        let mut ring_b: Vec<i8> = fill(k * n, 0xcd29, |x| ((x % 255) as i64 - 127) as i8);
+        for x in ring_a.iter_mut().take(k) {
+            *x = 127;
+        }
+        for p in 0..k {
+            ring_b[p * n] = 127;
+        }
+        let ring: Vec<Vec<i8>> = modes
+            .iter()
+            .map(|&mode| {
+                one_answer::<i8, Full<i8>, i8, _>(
+                    as_alphabet_full(&ring_a),
+                    as_alphabet_full(&ring_b),
+                    shape,
+                    &Linear::OVERWRITE,
+                    mode,
+                )
+            })
+            .collect();
+
+        // The same shape at the tropical instance. `⊗` is addition, so two
+        // elements at the top of the alphabet sum past it and the mode decides
+        // the same question it decides in the ring. Lanes at the semiring zero
+        // are swept too, because a masked operand is an operand.
+        let mut trop_a: Vec<Trop<i8>> = ring_a
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                if i % 11 == 3 {
+                    Trop::NEG_INF
+                } else {
+                    Trop::finite(x)
+                }
+            })
+            .collect();
+        let mut trop_b: Vec<Trop<i8>> = ring_b
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                if i % 13 == 5 {
+                    Trop::NEG_INF
+                } else {
+                    Trop::finite(x)
+                }
+            })
+            .collect();
+        trop_a[0] = Trop::finite(127);
+        trop_b[0] = Trop::finite(127);
+        let trop: Vec<Vec<Trop<i8>>> = modes
+            .iter()
+            .map(|&mode| {
+                one_answer::<Trop<i8>, Full<i8>, Trop<i8>, _>(
+                    as_alphabet_tropical(&trop_a),
+                    as_alphabet_tropical(&trop_b),
+                    shape,
+                    &MaxPlus::OVERWRITE,
+                    mode,
+                )
+            })
+            .collect();
+
+        // Three of the four modes are one map at an integer output: there is
+        // nothing to round, so `Nearest`, `TowardZero` and `Saturating` all
+        // clamp. `Wrapping` is a different map, and it is the one knob this row
+        // says the bytes turn on --- at both families.
+        assert_eq!(ring[0], ring[1], "the ring clamps under TowardZero");
+        assert_eq!(ring[0], ring[2], "the ring clamps under Saturating");
+        assert_ne!(
+            ring[0], ring[3],
+            "and Wrapping moves the ring's bytes, so the mode is not inert"
+        );
+        assert_eq!(trop[0], trop[1], "the tropical instance clamps too");
+        assert_eq!(trop[0], trop[2], "and under Saturating as well");
+        assert_ne!(
+            trop[0], trop[3],
+            "and Wrapping moves the tropical bytes, so the row is not about one family"
+        );
+
+        // The observation the quantifier exists for: at one mode and one pair of
+        // operands the two element types write different numbers. Nothing is
+        // violated --- they compute two products --- and that is exactly why
+        // `CD-05`'s "only" is read inside an element type.
+        let ring_values: Vec<Option<i8>> = ring[0].iter().map(|&x| Some(x)).collect();
+        let trop_values: Vec<Option<i8>> = trop[0].iter().map(|&x| x.get()).collect();
+        assert_ne!(
+            ring_values, trop_values,
+            "two element types are two functions, which is what the quantifier says"
+        );
     }
 }

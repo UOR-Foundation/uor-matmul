@@ -1,14 +1,17 @@
 //! `CM-02`, `CM-03`, and R4's behavioural half.
 //!
 //! Runs the meta-gate against the actual workspace: the register, the feature
-//! suites, and the test names `cargo test -- --list` reports. An ID with no
-//! scenario, a scenario with no ID, an ID with no test, or a mislabelled
-//! honesty level all fail here.
+//! suites, and the `#[test]` functions the workspace actually runs. An ID with
+//! no scenario, a scenario with no ID, an ID whose only test nothing runs, or a
+//! mislabelled honesty level all fail here.
+//!
+//! The harvest itself lives in [`uor_matmul_conformance::harvest`], because
+//! deciding whether a test runs is a rule with cases and every case has to be
+//! exercised --- which a helper buried in an integration test cannot be.
 
-use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use uor_matmul_conformance::{check_honesty, scenarios_in};
+use uor_matmul_conformance::{check_honesty, scenarios_in, TestNames};
 use uor_matmul_model::{Level, Model};
 
 fn root() -> PathBuf {
@@ -19,77 +22,38 @@ fn root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every `#[test]` function name in the workspace.
-///
-/// Read from the source rather than from `cargo test -- --list`, because this
-/// runs *inside* `cargo test` and a nested invocation blocks on the target
-/// directory lock. The scan is exact for the shape the workspace uses: a
-/// `#[test]` attribute followed, possibly after further attributes, by the
-/// function it annotates.
-fn workspace_test_names(root: &Path) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    let mut stack = vec![root.join("crates"), root.join("xtask")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().is_some_and(|n| n == "target") {
-                    continue;
-                }
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let mut armed = false;
-                for line in text.lines() {
-                    let line = line.trim();
-                    if line == "#[test]" {
-                        armed = true;
-                    } else if armed {
-                        if let Some(rest) = line.strip_prefix("fn ") {
-                            let name: String = rest
-                                .chars()
-                                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                                .collect();
-                            if !name.is_empty() {
-                                names.insert(name);
-                            }
-                            armed = false;
-                        } else if !line.starts_with('#') && !line.is_empty() {
-                            armed = false;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    names
-}
-
-/// `CM-02`: every registered ID has a scenario and a test, and every scenario
-/// and test names a registered ID.
+/// `CM-02`: every registered ID has a scenario and a test that runs, and every
+/// scenario and test names a registered ID.
 #[test]
 fn every_id_has_a_scenario_and_a_test_cm_02() {
     let root = root();
-    let tests = workspace_test_names(&root);
-    assert!(!tests.is_empty(), "the test list must not be empty");
+    let tests = TestNames::harvest(&root);
+    let running = tests.running();
+    assert!(!running.is_empty(), "the test list must not be empty");
 
     let report = check_honesty(&root, &tests).expect("the meta-gate runs");
     assert!(
         report.is_clean(),
-        "the honesty meta-gate failed:\n\n{}",
-        report.violations.join("\n\n")
+        "the honesty meta-gate failed:\n\n{}\n\nunreachable tests:\n    {}",
+        report.violations.join("\n\n"),
+        if tests.unreachable().is_empty() {
+            "none".to_string()
+        } else {
+            tests.unreachable().join("\n    ")
+        }
     );
+    let by_recipe = tests.by_recipe();
     eprintln!(
-        "CM-02: {} registered IDs, {} scenarios, {} test names",
+        "CM-02: {} registered IDs, {} scenarios, {} test names that run ({} of them only \
+         under a named recipe)",
         report.ids_checked,
         report.scenarios_checked,
-        tests.len()
+        running.len(),
+        by_recipe.len()
     );
+    for line in by_recipe {
+        eprintln!("    {line}");
+    }
 }
 
 /// R9: there are no pending or skipped steps.
@@ -146,15 +110,15 @@ fn every_some_true_claim_cites_an_authority_cm_03() {
 /// R4: the meta-gate can fail.
 ///
 /// A gate nobody has ever seen fail is indistinguishable from a gate that
-/// cannot. This plants each of the three violations it exists to catch and
-/// checks that each is reported.
+/// cannot. This plants each of the violations it exists to catch and checks
+/// that each is reported.
 #[test]
 fn the_meta_gate_is_falsifiable_cm_02() {
     let root = root();
 
-    // An ID with no test.
-    let empty = BTreeSet::new();
-    let report = check_honesty(&root, &empty).expect("runs");
+    // An ID with no test at all.
+    let none = TestNames::default();
+    let report = check_honesty(&root, &none).expect("runs");
     assert!(!report.is_clean(), "an empty test list must fail the gate");
     assert!(
         report
@@ -165,6 +129,36 @@ fn the_meta_gate_is_falsifiable_cm_02() {
     );
 
     // A test list that covers everything passes, which is the control.
-    let full = workspace_test_names(&root);
+    let full = TestNames::harvest(&root);
     assert!(check_honesty(&root, &full).expect("runs").is_clean());
+}
+
+/// `CM-02`: the harvest covers the whole workspace.
+///
+/// `CM-02` matches an ID against test names gathered from two directories. If a
+/// member crate ever moved out from under them the gate would go on passing
+/// while checking less --- the worst failure a meta-gate has, because it is
+/// silent. [`TestNames::harvest`] refuses to return in that case; this names the
+/// claim so that it appears in the suite rather than only in a panic.
+#[test]
+fn the_harvest_covers_every_workspace_member_cm_02() {
+    let root = root();
+    let manifest =
+        std::fs::read_to_string(root.join("Cargo.toml")).expect("the workspace manifest reads");
+    let value: toml::Value = manifest.parse().expect("the workspace manifest parses");
+    let members = value["workspace"]["members"]
+        .as_array()
+        .expect("the workspace declares members");
+    assert!(!members.is_empty(), "a workspace with no members");
+
+    // The harvest asserts coverage itself; running it here is what makes that
+    // assertion part of the suite. The count is the control: coverage that
+    // yields nothing is coverage in name only.
+    let tests = TestNames::harvest(&root);
+    assert!(
+        tests.all().len() >= members.len(),
+        "{} members and only {} test names: the harvest is not reading them",
+        members.len(),
+        tests.all().len()
+    );
 }

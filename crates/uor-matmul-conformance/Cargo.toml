@@ -12,6 +12,13 @@ uor-matmul-model = { workspace = true }
 uor-matmul = { workspace = true, features = ["std"] }
 uor-matmul-core = { workspace = true }
 uor-matmul-validate = { workspace = true }
+# `CM-02` asks two questions the manifests answer and nothing else does: which
+# directories the workspace's members live in, and which features a crate turns
+# on by default. Hand-reading TOML to answer them would put a second, worse
+# parser in the gate that decides whether every other gate ran. The version is
+# the one `uor-matmul-model` already resolves, so this adds nothing to the
+# dependency graph.
+toml = "0.8"
 
 [lints]
 workspace = true

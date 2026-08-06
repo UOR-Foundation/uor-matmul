@@ -53,3 +53,9 @@ Feature: Purity
     Given the standing corpus
     When the suite exercises CU-08
     Then the claim holds byte for byte
+
+  @CU-10 @build
+  Scenario: No tropical sequence issues a multiply, read from the emitted instructions
+    Given the standing corpus
+    When the suite exercises CU-10
+    Then the claim holds byte for byte

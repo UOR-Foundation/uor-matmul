@@ -104,11 +104,20 @@ sized against the largest `k` the machine can address, so overflow is
 | `i16` | 95 | `i128` |
 | `i32` | 127 | `i128` |
 | `i64` | 191 | `Limbs<3>` (192 bits) |
+| `Trop<i8>` | 10 | `TropAcc<10>` |
+| `Trop<i64>` | 66 | `TropAcc<66>` |
 
 `MAX_K_BITS` is *declared* in `model/constants.toml`, not probed from the host,
 so this table is the same table on a 64-bit host, a 32-bit host, and wasm32. A
 32-bit host cannot reach that depth, which makes the width conservative there
 and never wrong anywhere.
+
+The last two rows have **no depth term at all** --- ten bits where the ring's
+`i8` needs seventy-nine --- and their absence is the arithmetic content of the
+selection half. A sum grows with the reduction; a maximum does not.
+`max_p (a_p + b_p)` is bounded by `2B` whatever `k` is, so `MAX_K_BITS` never
+enters the derivation and `CA-04` is the gate that says the width is the same
+number at depth one and at the deepest reduction the machine can address.
 
 There is no ladder, no policy, no promotion, and no `k_max` in the public API.
 `fits_narrow` survives only as an internal predicate answering one question:
@@ -169,6 +178,75 @@ Consequences, stated plainly:
   accumulation.
 - Non-finite inputs are codes too. NaN and infinity propagate by the IEEE rules;
   they are not an error condition.
+
+## Max is a code operation too
+
+The operation census this library is written against names two products, not
+one: *matrix products under complete accumulation*, and *max*. The second is the
+`(max, +)` semiring --- `⊕` is `max`, `⊗` is addition --- and it is where a
+transformer's selection lives once the softmax is gone.
+
+It is not a second method, and it is not a second driver. The semiring is
+carried by the **element type**: `Trop<E>` is the alphabet `E ∪ {-inf}`, its
+`mac` is `acc = max(acc, a + w)`, and its accumulator's `combine` is `max`. The
+*reference traversal* names `E::mac` and `combine` and nothing else, so
+instantiating `E` at `Trop<i8>` is the whole of the change there:
+
+```rust
+# use uor_matmul::prelude::*;
+# use uor_matmul::{Scratch, Triple};
+let a = [Trop::finite(1i8), Trop::finite(2), Trop::finite(3), Trop::finite(4)];
+let b = [Trop::finite(5i8), Trop::finite(6), Trop::finite(7), Trop::finite(8)];
+let mut c = [Trop::<i32>::NEG_INF; 4];
+
+let av = MatView::row_major(as_alphabet_tropical(&a), 2, 2).unwrap();
+let bv = MatView::row_major(as_alphabet_tropical(&b), 2, 2).unwrap();
+let cv = MatViewMut::row_major(&mut c, 2, 2).unwrap();
+let mut t = Triple::new(av, bv, cv).unwrap();
+
+uor_matmul::driver::gemm(&mut t, &MaxPlus::OVERWRITE, GemmOptions::default(), &mut Scratch::none());
+// max(1+5, 2+7) = 9, and so on.
+assert_eq!(c, [Trop::finite(9), Trop::finite(10), Trop::finite(11), Trop::finite(12)]);
+```
+
+That is `uor_matmul::driver::gemm` --- the reference traversal, the one R6 keeps
+unoptimized and every other factorization is validated against. It is *not* the
+`gemm` the first example on this page calls: that one is `gemm_auto`, which
+selects a kernelized factorization, and every such factorization is bounded on
+`Kernelized`, which `Trop<E>` deliberately does not implement. So the census's
+second product runs on the reference traversal and on the packed `(max, +)`
+sequences (`CB-13`), and not through the auto-selecting front door. Saying which
+is not a caveat --- it is the difference between a claim about *the* driver and
+a claim about *every* driver, and the second one is false.
+
+`CD-29` asserts the first: the reference traversal computes both products, and
+it asserts the *structure* as well as the value --- a planted branch on the
+accumulator's width, which is exactly a branch on which semiring the caller is
+in, fails it. `CK-16` asserts that the semiring laws hold at *every* instance
+while idempotence holds precisely at the tropical one and fails precisely at the
+ring.
+
+Three consequences, each load-bearing:
+
+- **The semiring zero is the pad and the mask.** A padded position decodes to
+  `Element::ZERO`, which here is `-inf`; a masked position is the semiring zero.
+  They coincide by construction, so a masked shape and a zero-padded shape are
+  byte-identical and there is nothing to reconcile (`CK-17`).
+- **`-inf` is a value of `Trop<E>`, not a reserved pattern inside `E`.**
+  `i8::MIN` remains a perfectly ordinary finite tropical element, exactly as it
+  remains an ordinary member of its own alphabet in the ring family. A sentinel
+  would also have made `⊗` at the semiring zero an `i8::MIN + a` that overflows,
+  which the checked build traps and C6 forbids --- so the absorbing law is
+  spelled as *no arithmetic is performed at all* (`CT-08`).
+- **`Trop<E>` is deliberately not an `IntegerElement`.** That is what excludes
+  the sub-cubic recursion, which needs additive inverses the semiring does not
+  have, and the `Linear` epilogue, whose `beta * C` has no reading under
+  `(max, +)`. Excluded by construction, not by a runtime check.
+
+A selection also answers a question a sum cannot: *which* term achieved it.
+`gemm_selected` writes that witness beside the product, under D-6's tie-break
+--- the smallest index --- by either of two mechanisms whose bytes are identical
+at every shape, degeneracy and offer including none (`CD-24`, `CD-25`).
 
 ## When the operand is a code, the product is a table read
 

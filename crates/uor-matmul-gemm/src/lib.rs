@@ -50,13 +50,14 @@ pub mod float;
 pub mod kernel;
 pub mod partition;
 pub mod scratch;
+pub mod selection;
 pub mod strassen;
 pub mod tabulated;
 
 pub use coded::{coded_gemm, CodedTriple};
 pub use collapse::{gemm_collapsed, suggested_collapse_index, suggested_collapse_rows, Collapse};
 pub use driver::{gemm, GemmOptions};
-pub use epilogue::{Bias, Epilogue, Linear, PlaceAt, Scaled};
+pub use epilogue::{Bias, Epilogue, Linear, MaxPlus, PlaceAt, Scaled, ShiftExact};
 pub use float::{
     gemm_float, gemm_float_bridged, gemm_float_packed, suggested_bridge_scaled,
     suggested_float_panels, SignedPlace,
@@ -69,6 +70,7 @@ pub use scratch::{
     minimum_workspace, suggested_accumulators, suggested_scratch, workspace_for_budget,
     workspace_report, Chunking, PanelSplit, Scratch, WorkspacePlan, WorkspaceReport,
 };
+pub use selection::{gemm_selected, SelectedTriple, Witness};
 pub use strassen::{
     gemm_strassen, gemm_strassen_modular, gemm_strassen_modular_counted, levels as strassen_levels,
     modular_level_needs, strassen_scratch,

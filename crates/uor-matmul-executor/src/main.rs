@@ -22,7 +22,8 @@ mod device {
         available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
         available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
         available_reduce_i8, available_table_i16, available_table_i32_modular,
-        available_table_i64_modular, available_table_i8, parity, MAX_TILE_LANES,
+        available_table_i64_modular, available_table_i8, available_tropical_i16, parity,
+        MAX_TILE_LANES, TROP_I16_MAX_BOUND, TROP_ZERO,
     };
 
     // The scratch geometry. Every bound below is read off the reduced corpus
@@ -255,6 +256,74 @@ mod device {
         i64
     );
 
+    /// The packed tropical family, at each of the three bounds it declares.
+    ///
+    /// Hand-written rather than one `tile_check!` because the family is swept
+    /// at three declared bounds and that macro carries a single fill: the bound
+    /// is what decides where the finite range ends and the absorbed one begins,
+    /// so one fill would leave two thirds of `CB-13` unrun here. The bounds,
+    /// the salts and the fills are [`parity::TROP_SWEEPS`], the same list the
+    /// host harness reads.
+    ///
+    /// The extremes are in the same function and not a separate one, because on
+    /// this target they are the half that has teeth: a Cortex-M build offers
+    /// only the reference, so what is being run here is the *representation* ---
+    /// the saturating add at two masked operands, which no random fill reaches.
+    #[inline(never)]
+    fn tile_tropical() -> usize {
+        let mut pa = [TROP_ZERO; PANEL];
+        let mut pb = [TROP_ZERO; PANEL];
+        let mut lane_a = [TROP_ZERO; KC];
+        let mut lane_b = [TROP_ZERO; KC];
+        let mut acc = [TROP_ZERO; MAX_TILE_LANES];
+        let mut want = [TROP_ZERO; MAX_TILE_LANES];
+        let mut compared = 0;
+        for (salts, map) in parity::TROP_SWEEPS {
+            let mut scratch = parity::TileScratch {
+                pa: &mut pa,
+                pb: &mut pb,
+                lane_a: &mut lane_a,
+                lane_b: &mut lane_b,
+                acc: &mut acc,
+                want: &mut want,
+            };
+            compared += parity::tile_parity(
+                "tile_tropical",
+                available_tropical_i16(),
+                parity::DEPTHS_REDUCED,
+                salts,
+                (map, map),
+                parity::dot_trop_i16,
+                &mut scratch,
+            );
+        }
+        let mut scratch = parity::TileScratch {
+            pa: &mut pa,
+            pb: &mut pb,
+            lane_a: &mut lane_a,
+            lane_b: &mut lane_b,
+            acc: &mut acc,
+            want: &mut want,
+        };
+        compared += parity::tile_extremes(
+            "tile_tropical extremes",
+            available_tropical_i16(),
+            parity::DEPTHS_REDUCED,
+            &parity::TROP_EXTREMES,
+            parity::trop_expect,
+            &mut scratch,
+        );
+        // The separation the family turns on, read on the target's own
+        // arithmetic rather than assumed from the host's: an absorbed lane must
+        // lose a `max` against the lowest finite result there is.
+        let b = TROP_I16_MAX_BOUND as i16;
+        assert!(
+            TROP_ZERO.saturating_add(b) < (-b).saturating_add(-b),
+            "CB-13: the absorbed range must sit strictly below the finite one"
+        );
+        compared + 1
+    }
+
     /// The tile sequences at the extremes of their declared alphabets.
     #[inline(never)]
     fn tile_extremes() -> usize {
@@ -472,6 +541,7 @@ mod device {
         run("tile i16 modular", tile_i16_modular());
         run("tile i64 exact", tile_i64_exact());
         run("tile i64 modular", tile_i64_modular());
+        run("tile tropical", tile_tropical());
         run("reduce i8", reduce_i8());
         run("reduce i16", reduce_i16());
         run("reduce i32 exact", reduce_i32_exact());

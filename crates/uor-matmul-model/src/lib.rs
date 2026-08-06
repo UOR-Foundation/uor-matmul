@@ -346,6 +346,29 @@ impl Model {
                     row.id
                 )));
             }
+            if row.refuted_by.trim().is_empty() {
+                return Err(bad(format!(
+                    "{}: a claim with no refutation condition is not falsifiable; every row \
+                     states what would refute it",
+                    row.id
+                )));
+            }
+            // R10, CM-02: `CONFORMANCE.md` groups the register by class, and
+            // the generator skips a class it does not know. Left to the
+            // generator, that skip is silent: the row stays gated by every
+            // rule here and by the meta-gate, and reaches the published index
+            // nowhere. No byte comparison can catch it either, because the
+            // rendered bytes and the committed bytes agree on the absence. So
+            // the register refuses the row, which is the one place the
+            // omission is visible.
+            if !codegen::CLASSES.iter().any(|(p, _)| row.id.starts_with(p)) {
+                return Err(bad(format!(
+                    "{}: `CONFORMANCE.md` renders no class this ID belongs to, so the row \
+                     would be gated everywhere and published nowhere; add its class to \
+                     `codegen::CLASSES`, or register the ID under a class that exists",
+                    row.id
+                )));
+            }
         }
 
         // §3.4: the integer oracles agree byte for byte over the whole corpus
@@ -478,6 +501,55 @@ mod tests {
         let model = Model::load_from_repo_root().expect("model loads");
         model.check().expect("model checks");
         assert!(model.ids.id.len() > 50, "the register is the whole of §2.1");
+    }
+
+    /// CM-02: a row whose class `CONFORMANCE.md` does not render is refused
+    /// rather than skipped.
+    ///
+    /// This is the one omission the index cannot report about itself: an
+    /// unrendered row leaves the rendered bytes and the committed bytes
+    /// equally silent, so `check-model`'s byte comparison passes over it. The
+    /// refusal is therefore asserted here, with the committed register as the
+    /// control that the rule admits every class actually in use.
+    #[test]
+    fn a_class_the_index_does_not_render_is_refused_cm_02() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model
+            .check()
+            .expect("every committed row names a rendered class");
+
+        let mut planted = model.ids.id[0].clone();
+        planted.id = "CZ-01".to_string();
+        model.ids.id.push(planted);
+        let e = model
+            .check()
+            .expect_err("a class the index does not render is refused");
+        let text = e.to_string();
+        assert!(text.contains("CZ-01"), "{text}");
+        assert!(text.contains("codegen::CLASSES"), "{text}");
+    }
+
+    /// CM-02, R4: a row that names no refutation condition does not ship,
+    /// in the ID register and in the ledger alike.
+    ///
+    /// Whitespace rather than an empty string, because a condition spelled as
+    /// a space is exactly the omission that would otherwise read as a value.
+    #[test]
+    fn a_claim_with_no_refutation_condition_is_refused_cm_02() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.check().expect("every committed row states one");
+
+        let restore = model.ids.id[0].refuted_by.clone();
+        model.ids.id[0].refuted_by = "   ".to_string();
+        let e = model.check().expect_err("an ID row with none is refused");
+        assert!(e.to_string().contains("not falsifiable"), "{e}");
+        model.ids.id[0].refuted_by = restore;
+
+        model.ledger.claim[0].refuted_by = String::new();
+        let e = model
+            .check()
+            .expect_err("a ledger row with none is refused");
+        assert!(e.to_string().contains("not falsifiable"), "{e}");
     }
 
     /// CM-03: every `some-true` claim cites an authority that exists.
