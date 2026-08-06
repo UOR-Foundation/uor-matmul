@@ -41,6 +41,11 @@ test:
 features:
     cargo check --workspace --all-features --all-targets
     cargo test -p uor-matmul-codec --all-features
+    # `CX-08`'s harness sits behind `ref-gemm`, which is not a default feature,
+    # so `cargo test --workspace` compiles it and never runs it. The strengthened
+    # `CM-02` found that: a test that is compiled out is not evidence, it is a
+    # name. This line is what makes the oracle's row honest.
+    cargo test -p uor-matmul-validate --all-features
 
 # CT-02: the whole corpus in a build where every accumulator operation is
 # checked and any overflow panics. The width is derived so that this is
@@ -183,13 +188,21 @@ cross: no-alloc cross-run
 
 # The bench half of `scaling`, on its own for the quick loop: one criterion
 # group per element type times this library beside every enabled oracle at
-# three shapes, byte-equality asserted inside each timed closure. A regression
+# three shapes; this includes tropical lane and witness scaling. Byte-equality
+# is asserted inside each timed closure. A regression
 # against your own last run is a criterion baseline away ---
 # `--save-baseline before` before the change, `--baseline before` after.
 #
-# "Are we faster?", beside every enabled oracle. Seconds.
+# "Are we faster?", beside every enabled oracle. Seconds. The completed
+# Criterion measurements are consolidated into target/criterion/REPORT.md and
+# target/criterion/REPORT.html after the run.
 bench:
     cargo bench -p uor-matmul-validate
+    cargo run --release -p uor-matmul-validate --bin benchmark_report
+
+# Regenerate the comparison report from an existing Criterion directory.
+bench-report:
+    cargo run --release -p uor-matmul-validate --bin benchmark_report
 
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a
 # fitted exponent with a confidence interval, against the same fit for the
@@ -230,21 +243,27 @@ honesty: bdd
 bdd:
     cargo test -p uor-matmul-conformance
 
-# CT-01, CT-03, CK-06: the fuzz targets. Needs `cargo install cargo-fuzz` and a
-# nightly toolchain, which is why it is not part of `just vv`.
+# CT-01, CT-03, CK-06, CT-08, CD-25: the fuzz targets. Needs `cargo install
+# cargo-fuzz` and a nightly toolchain, which is why it is not part of `just vv`.
 #
-# Totality over unstructured input, on all three targets.
+# The `tropical` target carries a differential as well as a totality claim: it
+# runs both witness mechanisms on the operands the fuzzer drew and compares
+# their bytes, because a corpus is a list of shapes someone thought of.
+#
+# Totality over unstructured input, on all four targets.
 fuzz duration="60":
     cargo +nightly fuzz run totality -- -max_total_time={{duration}}
     cargo +nightly fuzz run float_decode -- -max_total_time={{duration}}
     cargo +nightly fuzz run codec_shapes -- -max_total_time={{duration}}
+    cargo +nightly fuzz run tropical -- -max_total_time={{duration}}
 
 # Regenerate the committed oracle and corpus artifacts. Run only when a corpus
 # changes; the outputs are committed and their digests are recorded.
 #
-# Regenerate the NumPy oracle and symbol-corpus artifacts. Only when a corpus changes.
+# Regenerate the NumPy oracles and the symbol corpus. Only when a corpus changes.
 oracles:
     python3 oracles/numpy/generate.py
+    python3 oracles/tropical/generate.py
     python3 oracles/symbols/generate.py
 
 # CG-11: the static issue census --- llvm-mca over the emitted inner loops, one
@@ -353,6 +372,19 @@ op-cost-fit:
 # The recursion against the cubic walk, measured. Minutes.
 strassen-sweep:
     cargo test --release -p uor-matmul-validate --test strassen_sweep -- \
+        --ignored --nocapture --test-threads=1
+
+# CG-19: the selection lane against the accumulation lane at matched shapes ---
+# one driver at two instantiations of `E`, so what separates the rates is the
+# arithmetic and not the traversal --- with the packed ring lane beside them for
+# scale, and the two witness mechanisms at both ends of the compare pass's cost.
+# Byte-identity with a reference computed off the timed path is asserted inside
+# every timed run. Seconds, and every figure is `open`. `--release` is not
+# optional: a throughput figure from an unoptimised build is not a figure.
+#
+# The selection lane against the ring lane, measured. Seconds.
+tropical-sweep:
+    cargo test --release -p uor-matmul-validate --test tropical_sweep -- \
         --ignored --nocapture --test-threads=1
 
 # CG-17: the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends

@@ -1,5 +1,37 @@
 # MEASUREMENT LOG
 
+**The finite i8 lookup route (first host measurement; open).** The complete
+signed i8 product alphabet is now a static 256 KiB lookup table, and selected
+i8 dense, reduce, and table entries use lookup plus accumulation on every ISA
+family. The table is generated at compile time by an independent shift-add
+constructor; shipped calls do not allocate. On the development host (Apple M4
+Max, aarch64), the existing `gemm/i8_i32_128cubed` Criterion case measured
+**992.81 us--1.0875 ms**, midpoint **1.0350 ms** over ten samples. Criterion
+compared this with the prior route at **+5.58%--+12.44%** (midpoint **+8.94%**),
+so this correctness-complete lookup route was a small regression. Byte identity
+and the zero-multiply census passed. The follow-up native vector-add/gather
+route retains the same table identity: on the same host and shape it measured
+**880.00 us--889.39 us**, midpoint **883.99 us**, or **-15.14% to -8.15%**
+(midpoint **-11.85%**) against the scalar lookup route. ARM's table reads remain
+scalar because NEON has no general i32 gather; its accumulation is now native
+four-lane add. The AVX2 and AVX-512 table builders now use native i32 gather
+plus add as well. The pinned Rust toolchain cross-checks both x86-64 and Wasm
+kernel builds; no non-CPU path was added in this step. The reduce factorization
+now has the same native vectorized lookup accumulation on all three ISA
+families. On the development host, `workspace/none[0B]/1x1048576x1` measured **383.69 us--386.95 us**,
+midpoint **385.33 us**, or **-8.74% to -7.03%** (midpoint **-7.89%**) against
+the prior reduce route. Byte identity was asserted in the timed path. The
+The isolated finite-i8 table-build benchmark now covers the full-alphabet
+builder at `space=4096`, `block=16`, `rows=16`: portable measured
+**383.21 us--398.29 us**, midpoint **391.98 us**, while the native NEON build
+measured **379.36 us--385.02 us**, midpoint **381.70 us** (about **2.62%**
+faster at the midpoint, ten samples). A CPU byte-sliced i16 table-build
+experiment was rejected: portable measured **105.04 us** versus **1.758 ms**
+for native NEON, about **16.7x slower**; that path was reverted and does not
+ship. The next viable CPU target is direct x86 measurement of the already
+implemented AVX2/AVX-512 gather builders, followed by a narrower optimization
+only if that measurement identifies a bottleneck.
+
 The working log of the representation-width performance phase. This file is
 the one place a named next step may live while `SUSP-R15-WIDTH-PHASE` stands
 in `model/ledger.toml`: performance work is iterative, and a rule forbidding a
@@ -31,7 +63,24 @@ In landing order. An entry leaves this list by shipping with its IDs and
 gates, or by being measured and recorded below as a result.
 
 The phase's eight items are all landed. What remains are the follow-ups the
-measurements named:
+measurements named.
+
+**The suspension's scope, item by item.** `SUSP-R15-WIDTH-PHASE` admits exactly
+this file and nothing else, and it ends when every item below has either shipped
+with its IDs and gates or been measured and recorded as a result. Waving at the
+suspension is not a disposition, so here is one per item:
+
+| Item | Disposition |
+| --- | --- |
+| VNNI break-even | **Blocked on hardware, with the reason in the rows.** `model/tiers.toml`'s VNNI rows stay `Unmeasured`; the runner declares no AVX-512, so the AVX2 pair's derived 683 is the caller-experienced crossing there. Not on any current critical path: the tropical sequences are baseline AVX2 (`vpmaxs*` and a saturating `vpadds*`) and deliberately need no VNNI. Closes when a runner with AVX-512 exists. |
+| The co-issue thesis | **Answered and refuted.** 2.6--11.2x slower at every configuration; no kernel ships. The harness is retained rather than deleted, for a second host whose scalar-to-vector density ratio could differ --- that retention is the item's whole remainder, and it is a decision, not a pending step. |
+| Mantissa slicing | **Conditional, trigger not met.** The arithmetic is recorded in ANALYSIS.md and is not to be rediscovered. The trigger is a measured narrow-to-wide ratio of eight or better; every host measured here sits at four to five, so it does not fire. Closes as *declined on this host class*, and reopens only on a measurement, never on a preference. |
+| The multi-host remainder | **Closed.** The `CG-17` x86 figure landed: 0.30x at `k = 64` and 0.20x at `k = 1024` and `16384`, the same decline on a second host. |
+
+Three of the four are closed as results. The one that is not is blocked on a
+machine, which is a fact about the world rather than work this repository is
+holding back --- and the suspension row stays exactly until that machine
+produces a figure or the rows are retired.
 
 1. **The multi-host remainder.** All read now. The CG-17 x86 figure: the
    SWAR broadcast at 0.30x of the dot sequence at `k = 64` and 0.20x at
@@ -57,6 +106,35 @@ measurements named:
    not fire here.
 
 ## Measurements
+
+**The selection lane against the ring lane (`CG-19`, measured; every figure
+`open`).** Measured on the CI-class development host (x86_64-unknown-linux-gnu,
+AVX2, no AVX-512), 2026-08-06, `just tropical-sweep` in release, seed 20260805,
+best of a 0.35 s budget per point, with byte-identity against the reference
+traversal asserted inside every timed run.
+
+At `64^3`: the `(max, +)` reference lane reads **0.683 Gmac/s**, the ring
+reference lane 0.995, and the ring's *packed* lane 11.144. The first two are the
+comparison the row is about --- the same traversal at two instantiations --- and
+they sit within a factor of one and a half, which is what a traversal that
+branches on nothing should look like. The third is not a tropical figure and is
+recorded only so the first two are not read as this library's throughput: the
+packed ring lane is an order above both, because it is kernelized and the
+reference is not. The tropical sequences that would close that gap are pinned by
+`CB-13` and are not what this row times.
+
+The two witness mechanisms, at `16x4096x16`: on a tie-dense fill, lexicographic
+**0.316 Gmac/s** against compare-pass **0.854**; on a fill whose maximum falls
+last, lexicographic **0.388** against **0.316**. The order reverses, which is why
+both fills are timed and why neither mechanism is a default in the sense of being
+faster --- `Witness::Lexicographic` is the default because its invariance is a
+property of the order rather than of the loop (`CD-24`), and `CD-25` asserts the
+two write the same bytes whatever the clock says.
+
+Nothing here is asserted as a property of the library. A reader who reruns
+`just tropical-sweep` on another host should expect different numbers and the
+same two orderings, and a disagreement about the *orderings* at this host, seed
+and shape is what would refute the row.
 
 **The public-path and workspace benches (CD-22 and the Phase B plans,
 measured; figures `open`).** On the development host (Apple M4 Max, quiet
@@ -463,6 +541,80 @@ the default's offer cannot spell the accumulator room the chunked traversal
 and the sub-cubic level want, which is the remaining distance to the
 `CG-15` explicit column (14.95 against 13.89 at one-exponent `1024` cubed)
 and to the oracle (3.8x at `1024` cubed, from 13x).
+
+**Deep default bridge re-read (CG-15, open).** The panel-only float entry had
+enough room for the bridge's reified operands and kernel panels, but no exact
+accumulator offer. At a depth past the selected lane's capacity it therefore
+declined to the scalar scaled loop, even though the same kernel traversal was
+faster when [`gemm_float_bridged`] supplied accumulator room. The default now
+keeps one tile-sized `i128` accumulator block on the stack and lets the kernel
+chunk the reduction; the byte-identical test now pins the bridge at both shallow
+and deep admitted depths. This adds no model constant and keeps the no-allocation
+API unchanged.
+
+On the same aarch64-macos host, `just bridge-sweep` (best of a 0.35 s budget per
+point, 2026-08-05) read the retained version as follows:
+
+| fill | default at `512` cubed | explicit | default at `1024` cubed | explicit |
+| --- | ---: | ---: | ---: | ---: |
+| one exponent | 14.208 | 13.905 | 15.271 | 17.285 |
+| a few binades (3/4) | 4.552 | 12.369 | 4.888 | 15.202 |
+| wide spans (18/22) | 3.602 | 3.694 | 3.658 | 3.672 |
+
+The accumulator closes part of the default deep-span gap, but the large
+explicit offer still has more output-block room and can admit richer factoring.
+The wide-span row is unchanged: its exponent range does not fit the `i32`
+bridge, so both entries correctly use the scalar scaled lane.
+
+**Wide-span compact-band probe (CG-15, open; rejected).** A caller-owned
+experiment compacted each finite `f32` code to a band-local `i32` value and
+bucketed each output by `(A-band, B-band)`, placing each non-empty bucket once.
+It was byte-identical to the scalar lane, but on the same aarch64-macos host
+it reached only `0.415`, `0.431`, `0.434`, `0.342`, and `0.401` Gmac/s at
+`32`, `256`, `512`, `1024` cubed, and `509x1021x257`, respectively, against
+`1.649`, `3.414`, `3.711`, `3.837`, and `3.819` for the scalar lane. The
+per-output bucket bookkeeping and wide integer accumulation cost more than the
+placements removed, so the experiment is not part of the shipped API. The
+result narrows the next target: a useful wide-span optimization needs a
+sparse-native kernel or a representation that groups reduction positions
+before the output-cell loop; another scalar band decomposition is not enough.
+
+**Portable tropical baseline (CG-19, open).** The first completed slice of
+the plan's D-8 selection half is the exact portable `(max, +)` reference:
+finite inputs use a one-step wider signed sum, `-inf` is the semiring zero,
+and reduction combines by max. The release sweep on the development host
+(Apple M4 Max, aarch64-apple-darwin; 2026-08-05) measured:
+
+| shape | portable reference (Gop/s) |
+| --- | ---: |
+| 32x32x32 | 1.504 |
+| 128x128x128 | 1.557 |
+| 256x256x256 | 1.478 |
+
+The timed result is byte-identical to an independently written scalar oracle.
+This is a baseline, not a performance claim.
+
+**Native tropical lane (CG-20, open; shipped).** The plan's first native
+factorization is a separate tropical kernel family: an 8x16 stack block packs
+each operand once, then invokes a 4x8 NEON tile whose interleaved loads decode
+eight `Trop<i8>` records at once and reuse that B vector across four A rows.
+The tile applies `smax`/`add` and processes depth in stack chunks. It is
+byte-identical to the portable result, including `-inf`, tails, and a depth
+that crosses a chunk boundary. On the same host and release harness it
+measured:
+
+| shape | portable reference (Gop/s) | native NEON (Gop/s) |
+| --- | ---: | ---: |
+| 32x32x32 | 1.542 | 6.292 |
+| 128x128x128 | 1.595 | 6.727 |
+| 256x256x256 | 1.498 | 6.235 |
+
+The native blocked path is about 4.0--4.2x here. The representation-aware
+load, four-row reuse, and 8x16 stack block remove the prior scalar conversion,
+repeated-B decode, and panel-copy costs while keeping one semantic data path.
+The next optimization is a larger measured cache block if the host's working
+set supports it; AVX2 and wasm remain additive backend factorizations under the
+same tropical contract.
 
 **f32 as a symbol (CK-14, CD-18, shipped; CG-14 figures `open`).** The arena
 tier's code width is a parameter now: `Arena<'_, E, N, u8>` stores one byte a

@@ -5,6 +5,14 @@
 #
 # The resolved versions live in `Cargo.lock`, which is committed, because the
 # version of an oracle is part of the claim made against it.
+#
+# Every `harness` below names a function that exists, and
+# `tests/provenance.rs::the_recorded_harness_names_resolve` is what says so.
+# Four of them did not: `xtask verify-oracles` substring-matches the *id* and
+# reads no other field, and the register's ID-to-test rule matches by name
+# suffix, so a record could point at nothing while both gates stayed green. A
+# provenance record whose harness cannot be found is a citation to a missing
+# paper.
 
 spec = "uor-matmul/1"
 
@@ -13,7 +21,7 @@ id = "CX-01"
 oracle = "ndarray"
 kind = "crate"
 entry = "Array2::dot"
-harness = "crates/uor-matmul-validate/tests/cross_library.rs::ndarray_i32_agrees_cx_01"
+harness = "crates/uor-matmul-validate/tests/cross_library.rs::ndarray_i32_is_byte_identical_cx_01"
 version_pin = "Cargo.lock"
 exactness = "exact"
 status = "reproduced"
@@ -26,7 +34,7 @@ id = "CX-02"
 oracle = "nalgebra"
 kind = "crate"
 entry = "DMatrix<i32> multiplication"
-harness = "crates/uor-matmul-validate/tests/cross_library.rs::nalgebra_i32_agrees_cx_02"
+harness = "crates/uor-matmul-validate/tests/cross_library.rs::nalgebra_i32_is_byte_identical_cx_02"
 version_pin = "Cargo.lock"
 exactness = "exact"
 status = "reproduced"
@@ -36,7 +44,7 @@ id = "CX-03"
 oracle = "ndarray"
 kind = "crate"
 entry = "Array2::dot over widened i8"
-harness = "crates/uor-matmul-validate/tests/cross_library.rs::ndarray_widened_i8_agrees_with_our_i8_kernel_cx_03"
+harness = "crates/uor-matmul-validate/tests/cross_library.rs::ndarray_agrees_with_our_i8_kernel_cx_03"
 version_pin = "Cargo.lock"
 exactness = "exact"
 status = "reproduced"
@@ -47,7 +55,7 @@ id = "CX-04"
 oracle = "nalgebra"
 kind = "crate"
 entry = "DMatrix<i32> multiplication over decoded i4 weights"
-harness = "crates/uor-matmul-validate/tests/cross_library.rs::nalgebra_decoded_weights_agree_with_our_coded_kernel_cx_04"
+harness = "crates/uor-matmul-validate/tests/cross_library.rs::nalgebra_agrees_with_our_coded_kernel_cx_04"
 version_pin = "Cargo.lock"
 exactness = "exact"
 status = "reproduced"
@@ -124,6 +132,27 @@ kernel author with this library, so agreement among them is weaker evidence
 than it looks. The artifacts are committed with a per-file SHA-256 recorded in
 manifest.json, so the claim reproduces without a Python toolchain, and the
 harness verifies each digest before believing the bytes."""
+
+[[record]]
+id = "CX-11"
+oracle = "numpy"
+kind = "committed artifact"
+entry = "(A[:, :, None] + B[None, :, :]).max(axis=1), int64"
+harness = "crates/uor-matmul-validate/tests/tropical_oracle.rs::numpy_max_plus_is_byte_identical_cx_11"
+version_pin = "oracles/tropical/manifest.json"
+exactness = "exact"
+status = "reproduced"
+generator = "oracles/tropical/generate.py"
+note = """The `(max, +)` half of the operation census, witnessed from outside
+the Rust ecosystem exactly as CX-10 witnesses the ring half. A max-plus product
+has no rounding for two implementations to disagree about --- `max` selects an
+offered value and `+` is exact at this range --- so the comparison is byte
+equality with no exempted region, and `exact` here is a stronger word than it
+is for a float oracle rather than a weaker one. The semiring zero is spelled
+`-2^63` in the artifact and decoded into the element type's own discriminant on
+the way in, so no sentinel enters `Trop`. Every case carries masked lanes, in
+both operands and in whole rows and columns, because a corpus with no mask
+tests half of A-6."""
 
 [[record]]
 id = "CK-14"

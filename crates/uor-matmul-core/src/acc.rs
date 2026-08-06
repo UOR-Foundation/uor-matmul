@@ -119,7 +119,7 @@ impl_encode_from_i128!(i8, i16, i32, i64, i128);
 /// as `Saturating` on range. `Wrapping` names a range rule and truncates. The
 /// caller names which they want; neither is a fallback, and both are exact
 /// functions of the exact accumulator (§5.5).
-const fn encode_i128_into(acc: i128, min: i128, max: i128, mode: EncodeMode) -> i128 {
+pub(crate) const fn encode_i128_into(acc: i128, min: i128, max: i128, mode: EncodeMode) -> i128 {
     match mode {
         EncodeMode::Wrapping => {
             if min == i128::MIN && max == i128::MAX {

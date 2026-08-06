@@ -21,8 +21,17 @@ jobs:
         with: { targets: wasm32-wasip1 }
       - uses: extractions/setup-just@v2
       - uses: Swatinem/rust-cache@v2
+      - name: BDD conformance
+        run: just bdd
       - name: fitted exponents, ours and every oracle's
         run: just scaling
+      - name: publish comparison benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-benchmark-report
+          path: target/criterion/
+          if-no-files-found: error
+          retention-days: 30
       # CT-06, CG-08: gigabytes of operands and minutes of wall clock, so it is
       # not part of `vv` --- but it is part of CI, or the largest shapes would be
       # measured only when somebody remembered to.
@@ -85,6 +94,17 @@ jobs:
         run: |
           set -o pipefail
           just swar-sweep 2>&1 | tee target/measurements/swar-wasm.txt
+      # CG-19: the census's second product, priced against its first. The two
+      # lanes are one driver at two instantiations of `E`, so the ratio is the
+      # arithmetic; the witness half is timed at both ends of the compare
+      # pass's cost, because its second pass stops at the first index attaining
+      # the maximum and a single fill would report a knob. Byte-identity is
+      # asserted inside every timed run, so a red step is a correctness failure
+      # and never a slow day.
+      - name: CG-19, the selection lane against the accumulation lane
+        run: |
+          set -o pipefail
+          just tropical-sweep 2>&1 | tee target/measurements/tropical-x86.txt
       - uses: actions/upload-artifact@v4
         with:
           name: measurements-x86
@@ -116,6 +136,13 @@ jobs:
         run: |
           set -o pipefail
           just symbol-tabulated 2>&1 | tee target/measurements/symbol-tabulated-aarch64.txt
+      # The selection lane is a portable loop on both architectures, so the
+      # aarch64 column is the one that says whether the ratio between the two
+      # lanes is a property of the algebra or of this runner's x86 scheduler.
+      - name: CG-19, the selection lane against the accumulation lane
+        run: |
+          set -o pipefail
+          just tropical-sweep 2>&1 | tee target/measurements/tropical-aarch64.txt
       - uses: actions/upload-artifact@v4
         with:
           name: measurements-aarch64

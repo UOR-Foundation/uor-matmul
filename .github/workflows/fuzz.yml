@@ -1,8 +1,13 @@
-# CT-01, CT-03, CK-06: totality over unstructured input.
+# CT-01, CT-03, CK-06, CT-08, CD-25: totality over unstructured input.
 #
 # Short on every push, long on a schedule. The claim is that no representable
 # input fails, so what the fuzzer looks for is a panic --- not a wrong answer,
 # which the differential tests cover.
+#
+# `tropical` is the one exception, and deliberately: it runs both witness
+# mechanisms on the operands the fuzzer drew and compares their bytes, so a
+# disagreement is a crash. `CD-25` quantifies over every shape, and a corpus is
+# a list of shapes someone thought of.
 #
 # The `push` trigger below was missing, and the header above has claimed it since
 # the file was written. So the only runs this workflow ever had came from its
@@ -32,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [totality, float_decode, codec_shapes]
+        target: [totality, float_decode, codec_shapes, tropical]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

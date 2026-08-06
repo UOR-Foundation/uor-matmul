@@ -9,8 +9,33 @@
 #
 # The meta-gate proves the suite never asserts an `open` claim as established,
 # and `CM-03` proves every `some-true` row cites an authority that exists.
+#
+# Every row carries `refuted_by`, the same required field the ID register
+# carries: for a cited identity, the cited text not saying what the row says it
+# says; for a measurement, the figure not reproducing at the host, seed, and
+# harness it records. Both are checks a third party can run without this
+# repository's cooperation, which is the difference between a citation and an
+# assertion.
 
 spec = "uor-matmul/1"
+
+# The vocabulary `audit-deferral` reads as a deferral (R15).
+#
+# Here rather than inside the gate because the gate scans the whole workspace,
+# `xtask/` included --- and a marker table written as Rust string literals would
+# make the gate fail on its own source. The alternative was exempting that file,
+# which is a hole in exactly the place nobody looks. As model data the
+# vocabulary is reviewable, and the gate's source contains no marker to trip
+# over (R10).
+deferral_markers = [
+    "TODO",
+    "FIXME",
+    "XXX",
+    "unimplemented!",
+    "todo!",
+    "for now",
+    "later version",
+]
 
 # ==========================================================================
 # Cited identities. Reproduced from an authority, never established here. A
@@ -22,24 +47,30 @@ id = "AUTH-CL-MM01"
 level = "some-true"
 authority = "CL-MM01"
 statement = "the accumulation does not depend on the codec"
+refuted_by = """`UorMatMul.lean`'s Theorem CL-MM01 not carrying this statement, or the
+development carrying no such theorem"""
 
 [[claim]]
 id = "AUTH-CL-MM02"
 level = "some-true"
 authority = "CL-MM02"
 statement = "a scalar codec is the block codec of its singletons"
+refuted_by = "`scalar_eq_block` not carrying this statement, or being absent from the development"
 
 [[claim]]
 id = "AUTH-CL-MM03"
 level = "some-true"
 authority = "CL-MM03"
 statement = "the composite of two codecs is a codec with the composed decode"
+refuted_by = "`transcode_decode` not carrying this statement, or being absent from the development"
 
 [[claim]]
 id = "AUTH-CL-MM04"
 level = "some-true"
 authority = "CL-MM04"
 statement = "all bound theorems hold for arbitrary (B, cap); W8A8 is one instantiation"
+refuted_by = """one (B, cap) at which a bound theorem fails, or W8A8's (127, 2^31 - 1)
+turning out not to be an instance of the general statement"""
 
 [[claim]]
 id = "AUTH-IEEE754"
@@ -47,6 +78,8 @@ level = "some-true"
 authority = "IEEE-754-2019"
 statement = """a finite IEEE 754 value names an exact dyadic rational; NaN and
 infinity propagate by clause 6."""
+refuted_by = """IEEE Std 754-2019 clause 3.4 or clause 6 not carrying this
+statement at the clause the citation names."""
 
 [[claim]]
 id = "AUTH-RING-HOM"
@@ -55,6 +88,8 @@ authority = "RING-HOM-2W"
 statement = """reduction modulo 2^w is a ring homomorphism, so reducing the exact
 sum once at the end equals reducing at every step. This is why the integer
 oracles agree byte for byte with no exempted region (§3.4)."""
+refuted_by = """one summand sequence and one w at which reducing once at the end
+differs from reducing at every step."""
 
 [[claim]]
 id = "AUTH-VNNI"
@@ -62,12 +97,77 @@ level = "some-true"
 authority = "INTEL-VNNI"
 statement = """vpdpbusd multiplies unsigned bytes by signed bytes and accumulates
 into i32; vpdpwssd multiplies signed words."""
+refuted_by = """the Intrinsics Guide entries for `_mm512_dpbusd_epi32` or
+`_mm512_dpwssd_epi32` describing different operand signedness, or a different
+accumulator width."""
 
 [[claim]]
 id = "AUTH-UOR-ADDR"
 level = "some-true"
 authority = "UOR-ADDR-1"
 statement = "JCS-RFC8785 + NFC then SHA-256 over the canonical manifest"
+refuted_by = """`uor_addr_1::address` at the version `Cargo.lock` pins computing
+anything but SHA-256 over the JCS-RFC8785 and NFC canonical form"""
+
+# The selection half of the census. Each row is one clause of the upstream
+# transformer formalization, cited by its own clause number so that a reader
+# can check the sentence rather than the summary. The realizations are the
+# `build` rows in `model/ids.toml`; nothing here is established in this
+# repository.
+
+[[claim]]
+id = "AUTH-TF1-A4"
+level = "some-true"
+authority = "TF1"
+statement = """the (max, +) semiring is the selection algebra: `max` is the
+additive operation and addition is the multiplicative one."""
+refuted_by = """TF1's A-4 naming a different algebra for selection, or naming
+(max, +) for something other than selection."""
+
+[[claim]]
+id = "AUTH-TF1-A6"
+level = "some-true"
+authority = "TF1"
+statement = """a masked position is the semiring zero --- the same value a padded
+position decodes to, not a second convention beside it."""
+refuted_by = """TF1's A-6 giving a mask a value distinct from the semiring zero,
+or leaving the two conventions unidentified."""
+
+[[claim]]
+id = "AUTH-TF1-D6"
+level = "some-true"
+authority = "TF1"
+statement = """the tie-break for the selection witness is the smallest index, and
+it is total: every set of achieving terms has exactly one winner."""
+refuted_by = """TF1's D-6 naming a different tie-break, or a set of achieving
+terms on which the order it declares admits two winners."""
+
+[[claim]]
+id = "AUTH-TF1-D8"
+level = "some-true"
+authority = "TF1"
+statement = """the operation census is matrix products under complete
+accumulation, max, addition, table lookup, and power-of-two shifts."""
+refuted_by = """TF1's D-8 census naming an operation outside this list, or
+omitting one of these five."""
+
+[[claim]]
+id = "AUTH-TF1-G2"
+level = "some-true"
+authority = "TF1"
+statement = """recentring --- subtracting the maximum --- is the canonical section
+of the shift gauge."""
+refuted_by = """TF1's G-2 naming a different section of the shift gauge, or
+naming no canonical representative at all."""
+
+[[claim]]
+id = "AUTH-TF1-G5"
+level = "some-true"
+authority = "TF1"
+statement = """the dyadic section: scaling by a power of two is a gauge, and
+placement at a signed exponent is its section."""
+refuted_by = """TF1's G-5 naming a different section of the dyadic gauge, or a
+section that is not exact."""
 
 # ==========================================================================
 # Open, and stated as open. Nothing below is asserted anywhere in the repo.
@@ -78,18 +178,25 @@ id = "OPEN-CODEBOOK-QUALITY"
 level = "open"
 statement = """the reconstruction quality of any codebook, including E8, is
 measured per (model, codebook) and reported, never asserted (N3)."""
+refuted_by = """a reconstruction-quality figure stated in this repository as a
+property of a codebook rather than of a (model, codebook) pair it was measured
+on."""
 
 [[claim]]
 id = "OPEN-ORACLE-ULPS"
 level = "open"
 statement = """each classical float oracle's rounding error against the exact
 value this library holds, in ulps. Reported by CX-05 through CX-09."""
+refuted_by = """a recorded ulp figure not reproducing at the host, seed, and
+harness the record names."""
 
 [[claim]]
 id = "OPEN-RESIDENCY"
 level = "open"
 statement = """the residency collapse of the coded tiers, measured as a scaling
 constant against the oracle (CG-03), never asserted."""
+refuted_by = """the recorded residency constant not reproducing at the host and
+codec the record names."""
 
 # ==========================================================================
 # Suspended rules. A working rule deliberately suspended for one named scope,

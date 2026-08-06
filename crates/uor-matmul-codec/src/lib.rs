@@ -7,7 +7,7 @@
 //! `CK-02` and `CK-05` are the evidence that these types realize it.
 //!
 //! Every tier in this crate is an *instantiation* of one trait, not a special
-//! case. [`Codec::BLOCK`] unifies the scalar and block cases exactly as the
+//! case. [`Codec::MAX_BLOCK`] unifies the scalar and block cases exactly as the
 //! upstream `scalar_eq_block` does: a scalar codec is the block codec of its
 //! singletons, so no identity and no kernel is written twice.
 //!
@@ -35,4 +35,4 @@ pub use e8::{e8_codec, e8_codec_u8, e8_table, E8_I8};
 pub use matrix::CodedMatrix;
 pub use tier::{Codec, Enumerable, IndexStream, TierId};
 
-pub use kappa::{KappaError, Manifest};
+pub use kappa::{Addressing, KappaError, Manifest};

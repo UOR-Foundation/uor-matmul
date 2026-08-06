@@ -70,3 +70,9 @@ Feature: Cross-library agreement
     Given the standing corpus
     When the suite exercises CX-10
     Then the claim holds byte for byte
+
+  @CX-11 @build
+  Scenario: NumPy `(max, +)` out of process, byte-identical
+    Given the standing tropical corpus
+    When the suite exercises CX-11
+    Then the claim holds byte for byte

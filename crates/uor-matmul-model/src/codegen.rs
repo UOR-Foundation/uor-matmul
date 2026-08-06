@@ -370,6 +370,71 @@ pub fn render(model: &Model) -> String {
 /// Where the generated conformance index lives, relative to the repository root.
 pub const CONFORMANCE_PATH: &str = "CONFORMANCE.md";
 
+/// The conformance classes `CONFORMANCE.md` renders, in the order it renders
+/// them.
+///
+/// Public because the register is checked against it. Grouping by class means
+/// a class the generator does not know renders nothing at all, and that
+/// omission is invisible to `check-model`'s byte comparison: the rendered
+/// bytes and the committed bytes agree, because both leave the row out. So the
+/// completeness of this list is enforced where it can be seen ---
+/// [`crate::Model::check`] refuses a register row no class here covers --- and
+/// adding a class is one edit to this array rather than a row that quietly
+/// never appears.
+pub const CLASSES: &[(&str, &str)] = &[
+    (
+        "CS-",
+        "Structural: public API shape, stride semantics, view construction",
+    ),
+    (
+        "CT-",
+        "Totality: the operation is infallible on everything it can represent",
+    ),
+    ("CD-", "Determinism: same inputs, same bytes"),
+    (
+        "CB-",
+        "Backend parity: every backend equals the portable reference",
+    ),
+    (
+        "CU-",
+        "Purity: one answer, many factorizations; no classical path, no fallback",
+    ),
+    (
+        "CK-",
+        "Codec: tier equivalence, transcode, kappa addressing",
+    ),
+    ("CX-", "Cross-library agreement against an external library"),
+    (
+        "CA-",
+        "Allocation and environment: zero heap, no_std, embedded and wasm",
+    ),
+    (
+        "CP-",
+        "Statistical / property-based, with sample size and seed recorded",
+    ),
+    (
+        "CG-",
+        "Scaling: fitted exponent, compared against the same fit for each oracle",
+    ),
+    (
+        "CM-",
+        "Model integrity: the model is the single source of every constant",
+    ),
+];
+
+/// One markdown table cell: newlines folded to spaces, pipes escaped, edges
+/// trimmed.
+///
+/// The model authors its statements as TOML block strings so they stay
+/// readable where they are written; a table row is one line. The fold belongs
+/// here rather than as a constraint on how the model is spelled.
+fn cell(text: &str) -> String {
+    text.replace('\n', " ")
+        .replace('|', "\\|")
+        .trim()
+        .to_string()
+}
+
 /// Render `CONFORMANCE.md` from the ID register.
 ///
 /// The index is generated rather than written, so that an ID cannot exist in
@@ -428,48 +493,7 @@ pub fn render_conformance(model: &Model) -> String {
     );
     let _ = writeln!(w, "returns an error the model does not sanction.");
 
-    let classes: &[(&str, &str)] = &[
-        (
-            "CS-",
-            "Structural: public API shape, stride semantics, view construction",
-        ),
-        (
-            "CT-",
-            "Totality: the operation is infallible on everything it can represent",
-        ),
-        ("CD-", "Determinism: same inputs, same bytes"),
-        (
-            "CB-",
-            "Backend parity: every backend equals the portable reference",
-        ),
-        (
-            "CU-",
-            "Purity: one answer, many factorizations; no classical path, no fallback",
-        ),
-        (
-            "CK-",
-            "Codec: tier equivalence, transcode, kappa addressing",
-        ),
-        ("CX-", "Cross-library agreement against an external library"),
-        (
-            "CA-",
-            "Allocation and environment: zero heap, no_std, embedded and wasm",
-        ),
-        (
-            "CP-",
-            "Statistical / property-based, with sample size and seed recorded",
-        ),
-        (
-            "CG-",
-            "Scaling: fitted exponent, compared against the same fit for each oracle",
-        ),
-        (
-            "CM-",
-            "Model integrity: the model is the single source of every constant",
-        ),
-    ];
-
-    for (prefix, title) in classes {
+    for (prefix, title) in CLASSES {
         let rows: Vec<_> = model
             .ids
             .id
@@ -482,16 +506,16 @@ pub fn render_conformance(model: &Model) -> String {
         let _ = writeln!(w);
         let _ = writeln!(w, "## `{prefix}*` --- {title}");
         let _ = writeln!(w);
-        let _ = writeln!(w, "| ID | Level | Statement |");
-        let _ = writeln!(w, "| --- | --- | --- |");
+        let _ = writeln!(w, "| ID | Level | Statement | Refuted by |");
+        let _ = writeln!(w, "| --- | --- | --- | --- |");
         for r in rows {
-            let statement = r.statement.replace('\n', " ").replace('|', "\\|");
             let _ = writeln!(
                 w,
-                "| `{}` | `{}` | {} |",
+                "| `{}` | `{}` | {} | {} |",
                 r.id,
                 r.level.as_str(),
-                statement.trim()
+                cell(&r.statement),
+                cell(&r.refuted_by)
             );
         }
     }
@@ -504,7 +528,6 @@ pub fn render_conformance(model: &Model) -> String {
     let _ = writeln!(w, "| Authority | Citation | Evidence here |");
     let _ = writeln!(w, "| --- | --- | --- |");
     for a in &model.authorities.authority {
-        let citation = a.citation.replace('\n', " ").replace('|', "\\|");
         let realized = if a.realized_by.is_empty() {
             "--".to_string()
         } else {
@@ -514,22 +537,22 @@ pub fn render_conformance(model: &Model) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let _ = writeln!(w, "| `{}` | {} | {realized} |", a.id, citation.trim());
+        let _ = writeln!(w, "| `{}` | {} | {realized} |", a.id, cell(&a.citation));
     }
 
     let _ = writeln!(w);
     let _ = writeln!(w, "## Claims that are not conformance IDs");
     let _ = writeln!(w);
-    let _ = writeln!(w, "| ID | Level | Claim |");
-    let _ = writeln!(w, "| --- | --- | --- |");
+    let _ = writeln!(w, "| ID | Level | Claim | Refuted by |");
+    let _ = writeln!(w, "| --- | --- | --- | --- |");
     for c in &model.ledger.claim {
-        let statement = c.statement.replace('\n', " ").replace('|', "\\|");
         let _ = writeln!(
             w,
-            "| `{}` | `{}` | {} |",
+            "| `{}` | `{}` | {} | {} |",
             c.id,
             c.level.as_str(),
-            statement.trim()
+            cell(&c.statement),
+            cell(&c.refuted_by)
         );
     }
 
@@ -550,8 +573,6 @@ pub fn render_conformance(model: &Model) -> String {
         let _ = writeln!(w, "| ID | Rule | Scope | Admits | Ends |");
         let _ = writeln!(w, "| --- | --- | --- | --- | --- |");
         for s in &model.ledger.suspension {
-            let scope = s.scope.replace('\n', " ").replace('|', "\\|");
-            let ends = s.ends.replace('\n', " ").replace('|', "\\|");
             let admits = s
                 .admits
                 .iter()
@@ -563,9 +584,9 @@ pub fn render_conformance(model: &Model) -> String {
                 "| `{}` | {} | {} | {} | {} |",
                 s.id,
                 s.rule,
-                scope.trim(),
+                cell(&s.scope),
                 admits,
-                ends.trim()
+                cell(&s.ends)
             );
         }
     }

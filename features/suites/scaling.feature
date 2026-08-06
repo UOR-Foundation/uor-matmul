@@ -123,3 +123,10 @@ Feature: Scaling
     When the suite exercises CG-18
     Then below the break-even the census shows the dense route, and at and above it the table
     And the table's multiplies are exactly the build's charge, and a block-1 codec is declined at every size
+
+  @CG-19 @open
+  Scenario: Tropical selection throughput against the ring lane at matched shapes, and witness mechanism A against B
+    Given the standing sweep and its recorded seed
+    When the harness measures CG-19
+    Then the figure is reported with its confidence interval
+    And nothing asserts it as established

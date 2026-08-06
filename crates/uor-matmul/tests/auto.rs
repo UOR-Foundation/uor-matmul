@@ -142,18 +142,15 @@ fn the_default_entry_runs_a_host_kernel_and_returns_the_reference_bytes_cd_22() 
     assert_eq!(counted, reference(&a, &b));
 }
 
-/// CD-22, the decline half: no offer runs the reference traversal --- through
-/// the same selecting entry, not around it --- at the same bytes.
+/// CD-22, the totality half: with no panel offer, the canonical entry uses its
+/// reference implementation at the same bytes.
 #[test]
 fn zero_scratch_runs_the_reference_at_the_same_bytes() {
     let (a, b) = operands();
 
     let (streamed, census) = counted_auto(&mut [], &a, &b);
     assert!(
-        matches!(
-            census.route,
-            Some(Route::ReferenceByOffer | Route::ReferenceByCost)
-        ),
+        matches!(census.route, Some(Route::ReferenceByOffer)),
         "no offer must run the reference traversal, got {:?}",
         census.route
     );

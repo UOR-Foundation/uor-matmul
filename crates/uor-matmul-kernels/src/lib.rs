@@ -36,16 +36,18 @@
 extern crate std;
 
 pub mod isa;
+mod lookup;
 #[doc(hidden)]
 pub mod parity;
 pub mod spec;
 pub mod table;
+pub mod tropical;
 
 pub use table::{
     available_table_i16, available_table_i32_modular, available_table_i64_modular,
     available_table_i8, choose_table, gather_reference_i32, gather_reference_wide, gray_sign_table,
-    portable_table, portable_table_bound1, Lane, LaneWord, Mod32, Mod64, Scaled64, TableBuild,
-    TableGather, TableSpec, Wide,
+    portable_table, portable_table_bound1, portable_table_i8_lookup, Lane, LaneWord, Mod32, Mod64,
+    Scaled64, TableBuild, TableGather, TableSpec, Wide,
 };
 
 pub use spec::{
@@ -53,6 +55,8 @@ pub use spec::{
     available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
     available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
     available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
-    available_reduce_i8, cached, choose, choose_for_rows, packed_slot, portable_i8, Factorization,
-    KernelSpec, LaneLayout, MAX_TILE_LANES,
+    available_reduce_i8, available_tropical_i16, cached, choose, choose_for_rows, packed_slot,
+    portable_i8, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
 };
+
+pub use tropical::{pack_i8, unpack, TROP_I16_MAX_BOUND, TROP_I8_BOUND, TROP_ZERO};

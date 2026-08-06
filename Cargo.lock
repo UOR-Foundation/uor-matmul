@@ -1799,6 +1799,7 @@ dependencies = [
 name = "uor-matmul-conformance"
 version = "0.1.0"
 dependencies = [
+ "toml",
  "uor-matmul",
  "uor-matmul-core",
  "uor-matmul-model",

@@ -250,6 +250,32 @@ impl FloatOracle for Faer {
     }
 }
 
+#[cfg(feature = "ref-faer")]
+impl Faer {
+    /// The oracle's own `f64` product, row-major.
+    pub fn product_f64(m: usize, k: usize, n: usize, a: &[f64], b: &[f64]) -> Vec<f64> {
+        use faer::{Mat, Par};
+        if m == 0 || k == 0 || n == 0 {
+            return vec![0.0f64; m * n];
+        }
+        let am = Mat::from_fn(m, k, |i, j| a[i * k + j]);
+        let bm = Mat::from_fn(k, n, |i, j| b[i * n + j]);
+        let mut cm = Mat::<f64>::zeros(m, n);
+        faer::linalg::matmul::matmul(
+            cm.as_mut(),
+            faer::Accum::Replace,
+            am.as_ref(),
+            bm.as_ref(),
+            1.0f64,
+            Par::Seq,
+        );
+        (0..m)
+            .flat_map(|i| (0..n).map(move |j| (i, j)))
+            .map(|(i, j)| cm[(i, j)])
+            .collect()
+    }
+}
+
 /// `CX-07`: `ndarray`'s `f32` path, which routes to matrixmultiply.
 ///
 /// Registered and reported as **not independent** of `CX-05`. Two measurements

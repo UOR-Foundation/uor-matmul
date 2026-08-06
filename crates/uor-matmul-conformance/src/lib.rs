@@ -17,10 +17,19 @@
 //! test names*, not on the arithmetic --- which is why it lives here rather
 //! than in a numerical crate.
 
+//! **Which tests run.** The two above both rest on a list of test names, and a
+//! name is not a run. [`harvest`] is what decides the difference: it reads the
+//! attributes the compiler would apply to each `#[test]`, resolves the feature
+//! gates against the owning crate's own default set, and verifies an
+//! `#[ignore]`'s redirection against the Justfile rather than against the
+//! reason's prose.
+
 #![deny(missing_docs)]
 
+pub mod harvest;
 pub mod meta;
 pub mod runner;
 
+pub use harvest::{Reached, TestNames, SCAN_ROOTS};
 pub use meta::{check_honesty, HonestyReport};
 pub use runner::{scenarios_in, Scenario, SuiteReport};

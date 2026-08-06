@@ -41,6 +41,65 @@ pub const SIMD128_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     mac_tile: simd128_i8,
 };
 
+/// SIMD128 family entry using the finite i8 product lookup and adds.
+pub const SIMD128_LOOKUP_I8_I32: KernelSpec<i8, i32> =
+    simd128_lookup_spec::<4, 8>(Backend::WasmSimd128);
+
+const fn simd128_lookup_spec<const MR: usize, const NR: usize>(
+    backend: Backend,
+) -> KernelSpec<i8, i32> {
+    KernelSpec {
+        backend,
+        factorization: Factorization::Exact,
+        mr: MR,
+        nr: NR,
+        lane_layout: LaneLayout::Interleaved,
+        k_group: 1,
+        products_per_step: NR,
+        lane_cap: i32::MAX as u128,
+        max_bound: u128::MAX,
+        mac_tile: simd128_lookup_i8::<MR, NR>,
+    }
+}
+
+/// SIMD128 lookup/add tile: scalar table reads feed native four-lane adds.
+#[target_feature(enable = "simd128")]
+unsafe fn simd128_lookup_i8<const MR: usize, const NR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    debug_assert!(NR.is_multiple_of(4));
+    // SAFETY: the KernelSpec caller guarantees all three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    let mut tile = [[i32x4_splat(0); 3]; MR];
+    for p in 0..kc {
+        for i in 0..MR {
+            let a = pa[p * MR + i];
+            let mut products = [0i32; NR];
+            for j in 0..NR {
+                products[j] = crate::lookup::i8_product(a, pb[p * NR + j]);
+            }
+            for v in 0..NR / 4 {
+                let values = unsafe { v128_load(products.as_ptr().add(v * 4).cast()) };
+                tile[i][v] = i32x4_add(tile[i][v], values);
+            }
+        }
+    }
+    for (i, row) in tile.iter().enumerate() {
+        for (v, value) in row.iter().enumerate() {
+            unsafe { v128_store(acc.as_mut_ptr().add(i * NR + v * 4).cast(), *value) };
+        }
+    }
+}
+
 /// # Safety
 ///
 /// `pa` must have `4 * kc` readable elements, `pb` `8 * kc`, and `acc` 32
@@ -172,6 +231,60 @@ pub const SIMD128_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
     mac_tile: simd128_r_i8_one,
 };
 
+/// SIMD128 reduction entry using the finite i8 product lookup and adds.
+pub const SIMD128_LOOKUP_R_I8_I32: KernelSpec<i8, i32> =
+    simd128_lookup_reduce_spec::<4>(Backend::WasmSimd128);
+
+/// SIMD128 one-row reduction entry using the finite i8 product lookup and adds.
+pub const SIMD128_LOOKUP_R_I8_I32_1: KernelSpec<i8, i32> =
+    simd128_lookup_reduce_spec::<1>(Backend::WasmSimd128);
+
+const fn simd128_lookup_reduce_spec<const MR: usize>(backend: Backend) -> KernelSpec<i8, i32> {
+    KernelSpec {
+        backend,
+        factorization: Factorization::Exact,
+        mr: MR,
+        nr: 1,
+        lane_layout: LaneLayout::Contiguous,
+        k_group: 1,
+        products_per_step: MR,
+        lane_cap: i32::MAX as u128,
+        max_bound: u128::MAX,
+        mac_tile: simd128_lookup_reduce_i8::<MR>,
+    }
+}
+
+/// SIMD128 lookup reduction: four row lookups are combined by one native add.
+#[target_feature(enable = "simd128")]
+unsafe fn simd128_lookup_reduce_i8<const MR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    debug_assert!(MR == 1 || MR == 4);
+    // SAFETY: the KernelSpec caller guarantees all three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    let mut sum = i32x4_splat(0);
+    for p in 0..kc {
+        let mut products = [0i32; 4];
+        for i in 0..MR {
+            products[i] = crate::lookup::i8_product(pa[i * kc + p], pb[p]);
+        }
+        let values = unsafe { v128_load(products.as_ptr().cast()) };
+        sum = i32x4_add(sum, values);
+    }
+    let mut result = [0i32; 4];
+    unsafe { v128_store(result.as_mut_ptr().cast(), sum) };
+    acc.copy_from_slice(&result[..MR]);
+}
+
 /// # Safety
 ///
 /// As [`simd128_r_i8`], with a one-row panel.
@@ -187,6 +300,80 @@ unsafe fn simd128_r_i8_one(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i3
 unsafe fn simd128_r_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
     // SAFETY: the caller forwarded the lengths.
     unsafe { simd128_r_i8_generic::<R_MR>(kc, pa, pb, acc) }
+}
+
+// ---------------------------------------------------------------------------
+// The (max, +) reduction in a packed i16 lane
+// ---------------------------------------------------------------------------
+
+/// Rows of the tropical tile: four `v128` accumulators.
+const TROP_MR: usize = 4;
+/// Columns: eight `i16`, which is one `v128` exactly.
+const TROP_NR: usize = 8;
+
+crate::tile_fits!(TROP_MR, TROP_NR);
+
+/// wasm SIMD128 `(max, +)`: `i16x8_add_sat` is `⊗` and `i16x8_max` is `⊕`.
+///
+/// The AVX2 sequence at a quarter of the width and the NEON one at the same
+/// width, with the same two instructions in the same order --- which is what a
+/// semiring with no carry and no growth buys: there is no widening step for
+/// three ISAs to disagree about, so the three bodies differ only in how many
+/// lanes a register holds.
+///
+/// `i16x8_add_sat` and not `i16x8_add`: the saturating variant *is* the
+/// absorbing law `-inf ⊗ a = -inf`, and [`crate::tropical`] derives why the
+/// wrapping one is wrong at exactly the input a random sweep never generates
+/// --- two masked operands, where `i16::MIN + i16::MIN` wraps to `0`.
+pub const SIMD128_TROP_I16: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::WasmSimd128,
+    factorization: Factorization::Exact,
+    mr: TROP_MR,
+    nr: TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // One `k`-step per instruction: the splat covers `A` and the load covers a
+    // whole `k`-step of `B`.
+    k_group: 1,
+    products_per_step: TROP_NR,
+    lane_cap: u128::MAX,
+    max_bound: crate::tropical::TROP_I16_MAX_BOUND,
+    mac_tile: simd128_trop_i16,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `8 * kc`, and `acc` 32
+/// writable lanes.
+unsafe fn simd128_trop_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller guaranteed the three extents. One conversion here
+    // keeps every panel read below safe.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, TROP_MR * kc),
+            core::slice::from_raw_parts(pb, TROP_NR * kc),
+            core::slice::from_raw_parts_mut(acc, TROP_MR * TROP_NR),
+        )
+    };
+    // The identity of `max`, which is the semiring zero and not zero: at
+    // `kc == 0` this is the whole answer.
+    let mut tile = [i16x8_splat(crate::tropical::TROP_ZERO); TROP_MR];
+
+    for p in 0..kc {
+        // The panel is `k`-major at `k_group == 1`, so one v128 load is a whole
+        // `k`-step of `B`: eight columns, in lane order.
+        //
+        // SAFETY: `pb[p * TROP_NR ..][..8]` is in bounds: one v128 load.
+        let bv = unsafe { v128_load(pb.as_ptr().add(p * TROP_NR).cast()) };
+        for (i, cell) in tile.iter_mut().enumerate() {
+            let av = i16x8_splat(pa[p * TROP_MR + i]);
+            *cell = i16x8_max(*cell, i16x8_add_sat(av, bv));
+        }
+    }
+
+    for (i, cell) in tile.iter().enumerate() {
+        // SAFETY: `i < TROP_MR`, so this store lands inside `TROP_MR * TROP_NR`.
+        unsafe { v128_store(acc.as_mut_ptr().add(i * TROP_NR).cast(), *cell) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +586,7 @@ const SIMD_TABLE_LANES: usize = 4;
 /// Narrower tiles take the reference, whose row count is a compile-time constant
 /// there too.
 pub fn simd128_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>> {
-    let (build, gather, gather_codes, gather_codes_u8): (
+    let (_build, gather, gather_codes, gather_codes_u8): (
         crate::table::TableBuild<i8, i32>,
         crate::table::TableGather<i32>,
         crate::table::TableGatherCodes<i32>,
@@ -439,14 +626,14 @@ pub fn simd128_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i
         // the plain `k`-major layout and the sequence has no tail (S8).
         k_group: 1,
         lanes_per_add: SIMD_TABLE_LANES,
-        build_products_per_step: SIMD_TABLE_LANES,
+        build_products_per_step: 1,
         lane_cap: i32::MAX as u128,
         // Every product is widened to `i32` before it is accumulated, so
         // nothing narrower than the lane is held.
         max_bound: u128::MAX,
-        build_multiplies: true,
+        build_multiplies: false,
         build_adds: crate::table::product_build_adds,
-        build,
+        build: crate::table::packed_build_lookup_i8_group1,
         gather,
         gather_codes,
         gather_codes_u8,
