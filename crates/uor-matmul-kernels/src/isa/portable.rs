@@ -85,7 +85,7 @@ macro_rules! reference_kernel {
 reference_kernel!(
     /// `i8 x i8 -> i32`, exact. The reference `CB-01` pins to `dot_ref`.
     I8_I32, mac_i8_i32, i8, i32, 4, 4, Factorization::Exact, i32::MAX as u128,
-    |a: i8, b: i8| i32::from(a) * i32::from(b)
+    crate::lookup::i8_product
 );
 
 reference_kernel!(
@@ -193,7 +193,7 @@ macro_rules! reduce_reference {
 reduce_reference!(
     /// `i8 x i8 -> i32`, exact, reducing four rows at a time.
     R_I8_I32, red_i8_i32, i8, i32, 4, Factorization::Exact, i32::MAX as u128,
-    |a: i8, b: i8| i32::from(a) * i32::from(b)
+    crate::lookup::i8_product
 );
 
 reduce_reference!(
@@ -239,7 +239,7 @@ reduce_reference!(
 reduce_reference!(
     /// `i8 x i8 -> i32`, exact, one row.
     R1_I8_I32, red1_i8_i32, i8, i32, 1, Factorization::Exact, i32::MAX as u128,
-    |a: i8, b: i8| i32::from(a) * i32::from(b)
+    crate::lookup::i8_product
 );
 
 reduce_reference!(

@@ -557,6 +557,25 @@ fn the_wider_families_equal_their_references_cb_02() {
 /// cannot run is not an error.
 #[test]
 fn backend_selection_cannot_fail_cd_01() {
+    // A later ISA must not win merely by being later when its row tile would
+    // be padded. This is the cross-backend form of the same padding cost the
+    // chooser already accounts for within one backend: at the fitting height,
+    // the earlier four-row factorization is the admissible shape.
+    let fitting = portable_i8();
+    let oversized = KernelSpec {
+        backend: Backend::NeonDotprod,
+        mr: fitting.mr + 1,
+        ..fitting
+    };
+    let picked = choose_for_rows(
+        [fitting, oversized].into_iter(),
+        Backend::Auto,
+        128,
+        fitting.mr,
+    )
+    .expect("the fitting sequence remains admissible");
+    assert_eq!(picked.backend, Backend::Portable);
+
     for backend in Backend::ALL {
         let spec = choose_for_rows(available_i8(), backend, 128, usize::MAX)
             .expect("the portable kernel is always there");

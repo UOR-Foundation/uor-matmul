@@ -8,14 +8,11 @@
 //! driver takes the same lane when its panel offer re-reads as the room the
 //! bridge needs, so the two columns are: `default`, the packed entry at the
 //! panel offer every caller has (`k` and `k * n` codes), and `explicit`,
-//! [`gemm_float_bridged`] at its full named offers, kernel scratch and
-//! accumulators included. Which factorization each column runs is the
-//! fill's business and the header's: at spans the alphabet admits with a
-//! depth the lane holds, both are the table; past the lane's depth the
-//! default declines to the scalar scaled lanes --- the chunked traversal
-//! keeps its partial sums in the accumulator room only the explicit offer
-//! spells --- and at spans past the alphabet both are the scalar lanes,
-//! which is the wide fill's row.
+//! [`slice::gemm_float_full`] at its full named offers, kernel scratch and
+//! accumulators included. At admitted spans the default now supplies a
+//! tile-sized exact accumulator for deep reductions; at spans past the
+//! alphabet both entries use the scalar scaled lanes, which is the wide
+//! fill's row.
 //!
 //! What is left to ask is the economics, and either answer is the finding:
 //! the prediction recorded in ANALYSIS.md before this harness ran is
@@ -35,10 +32,10 @@
 use std::time::Instant;
 
 use uor_matmul::{
-    gemm_float_bridged, gemm_float_packed, suggested_accumulators, suggested_bridge_scaled,
-    suggested_scratch, GemmOptions, Linear, Scratch,
+    gemm_float_packed, suggested_accumulators, suggested_bridge_scaled, suggested_scratch,
+    GemmOptions, Linear,
 };
-use uor_matmul_core::{Alphabet, Full, MatView, MatViewMut, PackedCode, Shape, Triple};
+use uor_matmul_core::{MatView, MatViewMut, PackedCode, Shape, Triple};
 use uor_matmul_validate::oracle::{FloatOracle, MatrixMultiply};
 
 /// Deterministic fill, the same recorded generator the other harnesses use.
@@ -128,7 +125,7 @@ fn measure(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Row {
     let mut pa = vec![PackedCode::default(); k.max(1)];
     let mut pb = vec![PackedCode::default(); k * n];
     let mut scaled = vec![0i32; suggested_bridge_scaled(shape)];
-    let mut kernel_buf = vec![Alphabet::<i32, Full<i32>>::of(0); suggested_scratch(shape)];
+    let mut kernel_buf = vec![0i32; suggested_scratch(shape)];
     let mut acc_buf = vec![0i128; suggested_accumulators(shape)];
 
     // The default driver at the panel offer every caller has. Where the offer
@@ -149,19 +146,20 @@ fn measure(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Row {
     });
 
     let explicit = best(|| {
-        let av = MatView::row_major(a, m, k).unwrap();
-        let bv = MatView::row_major(b, k, n).unwrap();
-        let cv = MatViewMut::row_major(&mut c_explicit, m, n).unwrap();
-        let mut t = Triple::new(av, bv, cv).unwrap();
-        gemm_float_bridged(
-            &mut t,
-            &Linear::OVERWRITE,
-            GemmOptions::default(),
+        uor_matmul::slice::gemm_float_full(
+            m,
+            k,
+            n,
+            a,
+            b,
+            &mut c_explicit,
             &mut pa,
             &mut pb,
             &mut scaled,
-            &mut Scratch::with_accumulators(&mut kernel_buf, &mut acc_buf),
-        );
+            &mut kernel_buf,
+            &mut acc_buf,
+        )
+        .expect("the full float product exists");
         // Byte-identity between the two entries, inside the timed region
         // (`CD-19`): a speed measured on the wrong bytes is not a measurement.
         assert_eq!(
@@ -195,8 +193,8 @@ fn the_bridge_against_the_scalar_lanes_cg_15() {
         std::env::consts::OS
     );
     println!("# byte-identity between the two entries is asserted inside every timed run;");
-    println!("# at admitted spans with a depth the lane holds, the default column is the table;");
-    println!("# past the lane's depth it declines to the scalar scaled lanes;");
+    println!("# at admitted spans the default column uses the table, chunking deep reductions with exact tile accumulators;");
+    println!("# wide spans past the i32 alphabet still decline to the scalar scaled lanes;");
     println!("# matrixmultiply is the inexact oracle, reported for scale (`CX-05` records its deviation)");
     for (label, span_a, span_b) in [("one exponent", 0, 0), ("a few binades", 3, 4)] {
         println!();
@@ -217,7 +215,9 @@ fn the_bridge_against_the_scalar_lanes_cg_15() {
         }
     }
     println!();
-    println!("| fill: wide spans (18/22 binades, both columns decline to the scalar lanes) | default | explicit | matrixmultiply |");
+    println!(
+        "| fill: wide spans (18/22 binades, both columns decline to the scalar lanes) | default | explicit | matrixmultiply |"
+    );
     println!("| --- | --- | --- | --- |");
     for &(m, k, n) in SHAPES {
         let a = wide(m * k, 5);

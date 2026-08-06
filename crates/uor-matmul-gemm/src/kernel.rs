@@ -411,16 +411,15 @@ const MAX_TILE: usize = MAX_TILE_LANES;
 // The route census
 // ---------------------------------------------------------------------------
 
-/// Which factorization of the one identity a [`gemm_auto`] call ran.
+/// Which native tile kernel a [`gemm_auto`] call ran.
 ///
-/// Selection reads the caller's declarations and the host's --- the shape, the
-/// alphabet bound, the encode mode, the offer, and the kernel table the build
-/// resolves --- and never the data (R13), so one call routes exactly once and
-/// the route is something a test asserts rather than a speed it must trust.
+/// Selection reads the caller's declarations and the host's kernel table, never
+/// the data (R13). The same blocked traversal runs for every backend; this
+/// record identifies only the native tile used by that traversal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Route {
-    /// A kernel from the CG-13 table ran: the tile or reduce traversal over
-    /// packed panels, exact or modular as the encode mode admitted.
+    /// A kernel from the CG-13 table ran over the canonical packed panels,
+    /// exact or modular as the encode mode admitted.
     Kernel {
         /// The backend whose instructions ran.
         backend: Backend,
@@ -435,22 +434,18 @@ pub enum Route {
         /// Tile lanes on the output, or lanes on the reduction.
         lane_layout: LaneLayout,
     },
-    /// The sub-cubic recursion ran.
+    /// An explicit Strassen entry point ran.
     Strassen {
         /// The levels the declarations admitted and the recursion took.
         levels: usize,
     },
-    /// The one-level modular bilinear factorization ran: Winograd's form over
-    /// the quotient the caller named, with the base products on the modular
-    /// lane.
+    /// An explicit modular Strassen entry point ran.
     StrassenModular {
         /// The base block products the level issued, counted as they ran ---
         /// seven against the classical decomposition's eight.
         products: u64,
     },
-    /// The reference traversal ran because the cost model priced the packed
-    /// traversal above it at this shape: the streaming form of the same
-    /// identity, chosen rather than fallen back to.
+    /// Retained for route-ledger compatibility with explicit legacy callers.
     ReferenceByCost,
     /// The reference traversal ran because the offer could not hold one
     /// packed group. Zero scratch stays valid, and this is what it runs.
@@ -516,21 +511,16 @@ pub fn gemm_packed<E, Bd, O, Ep>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
-    gemm_packed_impl(triple, epilogue, options, scratch, true, &mut ());
+    gemm_packed_impl(triple, epilogue, options, scratch, &mut ());
 }
 
-/// `C := epilogue(A * B, C)`, through whichever factorization the caller's
-/// offer and the host's declarations admit.
+/// `C := epilogue(A * B, C)` through the canonical blocked tile traversal.
 ///
-/// This is [`gemm_packed`] with the same arguments, under the name the
-/// documented API calls: the modular lane when the encode mode admits one, the
-/// sub-cubic recursion when the shape and the offer admit a level, a kernel
-/// from the CG-13 table when the cost model and the offer admit one, and
-/// [`crate::gemm`] --- the reference traversal, which stays directly callable
-/// under its own name --- when none do. Every one of those is the same
-/// identity, so the offer decides which instructions run and never which bytes
-/// come out (`CD-01`, `CD-22`). Returns `()`, for the same reason
-/// [`crate::gemm`] does (R14).
+/// The backend selects the native microkernel and the encode mode selects the
+/// exact or modular arithmetic lane. The only alternate execution is the
+/// reference traversal when the offer cannot hold a panel; it preserves the
+/// total `()` API. The offer never changes the computed bytes (`CD-01`,
+/// `CD-22`). Returns `()`, for the same reason [`crate::gemm`] does (R14).
 pub fn gemm_auto<E, Bd, O, Ep>(
     triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
     epilogue: &Ep,
@@ -565,19 +555,20 @@ pub fn gemm_auto_counted<E, Bd, O, Ep, Lg>(
     Ep: Epilogue<E, O>,
     Lg: RouteLedger,
 {
-    gemm_packed_impl(triple, epilogue, options, scratch, true, ledger)
+    gemm_packed_impl(triple, epilogue, options, scratch, ledger)
 }
 
-/// [`gemm_packed`], with the sub-cubic auto-selection switchable.
+/// The one canonical dense integer execution path.
 ///
-/// `recurse` is `true` for every caller but one: [`crate::strassen`]'s own
-/// decline path, which must not re-enter the recursion it just declined.
+/// The backend selects the native microkernel, and the encode mode selects the
+/// exact or modular arithmetic of that same blocked tile traversal. Shape,
+/// scratch size, and data values do not select another traversal; an offer too
+/// small for a panel is the only reason this path reaches the reference.
 pub(crate) fn gemm_packed_impl<E, Bd, O, Ep>(
     triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
     epilogue: &Ep,
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
-    recurse: bool,
     ledger: &mut impl RouteLedger,
 ) where
     E: Kernelized,
@@ -590,83 +581,43 @@ pub(crate) fn gemm_packed_impl<E, Bd, O, Ep>(
         return;
     }
 
-    // The modular lane is admissible exactly when the caller asked to wrap into
-    // a type no wider than it. That is a question about two declarations --- the
-    // encode mode and the output type --- and about nothing else.
-    let wrapping = matches!(options.encode, EncodeMode::Wrapping);
-    let modular = wrapping
+    if let Some(spec) = matches!(options.encode, EncodeMode::Wrapping)
         .then(|| E::modular_spec(options.backend, O::BITS, Bd::VALUE, shape.m))
-        .flatten();
-
-    match modular {
-        Some(tile) => {
-            // The one-level bilinear factorization, admitted by the shape, the
-            // offer, and the measured crossover --- which the model records as
-            // `usize::MAX` while the modular lane has no measurement, so this
-            // declines everywhere until one exists (`MEASUREMENT-LOG.md`).
-            if crate::strassen::modular_level_admitted::<E, Bd, O>(shape, options, scratch, true) {
-                crate::strassen::run_modular(triple, epilogue, options, scratch, ledger);
-                return;
-            }
-            match pick(
+        .flatten()
+    {
+        let accumulate = |acc: &mut AccOf<E>, lane: E::Modular| {
+            *acc = E::modular_as_acc(E::add_modular(E::acc_as_modular(*acc), lane));
+        };
+        let (a, b) = (*triple.a(), *triple.b());
+        let reads_c = epilogue.reads_c();
+        let ran = {
+            let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| {
+                let c = triple.c_mut();
+                let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
+                *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+            };
+            run::<E, Bd, E::Modular>(
                 shape,
-                triple.a(),
-                triple.b(),
-                &tile,
-                || E::modular_narrow(options.backend, O::BITS, Bd::VALUE, shape.m),
-                || E::modular_reduce(options.backend, O::BITS, Bd::VALUE, shape.m),
-                scratch.len(),
-            ) {
-                Some(spec) => {
-                    // In the quotient the caller asked for, a running partial sum
-                    // kept in the accumulator and a lane are the same value, so
-                    // accumulating one into the other is the ring's own addition.
-                    let accumulate = |acc: &mut AccOf<E>, lane: E::Modular| {
-                        *acc = E::modular_as_acc(E::add_modular(E::acc_as_modular(*acc), lane));
-                    };
-                    let (a, b) = (*triple.a(), *triple.b());
-                    let reads_c = epilogue.reads_c();
-                    let ran = {
-                        let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| {
-                            let c = triple.c_mut();
-                            let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
-                            *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
-                        };
-                        run::<E, Bd, E::Modular>(
-                            shape,
-                            &a,
-                            &b,
-                            scratch,
-                            spec,
-                            E::add_modular,
-                            &accumulate,
-                            usize::MAX,
-                            &mut emit,
-                        )
-                    };
-                    if ran {
-                        ledger.routed(route_of(&spec));
-                    } else {
-                        ledger.routed(Route::ReferenceByOffer);
-                        crate::gemm(triple, epilogue, options, scratch);
-                    }
-                }
-                None => {
-                    ledger.routed(Route::ReferenceByCost);
-                    crate::gemm(triple, epilogue, options, scratch);
-                }
-            }
+                &a,
+                &b,
+                scratch,
+                spec,
+                E::add_modular,
+                &accumulate,
+                usize::MAX,
+                &mut emit,
+            )
+        };
+        if ran {
+            ledger.routed(route_of(&spec));
+        } else {
+            ledger.routed(Route::ReferenceByOffer);
+            crate::gemm(triple, epilogue, options, scratch);
         }
-        None => gemm_packed_exact_at(
-            triple,
-            epilogue,
-            options,
-            scratch,
-            Bd::VALUE,
-            recurse,
-            ledger,
-        ),
+        return;
     }
+
+    gemm_packed_cubic_at(triple, epilogue, options, scratch, Bd::VALUE, ledger);
 }
 
 /// The exact arm of [`gemm_packed`], with the alphabet bound measured rather
@@ -754,50 +705,34 @@ pub(crate) fn gemm_packed_cubic_at<E, Bd, O, Ep>(
     if shape.m == 0 || shape.n == 0 {
         return;
     }
-    let tile = E::exact_spec(options.backend, bound, shape.m);
-    match pick(
-        shape,
-        triple.a(),
-        triple.b(),
-        &tile,
-        || E::exact_narrow(options.backend, bound, shape.m),
-        || Some(E::exact_reduce(options.backend, bound, shape.m)),
-        scratch.len(),
-    ) {
-        Some(spec) => {
-            let depth = spec.lane_depth(bound);
-            let accumulate = E::fold_exact;
-            let (a, b) = (*triple.a(), *triple.b());
-            let reads_c = epilogue.reads_c();
-            let ran = {
-                let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| {
-                    let c = triple.c_mut();
-                    let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
-                    *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
-                };
-                run::<E, Bd, E::Exact>(
-                    shape,
-                    &a,
-                    &b,
-                    scratch,
-                    spec,
-                    |_, lane| lane,
-                    &accumulate,
-                    depth,
-                    &mut emit,
-                )
-            };
-            if ran {
-                ledger.routed(route_of(&spec));
-            } else {
-                ledger.routed(Route::ReferenceByOffer);
-                crate::gemm(triple, epilogue, options, scratch);
-            }
-        }
-        None => {
-            ledger.routed(Route::ReferenceByCost);
-            crate::gemm(triple, epilogue, options, scratch);
-        }
+    let spec = E::exact_spec(options.backend, bound, shape.m);
+    let depth = spec.lane_depth(bound);
+    let accumulate = E::fold_exact;
+    let (a, b) = (*triple.a(), *triple.b());
+    let reads_c = epilogue.reads_c();
+    let ran = {
+        let mut emit = |ci: usize, cj: usize, acc: AccOf<E>| {
+            let c = triple.c_mut();
+            let prior = if reads_c { Some(*c.at(ci, cj)) } else { None };
+            *c.at_mut(ci, cj) = epilogue.finish(acc, prior, options.encode);
+        };
+        run::<E, Bd, E::Exact>(
+            shape,
+            &a,
+            &b,
+            scratch,
+            spec,
+            |_, lane| lane,
+            &accumulate,
+            depth,
+            &mut emit,
+        )
+    };
+    if ran {
+        ledger.routed(route_of(&spec));
+    } else {
+        ledger.routed(Route::ReferenceByOffer);
+        crate::gemm(triple, epilogue, options, scratch);
     }
 }
 

@@ -13,6 +13,7 @@ const GROUPS: &[&str] = &[
     "gemm_f32",
     "public_api",
     "workspace",
+    "lookup_build",
     "gray_sign",
     "modular_strassen",
 ];
@@ -75,7 +76,10 @@ fn display_name(name: &str, group: &str) -> String {
             }
         }
     }
-    if matches!(group, "workspace" | "gray_sign" | "modular_strassen") {
+    if matches!(
+        group,
+        "workspace" | "lookup_build" | "gray_sign" | "modular_strassen"
+    ) {
         return name.replace('_', "/");
     }
     name.to_owned()
@@ -267,12 +271,80 @@ fn comparison_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
         }
         body.push_str("</tr>\n");
     }
+    let chart = comparison_chart_html(comparison, rows);
     format!(
-        "<h3>{}</h3><p>Ratios are competitor time divided by {} time; <strong>greater than 1x means {} is faster</strong>.</p><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>",
+        "<section class=\"comparison\"><h3>{}</h3><p>Ratios are competitor time divided by {} time; <strong>greater than 1× means {} is faster</strong>.</p><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>{chart}</section>",
         html_escape(comparison.title),
         html_escape(comparison.primary_label),
         html_escape(comparison.primary_label)
     )
+}
+
+fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
+    let points = comparison_rows(comparison, rows);
+    if points.is_empty() {
+        return String::new();
+    }
+    let left = 190.0;
+    let chart_width = 520.0;
+    let row_height = 24.0 + comparison.others.len() as f64 * 12.0;
+    let height = row_height * points.len() as f64;
+    let max_ratio = points
+        .iter()
+        .flat_map(|(primary, others)| others.iter().map(|other| other.mean / primary.mean))
+        .fold(1.0_f64, f64::max)
+        .max(1.0)
+        * 1.1;
+    let mut svg = String::new();
+    write!(
+        svg,
+        "<div class=\"chart-wrap\"><div class=\"chart-title\">Relative time — competitor ÷ {}</div><svg class=\"chart\" viewBox=\"0 0 760 {:.0}\" role=\"img\" aria-label=\"{} relative benchmark chart\">",
+        html_escape(comparison.primary_label),
+        height,
+        html_escape(comparison.title)
+    )
+    .unwrap();
+    let baseline_x = left + chart_width / max_ratio;
+    write!(
+        svg,
+        "<line x1=\"{baseline_x:.1}\" x2=\"{baseline_x:.1}\" y1=\"0\" y2=\"{height:.1}\" class=\"baseline\"/><text x=\"{baseline_x:.1}\" y=\"12\" class=\"baseline-label\">1×</text>"
+    )
+    .unwrap();
+    for (index, (primary, others)) in points.iter().enumerate() {
+        let y = index as f64 * row_height;
+        let shape = primary
+            .name
+            .strip_prefix(comparison.primary_prefix)
+            .unwrap_or(&primary.name);
+        write!(
+            svg,
+            "<text x=\"0\" y=\"{:.1}\" class=\"shape-label\">{}</text>",
+            y + 16.0,
+            html_escape(shape)
+        )
+        .unwrap();
+        for (other_index, other) in others.iter().enumerate() {
+            let ratio_value = other.mean / primary.mean;
+            let bar_y = y + 21.0 + other_index as f64 * 12.0;
+            let width = chart_width * (ratio_value / max_ratio).min(1.0);
+            let color = if ratio_value >= 1.0 {
+                "#238636"
+            } else {
+                "#cf222e"
+            };
+            write!(
+                svg,
+                "<rect x=\"{left:.1}\" y=\"{bar_y:.1}\" width=\"{width:.1}\" height=\"9\" rx=\"3\" fill=\"{color}\"/><text x=\"{:.1}\" y=\"{:.1}\" class=\"bar-label\">{} {:.2}×</text>",
+                left + width + 7.0,
+                bar_y + 8.0,
+                html_escape(comparison.others[other_index].label),
+                ratio_value
+            )
+            .unwrap();
+        }
+    }
+    svg.push_str("</svg></div>");
+    svg
 }
 
 fn comparisons() -> Vec<Comparison<'static>> {
@@ -331,6 +403,17 @@ fn comparisons() -> Vec<Comparison<'static>> {
             }],
         },
         Comparison {
+            title: "Finite i8 lookup-table build",
+            group: "lookup_build",
+            shapes: &["space4096-blk16"],
+            primary_label: "cpu-native",
+            primary_prefix: "build/cpu-native/",
+            others: &[Other {
+                label: "portable",
+                prefix: "build/portable/",
+            }],
+        },
+        Comparison {
             title: "Modular-Strassen routes",
             group: "modular_strassen",
             shapes: &[
@@ -368,30 +451,24 @@ fn main() -> Result<(), String> {
         ));
     }
 
-    let notable = [
-        ("i8 scaling exponent", "1.0220 +/- 0.0533 (95%)"),
-        ("i8 64^3", "783.4 us"),
-        ("i8 128^3", "6.209 ms"),
-        ("i8 256^3", "81.06 ms"),
-        ("f32 uor-matmul 128^3", "2.547 ms"),
-        ("f32 matrixmultiply 128^3", "443.1 us"),
-        ("f32 faer 128^3", "700.1 us"),
-        ("i8 modular-Strassen packed 2048^3", "2.3169 s"),
-        ("i8 modular-Strassen level 2048^3", "2.3168 s"),
-    ];
     let comparisons = comparisons();
+    let host = env::var("RUNNER_NAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "local".to_owned());
+    let arch = env::var("RUNNER_ARCH").unwrap_or_else(|_| env::consts::ARCH.to_owned());
+    let os = env::var("RUNNER_OS").unwrap_or_else(|_| env::consts::OS.to_owned());
+    let revision = env::var("GITHUB_SHA")
+        .or_else(|_| env::var("GIT_COMMIT"))
+        .unwrap_or_else(|_| "unknown".to_owned());
+    let workflow = env::var("GITHUB_WORKFLOW").unwrap_or_else(|_| "local".to_owned());
+    let run = env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "local".to_owned());
     let mut markdown = String::new();
     writeln!(
         markdown,
-        "# Raspberry Pi Benchmark Report\n\nGenerated from the Criterion artifacts.\n"
+        "# Comparison Benchmark Report\n\nGenerated from Criterion artifacts.\n"
     )
     .unwrap();
-    markdown.push_str("## Run context\n\n");
-    markdown.push_str(
-        "- Host: rpi1 - Raspberry Pi, 4-core Cortex-A72, aarch64\n\
-         - Toolchain: Rust 1.97.1\n\
-         - Repository revision: 8df6471\n",
-    );
+    writeln!(markdown, "## Run context\n\n- Host: `{host}` ({os}/{arch})\n- Workflow: `{workflow}` (run `{run}`)\n- Repository revision: `{revision}`\n").unwrap();
     writeln!(
         markdown,
         "- Completed Criterion measurements: **{}**",
@@ -399,16 +476,12 @@ fn main() -> Result<(), String> {
     )
     .unwrap();
     markdown.push_str(
-        "- Timing unit: Criterion nanosecond estimates converted for readability; intervals are 95% confidence intervals.\n\n\
-         The run was intentionally stopped before the remaining modular-Strassen stress cases: i32 2048^3, and all 4096^3 variants. Those cases are not represented as zeroes or failures here.\n\n\
-         ## Notable measurements\n\n| Benchmark | Mean |\n| --- | ---: |\n",
+        "- Timing unit: Criterion estimates converted for readability; intervals are 95% confidence intervals.\n\n\
+         Ratios below are competitor time divided by the named primary. Values above 1× mean the primary is faster.\n\n",
     );
-    for (name, value) in notable {
-        writeln!(markdown, "| {name} | {value} |").unwrap();
-    }
     markdown.push_str(
         "\n## Direct comparisons\n\n\
-         These tables compare identical shapes. The speedup columns are competitor time divided by the reference time; a value above 1x means the reference operation is faster.\n\n",
+         These tables compare identical shapes. The speedup columns are competitor time divided by the named primary; a value above 1× means the primary operation is faster.\n\n",
     );
     for comparison in &comparisons {
         markdown.push_str(&comparison_markdown(comparison, &rows));
@@ -442,17 +515,6 @@ fn main() -> Result<(), String> {
         markdown.push('\n');
     }
 
-    let notable_html = notable
-        .iter()
-        .map(|(name, value)| {
-            format!(
-                "<tr><td>{}</td><td>{}</td></tr>",
-                html_escape(name),
-                html_escape(value)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     let comparison_html_output = comparisons
         .iter()
         .map(|comparison| comparison_html(comparison, &rows))
@@ -474,13 +536,33 @@ fn main() -> Result<(), String> {
             .unwrap();
         }
     }
-    let html = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Raspberry Pi Benchmark Report</title><style>body{{font:15px/1.5 system-ui,-apple-system,sans-serif;color:#202124;max-width:1200px;margin:2rem auto;padding:0 1rem}}h1{{margin-bottom:.25rem}}h2{{margin-top:2rem}}table{{border-collapse:collapse;width:100%;margin:1rem 0}}th,td{{border:1px solid #d0d7de;padding:.45rem .6rem;text-align:left}}th{{background:#f6f8fa}}td:nth-child(n+3),th:nth-child(n+3){{text-align:right}}code{{font-size:.92em}}li{{margin:.2rem 0}}.note{{background:#fff8c5;border:1px solid #d4a72c;padding:.7rem 1rem}}</style></head><body><h1>Raspberry Pi Benchmark Report</h1><p>Generated from the Criterion artifacts.</p><h2>Run context</h2><ul><li>Host: <code>rpi1</code> - Raspberry Pi, 4-core Cortex-A72, <code>aarch64</code></li><li>Toolchain: Rust <code>1.97.1</code></li><li>Repository revision: <code>8df6471</code></li><li>Completed Criterion measurements: <strong>{}</strong></li><li>Intervals: 95% confidence intervals</li></ul><p class=\"note\">The run was intentionally stopped before modular-Strassen i32 <code>2048^3</code> and all <code>4096^3</code> stress cases. They are not represented as zeroes or failures.</p><h2>Notable measurements</h2><table><thead><tr><th>Benchmark</th><th>Mean</th></tr></thead><tbody>{}</tbody></table><h2>Direct comparisons</h2>{}<h2>Completed measurements</h2><table><thead><tr><th>Group</th><th>Benchmark</th><th>Mean</th><th>95% confidence interval</th><th>Raw estimate</th></tr></thead><tbody>{}</tbody></table></body></html>",
+    let mut html = String::new();
+    html.push_str(
+        r##"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Comparison Benchmark Report</title><style>
+        :root{color-scheme:light;--ink:#172033;--muted:#5d6b82;--line:#d8e0ea;--panel:#fff;--wash:#f4f7fb;--accent:#2563eb}
+        *{box-sizing:border-box}body{margin:0;background:var(--wash);color:var(--ink);font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+        header{background:linear-gradient(120deg,#172554,#2563eb);color:#fff;padding:3rem max(1rem,calc((100% - 1180px)/2)) 2.5rem}main{max-width:1180px;margin:0 auto;padding:1.25rem 1rem 3rem}
+        h1{font-size:clamp(2rem,5vw,3.5rem);line-height:1.05;margin:0 0 .6rem}h2{margin:2.5rem 0 1rem}h3{font-size:1.25rem;margin:.2rem 0 .6rem}p{color:var(--muted)}header p{color:#dbeafe}header code{color:#fff;background:#ffffff22}
+        .context{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.75rem;margin-top:1.5rem}.context div{background:#ffffff18;border:1px solid #ffffff30;border-radius:10px;padding:.7rem .85rem}.context small{display:block;color:#bfdbfe;text-transform:uppercase;letter-spacing:.08em;font-size:.7rem}.context code{display:block;overflow-wrap:anywhere}
+        nav{position:sticky;top:0;z-index:2;background:#ffffffee;backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:.65rem 0}nav a{color:var(--accent);font-weight:650;margin-right:1rem;text-decoration:none}
+        .comparison{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:1rem 1.1rem;margin:1rem 0 1.25rem;box-shadow:0 5px 18px #1720330b}.comparison p{margin:.2rem 0 .8rem}.chart-wrap{margin-top:1rem;overflow-x:auto;border-top:1px solid var(--line);padding-top:.85rem}.chart-title{color:var(--muted);font-size:.85rem;margin-bottom:.35rem}.chart{display:block;min-width:700px;width:100%;height:auto}.baseline{stroke:#64748b;stroke-dasharray:4 4}.baseline-label,.shape-label,.bar-label{font:12px system-ui,sans-serif;fill:var(--muted)}.shape-label{fill:var(--ink)}.bar-label{font-weight:650}
+        table{border-collapse:separate;border-spacing:0;width:100%;margin:1rem 0;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}th,td{border-bottom:1px solid var(--line);padding:.65rem .75rem;text-align:left}th{background:#eef3f9;color:#334155;font-size:.82rem;text-transform:uppercase;letter-spacing:.04em}tr:last-child td{border-bottom:0}tbody tr:nth-child(even){background:#fbfcfe}td:nth-child(n+3),th:nth-child(n+3){text-align:right}code{font-size:.92em;background:#eef2f7;border-radius:4px;padding:.08rem .3rem}header code{background:transparent;padding:0}@media(max-width:700px){td,th{padding:.5rem;font-size:.85rem}table{display:block;overflow-x:auto;white-space:nowrap}}
+        </style></head><body><header><main><h1>Comparison Benchmark Report</h1><p>Alternatives are compared at identical shapes; raw timing is included for context.</p><div class="context"><div><small>Host</small><code>"##,
+    );
+    write!(
+        html,
+        "{}</code></div><div><small>Platform</small><code>{}/{}</code></div><div><small>Workflow</small><code>{}</code></div><div><small>Run</small><code>{}</code></div><div><small>Revision</small><code>{}</code></div><div><small>Measurements</small><code>{}</code></div></div></main></header><main><nav><a href=\"#comparisons\">Comparisons</a><a href=\"#measurements\">All measurements</a></nav><section id=\"comparisons\"><h2>Direct comparisons</h2><p>Ratios are competitor time divided by the named primary. A ratio above 1× means the primary is faster; green bars favor the primary.</p>{}</section><section id=\"measurements\"><h2>Completed measurements</h2><table><thead><tr><th>Group</th><th>Benchmark</th><th>Mean</th><th>95% confidence interval</th><th>Raw estimate</th></tr></thead><tbody>{}</tbody></table></section></main></body></html>",
+        html_escape(&host),
+        html_escape(&os),
+        html_escape(&arch),
+        html_escape(&workflow),
+        html_escape(&run),
+        html_escape(&revision),
         rows.len(),
-        notable_html,
         comparison_html_output,
         all_html
-    );
+    )
+    .unwrap();
 
     fs::write(root.join("REPORT.md"), markdown)
         .map_err(|error| format!("write Markdown: {error}"))?;

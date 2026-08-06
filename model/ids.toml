@@ -336,7 +336,7 @@ refuted_by = """one modular table sequence differing from the portable modular r
 id = "CB-10"
 level = "build"
 suite = "backends"
-statement = """At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run"""
+statement = """At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, finite-alphabet lookup builds remain admissible beyond bound 1, and the census counts the issued operations"""
 refuted_by = """a bound-1 build differing from the portable reference in one slot, selection offering the adds-only build where the declared bound does not admit it, or the census counting one multiply in a bound-1 tabulated run"""
 
 [[id]]
@@ -815,6 +815,13 @@ level = "build"
 suite = "codec"
 statement = """The semiring zero is simultaneously the pad and the mask, so a masked shape and a zero-padded shape are byte-identical"""
 refuted_by = """a masked shape and the zero-padded shape of the same operand differing by a byte, or a pad that decodes to anything but `Element::ZERO`"""
+
+[[id]]
+id = "CK-18"
+level = "build"
+suite = "codec"
+statement = """The complete signed i8 product alphabet is byte-identical to an independent shift-add construction, so the canonical i8 product route is a lookup followed by addition"""
+refuted_by = """one signed i8 pair whose lookup product differs from the independent shift-add product, or a lookup route that issues an operation other than the declared native additions"""
 
 [[id]]
 id = "CS-10"

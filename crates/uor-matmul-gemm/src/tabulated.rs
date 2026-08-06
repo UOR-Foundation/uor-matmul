@@ -5343,14 +5343,20 @@ mod tests {
                         census.table_reads > 0,
                         "{m}x{k}x{n} d={d}: the offer was sized for a table and none was read"
                     );
-                    // The build charges per *distinct* row when the collapse
-                    // ran, and per row when anything declined it.
+                    // The lookup build charges each product as an add. The
+                    // collapse still changes only the number of distinct rows
+                    // that are built, never the bytes or the table identity.
                     let charged = if rows_offer >= d * k && d < m { d } else { m };
                     assert_eq!(
-                        census.multiplies,
+                        census.multiplies, 0,
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the i8 lookup build \
+                         must issue no multiplies ({census:?})"
+                    );
+                    assert_eq!(
+                        census.adds - census.table_reads,
                         (charged * k * space) as u64,
-                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the build must charge \
-                         per distinct row ({census:?})"
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the lookup build must \
+                         charge each product as an add ({census:?})"
                     );
                 }
             }
@@ -5388,9 +5394,13 @@ mod tests {
             "both axes: the dense driver's bytes ({census:?})"
         );
         assert_eq!(
-            census.multiplies,
+            census.multiplies, 0,
+            "both axes: the i8 lookup build issues no multiplies ({census:?})"
+        );
+        assert_eq!(
+            census.adds - census.table_reads,
             (rows_d * k * space) as u64,
-            "both axes: the build charges per distinct row ({census:?})"
+            "both axes: the lookup build charges each product as an add ({census:?})"
         );
         assert_eq!(
             census.table_reads,
@@ -5784,14 +5794,14 @@ mod tests {
     ///
     /// Three numbers say it, and each is a closed form rather than a fitted one:
     ///
-    /// - `adds == table_reads == m * n * (k / Bk)`. That is the *whole* content of
-    ///   the column loop: one read and one add per code, covering `Bk` weights.
+    /// - `adds == table_reads + m * k * code_space`. The first term is the
+    ///   column loop's one read and one add per code; the second is the lookup
+    ///   build's one add per product.
     /// - `decodes == code_space * Bk`, for the whole call. The codebook is
     ///   decoded once, not once per row tile and per block of the reduction, so
     ///   the codec's cost does not scale with the shape at all.
-    /// - `multiplies == m * k * code_space`, independent of `n`. The build is the
-    ///   only arithmetic that scales with the code space, and it does not scale
-    ///   with the output width at all.
+    /// - `multiplies == 0`: both the lookup build and the column loop are
+    ///   multiply-free, independent of `n`.
     #[test]
     fn the_tabulated_column_loop_has_no_multiply_cu_06() {
         let table = e8_table::<Full<i8>>().expect("i8 holds E8");
@@ -5842,12 +5852,13 @@ mod tests {
 
         assert_eq!(
             census.adds,
-            (m * n * blocks) as u64,
-            "one add per code per row: {census:?}"
+            (m * n * blocks + m * k * space) as u64,
+            "one gather add per code plus one lookup-build add per product: {census:?}"
         );
         assert_eq!(
-            census.table_reads, census.adds,
-            "every table read is exactly one add and nothing else: {census:?}"
+            census.adds - census.table_reads,
+            (m * k * space) as u64,
+            "the lookup build contributes one add per product: {census:?}"
         );
         assert_eq!(
             census.decodes,
@@ -5855,9 +5866,8 @@ mod tests {
             "the codebook is decoded once for the whole call, not once per tile: {census:?}"
         );
         assert_eq!(
-            census.multiplies,
-            (m * k * space) as u64,
-            "the build is `m * k * code_space` and does not scale with n: {census:?}"
+            census.multiplies, 0,
+            "the lookup build is multiply-free and does not scale with n: {census:?}"
         );
 
         // The claim the whole construction exists for, in the spec's own
@@ -6136,14 +6146,13 @@ mod tests {
                     "one read per code at n = {n}: {census:?}"
                 );
                 assert_eq!(
-                    census.adds, census.table_reads,
-                    "every read is exactly one add at n = {n}: {census:?}"
+                    census.adds - census.table_reads,
+                    (m * k * space) as u64,
+                    "the lookup build contributes one add per product at n = {n}: {census:?}"
                 );
                 assert_eq!(
-                    census.multiplies,
-                    (space * k * m * n.div_ceil(plan.cols)) as u64,
-                    "the only multiplies are the build's (`code_space * block * rows` per slot) \
-                     at n = {n}: {census:?}"
+                    census.multiplies, 0,
+                    "the lookup build and gather issue no multiplies at n = {n}: {census:?}"
                 );
             }
 

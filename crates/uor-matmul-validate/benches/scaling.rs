@@ -22,8 +22,9 @@ use std::mem::size_of;
 use uor_matmul::driver::modular_level_needs;
 use uor_matmul::prelude::*;
 use uor_matmul::{
-    suggested_collapse_index, suggested_collapse_rows, suggested_float_panels, suggested_scratch,
-    suggested_tabulation, workspace_report, Backend, Collapse, Shape, TabulatedTriple,
+    suggested_accumulators, suggested_bridge_scaled, suggested_collapse_index,
+    suggested_collapse_rows, suggested_float_panels, suggested_scratch, suggested_tabulation,
+    workspace_report, Backend, Collapse, Shape, TabulatedTriple,
 };
 use uor_matmul_core::{
     as_alphabet_tropical, Alphabet, EncodeMode, Full, PackedCode, Traversal, Trop,
@@ -183,6 +184,36 @@ fn vs_oracles(c: &mut Criterion) {
                     &mut pa,
                     &mut pb,
                 );
+                assert!(
+                    out.iter().all(|&v| v == k as f32),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        f32_group.bench_function(format!("uor-matmul-full/{shape}"), |bench| {
+            let mut out = vec![0.0f32; m * n];
+            let (pa_len, pb_len) = suggested_float_panels(Shape { m, k, n });
+            let mut pa = vec![PackedCode::default(); pa_len];
+            let mut pb = vec![PackedCode::default(); pb_len];
+            let mut scaled = vec![0i32; suggested_bridge_scaled(Shape { m, k, n })];
+            let mut panels = vec![0i32; suggested_scratch(Shape { m, k, n })];
+            let mut accumulators = vec![0i128; suggested_accumulators(Shape { m, k, n })];
+            bench.iter(|| {
+                uor_matmul::slice::gemm_float_full(
+                    m,
+                    k,
+                    n,
+                    &a,
+                    &b,
+                    &mut out,
+                    &mut pa,
+                    &mut pb,
+                    &mut scaled,
+                    &mut panels,
+                    &mut accumulators,
+                )
+                .expect("the product exists");
                 assert!(
                     out.iter().all(|&v| v == k as f32),
                     "the timed call must be correct"
@@ -494,6 +525,57 @@ fn gray_sign(c: &mut Criterion) {
     group.finish();
 }
 
+/// The finite-alphabet table build, measured at the widest CPU table tile.
+///
+/// The native spec receives the same logical activation panel as the portable
+/// reference, repacked only through its declared `k_group`. This isolates the
+/// build itself; the timed closure does not allocate and asserts the first
+/// entry's bytes after every run.
+fn finite_i8_table_build(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lookup_build");
+    group.sample_size(10);
+    let rows = 16usize;
+    let block = 16usize;
+    let space = 4096usize;
+    let book: Vec<i8> = (0..space * block)
+        .map(|i| ((i.wrapping_mul(13) % 255) as i16 - 127) as i8)
+        .collect();
+    let logical_acts: Vec<i8> = (0..rows * block)
+        .map(|i| ((i.wrapping_mul(7) % 255) as i16 - 127) as i8)
+        .collect();
+    let portable = uor_matmul::kernels::portable_table_i8_lookup(rows, 1);
+    let native = uor_matmul::kernels::available_table_i8(rows, 1)
+        .find(|spec| spec.backend != Backend::Portable)
+        .unwrap_or(portable);
+    let mut specs = vec![("portable", portable)];
+    if native.backend != Backend::Portable {
+        specs.push(("cpu-native", native));
+    }
+    for (name, spec) in specs {
+        let mut acts = vec![0i8; rows * block];
+        for t in 0..block {
+            for row in 0..rows {
+                acts[uor_matmul::kernels::packed_slot(t, row, rows, spec.k_group)] =
+                    logical_acts[t * rows + row];
+            }
+        }
+        let mut expected = vec![0i32; space * rows];
+        portable.build(space, block, &book, &logical_acts, &mut expected);
+        group.bench_function(format!("build/{name}/space{space}-blk{block}"), |b| {
+            let mut out = vec![0i32; space * rows];
+            b.iter(|| {
+                spec.build(space, block, &book, &acts, &mut out);
+                assert_eq!(
+                    &out[..rows],
+                    &expected[..rows],
+                    "the native build changed bytes"
+                );
+            });
+        });
+    }
+    group.finish();
+}
+
 /// The one-level modular bilinear factorization against the direct packed
 /// modular walk it would displace, at the squares the crossover will be read
 /// from. `Auto` and the explicit entry run the level where it is admitted
@@ -797,6 +879,7 @@ criterion_group!(
     workspace_plans,
     gray_sign,
     modular_strassen,
-    tropical
+    tropical,
+    finite_i8_table_build,
 );
 criterion_main!(benches);

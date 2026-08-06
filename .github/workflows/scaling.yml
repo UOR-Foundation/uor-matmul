@@ -21,8 +21,17 @@ jobs:
         with: { targets: wasm32-wasip1 }
       - uses: extractions/setup-just@v2
       - uses: Swatinem/rust-cache@v2
+      - name: BDD conformance
+        run: just bdd
       - name: fitted exponents, ours and every oracle's
         run: just scaling
+      - name: publish comparison benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-benchmark-report
+          path: target/criterion/
+          if-no-files-found: error
+          retention-days: 30
       # CT-06, CG-08: gigabytes of operands and minutes of wall clock, so it is
       # not part of `vv` --- but it is part of CI, or the largest shapes would be
       # measured only when somebody remembered to.

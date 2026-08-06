@@ -14,22 +14,19 @@
 //! # One method
 //!
 //! Everything below is *decode, accumulate exactly, encode once* at a different
-//! instantiation. The traversals differ in which order they walk the output and
-//! how much working memory they use; they do not differ in what they compute,
-//! and `CD-05` asserts it byte for byte.
+//! instantiation. The default integer entry point has one blocked traversal:
+//! the backend supplies its native microkernel and the encode mode supplies
+//! the arithmetic lane. `CD-05` asserts the result byte for byte against the
+//! portable reference.
 //!
-//! # Three entries, one identity
+//! # Entries, one identity
 //!
 //! [`gemm`] is the reference traversal: portable, never optimized, and the
-//! oracle every other factorization is validated against (R6). It stays
-//! directly callable under its own name. [`gemm_packed`] is the kernelized
-//! traversal: the modular lane, the sub-cubic recursion, and the CG-13 kernel
-//! table, each taken exactly when the caller's declarations and the offer
-//! admit it and declining to [`gemm`] when they do not. [`gemm_auto`] is
-//! [`gemm_packed`] under the name the documented API calls --- the default
-//! entry the safe faces reach --- and [`gemm_auto_counted`] is the same call
-//! recording which factorization ran, which is what `CD-22` asserts: the
-//! kernel table is reached, and every route returns the reference's bytes.
+//! oracle the kernelized traversal is validated against (R6). It stays
+//! directly callable under its own name. [`gemm_packed`] is the canonical
+//! integer traversal, and [`gemm_auto`] is that same call under the name the
+//! documented API uses. [`gemm_auto_counted`] records the selected microkernel
+//! for `CD-22`; it does not select a second algorithm.
 
 #![no_std]
 #![forbid(unsafe_code)]

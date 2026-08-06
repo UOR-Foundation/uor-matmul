@@ -71,6 +71,73 @@ pub const NEON_DOTPROD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     mac_tile: neon_dotprod_i8,
 };
 
+/// NEON family entry using the finite i8 product lookup and native adds.
+pub const NEON_LOOKUP_I8_I32: KernelSpec<i8, i32> = neon_lookup_spec::<4, 8>(Backend::Neon);
+
+/// NEON dot-product family entry using the finite i8 product lookup and adds.
+pub const NEON_DOTPROD_LOOKUP_I8_I32: KernelSpec<i8, i32> =
+    neon_lookup_spec::<8, 12>(Backend::NeonDotprod);
+
+const fn neon_lookup_spec<const MR: usize, const NR: usize>(
+    backend: Backend,
+) -> KernelSpec<i8, i32> {
+    KernelSpec {
+        backend,
+        factorization: Factorization::Exact,
+        mr: MR,
+        nr: NR,
+        lane_layout: LaneLayout::Interleaved,
+        k_group: 1,
+        products_per_step: NR,
+        lane_cap: i32::MAX as u128,
+        max_bound: u128::MAX,
+        mac_tile: neon_lookup_i8::<MR, NR>,
+    }
+}
+
+/// NEON lookup/add tile: lookup remains scalar, while accumulation uses native
+/// four-lane adds. ARM has no general i32 gather instruction for this table.
+#[target_feature(enable = "neon")]
+unsafe fn neon_lookup_i8<const MR: usize, const NR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    debug_assert!(NR.is_multiple_of(4));
+    // SAFETY: the KernelSpec caller guarantees all three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    let mut tile = [[vdupq_n_s32(0); 3]; MR];
+    for p in 0..kc {
+        for i in 0..MR {
+            let a = pa[p * MR + i];
+            let mut products = [0i32; NR];
+            for j in 0..NR {
+                products[j] = crate::lookup::i8_product(a, pb[p * NR + j]);
+            }
+            for (v, cell) in tile[i].iter_mut().enumerate().take(NR / 4) {
+                // SAFETY: `products` has `NR` elements and this load starts at
+                // a multiple of four below `NR`.
+                let values = unsafe { vld1q_s32(products.as_ptr().add(v * 4)) };
+                *cell = vaddq_s32(*cell, values);
+            }
+        }
+    }
+    for (i, row) in tile.iter().enumerate() {
+        for (v, value) in row.iter().enumerate().take(NR / 4) {
+            // SAFETY: the destination tile has `MR * NR` lanes and this store
+            // writes the four lanes belonging to vector `v`.
+            unsafe { vst1q_s32(acc.as_mut_ptr().add(i * NR + v * 4), *value) };
+        }
+    }
+}
+
 const NEON_MR: usize = 4;
 const NEON_NR: usize = 8;
 
@@ -592,6 +659,69 @@ pub const NEON_DOTPROD_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
     mac_tile: neon_dotprod_r_i8_one,
 };
 
+/// NEON reduction entry using the finite i8 product lookup and adds.
+pub const NEON_LOOKUP_R_I8_I32: KernelSpec<i8, i32> = neon_lookup_reduce_spec::<4>(Backend::Neon);
+
+/// NEON one-row reduction entry using the finite i8 product lookup and adds.
+pub const NEON_LOOKUP_R_I8_I32_1: KernelSpec<i8, i32> = neon_lookup_reduce_spec::<1>(Backend::Neon);
+
+/// NEON dot-product reduction entry using the finite i8 product lookup and adds.
+pub const NEON_DOTPROD_LOOKUP_R_I8_I32: KernelSpec<i8, i32> =
+    neon_lookup_reduce_spec::<4>(Backend::NeonDotprod);
+
+/// NEON dot-product one-row reduction entry using the finite i8 product lookup.
+pub const NEON_DOTPROD_LOOKUP_R_I8_I32_1: KernelSpec<i8, i32> =
+    neon_lookup_reduce_spec::<1>(Backend::NeonDotprod);
+
+const fn neon_lookup_reduce_spec<const MR: usize>(backend: Backend) -> KernelSpec<i8, i32> {
+    KernelSpec {
+        backend,
+        factorization: Factorization::Exact,
+        mr: MR,
+        nr: 1,
+        lane_layout: LaneLayout::Contiguous,
+        k_group: 1,
+        products_per_step: MR,
+        lane_cap: i32::MAX as u128,
+        max_bound: u128::MAX,
+        mac_tile: neon_lookup_reduce_i8::<MR>,
+    }
+}
+
+/// NEON lookup reduction: four row lookups are combined by one native add.
+#[target_feature(enable = "neon")]
+unsafe fn neon_lookup_reduce_i8<const MR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    debug_assert!(MR == 1 || MR == 4);
+    // SAFETY: the KernelSpec caller guarantees all three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    let mut sum = vdupq_n_s32(0);
+    for p in 0..kc {
+        let mut products = [0i32; 4];
+        for i in 0..MR {
+            products[i] = crate::lookup::i8_product(pa[i * kc + p], pb[p]);
+        }
+        // SAFETY: `products` always contains four lanes, including zero padding
+        // for the one-row reduction.
+        let values = unsafe { vld1q_s32(products.as_ptr()) };
+        sum = vaddq_s32(sum, values);
+    }
+    let mut result = [0i32; 4];
+    // SAFETY: `result` has four writable i32 lanes.
+    unsafe { vst1q_s32(result.as_mut_ptr(), sum) };
+    acc.copy_from_slice(&result[..MR]);
+}
+
 /// # Safety
 ///
 /// As [`neon_dotprod_r_i8`], with a one-row panel.
@@ -621,25 +751,25 @@ pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         crate::table::TableGatherCodesU8<i32>,
     ) = match (rows, group) {
         (16, 1) => (
-            neon_table_build_v4,
+            neon_table_build_lookup_v4,
             neon_gather_v4_u1,
             neon_codes_v4_u1,
             neon_codes_v4_u1_u8,
         ),
         (16, 2) => (
-            neon_table_build_v4,
+            neon_table_build_lookup_v4,
             neon_gather_v4_u2,
             neon_codes_v4_u2,
             neon_codes_v4_u2_u8,
         ),
         (8, 1) => (
-            neon_table_build_v2,
+            neon_table_build_lookup_v2,
             neon_gather_v2_u1,
             neon_codes_v2_u1,
             neon_codes_v2_u1_u8,
         ),
         (8, 2) => (
-            neon_table_build_v2,
+            neon_table_build_lookup_v2,
             neon_gather_v2_u2,
             neon_codes_v2_u2,
             neon_codes_v2_u2_u8,
@@ -655,13 +785,13 @@ pub fn neon_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         k_group: 1,
         lanes_per_add: NEON_TABLE_LANES,
         // One `vmlal_s16` per four lanes and one block step.
-        build_products_per_step: NEON_TABLE_LANES,
+        build_products_per_step: 1,
         lane_cap: i32::MAX as u128,
         // Every product is widened to `i32` before it is accumulated, so
         // nothing narrower than the lane is held and no alphabet is out of
         // reach --- the same statement `NEON_I8_I32` makes.
         max_bound: u128::MAX,
-        build_multiplies: true,
+        build_multiplies: false,
         build_adds: crate::table::product_build_adds,
         build,
         gather,
@@ -795,10 +925,9 @@ pub fn neon_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
 
 /// One slot of the `i16` table, at `V` registers of `i64`.
 ///
-/// # Safety
-///
-/// [`crate::table::TableBuild`]'s contract, with `rows == V * 2` and `V` a
-/// multiple of four.
+/// `vmull_s16` widens each product to `i32` and this widens again to `i64`
+/// before accumulating, so nothing narrower than the lane is held and no
+/// `i16` alphabet is out of reach.
 #[target_feature(enable = "neon")]
 unsafe fn neon_build16<const V: usize>(
     rows: usize,
@@ -818,14 +947,6 @@ unsafe fn neon_build16<const V: usize>(
             for t in 0..block {
                 let w = vdup_n_s16(*d.add(t));
                 let a = acts.add(t * rows);
-                // Four activations per widening multiply, which is two
-                // registers of the lane --- so one iteration covers four
-                // registers and therefore `4 * NEON_TABLE_LANES_64` rows. The
-                // register index and the row index advance at different rates
-                // and are written separately for that reason: an `i64` register
-                // holds two rows, so the row cursor moves twice as fast as the
-                // register cursor, and collapsing them silently re-reads the
-                // previous iteration's activations.
                 for quad in 0..V / 4 {
                     let reg = quad * 4;
                     let row = reg * NEON_TABLE_LANES_64;
@@ -1044,51 +1165,6 @@ neon_gathers64! {
     neon_gather64_v4_u2, neon_codes64_v4_u2, neon_codes64_v4_u2_u8, 4, 2, 8;
 }
 
-/// One slot of the table, at `V` registers of `i32`.
-///
-/// `T[c][i] = sum_t acts[t][i] * book[c][t]`, one block step at a time.
-/// `vmlal_s16` is a widening multiply-accumulate, so each product reaches the
-/// `i32` lane without an `i16` intermediate to overflow --- the same reason
-/// `NEON_I8_I32` widens rather than accumulating in `i16`.
-///
-/// # Safety
-///
-/// [`crate::table::TableBuild`]'s contract, with `rows == V * 4` and `V` even.
-#[target_feature(enable = "neon")]
-unsafe fn neon_table_build<const V: usize>(
-    rows: usize,
-    space: usize,
-    block: usize,
-    book: *const i8,
-    acts: *const i8,
-    out: *mut i32,
-) {
-    debug_assert_eq!(rows, V * NEON_TABLE_LANES);
-    debug_assert!(V.is_multiple_of(2));
-    // SAFETY: the caller established every extent.
-    unsafe {
-        for c in 0..space {
-            let d = book.add(c * block);
-            let mut entry = [vdupq_n_s32(0); V];
-            for t in 0..block {
-                let w = vdup_n_s16(*d.add(t) as i16);
-                let a = acts.add(t * rows);
-                // Eight activations per widening load, which is two lanes'
-                // worth of `i32` register.
-                for pair in 0..V / 2 {
-                    let x = vmovl_s8(vld1_s8(a.add(pair * 8)));
-                    entry[pair * 2] = vmlal_s16(entry[pair * 2], vget_low_s16(x), w);
-                    entry[pair * 2 + 1] = vmlal_s16(entry[pair * 2 + 1], vget_high_s16(x), w);
-                }
-            }
-            let o = out.add(c * rows);
-            for (v, cell) in entry.iter().enumerate() {
-                vst1q_s32(o.add(v * NEON_TABLE_LANES), *cell);
-            }
-        }
-    }
-}
-
 /// One slot of the table at bound 1, at `V` registers: no multiply.
 ///
 /// `T[c][i] = sum_t +-acts[t][i]`: the book word is in `{-1, 0, +1}`, so the
@@ -1136,7 +1212,7 @@ unsafe fn neon_table_build_bound1<const V: usize>(
                 let keep = vdupq_n_s16(-i16::from(w != 0));
                 let a = acts.add(t * rows);
                 // Eight activations per widening load, which is two lanes'
-                // worth of `i32` register, as in `neon_table_build`.
+                // worth of `i32` register.
                 for pair in 0..V / 2 {
                     let x = vmovl_s8(vld1_s8(a.add(pair * 8)));
                     let z = vsubq_s16(veorq_s16(vandq_s16(x, keep), sign), sign);
@@ -1259,12 +1335,8 @@ unsafe fn neon_codes<const V: usize, const U: usize, K: Copy + Into<usize>>(
     }
 }
 
-/// Build one slot at `rows == 16`.
-///
-/// # Safety
-///
-/// [`crate::table::TableBuild`]'s contract at `rows == 16`.
-unsafe fn neon_table_build_v4(
+/// One lookup-built table slot at `rows == 16`.
+unsafe fn neon_table_build_lookup_v4(
     rows: usize,
     space: usize,
     block: usize,
@@ -1272,17 +1344,12 @@ unsafe fn neon_table_build_v4(
     acts: *const i8,
     out: *mut i32,
 ) {
-    // SAFETY: NEON is mandatory on this target and the caller forwarded the
-    // extents.
-    unsafe { neon_table_build::<4>(rows, space, block, book, acts, out) }
+    // SAFETY: the caller established NEON and forwarded the extents.
+    unsafe { neon_table_build_lookup::<4>(rows, space, block, book, acts, out) }
 }
 
-/// Build one slot at `rows == 8`.
-///
-/// # Safety
-///
-/// [`crate::table::TableBuild`]'s contract at `rows == 8`.
-unsafe fn neon_table_build_v2(
+/// One lookup-built table slot at `rows == 8`.
+unsafe fn neon_table_build_lookup_v2(
     rows: usize,
     space: usize,
     block: usize,
@@ -1290,8 +1357,50 @@ unsafe fn neon_table_build_v2(
     acts: *const i8,
     out: *mut i32,
 ) {
-    // SAFETY: as [`neon_table_build_v4`], at a narrower tile.
-    unsafe { neon_table_build::<2>(rows, space, block, book, acts, out) }
+    // SAFETY: the caller established NEON and forwarded the extents.
+    unsafe { neon_table_build_lookup::<2>(rows, space, block, book, acts, out) }
+}
+
+/// NEON lookup/add table construction. The lookup is scalar, while each group
+/// of four rows is accumulated with a native vector add.
+#[target_feature(enable = "neon")]
+unsafe fn neon_table_build_lookup<const V: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    debug_assert_eq!(rows, V * NEON_TABLE_LANES);
+    // SAFETY: the TableBuild caller guarantees all three extents.
+    let (book, acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(book, space * block),
+            core::slice::from_raw_parts(acts, block * rows),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    for c in 0..space {
+        let mut entry = [vdupq_n_s32(0); 4];
+        for t in 0..block {
+            let weight = book[c * block + t];
+            let mut products = [0i32; 16];
+            for row in 0..rows {
+                products[row] = crate::lookup::i8_product(acts[t * rows + row], weight);
+            }
+            for (v, cell) in entry.iter_mut().enumerate().take(V) {
+                // SAFETY: every load starts within the `rows` products and
+                // reads exactly one four-lane vector.
+                let values = unsafe { vld1q_s32(products.as_ptr().add(v * 4)) };
+                *cell = vaddq_s32(*cell, values);
+            }
+        }
+        for (v, cell) in entry.iter().enumerate().take(V) {
+            // SAFETY: the output entry has `rows` lanes.
+            unsafe { vst1q_s32(out.as_mut_ptr().add(c * rows + v * 4), *cell) };
+        }
+    }
 }
 
 /// Build one slot at bound 1, at `rows == 16`.

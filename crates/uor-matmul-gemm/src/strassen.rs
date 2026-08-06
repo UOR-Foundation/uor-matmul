@@ -282,7 +282,7 @@ pub fn gemm_strassen<E, Bd, O, Ep>(
         // switched off. A caller who asked for zero levels gets zero levels ---
         // the packed walk's own auto-selection would otherwise take them, which
         // is the same bytes (`CD-21`) and not what was asked.
-        crate::kernel::gemm_packed_impl(triple, epilogue, options, scratch, false, &mut ());
+        crate::kernel::gemm_packed_impl(triple, epilogue, options, scratch, &mut ());
         return;
     }
     run(triple, epilogue, options, scratch, Bd::VALUE, take);

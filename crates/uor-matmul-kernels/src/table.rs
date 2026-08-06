@@ -801,10 +801,11 @@ pub struct TableSpec<E, L> {
     pub max_bound: u128,
     /// Whether [`Self::build`] issues multiplies.
     ///
-    /// Every build but the bound-1 one does. At bound 1 every product is
-    /// `+-a` or `0`, so the build that declares it is adds and subtracts, and
-    /// the driver's census charges it as such (`CB-10`) rather than as the
-    /// products it computes.
+    /// Product builds normally do. Bound-1 and finite-alphabet lookup builds
+    /// declare `false`: the former issues adds and subtracts, while the latter
+    /// reads a product and adds it. The driver's census charges the operation
+    /// actually issued (`CB-10`) rather than the mathematical product it
+    /// computes.
     pub build_multiplies: bool,
     /// How many adds [`Self::build`] issues per slot, charged to the census
     /// when [`Self::build_multiplies`] is false.
@@ -902,6 +903,114 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
         gather,
         gather_codes,
         gather_codes_u8,
+    }
+}
+
+/// The full-alphabet i8 table build using the static product lookup.
+///
+/// The gather is the same portable gather as [`portable_table`]; only the
+/// build's product operation is factored into a read from [`I8_PRODUCTS`].
+pub const fn portable_table_i8_lookup(rows: usize, group: usize) -> TableSpec<i8, i32> {
+    let mut spec = portable_table::<i8, i32>(rows, group);
+    spec.build_multiplies = false;
+    spec.build = portable_build_lookup_i8;
+    spec
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract.
+pub(crate) unsafe fn portable_build_lookup_i8(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (book, acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(book, space * block),
+            core::slice::from_raw_parts(acts, block * rows),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    match rows {
+        1 => build_run_lookup_i8::<1>(block, book, acts, out),
+        2 => build_run_lookup_i8::<2>(block, book, acts, out),
+        4 => build_run_lookup_i8::<4>(block, book, acts, out),
+        8 => build_run_lookup_i8::<8>(block, book, acts, out),
+        16 => build_run_lookup_i8::<16>(block, book, acts, out),
+        _ => build_any_lookup_i8(rows, block, book, acts, out),
+    }
+}
+
+/// Build an i8 table from an activation panel with a fixed k-group.
+#[cfg(target_arch = "wasm32")]
+unsafe fn packed_build_lookup_i8<const GROUP: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller supplied the extents in the TableBuild contract.
+    let (book, acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(book, space * block),
+            core::slice::from_raw_parts(acts, rows * block),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    for (entry, word) in out.chunks_exact_mut(rows).zip(book.chunks_exact(block)) {
+        for (row, cell) in entry.iter_mut().enumerate() {
+            let mut sum = 0i32;
+            for (t, &weight) in word.iter().enumerate() {
+                let activation = acts[crate::spec::packed_slot(t, row, rows, GROUP)];
+                sum = sum.wrapping_add(crate::lookup::i8_product(activation, weight));
+            }
+            *cell = sum;
+        }
+    }
+}
+
+/// Lookup build for a plain k-major activation panel.
+#[cfg(target_arch = "wasm32")]
+pub(crate) unsafe fn packed_build_lookup_i8_group1(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: forwarded from the TableBuild caller.
+    unsafe { packed_build_lookup_i8::<1>(rows, space, block, book, acts, out) }
+}
+
+#[inline(always)]
+fn build_run_lookup_i8<const R: usize>(block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(R).zip(book.chunks_exact(block)) {
+        let mut acc = [0i32; R];
+        for (&w, col) in word.iter().zip(acts.chunks_exact(R)) {
+            for (cell, &a) in acc.iter_mut().zip(&col[..R]) {
+                *cell = cell.wrapping_add(crate::lookup::i8_product(a, w));
+            }
+        }
+        entry.copy_from_slice(&acc);
+    }
+}
+
+fn build_any_lookup_i8(rows: usize, block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(rows).zip(book.chunks_exact(block)) {
+        entry.fill(0);
+        for (&w, col) in word.iter().zip(acts.chunks_exact(rows)) {
+            for (cell, &a) in entry.iter_mut().zip(col) {
+                *cell = cell.wrapping_add(crate::lookup::i8_product(a, w));
+            }
+        }
     }
 }
 
@@ -1812,7 +1921,7 @@ impl<E, L> TableSpec<E, L> {
 #[inline]
 pub fn available_table_i8(rows: usize, group: usize) -> impl Iterator<Item = TableSpec<i8, i32>> {
     collect_table![
-        true => portable_table::<i8, i32>(rows, group),
+        true => portable_table_i8_lookup(rows, group),
         crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i8_i32(rows, group),
         crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i8_i32(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i8_i32(rows, group),

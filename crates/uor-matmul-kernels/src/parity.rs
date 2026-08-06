@@ -992,7 +992,8 @@ where
 }
 
 /// `CB-10`: every bound-1 build equals the model, and selection offers the
-/// adds-only build exactly when the declared bound admits it.
+/// adds-only build exactly when the declared bound admits it; a wider finite
+/// alphabet lookup build may also issue no multiplies.
 ///
 /// At bound 1 every product is `+-a` or `0`, so a build can fill the same slot
 /// the reference fills with adds and subtracts alone. The selection half is
@@ -1111,8 +1112,9 @@ where
     }
 
     // The selection half. At bound 1 the adds-only build is what `Auto` runs;
-    // one past its declaration it is not considered at all --- not because it
-    // is riskier there, but because there it computes a different number.
+    // one past its declaration a bound-1 build is not considered. A finite
+    // alphabet lookup build remains admissible beyond bound 1 and also issues
+    // no multiplies, so the assertion distinguishes its wider declaration.
     for &(rows, group) in corpus.sel_tiles {
         for &block in corpus.sel_blocks {
             let picked = choose_table(available(rows, group), Backend::Auto, 1, block)
@@ -1129,8 +1131,8 @@ where
             let past = choose_table(available(rows, group), Backend::Auto, 2, block)
                 .expect("the reference sequence is always present");
             assert!(
-                past.build_multiplies,
-                "{check}: bound 2 must not be offered the adds-only build at {rows}x{group} \
+                past.max_bound > 1,
+                "{check}: bound 2 must not select a bound-1 build at {rows}x{group} \
                  b={block}"
             );
         }

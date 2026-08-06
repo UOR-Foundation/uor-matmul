@@ -351,11 +351,16 @@ family! {
     true => crate::isa::portable::I8_I32,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_I8_I32,
     crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPWSSD_I8_I32,
     crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPBUSD_I8_I32,
+    crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_LOOKUP_I8_I32,
     crate::isa::arm::neon_available() => crate::isa::arm::NEON_I8_I32,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_LOOKUP_I8_I32,
     crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_I8_I32,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_LOOKUP_I8_I32,
     crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_I8_I32,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_LOOKUP_I8_I32,
 }
 
 family! {
@@ -452,6 +457,8 @@ family! {
     available_i8_narrow, cached_i8_narrow, I8_NARROW, i8, i32;
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1_N8,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_N8,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_I8_I32_M1_N8,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_I8_I32_N8,
 }
 
 family! {
@@ -472,12 +479,20 @@ family! {
     true => crate::isa::portable::R_I8_I32,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32_1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_R_I8_I32_1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_R_I8_I32,
     crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32_1,
     crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_LOOKUP_R_I8_I32_1,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_LOOKUP_R_I8_I32,
     crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32_1,
     crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_LOOKUP_R_I8_I32_1,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_LOOKUP_R_I8_I32,
     crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32_1,
     crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_LOOKUP_R_I8_I32_1,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_LOOKUP_R_I8_I32,
 }
 
 family! {
@@ -678,9 +693,25 @@ pub fn choose_for_rows<E, L>(
                 spec.mr <= rows && spec.mr >= b.mr
             }
         } else {
-            // A later entry is a wider backend --- take it, unless the caller
-            // named one and this is already it.
-            !(requested != Backend::Auto && b.backend == requested)
+            // A later entry is a wider backend, but not when its panel would
+            // be padded and the incumbent would fill the declared height.
+            // This comparison has to happen before backend preference: an
+            // eight-row dot-product tile is not a wider factorization of a
+            // four-row product when the four-row NEON tile is available.
+            if requested == Backend::Auto {
+                let spec_fills = spec.mr <= rows;
+                let best_fills = b.mr <= rows;
+                if spec_fills != best_fills {
+                    spec_fills
+                } else {
+                    true
+                }
+            } else {
+                // A named backend remains authoritative once selected; if it
+                // has no admissible entry, the later entries still provide the
+                // same value rather than making selection fail.
+                !(b.backend == requested)
+            }
         };
         if take {
             best = Some(spec);

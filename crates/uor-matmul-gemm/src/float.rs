@@ -15,6 +15,7 @@ use uor_matmul_core::{
     as_alphabet_full, as_alphabet_full_mut, AccOf, Accumulator, Complete, Element, EncodeFrom,
     FloatElement, Full, MatView, PackedCode, Shape, Triple,
 };
+use uor_matmul_kernels::MAX_TILE_LANES;
 
 use crate::driver::GemmOptions;
 use crate::epilogue::{Epilogue, PlaceAt, Scaled};
@@ -67,15 +68,13 @@ pub fn gemm_float<E, O, Ep>(
 /// sixteen bytes, so a panel offer re-reads as four `i32` words per code; when
 /// the offer holds the placement bridge's reified operands plus a full-depth
 /// kernel panel pair, the panels' measured spans admit the `i32` alphabet,
-/// and the declared lane holds the whole depth, the reduction runs on the
-/// integer kernel table --- the same identity, walked by the table's
-/// instructions rather than the scalar lanes (R13). [`suggested_float_panels`]
-/// names the offer that admits every factorization the shape supports;
-/// anything short of it runs the widest lane the offer and the spans do
-/// admit, at the same bytes. A depth past the lane declines to the scalar
-/// lanes: the chunked traversal the table would run instead keeps its exact
-/// partial sums in an accumulator offer a panel buffer cannot spell, and
-/// [`gemm_float_bridged`] is the entry whose offers can.
+/// the reduction runs on the integer kernel table --- the same identity, walked
+/// by the table's instructions rather than the scalar lanes (R13).
+/// [`suggested_float_panels`]
+/// names the offer that admits the bridge's reified operands and panel pair;
+/// when the depth exceeds the lane, this entry supplies a tile-sized exact
+/// accumulator on the stack so the table can chunk the reduction without
+/// changing the public offer.
 pub fn gemm_float_packed<E, O, Ep>(
     triple: &mut Triple<'_, '_, '_, E, O>,
     epilogue: &Ep,
@@ -109,34 +108,27 @@ pub fn gemm_float_packed<E, O, Ep>(
             spans = Some(walked);
             let (finite, a_span, b_span) = walked;
             if let Some(bridge) = finite.then(|| admits_bridge::<E>(a_span, b_span)).flatten() {
-                // Past the reified operands the kernel table wants a
-                // full-depth panel pair; below that the traversal it would run
-                // is the per-tile one, and the scalar scaled lanes are the
-                // faster factorization of the same identity. The tile's own
-                // `mr` and `nr` are the question, at the bound the spans just
-                // declared.
+                // Past the reified operands the kernel table wants a panel
+                // pair. The tile's own `mr` and `nr` are the question, at the
+                // bound the spans just declared.
                 let spec = <i32 as Kernelized>::exact_spec(options.backend, bridge.bound, shape.m);
-                // And the lane must hold the whole depth. Past it the table
-                // chunks the reduction, and the chunked traversal's exact
-                // partial sums live in an accumulator offer this face cannot
-                // spell --- a `PackedCode` panel is eight-byte aligned, an
-                // `i128` accumulator sixteen. Without one the table runs its
-                // per-tile chunk traversal, which packs both panels afresh
-                // per output tile per chunk: measured (`CG-15`, a fill of a
-                // few binades at `512` cubed) 2.5 Gmac/s against the scalar
-                // scaled lanes' 4.3, so the decline is the faster
-                // factorization of the same identity. The lane's depth is
-                // the table's own capacity arithmetic at the declared bound,
-                // not a threshold; a caller with accumulator room gets the
-                // chunked traversal from [`gemm_float_bridged`], whose offers
-                // can spell it.
-                if shape.k <= spec.lane_depth(bridge.bound)
-                    && bridge_room(shape, spec.mr + spec.nr, pb.len())
-                {
+                // A deeper reduction is chunked through the tile-sized exact
+                // accumulator below; lane depth is a capacity, not a reason
+                // for this default entry to decline the bridge.
+                if bridge_room(shape, spec.mr + spec.nr, pb.len()) {
                     let admitted = {
                         let words = bytemuck::cast_slice_mut::<PackedCode, i32>(pb);
                         let (scaled, rest) = words.split_at_mut(suggested_bridge_scaled(shape));
-                        let mut scratch = Scratch::new(as_alphabet_full_mut(rest));
+                        // The panel API has no separate accumulator offer, but
+                        // the bridge still needs one when `k` exceeds the
+                        // native lane depth. A tile-sized exact block is enough
+                        // for `run` to chunk the reduction, and keeping it on
+                        // the stack preserves the API's no-allocation contract.
+                        let mut accumulators = [0i128; MAX_TILE_LANES];
+                        let mut scratch = Scratch::with_accumulators(
+                            as_alphabet_full_mut(rest),
+                            &mut accumulators,
+                        );
                         run_bridge(triple, epilogue, options, bridge, scaled, &mut scratch)
                     };
                     if admitted {
@@ -1418,18 +1410,17 @@ mod tests {
             "the offer holds the reified operands, so the table lane ran"
         );
 
-        // The depth term, pinned as the table's own capacity arithmetic: a
-        // declared bound of `2^27` holds 511 products in the `i64` lane, so a
-        // deeper reduction declines to the scalar lanes rather than chunking
-        // without accumulator room. The figure is the family's `i64` lane cap
-        // read against the bound, identical on every backend the family has.
+        // The depth term remains the table's own capacity arithmetic: a
+        // declared bound of `2^27` holds 511 products in the `i64` lane. The
+        // default bridge supplies exact tile accumulators, so a deeper
+        // reduction chunks instead of declining. The figure is the family's
+        // `i64` lane cap, identical on every backend the family has.
         let spec = <i32 as Kernelized>::exact_spec(GemmOptions::default().backend, 1 << 27, 8);
         assert_eq!(spec.lane_depth(1 << 27), 511, "the lane's depth at 2^27");
 
-        // A depth past the lane declines: spans that admit the alphabet but a
-        // `k` past the lane. The bytes are the streaming traversal's, and the
-        // offer shows the scalar lanes ran --- it holds packed codes, not the
-        // reified operands the table lane would have left.
+        // A depth past the lane still gives the reference bytes, while the
+        // offer shows that the table lane ran: it holds the reified operands
+        // used by the bridge rather than the packed float codes.
         let (m, k, n) = (16usize, 1024usize, 8usize);
         let av = gen(m * k, 3);
         let bv = gen(k * n, 4);
@@ -1470,10 +1461,10 @@ mod tests {
             .collect();
         reified.extend(bv.iter().map(|v| scaled_i32(v.pack(), bridge.base_b)));
         let words: &[i32] = bytemuck::cast_slice(&pb);
-        assert_ne!(
+        assert_eq!(
             &words[..reified.len()],
             reified.as_slice(),
-            "a depth past the lane must decline: the table lane did not run"
+            "a depth past the lane must chunk without leaving the bridge"
         );
     }
 
