@@ -27,7 +27,8 @@ use uor_matmul_kernels::{
     available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
     available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
     available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
-    available_reduce_i8, choose_for_rows, parity, portable_i8, Factorization, KernelSpec,
+    available_reduce_i8, available_tropical_i16, choose_for_rows, parity, portable_i8,
+    Factorization, KernelSpec, TROP_I16_MAX_BOUND, TROP_I8_BOUND, TROP_ZERO,
 };
 
 /// The depths this harness walks: the whole corpus natively, the reduced one
@@ -650,6 +651,38 @@ fn lane_depth_follows_the_declaration_cu_02() {
     // The modular lane is unbounded at every declared bound.
     assert_eq!(modular.lane_depth(1 << 31), usize::MAX);
     assert_eq!(modular.lane_depth(1), usize::MAX);
+
+    // And a selection lane is unbounded for a different reason, which is why it
+    // is a third factorization and not a generous `lane_cap`: a `max` has no
+    // per-step growth at all, so the register that holds one product holds the
+    // whole reduction whatever `k` is (`CA-04`). Read against the exact lane
+    // above, the claim is two-sided --- the ring's depth moves with the
+    // declared bound and this one does not move with anything.
+    let selection = choose_for_rows(
+        available_tropical_i16(),
+        Backend::Auto,
+        TROP_I8_BOUND,
+        usize::MAX,
+    )
+    .unwrap();
+    // The lane does not fill, which is what `u128::MAX` declares --- the same
+    // spelling `TableSpec` uses for the same reason. It is not `Modular`: the
+    // tropical lane is exact, and nothing about it wraps.
+    assert_eq!(selection.factorization, Factorization::Exact);
+    assert_eq!(selection.lane_cap, u128::MAX);
+    assert_eq!(selection.lane_depth(TROP_I16_MAX_BOUND), usize::MAX);
+    assert_eq!(selection.lane_depth(TROP_I8_BOUND), usize::MAX);
+    assert_eq!(selection.lane_depth(1), usize::MAX);
+    // Past the bound the representation declares there is no sequence at all,
+    // and that is the honest answer rather than a wider one: the bound belongs
+    // to the packing, so no instruction can be substituted to recover it.
+    assert!(choose_for_rows(
+        available_tropical_i16(),
+        Backend::Auto,
+        TROP_I16_MAX_BOUND + 1,
+        usize::MAX
+    )
+    .is_none());
 }
 
 /// `CG-13`: the cached availability list *is* the full walk's list, in every
@@ -813,6 +846,11 @@ fn the_cached_walk_is_the_full_walk_cg_13() {
         "i64 modular reduce",
         available_reduce_i64_modular,
         cached::available_reduce_i64_modular
+    );
+    family!(
+        "tropical",
+        available_tropical_i16,
+        cached::available_tropical_i16
     );
     assert_eq!(
         cached::resolutions() - cold,
@@ -1052,6 +1090,204 @@ fn every_reduce_sequence_equals_its_reference_cb_06() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// CB-13: the packed tropical sequences
+// ---------------------------------------------------------------------------
+
+/// `CB-13`: every tropical sequence agrees with the portable tropical
+/// reference, lane for lane, at every bound and depth.
+///
+/// The bounds, their salts, their fills and the extremes are
+/// [`parity::TROP_SWEEPS`] and [`parity::TROP_EXTREMES`], shared with the
+/// Cortex-M executor so that the two harnesses cannot come to walk different
+/// alphabets while reporting the same ID.
+#[test]
+fn every_tropical_sequence_equals_the_tropical_reference_cb_13() {
+    let specs: Vec<_> = available_tropical_i16().collect();
+    let mut vecs = TileVecs::for_specs(&specs, depths());
+    let mut compared = 0usize;
+    for (salts, map) in parity::TROP_SWEEPS {
+        compared += parity::tile_parity(
+            "CB-13",
+            specs.iter().copied(),
+            depths(),
+            salts,
+            (map, map),
+            parity::dot_trop_i16,
+            &mut vecs.scratch(),
+        );
+    }
+
+    compared += parity::tile_extremes(
+        "CB-13 extremes",
+        specs.iter().copied(),
+        &[0, 1, 2, 8, 65],
+        &parity::TROP_EXTREMES,
+        parity::trop_expect,
+        &mut vecs.scratch(),
+    );
+
+    let names: Vec<_> = specs.iter().map(|s| s.backend.as_str()).collect();
+    eprintln!(
+        "CB-13: {} tropical sequence(s): {}",
+        names.len(),
+        names.join(", ")
+    );
+    assert!(compared > 0, "CB-13 compared nothing");
+    // The same non-degeneracy `CB-02` asserts, and for the same reason: a run
+    // that only ever compared the reference against itself would pass while
+    // asserting nothing about an ISA. Not under Miri, which models no vector
+    // intrinsics and answers every detection predicate with false.
+    if cfg!(any(target_arch = "x86_64", target_arch = "aarch64")) && !cfg!(miri) {
+        assert!(
+            names.len() > 1,
+            "x86-64 and aarch64 both have a tropical sequence past the portable one; \
+             seeing only {names:?} means feature detection did not reach this test"
+        );
+    }
+}
+
+/// `CB-13`: the saturation argument, at each of its own three cases.
+///
+/// The family's correctness is a derivation from the declared bound `B`, and a
+/// derivation nobody evaluates at its edges is a paragraph. Each case below is
+/// the header of `uor_matmul_kernels::tropical`, run.
+#[test]
+fn the_saturation_argument_holds_at_its_own_extremes_cb_13() {
+    let b = TROP_I16_MAX_BOUND as i16;
+
+    // Case 1: two finite operands never saturate, so the packed add is the
+    // integer add and the answer is exact.
+    for (x, y) in [(-b, -b), (-b, b), (b, b), (b, -b)] {
+        let packed = x.saturating_add(y);
+        assert_eq!(
+            i32::from(packed),
+            i32::from(x) + i32::from(y),
+            "a finite pair at the declared bound must not saturate"
+        );
+        assert!(
+            (-2 * i32::from(b)..=2 * i32::from(b)).contains(&i32::from(packed)),
+            "and it must land in [-2B, 2B]"
+        );
+    }
+
+    // Case 2: an absorbed lane clamps to at most `i16::MIN + B`, and the
+    // clamping *is* the absorbing law --- a wrapping add would put the two
+    // masked operands at `0`, the largest value the lane can hold.
+    let both_masked = TROP_ZERO.saturating_add(TROP_ZERO);
+    assert_eq!(both_masked, TROP_ZERO, "-inf ⊗ -inf is -inf");
+    assert_eq!(
+        TROP_ZERO.wrapping_add(TROP_ZERO),
+        0,
+        "which a wrapping add would have reported as the largest finite value there is"
+    );
+    let highest_absorbed = TROP_ZERO.saturating_add(b);
+    for y in [-b, -1i16, 0, 1, b] {
+        assert!(
+            TROP_ZERO.saturating_add(y) <= highest_absorbed,
+            "no absorbed lane may exceed i16::MIN + B"
+        );
+    }
+
+    // Case 3: the two ranges are disjoint and in the right order, so `max`
+    // selects a finite contribution whenever one exists.
+    let lowest_finite = (-b).saturating_add(-b);
+    assert!(
+        highest_absorbed < lowest_finite,
+        "the absorbed range must sit strictly below the finite one: {highest_absorbed} vs \
+         {lowest_finite}"
+    );
+    assert_eq!(
+        lowest_finite.max(highest_absorbed),
+        lowest_finite,
+        "so a masked position never wins a max against a finite one"
+    );
+
+    // And the declared bound is the widest one for which that holds: one past
+    // it, the ranges meet and the reading is gone. This is what makes
+    // `TROP_I16_MAX_BOUND` a derivation rather than a margin.
+    let past = i32::from(b) + 1;
+    assert!(
+        i32::from(TROP_ZERO) + past >= -2 * past,
+        "one past the declared bound the two ranges must overlap, or the declaration is loose"
+    );
+
+    // The unpacking reads that separation and nothing else.
+    assert_eq!(
+        uor_matmul_kernels::unpack(lowest_finite, TROP_I16_MAX_BOUND),
+        Some(lowest_finite),
+        "the lowest finite result is finite"
+    );
+    assert_eq!(
+        uor_matmul_kernels::unpack(highest_absorbed, TROP_I16_MAX_BOUND),
+        None,
+        "and the highest absorbed one is the semiring zero"
+    );
+}
+
+/// `CB-13`: the packed reference is `dot_tropical_ref`, read through the
+/// packing.
+///
+/// The anchor. [`every_tropical_sequence_equals_the_tropical_reference_cb_13`]
+/// compares every sequence --- the reference included --- against
+/// `parity::dot_trop_i16`, which is a second spelling of the *packed*
+/// arithmetic; that establishes the sequences agree with each other and says
+/// nothing yet about the semiring. This is the link that makes it a claim about
+/// `max_p (a_p ⊗ b_p)` over `Trop<i8>`: pack an operand pair, run the reference
+/// sequence, unpack, and get the answer
+/// [`uor_matmul_core::dot_tropical_ref`] gives --- the same shape of anchor
+/// `CB-01` is for the ring family.
+#[test]
+fn the_packed_reference_equals_dot_tropical_ref_cb_13() {
+    use uor_matmul_core::{as_alphabet_tropical, dot_tropical_ref, Trop};
+    use uor_matmul_kernels::{pack_i8, unpack};
+
+    let spec = uor_matmul_kernels::isa::portable::TROP_I16;
+    let mut compared = 0usize;
+    for &kc in depths() {
+        // Four densities of the semiring zero, both ends included: no position
+        // masked, and every position masked. The all-masked reduction is the
+        // one that must come back as `-inf` rather than as a number, which is
+        // the whole content of A-6's mask.
+        for (salt, mask_every) in [(1u64, 0usize), (2, 3), (3, 7), (4, 1)] {
+            let mk = |n: usize, salt: u64| -> Vec<Trop<i8>> {
+                fill(n, salt, |v| {
+                    if mask_every != 0 && (v as usize).is_multiple_of(mask_every) {
+                        Trop::<i8>::NEG_INF
+                    } else {
+                        Trop::finite(v as i8)
+                    }
+                })
+            };
+            let av = mk(spec.mr * kc, salt);
+            let bv = mk(spec.nr * kc, salt ^ 0x5A);
+            let pa: Vec<i16> = av.iter().copied().map(pack_i8).collect();
+            let pb: Vec<i16> = bv.iter().copied().map(pack_i8).collect();
+            let mut acc = vec![0i16; spec.mr * spec.nr];
+            spec.mac_tile(kc, &pa, &pb, &mut acc);
+
+            let g = spec.k_group;
+            for i in 0..spec.mr {
+                let la: Vec<Trop<i8>> = (0..kc).map(|p| at(&av, p, i, spec.mr, g)).collect();
+                for j in 0..spec.nr {
+                    let lb: Vec<Trop<i8>> = (0..kc).map(|p| at(&bv, p, j, spec.nr, g)).collect();
+                    let want =
+                        dot_tropical_ref(as_alphabet_tropical(&la), as_alphabet_tropical(&lb));
+                    let got = unpack(acc[i * spec.nr + j], TROP_I8_BOUND);
+                    assert_eq!(
+                        got.map(i128::from),
+                        want.get(),
+                        "kc={kc}, salt={salt}, mask every {mask_every}, lane ({i}, {j})"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+    }
+    assert!(compared > 0, "CB-13's anchor compared nothing");
+    eprintln!("CB-13: {compared} packed lanes against dot_tropical_ref");
+}
+
 /// Every declared number about a sequence is consistent with its own shape.
 ///
 /// `products_per_step` is a claim about instructions, so no test can confirm it
@@ -1084,10 +1320,14 @@ fn every_declaration_is_consistent_with_the_shape_cb_07() {
             spec.mr * spec.nr <= uor_matmul_kernels::MAX_TILE_LANES,
             "{family}/{name}: tile exceeds the buffer"
         );
-        if matches!(spec.factorization, Factorization::Exact) {
+        // Every factorization but the modular one: a modular lane wraps by
+        // design, so `lane_cap` is ignored there and `max_bound` is the whole
+        // type. A selection lane is bounded like an exact one --- its packed
+        // representation has to fit --- so it answers the same two questions.
+        if !matches!(spec.factorization, Factorization::Modular) {
             assert!(
                 spec.lane_cap > 0,
-                "{family}/{name}: an exact lane must hold something"
+                "{family}/{name}: an exact or selection lane must hold something"
             );
             assert!(
                 spec.max_bound >= 1,
@@ -1136,6 +1376,9 @@ fn every_declaration_is_consistent_with_the_shape_cb_07() {
     }
     for s in uor_matmul_kernels::available_reduce_i64_modular() {
         check(&s, "i64 mod reduce");
+    }
+    for s in available_tropical_i16() {
+        check(&s, "tropical");
     }
 }
 

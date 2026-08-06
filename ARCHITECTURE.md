@@ -11,6 +11,11 @@ are `(Element, Bound, Codec, MaxBlock, Backend, Traversal)`, and W8A8 is the
 instantiation `(i8, 127, Identity, 1, *, *)`. Nothing privileges it beyond its
 having the most instruction support and the most external oracles.
 
+The **algebra is not a seventh parameter**. It is carried inside the first one:
+`Trop<i8>` is a different `Element` from `i8`, with a different `Element::Acc`,
+and that is the whole of how the `(max, +)` semiring reaches the code. See "The
+two semirings, and why one of them is an element type" below.
+
 ## The crates, and why they are separate
 
 | Crate                    | Contains                                                                      | `unsafe`              | `alloc` | float arithmetic |
@@ -72,6 +77,83 @@ The non-finite state is a *flag*, not a value. A value would have to take part
 in the fixed-point addition, and then the answer would depend on where in the
 accumulation the infinity arrived. IEEE 754 clause 6 is about the value, not the
 schedule.
+
+## The two semirings, and why one of them is an element type
+
+The operation census this library realizes names two products: *matrix products
+under complete accumulation*, and *max*. The second is the `(max, +)` semiring
+--- `⊕` is `max`, `⊗` is addition, the additive identity is `-inf` and the
+multiplicative identity is `0`.
+
+It reaches the code as an **element type**, `Trop<E>`, and not as a parameter on
+the driver. The reason is `Element::Acc`, which is documented as *not a
+parameter and not a choice*: exactly one accumulator per element type. The two
+semirings do not share one --- the ring's is seventy-nine bits at `i8` and this
+one's is ten --- so a semiring parameter beside the element type would make
+`Acc` a function of two things and contradict its own contract.
+
+Carrying it in the element type buys the property this document opens with. The
+dense driver's body names `E::mac` and `Accumulator::combine` and nothing else,
+so it computes a ring product over `Alphabet<i8, _>` and a `(max, +)` product
+over `Alphabet<Trop<i8>, _>` with no branch and no second traversal (`CD-29`).
+`gemm`'s bound is `E: Element`, not `E: IntegerElement`, for exactly this
+reason.
+
+| | ring | tropical |
+| --- | --- | --- |
+| element | `i8` .. `i64`, `Complex<_>`, `f32`, `f64` | `Trop<i8>` .. `Trop<i64>` |
+| `⊕` | `+` | `max` |
+| `⊗` | `*` | `+` |
+| additive identity | `0` | `-inf` |
+| accumulator | `acc_bits(E)`, with a `MAX_K_BITS` term | `trop_acc_bits(E)`, with **no** depth term |
+| `⊕` idempotent | no | yes |
+| epilogue | `Linear { alpha, beta }` (`CS-05`) | `MaxPlus { alpha, beta }` (`CS-12`) |
+| sub-cubic recursion | available | absent: no additive inverses |
+
+The last two rows are enforced by the type system rather than by a check.
+`Trop<E>` does not implement `IntegerElement`, so `gemm_strassen` --- which needs
+`IntegerElement::sub` --- does not exist at a tropical instantiation; and the
+`Linear` impl requires `AccOf<E>: ScaleExact`, which `TropAcc` does not
+implement, so `beta * C` cannot be written where it has no meaning. Neither
+exclusion can be reached at run time, which is the difference between excluding
+by construction and refusing by a branch (U-ii).
+
+`Semiring` is the declaration that makes this checkable: two zero-sized markers,
+`Ring<E>` and `Tropical<E>`, each declaring whether its `⊕` is idempotent, so
+that one gate body quantifies over both. Nothing in a traversal reads it and no
+traversal signature mentions it; removing it would change no output byte. What
+it changes is that `CK-16` can say *the laws hold at every instance, and
+idempotence holds precisely at one of them* --- a sentence that is not
+expressible as two independent tests.
+
+### The selection witness
+
+A `(max, +)` product answers a question a sum cannot: which term achieved the
+maximum. `SelectedTriple` carries a witness matrix beside `C`, validated at
+construction against the same two conditions `Triple::new` reports and no
+others, and `gemm_selected` writes both. The tie-break is the smallest index; it
+is cited (`AUTH-TF1-D6`), not chosen here.
+
+Two mechanisms produce it, and they are factorizations rather than alternatives.
+`Witness::Lexicographic` reduces `(value, index)` under an order that is total
+on the pair, so invariance under partition and order is a property of the order
+and not of the loop. `Witness::ComparePass` reduces the value and takes a
+compare-only second pass for the least index attaining it. `CD-25` asserts their
+bytes are identical at every shape, degeneracy and offer including none.
+
+### The two gauge sections
+
+`recenter` is the canonical section of the shift gauge: `(max, +)` is invariant
+under `⊗ c`, and the representative is the one whose maximum is exactly zero. It
+is taken in the accumulator's width, where it is exact for every input --- a
+difference of two alphabet elements has magnitude at most `2^BITS`, which is
+precisely what `trop_acc_bits` derives the width against.
+
+`dyadic` is the canonical section of the dyadic gauge, and it is a *placement*
+rather than a division: `Complete::add_scaled` takes a signed exponent, so
+writing a value at `2^-k` in the fixed-point register **is** division by `2^k`
+with every bit preserved. No division opcode is emitted and none is needed,
+which is why the census has no division in it.
 
 ## The tile and reduce factorizations
 
@@ -142,6 +224,29 @@ side outright, and a short offer, or an operand with nothing to share, gives
 the same bytes from the uncollapsed traversal. `CD-15`, `CD-16`, and `CD-17`
 assert the
 bytes at every degeneracy, and the census asserts the charge actually moved.
+
+### Addressing is a declaration, not an exclusion
+
+Whether this grouping exists for an operand is decided by what the operand
+*declares*, never by what it holds. `Addressing::of(tier, block, bound)` reads
+exactly the three manifest fields that describe the code --- and neither of the
+two that describe the artifact's bytes --- and answers whether a code addresses
+an element at all, and whether it addresses a *run*. `Identity` and `Runs`
+address nothing, and take the dense traversal; that is not a refusal, it is what
+their declarations say, and the dense traversal is the census's first product
+rather than a fallback from this one.
+
+Orientation is the second half of the same question. The reduction must run
+along the code block, so the coded operand must be stored `n x k` --- which is
+`rows` and `cols` in the canonical manifest. `Manifest::reduces_along_the_block`
+asks the declaration; nothing probes the stream. `CS-10` asserts both directions:
+at a fixed manifest the selection does not move when the operand's values change,
+and it does move when the declaration changes.
+
+A consequence worth stating rather than discovering: `tabulation_pays` refuses at
+`MAX_BLOCK == 1`, and `Addressing`'s `addresses_a_run` is false at exactly the
+same point. The arena tier's route back to the dense walk is therefore *stated*
+by the derivation rather than contradicted by it.
 
 Three things make this a factorization of the same identity rather than a
 different algorithm:

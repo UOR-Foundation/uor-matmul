@@ -417,6 +417,15 @@ pub struct Authority {
 pub struct Ledger {
     /// The schema tag.
     pub spec: String,
+    /// The words `audit-deferral` reads as a deferral (R15).
+    ///
+    /// Here rather than inside the gate for the reason `admits` is: the gate
+    /// scans the whole workspace including its own source, so a marker table
+    /// written as Rust string literals would make the gate fail on itself. The
+    /// alternative was exempting the gate's own file, which is a hole in exactly
+    /// the place nobody looks. As model data the vocabulary is reviewable, and
+    /// the gate's source contains no marker to trip over (R10).
+    pub deferral_markers: Vec<String>,
     /// One row per claim.
     pub claim: Vec<Claim>,
     /// One row per suspended rule. Empty in the steady state: a suspension is
@@ -462,6 +471,14 @@ pub struct Claim {
     pub level: Level,
     /// What is claimed.
     pub statement: String,
+    /// The observation that would refute the claim.
+    ///
+    /// A `some-true` row is refuted by the cited text not carrying it at the
+    /// citation given; an `open` row by its figure not reproducing at the host,
+    /// seed, and harness it records. Both are conditions a third party can
+    /// check without this repository's cooperation, which is what makes a
+    /// citation different from an assertion.
+    pub refuted_by: String,
     /// The Gherkin file carrying the scenario (R9).
     #[serde(default)]
     pub feature: Option<String>,
@@ -512,6 +529,15 @@ impl Ledger {
             }
         }
         for c in &self.claim {
+            // R4: a claim that cannot be broken is not at any honesty level;
+            // it is outside the register the three levels partition.
+            if c.refuted_by.trim().is_empty() {
+                return Err(ModelError::Inconsistent(format!(
+                    "{}: a claim with no refutation condition is not falsifiable; every row \
+                     states what would refute it",
+                    c.id
+                )));
+            }
             match c.level {
                 Level::SomeTrue => {
                     if c.authority.is_none() {
@@ -601,6 +627,15 @@ pub struct IdRow {
     pub suite: String,
     /// What the ID claims.
     pub statement: String,
+    /// The observation that would refute the claim.
+    ///
+    /// The upstream formalization attaches a *Refuted by* line to every result,
+    /// and the reason it does is the reason a gate is worth having: a claim
+    /// nobody can say how to break is not a claim about the world. Required
+    /// rather than optional, because an absent condition would read as "there
+    /// is none", and that is the one thing a falsifiable register may not say
+    /// by omission.
+    pub refuted_by: String,
 }
 
 impl Ids {

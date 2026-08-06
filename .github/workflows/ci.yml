@@ -73,3 +73,42 @@ jobs:
         with:
           name: issue-census
           path: target/issue-census/*.md
+
+  selection:
+    # `just vv` runs these tests too, inside a workspace-wide `cargo test`. The
+    # leg is named anyway, for the reason `cross.yml`'s `CA-02` step is named:
+    # a failure should say which claim broke in the check list, not inside a
+    # run of everything. What is *only* here is the regeneration below --- no
+    # other workflow runs an oracle generator, so until now nothing said that a
+    # committed artifact and the script that made it still agree.
+    name: CX-11, CD-24, CD-25, the selection half
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: >-
+          cargo test -p uor-matmul-validate
+          --test tropical_oracle --test selection --test provenance
+      - run: cargo test -p uor-matmul-validate --lib corpus
+      # `actions/setup-python` rather than the runner's own `python3`: Ubuntu
+      # marks its system interpreter externally managed (PEP 668) and `pip
+      # install` into it fails outright.
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.x" }
+      - name: CX-11, the committed artifacts regenerate byte for byte
+        run: |
+          python3 -m pip install --quiet numpy
+          python3 oracles/tropical/generate.py
+          git diff --exit-code -- 'oracles/tropical/*.bin'
+          # The manifest records the NumPy that generated it, which is a
+          # property of this runner and not of the claim, so that one line is
+          # allowed to move. Every other line --- the per-file digests included
+          # --- has to be identical.
+          CHANGED=$(git diff -U0 -- oracles/tropical/manifest.json \
+            | grep -E '^[-+][^-+]' | grep -v '"numpy_version"' || true)
+          test -z "$CHANGED" || {
+            echo "$CHANGED"
+            echo "the manifest changed beyond the NumPy version that wrote it"
+            exit 1
+          }

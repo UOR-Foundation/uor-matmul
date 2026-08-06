@@ -124,22 +124,25 @@ pub use uor_matmul_codec::{
     Book, Codec, CodedMatrix, Enumerable, Grid, Identity, Offset, Packed, Runs, TierId, Transcode,
 };
 pub use uor_matmul_core::{
-    acc_bits, as_alphabet, as_alphabet_full, dot_ref, narrow_cap_for, observe_bound, AccOf,
-    Accumulator, Alphabet, Backend, Bnd, Bound, Complex, Decoded, Element, EncodeMode,
-    FloatElement, Full, IntegerElement, MatView, MatViewMut, NotAProduct, PackedCode, Shape,
-    Strides, Traversal, Triple,
+    acc_bits, as_alphabet, as_alphabet_full, as_alphabet_tropical, as_alphabet_tropical_bounded,
+    dot_ref, dot_tropical_ref, dyadic, dyadic_exact, laws_of, lift_tropical, narrow_cap_for,
+    observe_bound, recenter, trop_acc_bits, AccOf, Accumulator, Alphabet, Backend, Bnd, Bound,
+    Complex, Decoded, Element, EncodeMode, FloatElement, Full, IntegerElement, Laws, MatView,
+    MatViewMut, NotAProduct, PackedCode, Ring, Semiring, Shape, Strides, Traversal, Triple, Trop,
+    TropAcc, Tropical, TropicalValue,
 };
 pub use uor_matmul_gemm::{
     coded_gemm, gemm_auto, gemm_auto as gemm, gemm_auto_counted, gemm_collapsed, gemm_float,
-    gemm_float_bridged, gemm_float_packed, gemm_packed, gemm_strassen, gemm_strassen_modular,
-    gemm_strassen_modular_counted, gemm_tabulated, gemm_tabulated_counted, minimum_workspace,
-    modular_level_needs, strassen_levels, strassen_scratch, suggested_accumulators,
-    suggested_bridge_scaled, suggested_collapse_index, suggested_collapse_rows,
-    suggested_float_panels, suggested_scratch, suggested_tabulation, tabulation_fits,
-    tabulation_pays, tabulation_rows, workspace_for_budget, workspace_report, Bias, Census,
-    Chunking, CodedTriple, Collapse, Epilogue, GemmOptions, Kernelized, Ledger, Linear, Partition,
-    PlaceAt, Route, RouteCensus, RouteLedger, Scaled, Scratch, SignedPlace, Table, TabulatedTriple,
-    Tile, WorkspacePlan, WorkspaceReport,
+    gemm_float_bridged, gemm_float_packed, gemm_packed, gemm_selected, gemm_strassen,
+    gemm_strassen_modular, gemm_strassen_modular_counted, gemm_tabulated, gemm_tabulated_counted,
+    minimum_workspace, modular_level_needs, strassen_levels, strassen_scratch,
+    suggested_accumulators, suggested_bridge_scaled, suggested_collapse_index,
+    suggested_collapse_rows, suggested_float_panels, suggested_scratch, suggested_tabulation,
+    tabulation_fits, tabulation_pays, tabulation_rows, workspace_for_budget, workspace_report,
+    Bias, Census, Chunking, CodedTriple, Collapse, Epilogue, GemmOptions, Kernelized, Ledger,
+    Linear, MaxPlus, Partition, PlaceAt, Route, RouteCensus, RouteLedger, Scaled, Scratch,
+    SelectedTriple, ShiftExact, SignedPlace, Table, TabulatedTriple, Tile, Witness, WorkspacePlan,
+    WorkspaceReport,
 };
 pub use uor_matmul_kernels as kernels;
 
@@ -147,10 +150,10 @@ pub use uor_matmul_kernels as kernels;
 pub mod prelude {
     pub use uor_matmul_codec::{Codec, CodedMatrix, Grid, Identity};
     pub use uor_matmul_core::{
-        as_alphabet, as_alphabet_full, Alphabet, Bnd, EncodeMode, Full, IntegerElement, MatView,
-        MatViewMut, Strides, Triple,
+        as_alphabet, as_alphabet_full, as_alphabet_tropical, Alphabet, Bnd, EncodeMode, Full,
+        IntegerElement, MatView, MatViewMut, Strides, Triple, Trop,
     };
-    pub use uor_matmul_gemm::{gemm_auto as gemm, GemmOptions, Linear, Scratch};
+    pub use uor_matmul_gemm::{gemm_auto as gemm, GemmOptions, Linear, MaxPlus, Scratch};
 }
 
 /// The canonical instantiation: `(i8, 127)`, the tier with the most instruction

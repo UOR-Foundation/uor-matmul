@@ -40,6 +40,7 @@ pub mod isa;
 pub mod parity;
 pub mod spec;
 pub mod table;
+pub mod tropical;
 
 pub use table::{
     available_table_i16, available_table_i32_modular, available_table_i64_modular,
@@ -53,6 +54,8 @@ pub use spec::{
     available_i64_exact, available_i64_modular, available_i8, available_i8_narrow,
     available_reduce_i16, available_reduce_i16_modular, available_reduce_i32_exact,
     available_reduce_i32_modular, available_reduce_i64_exact, available_reduce_i64_modular,
-    available_reduce_i8, cached, choose, choose_for_rows, packed_slot, portable_i8, Factorization,
-    KernelSpec, LaneLayout, MAX_TILE_LANES,
+    available_reduce_i8, available_tropical_i16, cached, choose, choose_for_rows, packed_slot,
+    portable_i8, Factorization, KernelSpec, LaneLayout, MAX_TILE_LANES,
 };
+
+pub use tropical::{pack_i8, unpack, TROP_I16_MAX_BOUND, TROP_I8_BOUND, TROP_ZERO};

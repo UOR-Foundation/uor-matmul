@@ -216,9 +216,14 @@ pub trait Enumerable<E: Element, Bd: Bound>: Codec<E, Bd> {
 
 /// Which tier a codec is.
 ///
-/// A label, never a dispatch key: nothing in the library branches on it, and
-/// two codecs with different `TierId`s and equal decodes produce byte-identical
-/// output (`CK-05`).
+/// A label, never a dispatch key on the *answer*: two codecs with different
+/// `TierId`s and equal decodes produce byte-identical output (`CK-05`), and
+/// nothing in the library reads this to decide a value.
+///
+/// One derivation reads it at all --- [`crate::Addressing::of`], asking whether
+/// the tier is one of the two with nothing between a code and an element --- and
+/// what that decides is which *factorizations* exist, which `CD-13` already
+/// holds to the same bytes either way.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[non_exhaustive]
 pub enum TierId {

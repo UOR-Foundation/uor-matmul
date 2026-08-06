@@ -190,6 +190,80 @@ unsafe fn simd128_r_i8(kc: usize, pa: *const i8, pb: *const i8, acc: *mut i32) {
 }
 
 // ---------------------------------------------------------------------------
+// The (max, +) reduction in a packed i16 lane
+// ---------------------------------------------------------------------------
+
+/// Rows of the tropical tile: four `v128` accumulators.
+const TROP_MR: usize = 4;
+/// Columns: eight `i16`, which is one `v128` exactly.
+const TROP_NR: usize = 8;
+
+crate::tile_fits!(TROP_MR, TROP_NR);
+
+/// wasm SIMD128 `(max, +)`: `i16x8_add_sat` is `⊗` and `i16x8_max` is `⊕`.
+///
+/// The AVX2 sequence at a quarter of the width and the NEON one at the same
+/// width, with the same two instructions in the same order --- which is what a
+/// semiring with no carry and no growth buys: there is no widening step for
+/// three ISAs to disagree about, so the three bodies differ only in how many
+/// lanes a register holds.
+///
+/// `i16x8_add_sat` and not `i16x8_add`: the saturating variant *is* the
+/// absorbing law `-inf ⊗ a = -inf`, and [`crate::tropical`] derives why the
+/// wrapping one is wrong at exactly the input a random sweep never generates
+/// --- two masked operands, where `i16::MIN + i16::MIN` wraps to `0`.
+pub const SIMD128_TROP_I16: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::WasmSimd128,
+    factorization: Factorization::Exact,
+    mr: TROP_MR,
+    nr: TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // One `k`-step per instruction: the splat covers `A` and the load covers a
+    // whole `k`-step of `B`.
+    k_group: 1,
+    products_per_step: TROP_NR,
+    lane_cap: u128::MAX,
+    max_bound: crate::tropical::TROP_I16_MAX_BOUND,
+    mac_tile: simd128_trop_i16,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `8 * kc`, and `acc` 32
+/// writable lanes.
+unsafe fn simd128_trop_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller guaranteed the three extents. One conversion here
+    // keeps every panel read below safe.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, TROP_MR * kc),
+            core::slice::from_raw_parts(pb, TROP_NR * kc),
+            core::slice::from_raw_parts_mut(acc, TROP_MR * TROP_NR),
+        )
+    };
+    // The identity of `max`, which is the semiring zero and not zero: at
+    // `kc == 0` this is the whole answer.
+    let mut tile = [i16x8_splat(crate::tropical::TROP_ZERO); TROP_MR];
+
+    for p in 0..kc {
+        // The panel is `k`-major at `k_group == 1`, so one v128 load is a whole
+        // `k`-step of `B`: eight columns, in lane order.
+        //
+        // SAFETY: `pb[p * TROP_NR ..][..8]` is in bounds: one v128 load.
+        let bv = unsafe { v128_load(pb.as_ptr().add(p * TROP_NR).cast()) };
+        for (i, cell) in tile.iter_mut().enumerate() {
+            let av = i16x8_splat(pa[p * TROP_MR + i]);
+            *cell = i16x8_max(*cell, i16x8_add_sat(av, bv));
+        }
+    }
+
+    for (i, cell) in tile.iter().enumerate() {
+        // SAFETY: `i < TROP_MR`, so this store lands inside `TROP_MR * TROP_NR`.
+        unsafe { v128_store(acc.as_mut_ptr().add(i * TROP_NR).cast(), *cell) };
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The SWAR broadcast sequence
 // ---------------------------------------------------------------------------
 

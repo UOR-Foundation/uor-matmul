@@ -31,6 +31,51 @@ The 536 bytes per output element is the real cost of exactness at `f64`, and it
 is not hidden: a large register-blocked tile is expensive on a small target. The
 mitigation is a traversal choice, not a method choice.
 
+## The tropical accumulator widths, and the term that is missing
+
+The ring's derivation is `1 + MAX_K_BITS + 2 * (E::BITS - 1) + log2(PRODUCT_TERMS)`.
+The `(max, +)` derivation is
+
+```text
+trop_acc_bits(E) = 1 + (E::BITS + 1)
+```
+
+and the whole content of this section is which terms are *absent* and why.
+
+`MAX_K_BITS` is absent because a maximum does not grow with the reduction.
+`max_p (a_p + b_p)` is bounded by `max_p a_p + max_p b_p` whatever `k` is, so
+there is no depth for a depth term to be a function of. That is not a tighter
+bound on the same quantity --- it is a different quantity, and `CA-04` is the
+gate that says the derived width is the same number at depth one and at
+`2^MAX_K_BITS`.
+
+`2 * (E::BITS - 1)` is absent because `⊗` is addition, not multiplication. Two
+magnitudes at most `2^(BITS-1)` multiply to `2^(2*BITS-2)` and *add* to at most
+`2^BITS`. Representing that bound needs `BITS + 1` bits rather than `BITS` ---
+one more than its logarithm, because the bound is attained --- and the sign
+makes `BITS + 2`.
+
+`log2(PRODUCT_TERMS)` is absent because there is no complex tropical element:
+`max` on the complex numbers is not an order, and inventing one would be an
+arbitrary choice this repository has nowhere to derive from.
+
+| `E` | worst-case bits | accumulator |
+| --- | --- | --- |
+| `Trop<i8>` | 10 | `TropAcc<10>` |
+| `Trop<i16>` | 18 | `TropAcc<18>` |
+| `Trop<i32>` | 34 | `TropAcc<34>` |
+| `Trop<i64>` | 66 | `TropAcc<66>` |
+
+Ten bits against the ring's seventy-nine at the same element type. The register
+is physically an `i128` in every case --- there is no narrower machine integer
+worth the trouble, and `TropAcc` is `repr(transparent)` over it --- so the width
+above is what the *derivation* answers and `Accumulator::BITS` reports, not the
+bytes the register occupies. The distinction matters for exactly one reason:
+`i128::MIN` is then unreachable as a finite accumulation at every element type,
+which is what lets it name the semiring zero without excluding any value. That
+is a derivation, and if it ever stopped holding the accumulator would need a
+flag exactly as `Complete` needs one for its non-finite states.
+
 ## The narrow-register thresholds
 
 Each is `floor(cap / per_step)`, where `per_step` is the worst-case magnitude

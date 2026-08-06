@@ -32,4 +32,10 @@ path = "fuzz_targets/codec_shapes.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "tropical"
+path = "fuzz_targets/tropical.rs"
+test = false
+doc = false
+
 [workspace]

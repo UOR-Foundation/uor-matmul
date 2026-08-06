@@ -31,7 +31,24 @@ In landing order. An entry leaves this list by shipping with its IDs and
 gates, or by being measured and recorded below as a result.
 
 The phase's eight items are all landed. What remains are the follow-ups the
-measurements named:
+measurements named.
+
+**The suspension's scope, item by item.** `SUSP-R15-WIDTH-PHASE` admits exactly
+this file and nothing else, and it ends when every item below has either shipped
+with its IDs and gates or been measured and recorded as a result. Waving at the
+suspension is not a disposition, so here is one per item:
+
+| Item | Disposition |
+| --- | --- |
+| VNNI break-even | **Blocked on hardware, with the reason in the rows.** `model/tiers.toml`'s VNNI rows stay `Unmeasured`; the runner declares no AVX-512, so the AVX2 pair's derived 683 is the caller-experienced crossing there. Not on any current critical path: the tropical sequences are baseline AVX2 (`vpmaxs*` and a saturating `vpadds*`) and deliberately need no VNNI. Closes when a runner with AVX-512 exists. |
+| The co-issue thesis | **Answered and refuted.** 2.6--11.2x slower at every configuration; no kernel ships. The harness is retained rather than deleted, for a second host whose scalar-to-vector density ratio could differ --- that retention is the item's whole remainder, and it is a decision, not a pending step. |
+| Mantissa slicing | **Conditional, trigger not met.** The arithmetic is recorded in ANALYSIS.md and is not to be rediscovered. The trigger is a measured narrow-to-wide ratio of eight or better; every host measured here sits at four to five, so it does not fire. Closes as *declined on this host class*, and reopens only on a measurement, never on a preference. |
+| The multi-host remainder | **Closed.** The `CG-17` x86 figure landed: 0.30x at `k = 64` and 0.20x at `k = 1024` and `16384`, the same decline on a second host. |
+
+Three of the four are closed as results. The one that is not is blocked on a
+machine, which is a fact about the world rather than work this repository is
+holding back --- and the suspension row stays exactly until that machine
+produces a figure or the rows are retired.
 
 1. **The multi-host remainder.** All read now. The CG-17 x86 figure: the
    SWAR broadcast at 0.30x of the dot sequence at `k = 64` and 0.20x at
@@ -57,6 +74,35 @@ measurements named:
    not fire here.
 
 ## Measurements
+
+**The selection lane against the ring lane (`CG-19`, measured; every figure
+`open`).** Measured on the CI-class development host (x86_64-unknown-linux-gnu,
+AVX2, no AVX-512), 2026-08-06, `just tropical-sweep` in release, seed 20260805,
+best of a 0.35 s budget per point, with byte-identity against the reference
+traversal asserted inside every timed run.
+
+At `64^3`: the `(max, +)` reference lane reads **0.683 Gmac/s**, the ring
+reference lane 0.995, and the ring's *packed* lane 11.144. The first two are the
+comparison the row is about --- the same traversal at two instantiations --- and
+they sit within a factor of one and a half, which is what a traversal that
+branches on nothing should look like. The third is not a tropical figure and is
+recorded only so the first two are not read as this library's throughput: the
+packed ring lane is an order above both, because it is kernelized and the
+reference is not. The tropical sequences that would close that gap are pinned by
+`CB-13` and are not what this row times.
+
+The two witness mechanisms, at `16x4096x16`: on a tie-dense fill, lexicographic
+**0.316 Gmac/s** against compare-pass **0.854**; on a fill whose maximum falls
+last, lexicographic **0.388** against **0.316**. The order reverses, which is why
+both fills are timed and why neither mechanism is a default in the sense of being
+faster --- `Witness::Lexicographic` is the default because its invariance is a
+property of the order rather than of the loop (`CD-24`), and `CD-25` asserts the
+two write the same bytes whatever the clock says.
+
+Nothing here is asserted as a property of the library. A reader who reruns
+`just tropical-sweep` on another host should expect different numbers and the
+same two orderings, and a disagreement about the *orderings* at this host, seed
+and shape is what would refute the row.
 
 **The public-path and workspace benches (CD-22 and the Phase B plans,
 measured; figures `open`).** On the development host (Apple M4 Max, quiet

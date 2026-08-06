@@ -53,3 +53,21 @@ Feature: Structural
     Given the standing corpus
     When the suite exercises CS-07
     Then the claim holds byte for byte
+
+  @CS-10 @build
+  Scenario: Traversal selection reads the operand's orientation from its declared manifest and never probes the operand
+    Given the standing corpus
+    When the suite exercises CS-10
+    Then the claim holds byte for byte
+
+  @CS-11 @build
+  Scenario: The semiring zero as `beta` overwrites C without reading it, so a masked or uninitialized output buffer is admissible
+    Given the standing corpus
+    When the suite exercises CS-11
+    Then the claim holds byte for byte
+
+  @CS-12 @build
+  Scenario: The tropical epilogue's `alpha` and `beta` are applied exactly, in the accumulator's width, once per output element
+    Given the standing corpus
+    When the suite exercises CS-12
+    Then the claim holds byte for byte

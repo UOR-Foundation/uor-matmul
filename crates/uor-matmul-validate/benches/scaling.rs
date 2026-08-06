@@ -25,7 +25,11 @@ use uor_matmul::{
     suggested_collapse_index, suggested_collapse_rows, suggested_float_panels, suggested_scratch,
     suggested_tabulation, workspace_report, Backend, Collapse, Shape, TabulatedTriple,
 };
-use uor_matmul_core::{Alphabet, EncodeMode, Full, PackedCode, Traversal};
+use uor_matmul_core::{
+    as_alphabet_tropical, Alphabet, EncodeMode, Full, PackedCode, Traversal, Trop,
+};
+use uor_matmul_gemm::{gemm as gemm_dense, gemm_selected, SelectedTriple, Witness};
+use uor_matmul_validate::corpus::{Case, Corpus, Mask};
 use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 
 /// Emit the fitted exponents, then time a few shapes so `cargo bench` has
@@ -579,6 +583,212 @@ fn modular_strassen(c: &mut Criterion) {
     group.finish();
 }
 
+/// `CG-19`: the selection lane beside the accumulation lane, and the two
+/// witness mechanisms beside each other.
+///
+/// Two questions, and they need different operands, which is why this is one
+/// group with two labelled halves rather than one sweep.
+///
+/// **The lanes.** `lane/tropical` and `lane/ring` are the *same function* ---
+/// `uor_matmul_gemm::gemm` --- at two instantiations of `E`, which is what
+/// `CD-29` claims and what this half prices. Neither is offered a kernel, so the
+/// comparison is between two arithmetics and not between a hand-written
+/// sequence and a portable loop. `lane/ring-packed` is the third row for the
+/// reason a two-row table would mislead: it is what a ring caller actually gets,
+/// and the gap between it and `lane/ring` is the kernel selection, not the
+/// semiring. The operands carry no masked lane here, because a masked lane
+/// performs no arithmetic at all --- that is the absorbing law, and a mask
+/// density silently chosen by the harness would be a throughput knob rather
+/// than a measurement.
+///
+/// **The mechanisms.** `Lexicographic` carries `(value, index)` through one
+/// pass; `ComparePass` takes the value in one pass and the least index in a
+/// second, compare-only one. The second pass stops at the first index attaining
+/// the maximum, so *where the maximum sits* is the whole of its cost --- and
+/// timing it on operands whose maximum sits at index zero would report a second
+/// pass that never happens. Both ends are therefore timed: `tie-dense` is the
+/// corpus draw, where a tie is the common case and the scan stops early, and
+/// `max-last` places the unique maximum at the final index, which is the scan's
+/// worst case. Reading only one of the two would be reading a knob.
+fn tropical(c: &mut Criterion) {
+    const SHAPES: [(usize, usize, usize); 3] = [(64, 64, 64), (128, 128, 128), (16, 4096, 16)];
+    /// The corpus seed the selection gates walk, so the bench and the gates
+    /// price the same operands.
+    const SEED: u64 = 20_260_805;
+
+    /// `max_p (a[i,p] + b[p,j])`, computed here so that every timed closure can
+    /// assert its own answer (`CG-06`).
+    fn max_plus_ref(
+        m: usize,
+        k: usize,
+        n: usize,
+        a: &[Option<i64>],
+        b: &[Option<i64>],
+    ) -> Vec<Trop<i32>> {
+        let mut out = Vec::with_capacity(m * n);
+        for i in 0..m {
+            for j in 0..n {
+                let mut best: Option<i64> = None;
+                for p in 0..k {
+                    if let (Some(x), Some(y)) = (a[i * k + p], b[p * n + j]) {
+                        best = best.max(Some(x + y));
+                    }
+                }
+                out.push(best.map_or(Trop::NEG_INF, |v| Trop::finite(v as i32)));
+            }
+        }
+        out
+    }
+
+    let mut group = c.benchmark_group("tropical");
+    for &(m, k, n) in &SHAPES {
+        let shape = format!("{m}x{k}x{n}");
+        let case = Case {
+            m,
+            k,
+            n,
+            seed: SEED,
+        };
+        // Unmasked, so the two lanes do the same amount of arithmetic.
+        let (da, db) = (
+            case.draw_tropical(m * k, 1, Mask::NONE),
+            case.draw_tropical(k * n, 2, Mask::NONE),
+        );
+        let ta = case.fill_tropical_i8(m * k, 1, Mask::NONE);
+        let tb = case.fill_tropical_i8(k * n, 2, Mask::NONE);
+        let want = max_plus_ref(m, k, n, &da, &db);
+
+        group.bench_function(format!("lane/tropical/{shape}"), |bench| {
+            let mut out = vec![Trop::<i32>::NEG_INF; m * n];
+            let mut scratch = vec![Alphabet::ZERO; k];
+            bench.iter(|| {
+                let av = MatView::row_major(as_alphabet_tropical(&ta), m, k).expect("A fits");
+                let bv = MatView::row_major(as_alphabet_tropical(&tb), k, n).expect("B fits");
+                let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                let mut t = Triple::new(av, bv, cv).expect("the product exists");
+                gemm_dense(
+                    &mut t,
+                    &MaxPlus::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut Scratch::new(&mut scratch),
+                );
+                assert_eq!(out, want, "the timed call must be correct");
+            });
+        });
+
+        // The same driver, the same offer, the same shape; only `E` differs.
+        let ra: Vec<i8> = da.iter().map(|v| v.unwrap_or(0) as i8).collect();
+        let rb: Vec<i8> = db.iter().map(|v| v.unwrap_or(0) as i8).collect();
+        let ring_want = uor_matmul_validate::ours_i8_i32(m, k, n, &ra, &rb, EncodeMode::Wrapping);
+
+        group.bench_function(format!("lane/ring/{shape}"), |bench| {
+            let mut out = vec![0i32; m * n];
+            let mut scratch = vec![Alphabet::<i8, Full<i8>>::ZERO; k];
+            bench.iter(|| {
+                let av = MatView::row_major(as_alphabet_full(&ra), m, k).expect("A fits");
+                let bv = MatView::row_major(as_alphabet_full(&rb), k, n).expect("B fits");
+                let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                let mut t = Triple::new(av, bv, cv).expect("the product exists");
+                gemm_dense(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    GemmOptions {
+                        encode: EncodeMode::Wrapping,
+                        ..Default::default()
+                    },
+                    &mut Scratch::new(&mut scratch),
+                );
+                assert_eq!(out, ring_want, "the timed call must be correct");
+            });
+        });
+
+        group.bench_function(format!("lane/ring-packed/{shape}"), |bench| {
+            let mut out = vec![0i32; m * n];
+            let mut scratch =
+                vec![Alphabet::<i8, Full<i8>>::ZERO; suggested_scratch(Shape { m, k, n })];
+            bench.iter(|| {
+                let av = MatView::row_major(as_alphabet_full(&ra), m, k).expect("A fits");
+                let bv = MatView::row_major(as_alphabet_full(&rb), k, n).expect("B fits");
+                let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                let mut t = Triple::new(av, bv, cv).expect("the product exists");
+                uor_matmul::gemm_packed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    GemmOptions {
+                        encode: EncodeMode::Wrapping,
+                        ..Default::default()
+                    },
+                    &mut Scratch::new(&mut scratch),
+                );
+                assert_eq!(out, ring_want, "the timed call must be correct");
+            });
+        });
+
+        // The mechanism half. `tie-dense` is the corpus's own masked draw ---
+        // the operands the gates run on --- and `max-last` puts the unique
+        // maximum at the last index of every reduction, which is where the
+        // compare pass has to walk the whole depth.
+        let last_a: Vec<Trop<i8>> = (0..m * k)
+            .map(|i| Trop::finite(if i % k == k - 1 { 1 } else { 0 }))
+            .collect();
+        let last_b: Vec<Trop<i8>> = (0..k * n)
+            .map(|i| Trop::finite(if i / n == k - 1 { 1 } else { 0 }))
+            .collect();
+        let masked_a = case.fill_tropical_i8(m * k, 1, Mask::LEFT);
+        let masked_b = case.fill_tropical_i8(k * n, 2, Mask::RIGHT);
+        let tie_want = max_plus_ref(
+            m,
+            k,
+            n,
+            &case.draw_tropical(m * k, 1, Mask::LEFT),
+            &case.draw_tropical(k * n, 2, Mask::RIGHT),
+        );
+        let last_want = vec![Trop::<i32>::finite(2); m * n];
+
+        for (fill, a, b, cells) in [
+            ("tie-dense", &masked_a, &masked_b, &tie_want),
+            ("max-last", &last_a, &last_b, &last_want),
+        ] {
+            for mechanism in [Witness::Lexicographic, Witness::ComparePass] {
+                let name = match mechanism {
+                    Witness::Lexicographic => "lexicographic",
+                    _ => "compare-pass",
+                };
+                group.bench_function(format!("witness/{name}/{fill}/{shape}"), |bench| {
+                    let mut out = vec![Trop::<i32>::NEG_INF; m * n];
+                    let mut witness = vec![usize::MAX; m * n];
+                    let mut scratch = vec![Alphabet::ZERO; k];
+                    bench.iter(|| {
+                        let av = MatView::row_major(as_alphabet_tropical(a), m, k).expect("A fits");
+                        let bv = MatView::row_major(as_alphabet_tropical(b), k, n).expect("B fits");
+                        let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                        let wv = MatViewMut::row_major(&mut witness, m, n).expect("W fits");
+                        let t = Triple::new(av, bv, cv).expect("the product exists");
+                        let mut s = SelectedTriple::new(t, wv).expect("the witness conforms");
+                        gemm_selected(
+                            &mut s,
+                            &MaxPlus::OVERWRITE,
+                            GemmOptions::default(),
+                            mechanism,
+                            &mut Scratch::new(&mut scratch),
+                        );
+                        assert_eq!(&out, cells, "the timed call must be correct");
+                    });
+                });
+            }
+        }
+    }
+    group.finish();
+
+    // The corpus the gates walk, so that a reader of this group can see the
+    // shapes it was validated on beside the shapes it was timed on.
+    eprintln!(
+        "tropical: timed at {} shapes; gated at {} corpus cases",
+        SHAPES.len(),
+        Corpus::tropical(SEED).cases.len()
+    );
+}
+
 criterion_group!(
     benches,
     scaling_report,
@@ -586,6 +796,7 @@ criterion_group!(
     public_api,
     workspace_plans,
     gray_sign,
-    modular_strassen
+    modular_strassen,
+    tropical
 );
 criterion_main!(benches);

@@ -72,8 +72,39 @@ differential test picks it up automatically.
 
 ## Adding an element type
 
-An `impl Element`, plus `IntegerElement` or `FloatElement`. If you find yourself
-adding a branch anywhere else, the type is not being added parametrically.
+An `impl Element`, plus **one of** `IntegerElement`, `FloatElement`, or neither.
+The third arm is not an oversight: `Trop<E>` implements `Element` alone, and
+that absence is what excludes the sub-cubic recursion (which needs
+`IntegerElement::sub`) and the `Linear` epilogue (whose `beta * C` has no
+reading under `(max, +)`) *by construction* rather than by a refusal. Before you
+reach for a trait, ask which operations the new type genuinely has; a trait it
+does not implement is a capability it cannot be handed.
+
+If you find yourself adding a branch anywhere else, the type is not being added
+parametrically.
+
+## Adding a semiring instance
+
+Rarely. There are two, and a third would need a reason from the operation
+census, not from convenience. If there is one:
+
+1. A new `Element` type carrying the algebra, with its own `Acc`. Do **not** add
+   a semiring parameter to a traversal --- `Element::Acc` is *not a parameter and
+   not a choice*, and a parameter beside the element type would make it a
+   function of two things.
+2. A `Semiring` marker in `uor-matmul-core`, declaring `IDEMPOTENT` and its
+   witnesses, so that `CK-16`'s one body quantifies over the new instance too.
+   The declaration is compared against the measurement; do not derive one from
+   the other.
+3. An `EncodeFrom` for the output alphabet, routed through the *same*
+   `encode_i128_into` the ring family uses. A second encode step would be a
+   second method (R13).
+4. An epilogue, if `⊗` by a scalar means anything in the new algebra. It gets
+   its own trait for `⊗`, so that an accumulator of one algebra cannot be handed
+   the other's epilogue.
+5. A derived accumulator width with its own gate. State which terms are present
+   and which are absent, and why: the tropical width has no `MAX_K_BITS` term
+   and `CA-04` is the row that says so.
 
 ## Writing a gate
 

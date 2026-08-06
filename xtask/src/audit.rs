@@ -13,7 +13,7 @@ use crate::Fail;
 
 /// The crates that ship. The rules below apply to these and not to the
 /// dev-and-CI-only crates, which may use `std`, `alloc`, and floats freely.
-const SHIPPED: &[&str] = &[
+pub(crate) const SHIPPED: &[&str] = &[
     "uor-matmul",
     "uor-matmul-core",
     "uor-matmul-codec",
@@ -655,8 +655,15 @@ fn contains_word(line: &str, word: &str) -> bool {
     false
 }
 
-/// R15: nothing is deferred. No `TODO`, no stub, no placeholder document
-/// section, no capability behind a flag that turns it off, no "later version".
+/// R15: nothing is deferred --- no stub, no placeholder document section, no
+/// capability behind a flag that turns it off.
+///
+/// The vocabulary this reads as a deferral is `model/ledger.toml`'s
+/// `deferral_markers`, not a table written here. That is not tidiness: this
+/// gate walks `crates/`, `xtask/` and `fuzz/`, so it reads *its own source*, and
+/// a marker table spelled as Rust string literals would make it fail on itself.
+/// The alternative was exempting this file, which is a hole in exactly the place
+/// nobody looks (R10).
 ///
 /// R15 is suspended for one named phase (`SUSP-R15-WIDTH-PHASE` in
 /// `model/ledger.toml`). What the suspension admits is read from the ledger
@@ -667,17 +674,16 @@ fn contains_word(line: &str, word: &str) -> bool {
 /// `crates/` or `xtask/` --- a deferral parked in shipped code or in a gate is
 /// a deferral, whatever the ledger says.
 pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
-    let markers = [
-        "TODO",
-        "FIXME",
-        "XXX",
-        "unimplemented!",
-        "todo!",
-        "for now",
-        "later version",
-    ];
-    let admitted: Vec<String> = Model::load(&root.join("model"))?
-        .ledger
+    let ledger = Model::load(&root.join("model"))?.ledger;
+    let markers: Vec<String> = ledger.deferral_markers.clone();
+    if markers.is_empty() {
+        return Err(
+            "R15's marker vocabulary is empty, so the gate would pass vacuously; \
+                    `model/ledger.toml` owns it"
+                .into(),
+        );
+    }
+    let admitted: Vec<String> = ledger
         .suspension
         .iter()
         .filter(|s| s.rule == "R15")
@@ -686,26 +692,40 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
     let mut violations = Vec::new();
 
     let mut files: Vec<PathBuf> = Vec::new();
-    for name in SHIPPED {
-        let dir = root.join("crates").join(name);
-        if dir.exists() {
-            gather_all(&dir, &mut files)?;
+    // R15 binds the whole workspace, not the shipped half of it. The gather
+    // used to walk `SHIPPED` only, so the gate that forbids deferral read
+    // neither `xtask/` --- its own source --- nor the model, validation,
+    // conformance and executor crates, nor `fuzz/`, which is outside the
+    // workspace entirely. A rule enforced everywhere except where the enforcer
+    // lives is a rule with a hole in exactly the place nobody looks.
+    for dir in [
+        "crates", "xtask", "fuzz", "docs", "model", "features", "oracles", ".github",
+    ] {
+        let p = root.join(dir);
+        if p.exists() {
+            gather_all(&p, &mut files)?;
         }
     }
-    for doc in [
-        "README.md",
-        "ARCHITECTURE.md",
-        "CONFORMANCE.md",
-        "VERIFICATION.md",
-        // The phase's measurement log is scanned like every other document; the
-        // suspension is what currently spares it, and when the suspension's
-        // ledger row goes the log is held to the rule like everything else.
-        "MEASUREMENT-LOG.md",
-    ] {
-        let p = root.join(doc);
-        if p.exists() {
+    // Every top-level document, found rather than listed. A hard-coded list is
+    // how `docs/conceptual-model/README.md` came to be edited by a change that
+    // the gate then did not read: the list was the coverage, and nobody
+    // remembered to grow it. Reading the directory means a new document is
+    // covered on the day it is written.
+    for entry in std::fs::read_dir(root)? {
+        let p = entry?.path();
+        if p.is_file() && p.extension().is_some_and(|e| e == "md" || e == "toml") {
             files.push(p);
         }
+    }
+    // The recipes are prose to a reader and a program to `just`, and a deferral
+    // parked in a comment there is as deferred as one in a crate.
+    //
+    // `MEASUREMENT-LOG.md` is reached by the directory read above, and the
+    // suspension is what currently spares it; when the suspension's ledger row
+    // goes, the log is held to the rule like everything else.
+    let recipes = root.join("Justfile");
+    if recipes.exists() {
+        files.push(recipes);
     }
 
     for path in files {
@@ -721,8 +741,17 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
             continue;
         }
         for (i, line) in text.lines().enumerate() {
-            for marker in markers {
-                if !line.contains(marker) {
+            for marker in &markers {
+                if !line.contains(marker.as_str()) {
+                    continue;
+                }
+                // The vocabulary declares itself, and a list cannot list itself
+                // without naming its own members. The exemption is exactly one
+                // shape --- a line that is nothing but a quoted marker and a
+                // comma, in the file the vocabulary lives in --- so a real
+                // deferral written anywhere else in that file, in a comment or
+                // in any other field, is still reported.
+                if rel == "model/ledger.toml" && line.trim() == format!("\"{marker}\",") {
                     continue;
                 }
                 // A backticked marker is a *mention*, not a use: the
@@ -737,9 +766,9 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
 
     if !violations.is_empty() {
         return Err(format!(
-            "R15: nothing is deferred. No TODO, no stub, no placeholder section, no \
-             capability behind a flag that turns it off, no 'later version'. Every \
-             capability ships in the one release.\n\n{}",
+            "R15: nothing is deferred. No stub, no placeholder section, no capability \
+             behind a flag that turns it off. Every capability ships in the one release. \
+             The vocabulary is `model/ledger.toml`'s `deferral_markers`.\n\n{}",
             violations.join("\n")
         )
         .into());
@@ -781,10 +810,21 @@ fn gather_all(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), Fail> {
                 continue;
             }
             gather_all(&path, out)?;
-        } else if path
-            .extension()
-            .is_some_and(|e| e == "rs" || e == "md" || e == "toml")
-        {
+        } else if path.extension().is_some_and(|e| {
+            // Source, prose, model data, the workflows, the Gherkin suites, and
+            // the oracle generators. A deferral parked in a CI step or in a
+            // scenario is a deferral; extension-filtering to `.rs` is how a
+            // marker in `ci.yml` used to pass a gate whose own message said
+            // "anywhere in the workspace".
+            e == "rs"
+                || e == "md"
+                || e == "toml"
+                || e == "yml"
+                || e == "yaml"
+                || e == "feature"
+                || e == "py"
+                || e == "json"
+        }) {
             out.push(path);
         }
     }
@@ -836,6 +876,7 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
     // instruction. A source grep cannot see what the optimizer emitted, and the
     // whole claim of the tabulated traversal is about what it emitted.
     let mut column_loops = 0usize;
+    let mut tropical_bodies = 0usize;
 
     for krate in ["uor-matmul-kernels", "uor-matmul-core", "uor-matmul-gemm"] {
         let before = checked;
@@ -890,6 +931,16 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
                     }
                 }
             }
+            for (label, body) in function_bodies(&text, TROPICAL_SEQUENCE) {
+                tropical_bodies += 1;
+                for (i, line) in body {
+                    if let Some(op) = integer_multiply_opcode(line) {
+                        violations.push(format!(
+                            "CU-10: {name}:{i}: `{op}` in `{label}`\n    {line}"
+                        ));
+                    }
+                }
+            }
         }
         per_crate.push((krate, checked - before));
     }
@@ -915,6 +966,15 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
         )
         .into());
     }
+    if tropical_bodies == 0 {
+        return Err(format!(
+            "CU-10 found no symbol containing `{TROPICAL_SEQUENCE}`, so the claim that no \
+             tropical sequence multiplies would pass vacuously. Every entry point in the \
+             family carries that fragment by convention, and a rename that dropped it is \
+             exactly what this catches."
+        )
+        .into());
+    }
     if !violations.is_empty() {
         return Err(format!(
             "R2, CU-01: the library never adds two floats. A float arithmetic opcode in a \
@@ -924,14 +984,18 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
              the same integer --- any other float opcode is a defect.\n\
              CU-06: the tabulated column loop never multiplies. A multiply there means a \
              product the table was supposed to have already computed, which is the whole \
-             content of the traversal.\n\n{}",
+             content of the traversal.\n\
+             CU-10: a tropical sequence never multiplies. `⊗` in the `(max, +)` semiring is \
+             an addition, so a multiply there is a different operation and not a faster \
+             spelling of this one.\n\n{}",
             violations.join("\n")
         )
         .into());
     }
     println!(
         "audit-disassembly: no float arithmetic opcode in {checked} shipped object(s) (CU-01), \
-         and no multiply in {column_loops} tabulated column loop(s) (CU-06)"
+         no multiply in {column_loops} tabulated column loop(s) (CU-06), and none in \
+         {tropical_bodies} tropical sequence(s) (CU-10)"
     );
     Ok(())
 }
@@ -943,6 +1007,16 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
 /// `uor_matmul_gemm::tabulated::gather_reference_*` names the reference
 /// instantiation precisely so this gate has instructions to read.
 const TABULATED_COLUMN_LOOP: &str = "gather_reference";
+
+/// The symbol fragment that names a packed tropical `(max, +)` sequence.
+///
+/// `⊗` in that semiring is an addition, so a multiply in one of these bodies is
+/// a different operation and not a faster spelling of this one. The convention
+/// is the scope, exactly as [`TABULATED_COLUMN_LOOP`] is:
+/// `uor_matmul_kernels::tropical`'s header names every entry point that carries
+/// it, so adding a sequence enrols it and dropping the fragment in a rename is
+/// visible in the source (`CU-10`).
+const TROPICAL_SEQUENCE: &str = "trop_i16";
 
 /// The name fragment marking a function that holds the `F64Exact` witness ---
 /// the one place a float arithmetic opcode may appear in shipped code (`CU-01`
@@ -1114,4 +1188,91 @@ pub(crate) fn asm_files(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `CU-10`: no tropical sequence issues a multiply.
+    ///
+    /// The substance of the claim is read from the emitted instructions by
+    /// [`audit_disassembly`], which `just purity` runs. What a test can pin is
+    /// the two ways that reading goes vacuous, and both are pinned here
+    /// two-sidedly --- because a gate that reads the wrong bodies, or that reads
+    /// the right ones with a blind scanner, passes exactly as loudly as one that
+    /// works.
+    #[test]
+    fn no_tropical_sequence_issues_a_multiply_cu_10() {
+        // One: the *scope*. Every entry point in the family carries
+        // `TROPICAL_SEQUENCE` in its symbol by convention, so a rename that
+        // dropped the fragment would silently empty the gate. The source is what
+        // says so, and it says so for every one of them.
+        let sources = [
+            include_str!("../../crates/uor-matmul-kernels/src/isa/portable.rs"),
+            include_str!("../../crates/uor-matmul-kernels/src/isa/x86.rs"),
+            include_str!("../../crates/uor-matmul-kernels/src/isa/arm.rs"),
+            include_str!("../../crates/uor-matmul-kernels/src/isa/wasm.rs"),
+        ];
+        let mut entry_points = 0usize;
+        for text in sources {
+            for line in text.lines() {
+                let Some(rest) = line.trim().split("fn ").nth(1) else {
+                    continue;
+                };
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                // A sequence is tropical exactly when it names the semiring. The
+                // check is the other way round from the obvious one: it does not
+                // ask whether every `trop` function carries the fragment --- it
+                // asks whether anything the family would recognise as tropical
+                // fails to, which is the rename this catches.
+                if name.contains("trop") {
+                    assert!(
+                        name.contains(TROPICAL_SEQUENCE),
+                        "`{name}` is a tropical sequence whose symbol does not carry \
+                         `{TROPICAL_SEQUENCE}`, so `audit-disassembly` would never read it"
+                    );
+                    entry_points += 1;
+                }
+            }
+        }
+        assert!(
+            entry_points >= 4,
+            "one sequence per ISA at least, or the scope check is itself vacuous; found \
+             {entry_points}"
+        );
+
+        // Two: the *scanner*. A body of the shape these sequences emit ---
+        // saturating adds and signed maxima --- must read clean, and the same
+        // body with one multiply in it must not. Without the second half a
+        // scanner that recognised nothing would pass.
+        let clean = "\
+_ZN4trop_i16_probe:
+    vpaddsw %ymm1, %ymm2, %ymm0
+    vpmaxsw %ymm0, %ymm3, %ymm3
+    ret
+";
+        let dirty = "\
+_ZN4trop_i16_probe:
+    vpaddsw %ymm1, %ymm2, %ymm0
+    imull $3, %eax, %eax
+    vpmaxsw %ymm0, %ymm3, %ymm3
+    ret
+";
+        for (text, want) in [(clean, false), (dirty, true)] {
+            let bodies = function_bodies(text, TROPICAL_SEQUENCE);
+            assert_eq!(bodies.len(), 1, "the probe is one body");
+            let found = bodies[0]
+                .1
+                .iter()
+                .any(|(_, line)| integer_multiply_opcode(line).is_some());
+            assert_eq!(
+                found, want,
+                "the scanner must report a multiply in a tropical body and only there"
+            );
+        }
+    }
 }

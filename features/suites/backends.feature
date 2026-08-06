@@ -77,3 +77,9 @@ Feature: Backend parity
     Given the standing corpus
     When the suite exercises CB-12
     Then the claim holds byte for byte
+
+  @CB-13 @build
+  Scenario: Every tropical instruction sequence agrees with the portable tropical reference, lane for lane, at every bound and depth
+    Given the standing corpus
+    When the suite exercises CB-13
+    Then the claim holds byte for byte

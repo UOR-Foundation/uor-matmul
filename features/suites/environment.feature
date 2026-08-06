@@ -23,3 +23,9 @@ Feature: Allocation and environment
     Given the standing corpus
     When the suite exercises CA-03
     Then the claim holds byte for byte
+
+  @CA-04 @build
+  Scenario: The tropical accumulator's width is independent of `k`, and is the same width at depth one and at the deepest reduction the machine can address
+    Given the standing corpus
+    When the suite exercises CA-04
+    Then the claim holds byte for byte

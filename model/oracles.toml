@@ -134,6 +134,25 @@ SHA-256, and compared like any other oracle. int64 accumulation wraps exactly
 where a two's complement accumulator does, so the comparison is byte equality
 with no exempted region."""
 
+[[oracle]]
+id = "CX-11"
+crate = "numpy"
+feature = "none"
+element = "i64"
+entry = "(max, +) product, out of process"
+exactness = "exact"
+independent = true
+honesty = "build"
+note = """The selection half of the operation census, witnessed the way CX-10
+witnesses the accumulation half. `exact` is a stronger word here than anywhere
+else in this table: a float oracle computes a different function and an integer
+ring oracle agrees by a homomorphism argument, but a max-plus product has no
+rounding for two implementations to disagree about at all, so byte equality is
+the only comparison the claim admits. Generated once by
+oracles/tropical/generate.py, committed to oracles/tropical/ with a per-file
+SHA-256, and drawn at the corpus parameters the manifest records so an artifact
+from another corpus is refused rather than compared."""
+
 # --------------------------------------------------------------------------
 # Cited authorities. These are not crates and are not executed. They are cited
 # the way an instruction-set manual is cited: they tell the implementation what

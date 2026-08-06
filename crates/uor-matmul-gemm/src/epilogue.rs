@@ -9,7 +9,8 @@
 //! platform rounding mode.
 
 use uor_matmul_core::{
-    AccOf, Accumulator, Complete, Element, EncodeFrom, EncodeMode, FloatElement, Limbs,
+    AccOf, Accumulator, Complete, Element, EncodeFrom, EncodeMode, FloatElement, IntegerElement,
+    Limbs, Trop, TropAcc,
 };
 
 use core::marker::PhantomData;
@@ -116,6 +117,114 @@ where
         let (bias, column) = *self;
         let b = bias.values.get(column).copied().unwrap_or(0);
         O::encode_from(acc.combine(AccOf::<E>::from_i128(b as i128)), mode)
+    }
+}
+
+/// `C := (alpha ⊗ A⊗B) ⊕ (beta ⊗ C)`, the `(max, +)` epilogue.
+///
+/// The tropical reading of [`Linear`], line for line: `⊗` is addition, `⊕` is
+/// `max`, and the two scalars are tropical elements rather than integers. It is
+/// the *same* epilogue at a different semiring --- the body below differs from
+/// [`Linear`]'s only in which trait supplies `⊗`, which is what makes this an
+/// instantiation and not a second method (R13).
+///
+/// `beta` at the semiring zero is the tropical overwrite: `-inf ⊗ C` is `-inf`,
+/// which contributes nothing to the `max`, so the driver need not read `C` at
+/// all --- and an uninitialised output buffer is admissible here for exactly
+/// the reason `beta == 0` makes it admissible in the ring (`CS-11`, the
+/// tropical sibling of `CS-04`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MaxPlus {
+    /// Shifts the product. The multiplicative identity is `finite(0)`.
+    pub alpha: Trop<i64>,
+    /// Shifts the value already in `C`. The semiring zero overwrites.
+    pub beta: Trop<i64>,
+}
+
+impl MaxPlus {
+    /// `C := A⊗B`, overwriting. The common case, and the one that never reads
+    /// the output buffer.
+    pub const OVERWRITE: Self = Self {
+        alpha: Trop::finite(0),
+        beta: Trop::NEG_INF,
+    };
+
+    /// `C := (A⊗B) ⊕ C`.
+    pub const ACCUMULATE: Self = Self {
+        alpha: Trop::finite(0),
+        beta: Trop::finite(0),
+    };
+}
+
+impl<E, O> Epilogue<E, O> for MaxPlus
+where
+    E: Element,
+    O: EncodeFrom<AccOf<E>>,
+    AccOf<E>: ShiftExact + AbsorbPrior<O>,
+{
+    fn reads_c(&self) -> bool {
+        // `beta` at the semiring zero absorbs `C` away, which is what makes an
+        // uninitialised output buffer admissible (`CS-11`).
+        self.beta.is_finite()
+    }
+
+    fn finish(&self, acc: AccOf<E>, prior: Option<O>, mode: EncodeMode) -> O {
+        let shifted = acc.shift_exact(self.alpha);
+        let total = match prior {
+            // `beta` is the semiring zero and the driver did not read `C`.
+            None => shifted,
+            Some(c) => {
+                if self.beta.is_finite() {
+                    shifted.combine(AccOf::<E>::of_prior(c).shift_exact(self.beta))
+                } else {
+                    shifted
+                }
+            }
+        };
+        O::encode_from(total, mode)
+    }
+}
+
+/// Exact `⊗` by a tropical scalar.
+///
+/// The tropical twin of [`ScaleExact`], and a separate trait for the reason
+/// that keeps the two families apart everywhere else: `⊗` is *addition* here,
+/// so an accumulator that implements one must not implement the other. The
+/// separation is what excludes [`Linear`] from a tropical accumulation and
+/// [`MaxPlus`] from a ring one, by construction rather than by a check.
+pub trait ShiftExact: Accumulator {
+    /// `self ⊗ by`, exactly. Absorbing at the semiring zero.
+    fn shift_exact(self, by: Trop<i64>) -> Self;
+}
+
+impl<const W: u32> ShiftExact for TropAcc<W> {
+    fn shift_exact(self, by: Trop<i64>) -> Self {
+        match (self.get(), by.get()) {
+            // Exact, and it cannot leave the register: the accumulated value
+            // has magnitude at most `2^BITS` --- `⊕` selects rather than sums,
+            // so a reduction of any depth reaches no further --- and the scalar
+            // at most `2^63`, so the sum is inside `TropAcc::DOMAIN` at every
+            // element width. A derivation, so there is no saturating step here
+            // (R3), and the domain it rests on is the one `TropAcc::of`
+            // declares and checks.
+            (Some(v), Some(s)) => Self::of(v + s as i128),
+            // `-inf ⊗ a = -inf`, in either argument. No arithmetic is performed
+            // at all, which is why the checked profile has nothing to trap on
+            // (`CT-08`).
+            _ => Self::NEG_INF,
+        }
+    }
+}
+
+impl<const W: u32, T> AbsorbPrior<Trop<T>> for TropAcc<W>
+where
+    T: IntegerElement + Into<i128>,
+{
+    fn of_prior(prior: Trop<T>) -> Self {
+        match prior.get() {
+            Some(v) => Self::of(v.into()),
+            None => Self::NEG_INF,
+        }
     }
 }
 

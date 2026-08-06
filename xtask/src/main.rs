@@ -10,6 +10,7 @@ use std::process::ExitCode;
 
 use uor_matmul_model::{codegen, Model};
 
+mod api;
 mod audit;
 mod census;
 
@@ -22,6 +23,7 @@ fn main() -> ExitCode {
 
     let result = match task.as_str() {
         "check-model" => check_model(&root, write),
+        "check-api" => api::check_api(&root, write),
         "check-constants" => audit::check_constants(&root),
         "audit-limits" => audit::audit_limits(&root),
         "audit-purity" => audit::audit_purity(&root),
@@ -35,16 +37,17 @@ fn main() -> ExitCode {
                 "cargo xtask <task>\n\
                  \n\
                  check-model       R10: model/*.toml is the single source; regenerate and diff\n\
+                 check-api         no public item is removed or renamed; diff against the baseline\n\
                  check-constants   R1:  every constant derives or is measured; no magic numeral\n\
                  audit-limits      R8:  no bound that cannot be traced to a parameter\n\
                  audit-purity      R13: one method; no float addition, no fallback\n\
                  audit-disassembly CU-01: no float arithmetic opcode in any shipped kernel\n\
-                 audit-deferral    R15: no TODO, no stub, no 'later version'\n\
+                 audit-deferral    R15: nothing is deferred, anywhere in the workspace\n\
                  issue-census      CG-11: a named bottleneck for every emitted inner loop\n\
                  verify-oracles    R11: every external claim is bound to a committed artifact\n\
                  validate          run every gate above\n\
                  \n\
-                 --write           check-model only: rewrite the generated file"
+                 --write           check-model, check-api: rewrite the generated file"
             );
             return ExitCode::from(2);
         }
@@ -158,6 +161,7 @@ fn verify_oracles(root: &Path) -> Result<(), Fail> {
 /// The whole normative acceptance gate, in one place.
 fn validate(root: &Path) -> Result<(), Fail> {
     check_model(root, false)?;
+    api::check_api(root, false)?;
     audit::check_constants(root)?;
     audit::audit_limits(root)?;
     audit::audit_purity(root)?;

@@ -36,6 +36,9 @@ pub const NEON_R_I8_I32_1: KernelSpec<i8, i32> = portable::R1_I8_I32;
 /// Absent here; the reference reduce sequence carries this family.
 pub const NEON_DOTPROD_R_I8_I32_1: KernelSpec<i8, i32> = portable::R1_I8_I32;
 
+/// Unreachable: [`neon_available`] is `false`.
+pub const NEON_TROP_I16: KernelSpec<i16, i16> = portable::TROP_I16;
+
 // ---------------------------------------------------------------------------
 // The table sequences (§7.3)
 // ---------------------------------------------------------------------------
