@@ -257,6 +257,73 @@ fn vs_oracles(c: &mut Criterion) {
         });
     }
     f32_group.finish();
+
+    let mut f64_group = c.benchmark_group("gemm_f64");
+    for &(m, k, n) in &SHAPES {
+        let shape = format!("{m}x{k}x{n}");
+        let a = vec![1.0f64; m * k];
+        let b = vec![1.0f64; k * n];
+
+        f64_group.bench_function(format!("uor-matmul/{shape}"), |bench| {
+            let mut out = vec![0.0f64; m * n];
+            let (pa_len, pb_len) = suggested_float_panels(Shape { m, k, n });
+            let mut pa = vec![PackedCode::default(); pa_len];
+            let mut pb = vec![PackedCode::default(); pb_len];
+            bench.iter(|| {
+                let av = MatView::row_major(&a, m, k).expect("A fits");
+                let bv = MatView::row_major(&b, k, n).expect("B fits");
+                let cv = MatViewMut::row_major(&mut out, m, n).expect("C fits");
+                let mut t = Triple::new(av, bv, cv).expect("the product exists");
+                uor_matmul::gemm_float_packed(
+                    &mut t,
+                    &Linear::OVERWRITE,
+                    GemmOptions::default(),
+                    &mut pa,
+                    &mut pb,
+                );
+                assert!(
+                    out.iter().all(|&v| v == k as f64),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        f64_group.bench_function(format!("handwritten/{shape}"), |bench| {
+            let mut out = vec![0.0f64; m * n];
+            bench.iter(|| {
+                handwritten_f64(m, k, n, &a, &b, &mut out);
+                assert!(
+                    out.iter().all(|&v| v == k as f64),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        #[cfg(feature = "ref-matrixmultiply")]
+        f64_group.bench_function(format!("matrixmultiply/{shape}"), |bench| {
+            use uor_matmul_validate::oracle::MatrixMultiplyF64;
+            bench.iter(|| {
+                let out = MatrixMultiplyF64::product_f64(m, k, n, &a, &b);
+                assert!(
+                    out.iter().all(|&v| v == k as f64),
+                    "the timed call must be correct"
+                );
+            });
+        });
+
+        #[cfg(feature = "ref-faer")]
+        f64_group.bench_function(format!("faer/{shape}"), |bench| {
+            use uor_matmul_validate::oracle::Faer;
+            bench.iter(|| {
+                let out = Faer::product_f64(m, k, n, &a, &b);
+                assert!(
+                    out.iter().all(|&v| v == k as f64),
+                    "the timed call must be correct"
+                );
+            });
+        });
+    }
+    f64_group.finish();
 }
 
 /// The `f32` half of "no library": three loops and an `f32` accumulator.
@@ -265,6 +332,16 @@ fn vs_oracles(c: &mut Criterion) {
 /// stay quiet; the arithmetic is the same naive sum, in the same order, with
 /// the same order-dependent rounding a classical caller gets.
 fn handwritten_f32(m: usize, k: usize, n: usize, a: &[f32], b: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(out.len(), m * n, "the output is the product's shape");
+    for (i, row) in out.chunks_exact_mut(n).enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = (0..k).map(|p| a[i * k + p] * b[p * n + j]).sum();
+        }
+    }
+}
+
+/// The `f64` half of "no library": the same three loops at the wider format.
+fn handwritten_f64(m: usize, k: usize, n: usize, a: &[f64], b: &[f64], out: &mut [f64]) {
     debug_assert_eq!(out.len(), m * n, "the output is the product's shape");
     for (i, row) in out.chunks_exact_mut(n).enumerate() {
         for (j, cell) in row.iter_mut().enumerate() {

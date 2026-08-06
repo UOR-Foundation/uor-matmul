@@ -188,7 +188,8 @@ cross: no-alloc cross-run
 
 # The bench half of `scaling`, on its own for the quick loop: one criterion
 # group per element type times this library beside every enabled oracle at
-# three shapes, byte-equality asserted inside each timed closure. A regression
+# three shapes; this includes tropical lane and witness scaling. Byte-equality
+# is asserted inside each timed closure. A regression
 # against your own last run is a criterion baseline away ---
 # `--save-baseline before` before the change, `--baseline before` after.
 #
