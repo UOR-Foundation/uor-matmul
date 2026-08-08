@@ -184,11 +184,13 @@ one Euclidean fracture in the signed-place radix `i128::MAX + 1` then yields a
 low digit and at most one unit high digit, placed at the base grade and its
 radix-successor grade. The only selector globally compares every eligible
 group-one tile, narrow, and reduce lookup declaration by model-derived executed
-work, including exact output-cell residency, the fixed Atlas workspace, and
-full tiles plus row, column, and corner edges. One exact frame owns every live
-cell of a tile for its entire reduction; a model-generated contiguous capacity
-dispatch gives that frame exactly `rows * columns` cells, with no replay or
-maximum-tile allocation. There is no scalar support mask, population count,
+work, including exact output-cell residency, live-only product initialization,
+the fixed Atlas workspace, and full tiles plus row, column, and corner edges.
+One exact frame owns every live cell of a tile for its entire reduction; its
+streamed source cell is one six-state boundary quotient plus the finite payload,
+and reused coordinate words clear only their retired suffix. A model-generated
+contiguous capacity dispatch gives the frame exactly `rows * columns` cells,
+with no replay or maximum-tile allocation. There is no scalar support mask, population count,
 common-gauge route, tuned threshold, significand multiply, float arithmetic,
 whole-operand integer reification, or reserve route (`CU-11`, `CG-22`). The
 interval and projector objects used by `CD-31` and `CK-20` remain borrowed
@@ -428,11 +430,14 @@ latency, and fitted exponents from `n = 1` to `n = 1024`, beside every oracle.
 `MEASUREMENT-LOG.md` §"Current pure-Atlas CG-16 and CG-21 measurement record"
 records the completed block-one selector experiment: its same-key H01/H02
 holdout rejected the fitted `CG-16` candidate, so the value-blind default still
-declines. The fresh `CG-21` sweep records the current one-frame implementation:
-all exact-byte guards passed, the full finite-range cases fell from the old
-multi-millisecond gauge path to `226.5 +/- 27.7` us (`f32`, offered) and
-`501.3 +/- 81.2` us (`f64`, offered), and all timing figures remain host-scoped
-`open` observations rather than selector thresholds.
+declines. The fresh post-V&V `CG-21` sweep records the current one-frame
+implementation: all exact-byte guards passed; f32 one-grade measured
+`1.350 +/- 0.329` us and full finite range measured `219.3 +/- 30.5` us with an
+offer, while the f64 full finite range measured `485.4 +/- 61.8` us without
+one. The retained prior run has no clear 95%-interval regression and shows
+clear wins for f32 one-grade with an offer, both f32 sparse offer states, and
+f64 one-grade without an offer. All timing figures remain host-scoped `open`
+observations rather than selector thresholds.
 Two classes remain separate, because confusing them is the oldest mistake in
 this repository's
 performance prose: **arbitrary-data results** (dense kernels, exponents,

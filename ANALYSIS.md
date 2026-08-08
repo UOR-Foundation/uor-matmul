@@ -1588,14 +1588,16 @@ group-one tile, narrow, and reduce lookup/add orientations, globally priced by
 model-derived executed work. It does not decide whether the coded driver admits
 block-one tabulation. That internal price
 includes each declaration's contraction work, exact output-cell residency after
-the fixed Atlas workspace is charged to L1, and full tiles plus every edge
-orientation; it has no tuned threshold. One exact frame owns all live cells of
-each tile for the complete reduction, and the model-generated contiguous
-capacity dispatch instantiates its exact live extent rather than a manually
-maintained maximum frame. Offered `PackedCode` words become balanced-octet/grade
-projections in place, so reuse covers projection as well as decode with no
-second buffer. Panels and the fixed source workspace are reused across arbitrary
-reduction depth. Thus neither empty workspace nor wider
+the fixed Atlas workspace is charged to L1, live-only product-carrier
+initialization, and full tiles plus every edge orientation; it has no tuned
+threshold. One exact frame owns all live cells of each tile for the complete
+reduction, and the model-generated contiguous capacity dispatch instantiates
+its exact live extent rather than a manually maintained maximum frame. Offered
+`PackedCode` words become balanced-octet/grade projections in place, so reuse
+covers projection as well as decode with no second buffer. Streamed cells decode
+once into the six-state boundary quotient and finite payload; reused coordinate
+words clear only their retired suffix. Panels and the fixed source workspace are
+reused across arbitrary reduction depth. Thus neither empty workspace nor wider
 exponent support causes whole-operand reification, allocation, a traditional
 multiply, a scalar support mask, or a reserve arithmetic path (`CK-19`,
 `CK-20`, `CD-31`, `CA-05`, `CU-11`, `CG-22`).
@@ -1624,15 +1626,18 @@ rates of `0.0179 +/- 0.0055` / `0.0221 +/- 0.0024` Gproduct/s and reported exact
 bytes plus unchanged integer and tropical controls.
 
 Those intermediate numbers have no retained command artifact and are not the
-authoritative result. The final current-source sweep does: its source manifest
-is identical before and after the run, it retains every raw sample, and the
-live harness poisons before and completely checks after each calibrated batch,
-leaving only production calls inside the timer. The current full finite-range
-offered calls are `226.530 +/- 27.686` us for `f32` and
-`501.251 +/- 81.208` us for `f64`; the corresponding no-offer calls are
-`181.129 +/- 19.830` us and `428.566 +/- 33.914` us. These figures remain
-`open`; the build claims are exact bytes and census correspondence, not a
-host-independent nanosecond rate or a new selector constant.
+authoritative result. The final post-V&V UOR-NAF cleanup sweep does: its source
+manifest is identical before and after the run, it retains every raw sample,
+and the live harness poisons before and completely checks after each calibrated
+batch, leaving only production calls inside the timer. The current full
+finite-range calls are `219.328 +/- 30.541` / `183.323 +/- 26.491` us for f32
+offered/no offer and `479.374 +/- 59.446` / `485.419 +/- 61.767` us for f64.
+Across the complete corpus there is no clear 95%-interval regression; f32
+one-grade with an offer, both f32 sparse offer states, and f64 one-grade without
+an offer are clear wins. These figures remain `open`; the build claims are
+exact bytes and census correspondence over the complete eligible group-one
+universe, not a host-independent nanosecond rate, an optimum outside that
+universe, or a new selector constant.
 
 ### The float placement (historical, superseded)
 

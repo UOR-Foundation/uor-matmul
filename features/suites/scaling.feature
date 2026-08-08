@@ -140,7 +140,7 @@ Feature: Scaling
 
   @CG-22 @build
   Scenario: The direct pure-UOR traversal chooses the global model-derived executed-work lookup orientation and leaves non-float routes unchanged
-    Given every eligible group-one lookup-add family, both float accumulator sizes, exact-cell residency, fixed Atlas workspace, full and edge subcells, the direct coordinate census, and captured integer and tropical control counts
+    Given every eligible group-one lookup-add family, both float accumulator sizes, exact-cell residency, live-only product-carrier initialization, fixed Atlas workspace, full and edge subcells, the direct coordinate census, and captured integer and tropical control counts
     When the suite exercises shapes selecting each executed-work orientation for CG-22
     Then the route census names the global model-derived minimum, shipped storage and work equal their independent model twins, and every non-float route and operation count is unchanged
 

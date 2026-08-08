@@ -140,17 +140,18 @@ Tile and reduce kernels are orientations of this same direct octet contraction.
 Their selector globally compares every eligible group-one tile, narrow, and
 reduce declaration by model-derived executed work. That work includes each
 `KernelSpec`'s contraction cost, exact output-cell residency after the fixed
-Atlas workspace is charged to L1, and full tiles plus row, column, and corner
-edges; it carries no restated threshold or data-dependent route. One exact
-frame owns all live cells of a tile for one complete reduction. Its exact
-capacity comes from a model-generated contiguous dispatch over the maximum
-family geometry, so neither `f64` nor an edge tile replays through a smaller
-window or allocates the maximum frame. Each offered `PackedCode` slot is
-reinterpreted in place as the ready contextual q cell, reusing both decode and
-projection without another object. A short or empty offer
-streams the same bounded source state, while a full offer avoids repeated
-decode and projection. Every historical workspace spelling delegates to that
-one body and leaves the compatibility-only integer buffers untouched (`CD-19`,
+Atlas workspace is charged to L1, live-only product-carrier initialization, and
+full tiles plus row, column, and corner edges; it carries no restated threshold
+or data-dependent route. One exact frame owns all live cells of a tile for one
+complete reduction. Its exact capacity comes from a model-generated contiguous
+dispatch over the maximum family geometry, so neither `f64` nor an edge tile
+replays through a smaller window or allocates the maximum frame. Each offered
+`PackedCode` slot is reinterpreted in place as the ready contextual q cell,
+reusing both decode and projection without another object. A short or empty
+offer decodes each source once into the same six-state boundary quotient and
+finite payload; coordinate replacement rewrites its live prefix and clears only
+the retired suffix. Every historical workspace spelling delegates to that one
+body and leaves the compatibility-only integer buffers untouched (`CD-19`,
 `CD-30`, `CG-22`).
 
 That selector is internal to the dense Atlas arithmetic: it chooses an

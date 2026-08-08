@@ -32,6 +32,17 @@ struct AtlasAtom {
     negative: bool,
 }
 
+/// Finite source data not already carried by the six-state boundary quotient.
+#[derive(Clone, Copy)]
+struct AtlasFiniteSite {
+    unit: u64,
+    grade: i64,
+}
+
+impl AtlasFiniteSite {
+    const ZERO: Self = Self { unit: 0, grade: 0 };
+}
+
 /// Signed local carrier for one lookup-resolved source product.
 ///
 /// Two `u64` source coefficients have a sub-`2^128` final magnitude. During
@@ -169,11 +180,10 @@ const ATLAS_TILE_COORDINATES: usize = MAX_TILE_LANES * MAX_ATLAS_WORDS;
 /// the derived sum bound; product state remains one per physical output because
 /// the selected kernel overwrites its complete tile on every diagonal.
 struct AtlasTileWorkspace {
-    source_codes: [PackedCode; MAX_ATLAS_SOURCE_SITES],
-    source_atoms: [Option<AtlasAtom>; MAX_ATLAS_SOURCE_SITES],
+    source_kinds: [u8; MAX_ATLAS_SOURCE_SITES],
+    source_finite: [AtlasFiniteSite; MAX_ATLAS_SOURCE_SITES],
     source_words: [[i8; MAX_ATLAS_WORDS]; MAX_ATLAS_SOURCE_SITES],
     source_extents: [u8; MAX_ATLAS_SOURCE_SITES],
-    source_projected: [bool; MAX_ATLAS_SOURCE_SITES],
     a_active: [bool; MAX_ATLAS_WORDS],
     b_active: [bool; MAX_ATLAS_WORDS],
     left: [i8; ATLAS_TILE_COORDINATES],
@@ -184,11 +194,10 @@ struct AtlasTileWorkspace {
 
 impl AtlasTileWorkspace {
     const ZERO: Self = Self {
-        source_codes: [ZERO_CODE; MAX_ATLAS_SOURCE_SITES],
-        source_atoms: [None; MAX_ATLAS_SOURCE_SITES],
+        source_kinds: [AtlasProjectedKind::FiniteZero as u8; MAX_ATLAS_SOURCE_SITES],
+        source_finite: [AtlasFiniteSite::ZERO; MAX_ATLAS_SOURCE_SITES],
         source_words: [[0; MAX_ATLAS_WORDS]; MAX_ATLAS_SOURCE_SITES],
         source_extents: [0; MAX_ATLAS_SOURCE_SITES],
-        source_projected: [false; MAX_ATLAS_SOURCE_SITES],
         a_active: [false; MAX_ATLAS_WORDS],
         b_active: [false; MAX_ATLAS_WORDS],
         left: [0; ATLAS_TILE_COORDINATES],
@@ -210,10 +219,11 @@ const fn atlas_split_signed_place(magnitude: u128) -> (u128, u128) {
     )
 }
 
-/// Remove the exact dyadic valuation by observing the radix quotient.
+/// Remove the exact dyadic valuation through the defining radix-two quotient.
 ///
-/// The doubled quotient is the divisibility witness, so no binary field or
-/// trailing-bit operation participates in the canonical section.
+/// The quotient/add witness keeps the canonical section independent of binary
+/// field inspection. A wider-radix prepass was measured and rejected because
+/// its divisibility test regressed ordinary finite f32 panels.
 #[inline(always)]
 fn atlas_odd_section(mut magnitude: u64) -> (u64, u32) {
     if magnitude == 0 {
@@ -233,15 +243,14 @@ fn atlas_odd_section(mut magnitude: u64) -> (u64, u32) {
 /// Decode a finite nonzero coefficient into the canonical odd section.
 #[inline(always)]
 fn atlas_atom(code: PackedCode, prescaled: bool) -> Option<AtlasAtom> {
-    let (negative, magnitude, exponent) = finite_parts(code)?;
-    if magnitude == 0 {
+    let (kind, finite) = atlas_source_state(code, prescaled);
+    if !atlas_kind_is_productive(kind) {
         return None;
     }
-    let (unit, valuation) = atlas_odd_section(magnitude);
     Some(AtlasAtom {
-        unit,
-        grade: i64::from(if prescaled { 0 } else { exponent }) + i64::from(valuation),
-        negative,
+        unit: finite.unit,
+        grade: finite.grade,
+        negative: kind == AtlasProjectedKind::FiniteNegative as u8,
     })
 }
 
@@ -279,6 +288,14 @@ fn atlas_word(atom: AtlasAtom, coordinates: &mut [i8]) -> usize {
     context
 }
 
+/// Replace one reused coordinate word without pre-clearing its live prefix.
+#[inline(always)]
+fn replace_atlas_word(atom: AtlasAtom, coordinates: &mut [i8]) -> usize {
+    let extent = atlas_word(atom, coordinates);
+    coordinates[extent..].fill(0);
+    extent
+}
+
 /// The caller's sixteen-byte panel word viewed as a ready Atlas projection.
 ///
 /// Nine signed octets are the complete centered word of a `u64` coefficient.
@@ -310,6 +327,75 @@ enum AtlasProjectedKind {
     PositiveInfinity,
     NegativeInfinity,
     NotANumber,
+}
+
+#[inline(always)]
+fn atlas_source_state(code: PackedCode, prescaled: bool) -> (u8, AtlasFiniteSite) {
+    if let Some((negative, magnitude, exponent)) = finite_parts(code) {
+        if magnitude == 0 {
+            return (AtlasProjectedKind::FiniteZero as u8, AtlasFiniteSite::ZERO);
+        }
+        let (unit, valuation) = atlas_odd_section(magnitude);
+        (
+            if negative {
+                AtlasProjectedKind::FiniteNegative as u8
+            } else {
+                AtlasProjectedKind::FinitePositive as u8
+            },
+            AtlasFiniteSite {
+                unit,
+                grade: i64::from(if prescaled { 0 } else { exponent }) + i64::from(valuation),
+            },
+        )
+    } else if code.is_nan() {
+        (AtlasProjectedKind::NotANumber as u8, AtlasFiniteSite::ZERO)
+    } else if code.mantissa < 0 {
+        (
+            AtlasProjectedKind::NegativeInfinity as u8,
+            AtlasFiniteSite::ZERO,
+        )
+    } else {
+        (
+            AtlasProjectedKind::PositiveInfinity as u8,
+            AtlasFiniteSite::ZERO,
+        )
+    }
+}
+
+#[inline(always)]
+fn atlas_kind_is_boundary(kind: u8) -> bool {
+    kind == AtlasProjectedKind::PositiveInfinity as u8
+        || kind == AtlasProjectedKind::NegativeInfinity as u8
+        || kind == AtlasProjectedKind::NotANumber as u8
+}
+
+#[inline(always)]
+fn atlas_kind_is_productive(kind: u8) -> bool {
+    kind == AtlasProjectedKind::FinitePositive as u8
+        || kind == AtlasProjectedKind::FiniteNegative as u8
+}
+
+#[inline(always)]
+fn atlas_boundary_code(kind: u8) -> PackedCode {
+    if kind == AtlasProjectedKind::FiniteZero as u8 {
+        ZERO_CODE
+    } else if kind == AtlasProjectedKind::FinitePositive as u8 {
+        UNIT_CODE
+    } else if kind == AtlasProjectedKind::FiniteNegative as u8 {
+        PackedCode {
+            mantissa: -1,
+            exp: 0,
+            _pad: 0,
+        }
+    } else if kind == AtlasProjectedKind::PositiveInfinity as u8 {
+        PackedCode::of(uor_matmul_core::Decoded::Infinite { sign: false })
+    } else if kind == AtlasProjectedKind::NegativeInfinity as u8 {
+        PackedCode::of(uor_matmul_core::Decoded::Infinite { sign: true })
+    } else if kind == AtlasProjectedKind::NotANumber as u8 {
+        PackedCode::of(uor_matmul_core::Decoded::NotANumber)
+    } else {
+        unreachable!("every Atlas boundary kind is constructed in this module")
+    }
 }
 
 const _: () = assert!(
@@ -384,6 +470,7 @@ impl AtlasProjectedCode {
         bytemuck::cast(code)
     }
 
+    #[cfg(test)]
     #[inline(always)]
     fn atom(self) -> Option<AtlasAtom> {
         if self.kind != AtlasProjectedKind::FinitePositive as u8
@@ -400,33 +487,25 @@ impl AtlasProjectedCode {
         })
     }
 
+    #[inline(always)]
+    fn finite_site(self) -> AtlasFiniteSite {
+        debug_assert!(atlas_kind_is_productive(self.kind));
+        AtlasFiniteSite {
+            unit: 1,
+            grade: i64::from(self.exponent) + i64::from(self.valuation),
+        }
+    }
+
     /// A representative with the same IEEE boundary action.
     ///
     /// Finite magnitude matters to a boundary product only through zero versus
     /// nonzero and its modality. The exact finite coefficient continues through
     /// `coordinates`; this representative is used solely when its partner is a
     /// NaN or infinity.
+    #[cfg(test)]
     #[inline(always)]
     fn boundary_code(self) -> PackedCode {
-        if self.kind == AtlasProjectedKind::FiniteZero as u8 {
-            ZERO_CODE
-        } else if self.kind == AtlasProjectedKind::FinitePositive as u8 {
-            UNIT_CODE
-        } else if self.kind == AtlasProjectedKind::FiniteNegative as u8 {
-            PackedCode {
-                mantissa: -1,
-                exp: 0,
-                _pad: 0,
-            }
-        } else if self.kind == AtlasProjectedKind::PositiveInfinity as u8 {
-            PackedCode::of(uor_matmul_core::Decoded::Infinite { sign: false })
-        } else if self.kind == AtlasProjectedKind::NegativeInfinity as u8 {
-            PackedCode::of(uor_matmul_core::Decoded::Infinite { sign: true })
-        } else if self.kind == AtlasProjectedKind::NotANumber as u8 {
-            PackedCode::of(uor_matmul_core::Decoded::NotANumber)
-        } else {
-            unreachable!("every in-place Atlas cache word is constructed here")
-        }
+        atlas_boundary_code(self.kind)
     }
 }
 
@@ -665,14 +744,16 @@ impl AtlasCount {
 ///
 /// Field order is deliberately visible: the measured bottleneck, source
 /// projection, is compared first; decode reuse and lookup issue work break its
-/// ties, followed by peak live storage.  CG-21 measures every eligible
-/// declaration against this order.  A different winner must change the
-/// measured model record rather than smuggle a scalar weight into this code.
+/// ties, followed by live carrier initialization and peak live storage. CG-21
+/// measures every eligible declaration against this order. A different winner
+/// must change the measured model record rather than smuggle a scalar weight
+/// into this code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct AtlasWork {
     projections: AtlasCount,
     decodes: AtlasCount,
     issued: AtlasCount,
+    product_initializations: AtlasCount,
     live_bytes: AtlasCount,
 }
 
@@ -681,15 +762,17 @@ impl AtlasWork {
         projections: AtlasCount::ZERO,
         decodes: AtlasCount::ZERO,
         issued: AtlasCount::ZERO,
+        product_initializations: AtlasCount::ZERO,
         live_bytes: AtlasCount::ZERO,
     };
 
     #[cfg(test)]
-    fn coordinates(self) -> [[u128; ATLAS_COUNT_WORDS]; 4] {
+    fn coordinates(self) -> [[u128; ATLAS_COUNT_WORDS]; 5] {
         [
             self.projections.coordinates(),
             self.decodes.coordinates(),
             self.issued.coordinates(),
+            self.product_initializations.coordinates(),
             self.live_bytes.coordinates(),
         ]
     }
@@ -776,6 +859,7 @@ fn atlas_executed_work<A>(
     let issued = atlas_product_count(row_tiles, column_tiles)
         .multiply(steps)
         .multiply(shape.k);
+    let product_initializations = atlas_product_count(shape.m, shape.n).multiply(shape.k);
 
     let live_rows = spec.mr.min(shape.m);
     let live_cols = spec.nr.min(block_width).min(shape.n);
@@ -796,6 +880,7 @@ fn atlas_executed_work<A>(
         projections: projection_sites,
         decodes,
         issued,
+        product_initializations,
         live_bytes,
     }
 }
@@ -812,6 +897,7 @@ trait AtlasLedger {
     fn decoded_a(&mut self);
     fn decoded_b(&mut self);
     fn projected(&mut self);
+    fn product_initialized(&mut self, live_products: usize);
     fn kernel_call(&mut self, coordinate_products: usize);
     fn placed(&mut self);
     fn boundary_joined(&mut self);
@@ -830,6 +916,8 @@ impl AtlasLedger for () {
     #[inline(always)]
     fn projected(&mut self) {}
     #[inline(always)]
+    fn product_initialized(&mut self, _: usize) {}
+    #[inline(always)]
     fn kernel_call(&mut self, _: usize) {}
     #[inline(always)]
     fn placed(&mut self) {}
@@ -841,18 +929,26 @@ impl AtlasLedger for () {
 
 /// Exact output cells retained by one bounded Atlas contraction.
 trait AtlasCells<A> {
-    fn for_each<F: FnMut(usize, &mut A)>(&mut self, visit: &mut F);
+    fn for_each_live<F: FnMut(usize, &mut A)>(&mut self, visit: &mut F);
 }
 
 #[cfg(test)]
-struct SliceAtlasCells<'a, A>(&'a mut [A]);
+struct SliceAtlasCells<'a, A> {
+    rows: usize,
+    cols: usize,
+    physical_cols: usize,
+    accumulators: &'a mut [A],
+}
 
 #[cfg(test)]
 impl<A> AtlasCells<A> for SliceAtlasCells<'_, A> {
     #[inline(always)]
-    fn for_each<F: FnMut(usize, &mut A)>(&mut self, visit: &mut F) {
-        for (physical_lane, accumulator) in self.0.iter_mut().enumerate() {
-            visit(physical_lane, accumulator);
+    fn for_each_live<F: FnMut(usize, &mut A)>(&mut self, visit: &mut F) {
+        for row in 0..self.rows {
+            for col in 0..self.cols {
+                let physical_lane = row * self.physical_cols + col;
+                visit(physical_lane, &mut self.accumulators[physical_lane]);
+            }
         }
     }
 }
@@ -869,7 +965,7 @@ struct WindowAtlasCells<'a, A> {
 
 impl<A> AtlasCells<A> for WindowAtlasCells<'_, A> {
     #[inline(always)]
-    fn for_each<F: FnMut(usize, &mut A)>(&mut self, visit: &mut F) {
+    fn for_each_live<F: FnMut(usize, &mut A)>(&mut self, visit: &mut F) {
         for (offset, accumulator) in self.accumulators.iter_mut().enumerate() {
             let logical = self.first_logical + offset;
             let row = logical / self.live_cols;
@@ -924,16 +1020,14 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
     FB: FnMut(usize, usize, &mut Lg) -> AtlasSource,
     C: AtlasCells<A>,
 {
-    let (a_codes, remainder) = workspace.source_codes.split_at_mut(spec.mr);
-    let b_codes = &mut remainder[..spec.nr];
-    let (a_atoms, remainder) = workspace.source_atoms.split_at_mut(spec.mr);
-    let b_atoms = &mut remainder[..spec.nr];
+    let (a_kinds, remainder) = workspace.source_kinds.split_at_mut(spec.mr);
+    let b_kinds = &mut remainder[..spec.nr];
+    let (a_finite, remainder) = workspace.source_finite.split_at_mut(spec.mr);
+    let b_finite = &mut remainder[..spec.nr];
     let (a_words, remainder) = workspace.source_words.split_at_mut(spec.mr);
     let b_words = &mut remainder[..spec.nr];
     let (a_extents, remainder) = workspace.source_extents.split_at_mut(spec.mr);
     let b_extents = &mut remainder[..spec.nr];
-    let (a_projected, remainder) = workspace.source_projected.split_at_mut(spec.mr);
-    let b_projected = &mut remainder[..spec.nr];
 
     for p in 0..depth {
         workspace.a_active.fill(false);
@@ -946,53 +1040,49 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
         for i in 0..rows {
             match source_a(p, i, ledger) {
                 AtlasSource::Raw(code) => {
-                    a_codes[i] = code;
-                    a_atoms[i] = atlas_atom(code, false);
+                    (a_kinds[i], a_finite[i]) = atlas_source_state(code, false);
                     a_extents[i] = 0;
-                    a_projected[i] = false;
                 }
                 AtlasSource::Projected(projected) => {
-                    a_codes[i] = projected.boundary_code();
-                    a_atoms[i] = projected.atom();
+                    a_kinds[i] = projected.kind;
+                    if atlas_kind_is_productive(projected.kind) {
+                        a_finite[i] = projected.finite_site();
+                    }
                     a_words[i] = projected.coordinates;
                     a_extents[i] = projected.extent;
-                    a_projected[i] = true;
                 }
             }
-            has_boundary = has_boundary || !a_codes[i].is_finite();
-            productive_a = productive_a || a_atoms[i].is_some();
+            has_boundary = has_boundary || atlas_kind_is_boundary(a_kinds[i]);
+            productive_a = productive_a || atlas_kind_is_productive(a_kinds[i]);
         }
         for j in 0..cols {
             match source_b(p, j, ledger) {
                 AtlasSource::Raw(code) => {
-                    b_codes[j] = code;
-                    b_atoms[j] = atlas_atom(code, false);
+                    (b_kinds[j], b_finite[j]) = atlas_source_state(code, false);
                     b_extents[j] = 0;
-                    b_projected[j] = false;
                 }
                 AtlasSource::Projected(projected) => {
-                    b_codes[j] = projected.boundary_code();
-                    b_atoms[j] = projected.atom();
+                    b_kinds[j] = projected.kind;
+                    if atlas_kind_is_productive(projected.kind) {
+                        b_finite[j] = projected.finite_site();
+                    }
                     b_words[j] = projected.coordinates;
                     b_extents[j] = projected.extent;
-                    b_projected[j] = true;
                 }
             }
-            has_boundary = has_boundary || !b_codes[j].is_finite();
-            productive_b = productive_b || b_atoms[j].is_some();
+            has_boundary = has_boundary || atlas_kind_is_boundary(b_kinds[j]);
+            productive_b = productive_b || atlas_kind_is_productive(b_kinds[j]);
         }
 
         if has_boundary {
-            cells.for_each(&mut |physical_lane, accumulator| {
+            cells.for_each_live(&mut |physical_lane, accumulator| {
                 let i = physical_lane / spec.nr;
                 let j = physical_lane % spec.nr;
-                if i < rows && j < cols {
-                    let a = a_codes[i];
-                    let b = b_codes[j];
-                    if !a.is_finite() || !b.is_finite() {
-                        accumulator.accumulate_one(a, b);
-                        ledger.boundary_joined();
-                    }
+                let a = atlas_boundary_code(a_kinds[i]);
+                let b = atlas_boundary_code(b_kinds[j]);
+                if !a.is_finite() || !b.is_finite() {
+                    accumulator.accumulate_one(a, b);
+                    ledger.boundary_joined();
                 }
             });
         }
@@ -1000,15 +1090,23 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
         if !productive_a || !productive_b {
             continue;
         }
-        workspace.products[..spec.mr * spec.nr].fill(AtlasProduct::ZERO);
+        for i in 0..rows {
+            let first = i * spec.nr;
+            workspace.products[first..first + cols].fill(AtlasProduct::ZERO);
+        }
+        ledger.product_initialized(rows * cols);
 
         for i in 0..rows {
-            if let Some(atom) = a_atoms[i] {
-                let extent = if a_projected[i] {
+            if atlas_kind_is_productive(a_kinds[i]) {
+                let atom = AtlasAtom {
+                    unit: a_finite[i].unit,
+                    grade: a_finite[i].grade,
+                    negative: a_kinds[i] == AtlasProjectedKind::FiniteNegative as u8,
+                };
+                let extent = if a_extents[i] != 0 {
                     usize::from(a_extents[i])
                 } else {
-                    a_words[i].fill(0);
-                    let extent = atlas_word(atom, &mut a_words[i]);
+                    let extent = replace_atlas_word(atom, &mut a_words[i]);
                     ledger.projected();
                     extent
                 };
@@ -1019,12 +1117,16 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
             }
         }
         for j in 0..cols {
-            if let Some(atom) = b_atoms[j] {
-                let extent = if b_projected[j] {
+            if atlas_kind_is_productive(b_kinds[j]) {
+                let atom = AtlasAtom {
+                    unit: b_finite[j].unit,
+                    grade: b_finite[j].grade,
+                    negative: b_kinds[j] == AtlasProjectedKind::FiniteNegative as u8,
+                };
+                let extent = if b_extents[j] != 0 {
                     usize::from(b_extents[j])
                 } else {
-                    b_words[j].fill(0);
-                    let extent = atlas_word(atom, &mut b_words[j]);
+                    let extent = replace_atlas_word(atom, &mut b_words[j]);
                     ledger.projected();
                     extent
                 };
@@ -1058,7 +1160,11 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
                 for i in 0..spec.mr {
                     let at = atlas_panel_slot(spec.lane_layout, pair, i, spec.mr, pair_count);
                     workspace.left[at] = if i < rows {
-                        a_atoms[i].map_or(0, |_| a_words[i][ca])
+                        if atlas_kind_is_productive(a_kinds[i]) {
+                            a_words[i][ca]
+                        } else {
+                            0
+                        }
                     } else {
                         0
                     };
@@ -1066,7 +1172,11 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
                 for j in 0..spec.nr {
                     let at = atlas_panel_slot(spec.lane_layout, pair, j, spec.nr, pair_count);
                     workspace.right[at] = if j < cols {
-                        b_atoms[j].map_or(0, |_| b_words[j][cb])
+                        if atlas_kind_is_productive(b_kinds[j]) {
+                            b_words[j][cb]
+                        } else {
+                            0
+                        }
                     } else {
                         0
                     };
@@ -1082,11 +1192,11 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
                 &mut workspace.lanes[..spec.mr * spec.nr],
             );
             for i in 0..rows {
-                if a_atoms[i].is_none() {
+                if !atlas_kind_is_productive(a_kinds[i]) {
                     continue;
                 }
                 for j in 0..cols {
-                    if b_atoms[j].is_none() {
+                    if !atlas_kind_is_productive(b_kinds[j]) {
                         continue;
                     }
                     let physical_lane = i * spec.nr + j;
@@ -1098,14 +1208,12 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
             }
         }
 
-        cells.for_each(&mut |physical_lane, accumulator| {
+        cells.for_each_live(&mut |physical_lane, accumulator| {
             let i = physical_lane / spec.nr;
             let j = physical_lane % spec.nr;
-            if i >= rows || j >= cols {
+            if !atlas_kind_is_productive(a_kinds[i]) || !atlas_kind_is_productive(b_kinds[j]) {
                 return;
             }
-            let Some(a) = a_atoms[i] else { return };
-            let Some(b) = b_atoms[j] else { return };
             let (negative, magnitude) = workspace.products[physical_lane].signed_magnitude();
             let (low, high) = atlas_split_signed_place(magnitude);
             if low != 0 {
@@ -1114,7 +1222,7 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
                 place(
                     accumulator,
                     if negative { -low } else { low },
-                    a.grade + b.grade,
+                    a_finite[i].grade + b_finite[j].grade,
                 );
             }
             if high != 0 {
@@ -1123,7 +1231,7 @@ fn accumulate_direct_atlas_tile<A, P, Lg, FA, FB, C>(
                 place(
                     accumulator,
                     if negative { -1 } else { 1 },
-                    a.grade + b.grade + i64::from(i128::BITS - 1),
+                    a_finite[i].grade + b_finite[j].grade + i64::from(i128::BITS - 1),
                 );
             }
         });
@@ -1155,7 +1263,12 @@ fn accumulate_atlas_tile<A, P, Lg>(
 {
     ledger.panel();
     let mut workspace = AtlasTileWorkspace::ZERO;
-    let mut cells = SliceAtlasCells(accumulators);
+    let mut cells = SliceAtlasCells {
+        rows,
+        cols,
+        physical_cols: spec.nr,
+        accumulators,
+    };
     accumulate_direct_atlas_tile(
         &mut workspace,
         &mut cells,
@@ -2317,6 +2430,7 @@ mod tests {
         coordinate_additions: usize,
         kernel_calls: usize,
         projections: usize,
+        product_initializations: usize,
         placements: usize,
         boundary_joins: usize,
         encodes: usize,
@@ -2341,6 +2455,10 @@ mod tests {
 
         fn projected(&mut self) {
             self.projections += 1;
+        }
+
+        fn product_initialized(&mut self, live_products: usize) {
+            self.product_initializations += live_products;
         }
 
         fn kernel_call(&mut self, coordinate_products: usize) {
@@ -3179,6 +3297,11 @@ mod tests {
                 exact_usize(work.decodes)
             );
             assert_eq!(census.issued_steps, exact_usize(work.issued));
+            assert_eq!(
+                census.product_initializations,
+                exact_usize(work.product_initializations),
+                "only live product carriers are initialized"
+            );
             assert_model_work::<AccOf<f64>>(spec, offered_shape, pa_codes, pb_codes);
         }
 
@@ -3380,6 +3503,18 @@ mod tests {
             assert_eq!(&coordinates[..extent], digits);
         }
 
+        let mut reused = [i8::MAX; MAX_ATLAS_WORDS];
+        let extent = replace_atlas_word(
+            AtlasAtom {
+                unit: 1,
+                grade: 0,
+                negative: false,
+            },
+            &mut reused,
+        );
+        assert_eq!(extent, 1);
+        assert_eq!(reused, [1, 0, 0, 0, 0, 0, 0, 0, 0]);
+
         assert_eq!(
             MAX_ATLAS_WORDS,
             (u64::BITS.div_ceil(ATLAS_DIGIT_BITS) + 1) as usize
@@ -3395,6 +3530,35 @@ mod tests {
                 &mut coordinates,
             );
             assert_eq!(extent, MAX_ATLAS_WORDS);
+        }
+    }
+
+    /// `CU-11`: the quotient recurrence is byte-identical to an independent
+    /// test-only binary oracle across complete low words and every source-width
+    /// boundary.
+    #[test]
+    fn atlas_valuation_matches_the_independent_binary_oracle_cu_11() {
+        for magnitude in 0..=u64::from(u16::MAX) {
+            let expected = if magnitude == 0 {
+                (0, 0)
+            } else {
+                let valuation = magnitude.trailing_zeros();
+                (magnitude >> valuation, valuation)
+            };
+            assert_eq!(atlas_odd_section(magnitude), expected, "{magnitude}");
+        }
+        for valuation in 0..u64::BITS {
+            for unit in [1u64, 3, 127, 255, u64::MAX >> valuation] {
+                let magnitude = unit << valuation;
+                if magnitude == 0 {
+                    continue;
+                }
+                let expected_valuation = magnitude.trailing_zeros();
+                assert_eq!(
+                    atlas_odd_section(magnitude),
+                    (magnitude >> expected_valuation, expected_valuation),
+                );
+            }
         }
     }
 
@@ -3462,6 +3626,12 @@ mod tests {
                     AtlasProjectedCode::project(right).0.boundary_code(),
                 );
                 assert_eq!(cached, direct, "{left:?} x {right:?}");
+                let mut quotient = <AccOf<f64> as Accumulator>::ZERO;
+                quotient.accumulate_one(
+                    atlas_boundary_code(atlas_source_state(left, false).0),
+                    atlas_boundary_code(atlas_source_state(right, false).0),
+                );
+                assert_eq!(quotient, direct, "boundary quotient {left:?} x {right:?}");
             }
         }
     }
@@ -3654,7 +3824,7 @@ mod tests {
                     0,
                     MAX_TILE_LANES,
                 );
-                assert_eq!(modeled[3], AtlasCount::from_u128(expected).coordinates());
+                assert_eq!(modeled[4], AtlasCount::from_u128(expected).coordinates());
             }
         }
         assert_eq!(

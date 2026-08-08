@@ -418,17 +418,18 @@ const fn atlas_count_coordinates(words: [u64; ATLAS_CENSUS_WORDS]) -> [u128; ATL
     coordinates
 }
 
-const fn invalid_atlas_census() -> [[u128; ATLAS_CENSUS_WORDS]; 4] {
-    [[u128::MAX; ATLAS_CENSUS_WORDS]; 4]
+const fn invalid_atlas_census() -> [[u128; ATLAS_CENSUS_WORDS]; 5] {
+    [[u128::MAX; ATLAS_CENSUS_WORDS]; 5]
 }
 
 /// Exact candidate census for the one-projection Atlas tile.
 ///
-/// The four rows are projection sites, actual source decodes under the caller
-/// offer, issued lookup steps including padded edges, and peak live bytes.
-/// Each count is a most-significant-first radix-`2^64` word so all three shape
-/// dimensions and the physical-tile factor remain exact on every supported
-/// address width. This is the independent model twin of the shipped selector.
+/// The five rows are projection sites, actual source decodes under the caller
+/// offer, issued lookup steps including padded edges, live product-carrier
+/// initializations, and peak live bytes. Each count is a
+/// most-significant-first radix-`2^64` word so all three shape dimensions and
+/// the physical-tile factor remain exact on every supported address width.
+/// This is the independent model twin of the shipped selector.
 #[allow(clippy::too_many_arguments)]
 pub const fn atlas_executed_work(
     m: usize,
@@ -442,7 +443,7 @@ pub const fn atlas_executed_work(
     pa_codes: usize,
     pb_codes: usize,
     max_tile_lanes: usize,
-) -> [[u128; ATLAS_CENSUS_WORDS]; 4] {
+) -> [[u128; ATLAS_CENSUS_WORDS]; 5] {
     let Some(physical_outputs) = mr.checked_mul(nr) else {
         return invalid_atlas_census();
     };
@@ -454,7 +455,7 @@ pub const fn atlas_executed_work(
         return invalid_atlas_census();
     }
     if m == 0 || k == 0 || n == 0 {
-        return [[0; ATLAS_CENSUS_WORDS]; 4];
+        return [[0; ATLAS_CENSUS_WORDS]; 5];
     }
 
     let a_offer_rows = match pa_codes.checked_div(k) {
@@ -533,6 +534,10 @@ pub const fn atlas_executed_work(
         atlas_count_multiply(tile_count, physical_outputs.div_ceil(products_per_step)),
         k,
     );
+    let Some(product_initializations) = atlas_count_product(m, n) else {
+        return invalid_atlas_census();
+    };
+    let product_initializations = atlas_count_multiply(product_initializations, k);
 
     let live_rows = if mr < m { mr } else { m };
     let live_cols = {
@@ -557,6 +562,7 @@ pub const fn atlas_executed_work(
         atlas_count_coordinates(projections),
         atlas_count_coordinates(decodes),
         atlas_count_coordinates(issued),
+        atlas_count_coordinates(product_initializations),
         atlas_count_coordinates(atlas_count_from_u128(live_bytes)),
     ]
 }
@@ -1026,8 +1032,9 @@ mod tests {
         assert_eq!(full[0], [0, 0, 0, 154]);
         assert_eq!(full[1], full[0]);
         assert_eq!(full[2], [0, 0, 0, 42]);
+        assert_eq!(full[3], [0, 0, 0, 672]);
         assert_eq!(
-            full[3],
+            full[4],
             [
                 0,
                 0,
@@ -1051,6 +1058,7 @@ mod tests {
         assert_eq!(edged[0], [0, 0, 0, 336]);
         assert_eq!(edged[1], edged[0]);
         assert_eq!(edged[2], [0, 0, 0, 168]);
+        assert_eq!(edged[3], [0, 0, 0, 833]);
         assert_eq!(
             atlas_executed_work(
                 7,
@@ -1065,7 +1073,7 @@ mod tests {
                 usize::MAX,
                 128,
             ),
-            [[0; ATLAS_CENSUS_WORDS]; 4]
+            [[0; ATLAS_CENSUS_WORDS]; 5]
         );
         assert_eq!(
             atlas_uniform_census(5, 7, 3, 4, 1, 16),

@@ -1021,7 +1021,7 @@ fn audit_atlas_tile_selector(engine: &str, functions: &[Function], violations: &
         "constATLAS_COUNT_WORDS:usize=[AtlasCountFactor::Rows,AtlasCountFactor::Depth,AtlasCountFactor::Columns,AtlasCountFactor::PhysicalTile,].len()",
         "constATLAS_COUNT_RADIX:u128=u64::MAXasu128+(u64::MAX!=u64::MIN)asu128",
         "#[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]structAtlasCount([u64;ATLAS_COUNT_WORDS]);",
-        "#[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]structAtlasWork{projections:AtlasCount,decodes:AtlasCount,issued:AtlasCount,live_bytes:AtlasCount,}",
+        "#[derive(Clone,Copy,Debug,PartialEq,Eq,PartialOrd,Ord)]structAtlasWork{projections:AtlasCount,decodes:AtlasCount,issued:AtlasCount,product_initializations:AtlasCount,live_bytes:AtlasCount,}",
     ] {
         if !compact_engine.contains(witness) {
             violations.push(format!(
@@ -1093,10 +1093,11 @@ fn audit_atlas_tile_selector(engine: &str, functions: &[Function], violations: &
             "letprojection_sites=decodes",
             "physical_outputs.div_ceil(spec.products_per_step)",
             "letissued=atlas_product_count(row_tiles,column_tiles).multiply(steps).multiply(shape.k)",
+            "letproduct_initializations=atlas_product_count(shape.m,shape.n).multiply(shape.k)",
             "letlive_cells=live_rows.checked_mul(live_cols)",
             "ATLAS_TILE_WORK_BYTESasu128",
             "(live_cellsasu128).checked_mul(core::mem::size_of::<A>()asu128)",
-            "AtlasWork{projections:projection_sites,decodes,issued,live_bytes,}",
+            "AtlasWork{projections:projection_sites,decodes,issued,product_initializations,live_bytes,}",
         ] {
             if !compact.contains(witness) {
                 violations.push(format!(
@@ -1310,6 +1311,7 @@ fn audit_model_storage_differential(functions: &[Function], violations: &mut Vec
             "assert_eq!(census.projections,exact_usize(work.projections))",
             "assert_eq!(census.decoded_a+census.decoded_b,exact_usize(work.decodes))",
             "assert_eq!(census.issued_steps,exact_usize(work.issued))",
+            "assert_eq!(census.product_initializations,exact_usize(work.product_initializations),",
             "letsource_lower_bound=(shape.m+shape.n)*shape.k",
             "letempty_depth=Shape{m:3,k:0,n:5}",
             "assert_eq!(census.route,None)",
@@ -4708,7 +4710,7 @@ fn declared_family_all_names(source: &str) -> Vec<String> {
 /// The live carrier is one reduction position plus a representation-sized set
 /// of exact output cells, never a depth panel.
 ///
-/// The independently derived maximum `mr + nr` owns the sole source-code
+/// The independently derived maximum `mr + nr` owns the sole source-state
 /// store, with no spare headroom inherited from the larger output-cell bound.
 /// Every live output of a physical edge tile occupies one exact const-generic
 /// frame and the contraction is invoked once: there is no cache window that
@@ -4744,13 +4746,12 @@ fn audit_panel_execution_storage(
         "enumAtlasProjectedKind{FiniteZero,FinitePositive,FiniteNegative,PositiveInfinity,NegativeInfinity,NotANumber,}",
         "core::mem::size_of::<AtlasProjectedCode>()==core::mem::size_of::<PackedCode>()",
         "structAtlasTileWorkspace{",
-        "source_codes:[PackedCode;MAX_ATLAS_SOURCE_SITES]",
-        "source_atoms:[Option<AtlasAtom>;MAX_ATLAS_SOURCE_SITES]",
+        "source_kinds:[u8;MAX_ATLAS_SOURCE_SITES]",
+        "source_finite:[AtlasFiniteSite;MAX_ATLAS_SOURCE_SITES]",
         "source_words:[[i8;MAX_ATLAS_WORDS];MAX_ATLAS_SOURCE_SITES]",
         "source_extents:[u8;MAX_ATLAS_SOURCE_SITES]",
-        "source_projected:[bool;MAX_ATLAS_SOURCE_SITES]",
         "products:[AtlasProduct;MAX_TILE_LANES]",
-        "source_codes:[ZERO_CODE;MAX_ATLAS_SOURCE_SITES]",
+        "source_kinds:[AtlasProjectedKind::FiniteZeroasu8;MAX_ATLAS_SOURCE_SITES]",
         "constATLAS_TILE_WORK_BYTES:usize=core::mem::size_of::<AtlasTileWorkspace>()",
     ] {
         if !compact_engine.contains(witness) {
@@ -4819,15 +4820,31 @@ fn audit_panel_execution_storage(
             contract.rel, contract.line
         ));
     }
+    if contract_compact.matches("cells.for_each_live(").count() != 2
+        || contract_compact.contains("ifi<rows&&j<cols")
+        || contract_compact.contains("ifi>=rows||j>=cols")
+    {
+        violations.push(format!(
+            "{}:{}: the Atlas cell view does not make its live-only traversal invariant explicit",
+            contract.rel, contract.line
+        ));
+    }
     for required in [
-        "workspace.source_codes.split_at_mut(spec.mr)",
+        "workspace.source_kinds.split_at_mut(spec.mr)",
+        "workspace.source_finite.split_at_mut(spec.mr)",
         "&mutremainder[..spec.nr]",
         "workspace.source_extents.split_at_mut(spec.mr)",
-        "workspace.source_projected.split_at_mut(spec.mr)",
         "forpin0..depth",
         "source_a(p,i,ledger)",
         "source_b(p,j,ledger)",
-        "workspace.products[..spec.mr*spec.nr].fill(AtlasProduct::ZERO)",
+        "atlas_kind_is_boundary(a_kinds[i])",
+        "atlas_kind_is_boundary(b_kinds[j])",
+        "atlas_boundary_code(a_kinds[i])",
+        "atlas_boundary_code(b_kinds[j])",
+        "foriin0..rows",
+        "letfirst=i*spec.nr",
+        "workspace.products[first..first+cols].fill(AtlasProduct::ZERO)",
+        "ledger.product_initialized(rows*cols)",
         "workspace.products[physical_lane].add_diagonal(lane,diagonal)",
         "workspace.products[physical_lane].signed_magnitude()",
     ] {
@@ -4845,6 +4862,66 @@ fn audit_panel_execution_storage(
         "place(accumulator,",
         violations,
     );
+
+    for (name, witnesses) in [
+        (
+            "atlas_source_state",
+            &[
+                "ifletSome((negative,magnitude,exponent))=finite_parts(code)",
+                "ifmagnitude==0{return(AtlasProjectedKind::FiniteZeroasu8,AtlasFiniteSite::ZERO)",
+                "let(unit,valuation)=atlas_odd_section(magnitude)",
+                "ifnegative{AtlasProjectedKind::FiniteNegativeasu8}else{AtlasProjectedKind::FinitePositiveasu8}",
+                "grade:i64::from(ifprescaled{0}else{exponent})+i64::from(valuation)",
+                "elseifcode.is_nan(){(AtlasProjectedKind::NotANumberasu8,AtlasFiniteSite::ZERO)}",
+                "elseifcode.mantissa<0{(AtlasProjectedKind::NegativeInfinityasu8,AtlasFiniteSite::ZERO,)}else{(AtlasProjectedKind::PositiveInfinityasu8,AtlasFiniteSite::ZERO,)}",
+            ][..],
+        ),
+        (
+            "atlas_kind_is_boundary",
+            &[
+                "kind==AtlasProjectedKind::PositiveInfinityasu8",
+                "kind==AtlasProjectedKind::NegativeInfinityasu8",
+                "kind==AtlasProjectedKind::NotANumberasu8",
+            ][..],
+        ),
+        (
+            "atlas_kind_is_productive",
+            &[
+                "kind==AtlasProjectedKind::FinitePositiveasu8",
+                "kind==AtlasProjectedKind::FiniteNegativeasu8",
+            ][..],
+        ),
+        (
+            "atlas_boundary_code",
+            &[
+                "kind==AtlasProjectedKind::FiniteZeroasu8",
+                "kind==AtlasProjectedKind::FinitePositiveasu8",
+                "kind==AtlasProjectedKind::FiniteNegativeasu8",
+                "kind==AtlasProjectedKind::PositiveInfinityasu8",
+                "kind==AtlasProjectedKind::NegativeInfinityasu8",
+                "kind==AtlasProjectedKind::NotANumberasu8",
+            ][..],
+        ),
+    ] {
+        let Some(function) = functions
+            .iter()
+            .find(|function| function.rel == ATLAS_ENGINE_FILE && function.name == name)
+        else {
+            violations.push(format!(
+                "`{ATLAS_ENGINE_FILE}` has no exact six-state boundary quotient `{name}`"
+            ));
+            continue;
+        };
+        let compact = function.body.split_whitespace().collect::<String>();
+        for witness in witnesses {
+            if !compact.contains(witness) {
+                violations.push(format!(
+                    "{}:{}: `{name}` aliases or omits boundary state `{witness}`",
+                    function.rel, function.line
+                ));
+            }
+        }
+    }
 
     let projector = functions.iter().find(|function| {
         function.rel == ATLAS_ENGINE_FILE
@@ -4974,10 +5051,10 @@ fn audit_panel_execution_storage(
         ));
     }
 
-    let projection_a = contract_compact.find("letextent=atlas_word(atom,&muta_words[i])");
-    let projection_b = contract_compact.find("letextent=atlas_word(atom,&mutb_words[j])");
+    let projection_a = contract_compact.find("letextent=replace_atlas_word(atom,&muta_words[i])");
+    let projection_b = contract_compact.find("letextent=replace_atlas_word(atom,&mutb_words[j])");
     let diagonals = contract_compact.find("fordiagonalin0..a_extent+b_extent-1");
-    if contract_compact.matches("atlas_word(").count() != 2
+    if contract_compact.matches("replace_atlas_word(").count() != 2
         || contract_compact.matches("ledger.projected();").count() != 2
         || !matches!((projection_a, projection_b, diagonals), (Some(a), Some(b), Some(diagonal)) if a < diagonal && b < diagonal)
     {
@@ -4988,10 +5065,10 @@ fn audit_panel_execution_storage(
         ));
     }
     for witness in [
-        "AtlasSource::Raw(code)=>{a_codes[i]=code;a_atoms[i]=atlas_atom(code,false);a_extents[i]=0;a_projected[i]=false;}",
-        "AtlasSource::Projected(projected)=>{a_codes[i]=projected.boundary_code();a_atoms[i]=projected.atom();a_words[i]=projected.coordinates;a_extents[i]=projected.extent;a_projected[i]=true;}",
-        "letextent=ifa_projected[i]{usize::from(a_extents[i])}else{a_words[i].fill(0);letextent=atlas_word(atom,&muta_words[i]);ledger.projected();extent}",
-        "letextent=ifb_projected[j]{usize::from(b_extents[j])}else{b_words[j].fill(0);letextent=atlas_word(atom,&mutb_words[j]);ledger.projected();extent}",
+        "AtlasSource::Raw(code)=>{(a_kinds[i],a_finite[i])=atlas_source_state(code,false);a_extents[i]=0;}",
+        "AtlasSource::Projected(projected)=>{a_kinds[i]=projected.kind;ifatlas_kind_is_productive(projected.kind){a_finite[i]=projected.finite_site();}a_words[i]=projected.coordinates;a_extents[i]=projected.extent;}",
+        "letextent=ifa_extents[i]!=0{usize::from(a_extents[i])}else{letextent=replace_atlas_word(atom,&muta_words[i]);ledger.projected();extent}",
+        "letextent=ifb_extents[j]!=0{usize::from(b_extents[j])}else{letextent=replace_atlas_word(atom,&mutb_words[j]);ledger.projected();extent}",
     ] {
         if !contract_compact.contains(witness) {
             violations.push(format!(
@@ -4999,6 +5076,35 @@ fn audit_panel_execution_storage(
                 contract.rel, contract.line
             ));
         }
+    }
+
+    let replacement = functions.iter().find(|function| {
+        function.rel == ATLAS_ENGINE_FILE && function.name == "replace_atlas_word"
+    });
+    if let Some(replacement) = replacement {
+        let compact = replacement.body.split_whitespace().collect::<String>();
+        for witness in [
+            "letextent=atlas_word(atom,coordinates)",
+            "coordinates[extent..].fill(0)",
+            "extent",
+        ] {
+            if !compact.contains(witness) {
+                violations.push(format!(
+                    "{}:{}: reused Atlas words do not clear exactly their retired suffix; missing `{witness}`",
+                    replacement.rel, replacement.line
+                ));
+            }
+        }
+        if compact.contains("coordinates.fill(0)") {
+            violations.push(format!(
+                "{}:{}: reused Atlas words rewrite their live prefix instead of only the retired suffix",
+                replacement.rel, replacement.line
+            ));
+        }
+    } else {
+        violations.push(format!(
+            "`{ATLAS_ENGINE_FILE}` has no exact reused-word replacement seam"
+        ));
     }
 
     let frame = functions.iter().find(|function| {
@@ -5170,6 +5276,8 @@ fn audit_panel_execution_storage(
         "with_atlas_cells",
         "atlas_cell_lanes",
         "atlas_retained_cells",
+        "source_projected",
+        "source_atoms:",
         "blocking::L1_BYTES",
         "whilecell_start",
         "ATLAS_L1_CELL_CAP",
@@ -5185,11 +5293,9 @@ fn audit_panel_execution_storage(
         }
     }
 
-    // Any second repeated PackedCode initializer is a second worst-case code
-    // cache, even if the original combined store remains present. Keeping this
-    // census over all production engine code prevents a dormant twin-array
-    // factorization from passing merely because the live body still splits one
-    // of its stores.
+    // A repeated PackedCode initializer is a dormant worst-case code cache.
+    // The live source cell retains only the six-state boundary quotient, so no
+    // full code array is needed after decode/projection.
     let repeated_code_stores = [
         "[ZERO_CODE;",
         "[UNIT_CODE;",
@@ -5199,11 +5305,11 @@ fn audit_panel_execution_storage(
     .iter()
     .map(|token| compact_engine.matches(token).count())
     .sum::<usize>();
-    if compact_engine.matches("[ZERO_CODE;").count() != 1 || repeated_code_stores != 1 {
+    if repeated_code_stores != 0 {
         violations.push(format!(
             "`{ATLAS_ENGINE_FILE}` has {repeated_code_stores} repeated PackedCode stores; \
-             CA-05 requires exactly one derived source cell, never a depth carrier or separate \
-             A/B worst-case arrays"
+             CA-05 requires one derived boundary-state cell, never a depth carrier or separate \
+             A/B full-code arrays"
         ));
     }
 }
@@ -7040,8 +7146,8 @@ mod tests {
 
         let literal_budget = plant(
             &clean,
-            "source_codes: [PackedCode; MAX_ATLAS_SOURCE_SITES]",
-            "source_codes: [PackedCode; 129]",
+            "source_kinds: [u8; MAX_ATLAS_SOURCE_SITES]",
+            "source_kinds: [u8; 129]",
         );
         violations = panel_fixture_violations(&literal_budget);
         assert!(
@@ -7052,8 +7158,8 @@ mod tests {
         );
 
         let twin_stores = clean.replace(
-            "source_codes: [ZERO_CODE; MAX_ATLAS_SOURCE_SITES],",
-            "source_codes: [ZERO_CODE; MAX_ATLAS_SOURCE_SITES], \
+            "source_kinds: [AtlasProjectedKind::FiniteZero as u8; MAX_ATLAS_SOURCE_SITES],",
+            "source_kinds: [AtlasProjectedKind::FiniteZero as u8; MAX_ATLAS_SOURCE_SITES], \
              a_worst_case: [ZERO_CODE; MAX_ATLAS_SOURCE_SITES], \
              b_worst_case: [ZERO_CODE; MAX_ATLAS_SOURCE_SITES],",
         );
@@ -7061,8 +7167,47 @@ mod tests {
         assert!(
             violations
                 .iter()
-                .any(|violation| violation.contains("separate A/B worst-case")),
+                .any(|violation| violation.contains("separate A/B full-code arrays")),
             "the planted separate A/B code stores were not rejected: {violations:?}"
+        );
+
+        let aliased_negative = plant(
+            &clean,
+            "            if negative {\n                AtlasProjectedKind::FiniteNegative as u8",
+            "            if negative {\n                AtlasProjectedKind::FinitePositive as u8",
+        );
+        violations = panel_fixture_violations(&aliased_negative);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("aliases or omits boundary state")),
+            "the planted negative boundary alias was not rejected: {violations:?}"
+        );
+
+        let redundant_projection_flags = plant(
+            &clean,
+            "    source_extents: [u8; MAX_ATLAS_SOURCE_SITES],",
+            "    source_extents: [u8; MAX_ATLAS_SOURCE_SITES],\n    source_projected: [bool; MAX_ATLAS_SOURCE_SITES],",
+        );
+        violations = panel_fixture_violations(&redundant_projection_flags);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("source_projected")),
+            "the planted redundant projection-state array was not rejected: {violations:?}"
+        );
+
+        let duplicated_modality = plant(
+            &clean,
+            "    source_finite: [AtlasFiniteSite; MAX_ATLAS_SOURCE_SITES],",
+            "    source_atoms: [Option<AtlasAtom>; MAX_ATLAS_SOURCE_SITES],",
+        );
+        violations = panel_fixture_violations(&duplicated_modality);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("source_atoms:")),
+            "the planted duplicated finite modality was not rejected: {violations:?}"
         );
     }
 
@@ -7073,8 +7218,8 @@ mod tests {
         assert!(violations.is_empty(), "{violations:?}");
 
         let depth_store = clean.replace(
-            "[ZERO_CODE; MAX_ATLAS_SOURCE_SITES]",
-            "[ZERO_CODE; ATLAS_PANEL_SITES]",
+            "[AtlasProjectedKind::FiniteZero as u8; MAX_ATLAS_SOURCE_SITES]",
+            "[AtlasProjectedKind::FiniteZero as u8; ATLAS_PANEL_SITES]",
         );
         violations = panel_fixture_violations(&depth_store);
         assert!(
@@ -7910,8 +8055,8 @@ mod tests {
 
         let restored_common_grade = plant(
             float,
-            "    let (negative, magnitude, exponent) = finite_parts(code)?;",
-            "    let _legacy = project_common_grade_f32;\n    let (negative, magnitude, exponent) = finite_parts(code)?;",
+            "    if let Some((negative, magnitude, exponent)) = finite_parts(code) {",
+            "    let _legacy = project_common_grade_f32;\n    if let Some((negative, magnitude, exponent)) = finite_parts(code) {",
         );
         violations = tabulated_float_fixture_violations(tabulated, table, &restored_common_grade);
         assert!(
@@ -8610,6 +8755,19 @@ mod tests {
             "the planted live-storage omission was not rejected: {violations:?}"
         );
 
+        let missing_product_initializations = plant(
+            &clean,
+            "        product_initializations,",
+            "        product_initializations: AtlasCount::ZERO,",
+        );
+        violations = selector_fixture_violations(&missing_product_initializations);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("structural-cost witness")),
+            "the planted live carrier-initialization omission was not rejected: {violations:?}"
+        );
+
         let priced_empty_depth = plant(
             &clean,
             "if shape.m == 0 || shape.k == 0 || shape.n == 0",
@@ -8689,6 +8847,42 @@ mod tests {
         let clean = clean_panel_fixture();
         let mut violations = panel_fixture_violations(&clean);
         assert!(violations.is_empty(), "{violations:?}");
+
+        let hidden_live_cell_invariant = plant(&clean, "cells.for_each_live", "cells.for_each");
+        violations = panel_fixture_violations(&hidden_live_cell_invariant);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("live-only traversal invariant")),
+            "the planted non-live cell traversal was not rejected: {violations:?}"
+        );
+
+        let padded_product_clear = plant(
+            &clean,
+            "        for i in 0..rows {\n            let first = i * spec.nr;\n            workspace.products[first..first + cols].fill(AtlasProduct::ZERO);\n        }\n        ledger.product_initialized(rows * cols);",
+            "        workspace.products[..spec.mr * spec.nr].fill(AtlasProduct::ZERO);\n        ledger.product_initialized(spec.mr * spec.nr);",
+        );
+        violations = panel_fixture_violations(&padded_product_clear);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("direct contraction lacks lazy-cell witness")),
+            "the planted padded carrier clear was not rejected: {violations:?}"
+        );
+
+        let full_word_clear = plant(
+            &clean,
+            "    coordinates[extent..].fill(0);",
+            "    coordinates.fill(0);",
+        );
+        violations = panel_fixture_violations(&full_word_clear);
+        assert!(
+            violations.iter().any(|violation| {
+                violation.contains("rewrite their live prefix")
+                    || violation.contains("retired suffix")
+            }),
+            "the planted full coordinate-word clear was not rejected: {violations:?}"
+        );
 
         let tile_early_place = plant(
             &clean,

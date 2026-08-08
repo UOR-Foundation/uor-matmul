@@ -993,45 +993,57 @@ changes the disposition above: the fitted value-blind block-one candidate is
 rejected, the automatic default remains decline, and forced exact tabulation
 remains available.
 
-### CG-21 current one-frame sweep --- completed, open
+### CG-21 UOR-NAF cleanup sweep --- completed, open
 
-The frozen implementation no longer has the historical gauge route: it uses the
-direct one-pass diagonal contraction, one exact live-cell frame, and in-place
-Atlas projection caches described in ARCHITECTURE.md. The live `CG-21` harness
-poisons with expected-derived distinct values before every calibrated batch and
-completely checks lengths and bytes after it, so only real production calls are
-timed. The final grouped run completed at 18:35:01 UTC on the same EPYC 7763
-host and rustc 1.97.1. Its retained transcript is:
+The frozen implementation uses the direct one-pass diagonal contraction, one
+exact live-cell frame, and in-place Atlas projection caches described in
+ARCHITECTURE.md. The cleanup additionally initializes only live product
+carriers, clears only retired coordinate suffixes, and decodes each streamed
+source once into its six-state boundary quotient plus finite payload. These are
+storage/work refinements of the same contraction, not another numerical route.
+
+The live `CG-21` harness poisons with expected-derived distinct values before
+every calibrated batch and completely checks lengths and bytes after it, so
+only real production calls are timed. The authoritative post-V&V grouped run
+began at 22:26:17 UTC on the EPYC 7763 host with rustc 1.97.1. Its retained
+transcript is:
 
 ```text
-target/measurements/cg21-pure-atlas-2026-08-08.log
+target/measurements/cg21-uor-naf-final-post-vv-2026-08-08.log
 ```
 
-The artifact is 4,192 lines and 1,169,525 bytes with SHA-256
-`d0cd1f3e92b82589f1d56d7a3c0d1ebcb9ce9833310c8be1b77b469b36d62c24`.
-The full sorted source manifest is the same before and after the commands:
-`88f1ee00d2e4e1a60b70a8568f6b4aadcaca40ae4ba2044298436d4602dbeed1`.
-The exact timer/plant test passed, the live audit reached 11 roots, 87 functions,
-and 108 call edges, and both ignored release sweeps passed.
+The artifact is 4,252 lines and 1,199,070 bytes with SHA-256
+`1c4ed9a5bf7e837f04bf57af786247875491084d037ebe5701cc96596217cb3c`.
+Its complete sorted Rust/TOML/toolchain source manifest is identical before and
+after the commands:
+`0960aef62004bd3a8617dfdf18766306c678c6f9fd6355c46ad0777519119879`.
+The exact timer/plant test passed, the live audit reached 11 roots, 92 functions,
+and 115 call edges, and both ignored release sweeps passed.
 
 The public sweep retained 558 `CG21_SAMPLE` rows: 62 width/case/route groups,
 each with rounds 0 through 8 exactly once. The forced-candidate supplement
 retained 2,916 more rows: 324 f32/f64 case/offer/route groups, again with nine
-rounds each. Every expected-byte comparison passed. Selected current public
-latencies are:
+rounds each. Every poison, length, and expected-byte comparison passed. Selected
+current public latencies are:
 
 | corpus | offered | no offer | exact incumbent |
 | --- | ---: | ---: | ---: |
-| f32 few grades, `32^3` | `7444.0 +/- 746.7` us | `5818.9 +/- 12.3` us | `150891.8 +/- 13418.4` us |
-| f32 full finite range, `7x31x5` | `236.5 +/- 54.9` us | `192.9 +/- 36.0` us | `5858.8 +/- 934.8` us |
-| f64 few grades, `32^3` | `12752.5 +/- 1440.8` us | `12523.8 +/- 1071.9` us | `774818.5 +/- 40327.2` us |
-| f64 full finite range, `7x31x5` | `523.0 +/- 72.8` us | `528.8 +/- 70.3` us | `37656.0 +/- 5328.0` us |
+| f32 one grade, `1x1x1` | `1.350 +/- 0.329` us | `1.115 +/- 0.214` us | `3.954 +/- 0.491` us |
+| f32 few grades, `32^3` | `6526.5 +/- 226.7` us | `5820.2 +/- 175.1` us | `134628.6 +/- 9351.3` us |
+| f32 full finite range, `7x31x5` | `219.3 +/- 30.5` us | `183.3 +/- 26.5` us | `5327.4 +/- 185.6` us |
+| f32 sparse significand, `128x8x128` | `16173.8 +/- 1248.4` us | `19638.6 +/- 3759.4` us | `41527.6 +/- 5204.0` us |
+| f64 few grades, `32^3` | `12201.6 +/- 930.5` us | `11245.8 +/- 196.5` us | `717894.3 +/- 12559.4` us |
+| f64 full finite range, `7x31x5` | `479.4 +/- 59.4` us | `485.4 +/- 61.8` us | `25712.3 +/- 3833.1` us |
 
-The float oracles remain much faster and generally produce different codes;
-that is expected because they round intermediate products while this method
-returns the correctly rounded exact sum. These are host-scoped `open` figures,
-not acceptance thresholds or selector constants. They complete `CG-21` without
-changing the production selector or erasing the historical baseline above.
+Against the preceding retained run, the 95% intervals show no clear regression.
+They show clear wins for f32 one-grade with an offer, both f32 sparse offer
+states, and f64 one-grade without an offer; the remaining pure-UOR intervals
+overlap. The float oracles remain much faster and generally produce different
+codes because they round intermediate products while this method returns the
+correctly rounded exact sum. These are host-scoped `open` figures, not
+acceptance thresholds, selector constants, or an unqualified global-optimality
+claim. The build-level optimum remains exactly the model-derived minimum over
+the complete eligible group-one lookup/add universe named by `CG-22`.
 
 ## Column dictionary radix recurrence
 
@@ -1041,20 +1053,21 @@ against the immutable pre-refactor comparator at every measured reduction
 depth. The host was Linux 6.8.0-1052-azure x86-64 on an AMD EPYC 7763 64-Core
 Processor. The release compiler was rustc 1.97.1
 (`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, LLVM 22.1.6). The base revision
-was `54cca2ad51fae469e5a342902b034196c34cc3bf`. The final current-source
+was `4896156face89599fe03406bc7f7be1780d3fbcf`. The final current-source
 rerun records SHA-256 identities for `tabulated.rs`
 `b97ff23b206a29db0ce1cbc7051a30c6bfe5d790f1e1a229cc1076d2e24bbc85`,
 model derivation
-`42c25faadff8d7d241bf1cbcc406942f77f0319a9c56ead59058d8623c63f74c`,
+`a75b8699d2581cb26b0fbf697e1b3a354c3f572706fa30496d1be68ee41805b8`,
 model constants
 `306d0914490e07c8fe462ce38f7fa6d9588bb9b97937623f12a775f5f488fb76`,
 the governing audit
-`765a82dafbd9263a5f4801e5022e56eeda527784176f9cd64c4226ede6c3a553`,
+`92c9651196441ed13600ac8ab9b1739b4879b5148591b3f54a863dd9cb1b8f2c`,
 and `Cargo.lock`
 `287d7784819bfdaf257aa5435fc92889ee6504228819f2b03e45e2a73aa67bc3`.
-The retained transcript is `target/measurements/column-hash-2026-08-08.log`:
-31 lines, 2,046 bytes, SHA-256
-`77d892510928ae9ddc588fdf294cad0ec9d846e771b2f47aae4a5de26402e882`.
+The retained transcript is
+`target/measurements/column-hash-uor-naf-final-2026-08-08.log`: 35 lines,
+2,338 bytes, SHA-256
+`6f8dc798d9c3041bc6931b940b7ef8a89b56da820e7ded3af30156351f1e39f8`.
 
 The exact command was:
 
@@ -1092,10 +1105,10 @@ batch rule, complete guards, and exact upper-endpoint criterion.
 
 | depth | common batch | paired ratio | paired 95% interval | verdict |
 | ---: | ---: | ---: | ---: | --- |
-| 1 | 32768 | 0.5363 | [0.5294, 0.5434] | pass |
-| 16 | 8192 | 0.7727 | [0.7682, 0.7772] | pass |
-| 64 | 4096 | 0.8209 | [0.8148, 0.8271] | pass |
-| 256 | 2048 | 0.8957 | [0.8891, 0.9023] | pass |
+| 1 | 32768 | 0.5327 | [0.5265, 0.5389] | pass |
+| 16 | 8192 | 0.7988 | [0.7954, 0.8023] | pass |
+| 64 | 4096 | 0.8291 | [0.8263, 0.8318] | pass |
+| 256 | 2048 | 0.9095 | [0.8995, 0.9196] | pass |
 
 The timing claim is deliberately only host-scoped `open` evidence. Correctness
 does not depend on it: canonical index-stream equality remains the dictionary
@@ -1105,8 +1118,8 @@ derives the widest live unreduced accumulator from a full 64-bit source-length
 coordinate and 16 full 64-bit indices at radix three:
 `1_191_107_759_025_695_718_254_230_815`, exactly 90 bits. The exact model test,
 the CU-11 mutation gate, and the live source audit passed before this clock; the
-live audit reached 11 roots, 87 functions, and 108 edges, including 18 Atlas
-functions and 50 Atlas edges, so the measurement is not attached to a vacuous
+live audit reached 11 roots, 92 functions, and 115 edges, including 23 Atlas
+functions and 57 Atlas edges, so the measurement is not attached to a vacuous
 or stale graph.
 
 ## Native lookup factorization (`CG-23`)

@@ -988,8 +988,8 @@ refuted_by = """a repeated run at the recorded host, seed, shapes, and harness n
 id = "CG-22"
 level = "build"
 suite = "scaling"
-statement = """The one direct pure-UOR float traversal selects only among eligible group-one lookup/add kernel orientations by model-derived executed work after exact-cell residency and fixed-workspace factorization, and its executed coordinate census equals the model while every non-float route and operation count remains unchanged"""
-refuted_by = """one shape selecting a lookup/add orientation other than the global model-derived executed-work minimum, one selector omitting exact-cell residency, fixed workspace, or an eligible family, one support-mask or alternative factorization route, one threshold literal in the selector, one executed coordinate count differing from the model, a silent route census, or one integer or tropical control changing route or operation count"""
+statement = """The one direct pure-UOR float traversal selects only among eligible group-one lookup/add kernel orientations by model-derived executed work after exact-cell residency, live-only product-carrier initialization, and fixed-workspace factorization, and its executed coordinate census equals the model while every non-float route and operation count remains unchanged"""
+refuted_by = """one shape selecting a lookup/add orientation other than the global model-derived executed-work minimum, one selector omitting exact-cell residency, live-only product-carrier initialization, fixed workspace, or an eligible family, one edge tile clearing a padded product carrier, one threshold literal or support-mask route in the selector, one executed coordinate count differing from the model, a silent route census, or one integer or tropical control changing route or operation count"""
 
 [[id]]
 id = "CG-23"
