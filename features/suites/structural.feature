@@ -71,3 +71,9 @@ Feature: Structural
     Given the standing corpus
     When the suite exercises CS-12
     Then the claim holds byte for byte
+
+  @CS-13 @build
+  Scenario: The float Linear epilogue preserves the exact terminal expression through extreme integer scaling, cancellation, and the one requested encoding
+    Given the standing corpus
+    When the suite exercises CS-13
+    Then the claim holds byte for byte

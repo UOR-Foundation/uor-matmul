@@ -23,6 +23,12 @@
 // the question; the checked build answers it.
 
 use crate::alphabet::{Alphabet, Bound, Element, IntegerElement};
+use crate::generated::complete_state::{
+    BASE as COMPLETE_NONFINITE_STATE_BASE, COUNT as COMPLETE_NONFINITE_STATE_COUNT,
+    NAN as COMPLETE_NAN_STATE, NAN_MASK as COMPLETE_NAN_MASK, NEG_INF as COMPLETE_NEG_INF_STATE,
+    NEG_INF_MASK as COMPLETE_NEG_INF_MASK, POS_INF as COMPLETE_POS_INF_STATE,
+    POS_INF_MASK as COMPLETE_POS_INF_MASK,
+};
 use crate::policy::EncodeMode;
 
 /// The accumulator for element type `E`.
@@ -147,53 +153,56 @@ pub(crate) const fn encode_i128_into(acc: i128, min: i128, max: i128, mode: Enco
 /// Add `parts` into `limbs` starting at limb `at`, propagating the carry only
 /// as far as it reaches.
 ///
-/// The whole reason the float path is not hopeless: an exact fixed-point add is
-/// three limb additions and a carry, not a full-width traversal.
-fn add_at<const L: usize>(limbs: &mut [u64; L], at: usize, parts: [u64; 3]) {
+/// The terminal Atlas placement touches only the limbs reached by one resolved
+/// Laurent coordinate. The coordinate contraction has already happened; this
+/// routine merely embeds its exact coefficient in the complete register.
+fn add_at<const L: usize>(limbs: &mut [u64; L], high: &mut i64, at: usize, parts: [u64; 3]) {
     let mut carry = 0u64;
     let mut i = at;
-    for part in parts {
-        if i >= L {
+    let mut part_at = 0usize;
+    while part_at < parts.len() || carry != 0 {
+        let part = parts.get(part_at).copied().unwrap_or(0);
+        if i < L {
+            let (sum, c1) = limbs[i].overflowing_add(part);
+            let (sum, c2) = sum.overflowing_add(carry);
+            limbs[i] = sum;
+            carry = u64::from(c1) + u64::from(c2);
+        } else if i == L {
+            *high = (*high as u64).wrapping_add(part).wrapping_add(carry) as i64;
+            // A carry beyond the extension word is outside every model-sized
+            // float accumulation and terminal expression. `Complete` remains
+            // total for a hand-built, undersized register by discarding that
+            // out-of-representation part, as the former low-only carrier did.
+            return;
+        } else {
             return;
         }
-        let (sum, c1) = limbs[i].overflowing_add(part);
-        let (sum, c2) = sum.overflowing_add(carry);
-        limbs[i] = sum;
-        carry = u64::from(c1) + u64::from(c2);
         i += 1;
-    }
-    // The tail: a carry out of the third limb, which stops as soon as a limb
-    // absorbs it. For a register whose top limbs are zero --- the usual case,
-    // since the leading one sits wherever the exponent put it --- that is one
-    // iteration.
-    while carry != 0 && i < L {
-        let (sum, c) = limbs[i].overflowing_add(carry);
-        limbs[i] = sum;
-        carry = u64::from(c);
-        i += 1;
+        part_at += 1;
     }
 }
 
 /// Subtract `parts` from `limbs` starting at limb `at`, propagating the borrow
 /// only as far as it reaches.
-fn sub_at<const L: usize>(limbs: &mut [u64; L], at: usize, parts: [u64; 3]) {
+fn sub_at<const L: usize>(limbs: &mut [u64; L], high: &mut i64, at: usize, parts: [u64; 3]) {
     let mut borrow = 0u64;
     let mut i = at;
-    for part in parts {
-        if i >= L {
+    let mut part_at = 0usize;
+    while part_at < parts.len() || borrow != 0 {
+        let part = parts.get(part_at).copied().unwrap_or(0);
+        if i < L {
+            let (diff, b1) = limbs[i].overflowing_sub(part);
+            let (diff, b2) = diff.overflowing_sub(borrow);
+            limbs[i] = diff;
+            borrow = u64::from(b1) + u64::from(b2);
+        } else if i == L {
+            *high = (*high as u64).wrapping_sub(part).wrapping_sub(borrow) as i64;
+            return;
+        } else {
             return;
         }
-        let (diff, b1) = limbs[i].overflowing_sub(part);
-        let (diff, b2) = diff.overflowing_sub(borrow);
-        limbs[i] = diff;
-        borrow = u64::from(b1) + u64::from(b2);
         i += 1;
-    }
-    while borrow != 0 && i < L {
-        let (diff, b) = limbs[i].overflowing_sub(borrow);
-        limbs[i] = diff;
-        borrow = u64::from(b);
-        i += 1;
+        part_at += 1;
     }
 }
 
@@ -434,108 +443,565 @@ macro_rules! impl_encode_from_limbs {
 
 impl_encode_from_limbs!(i8, i16, i32, i64, i128);
 
+// The former three boolean flags occupied one alignment-rounded word after the
+// low limbs. Seven extreme values of that same word encode every nonempty
+// union of those flags; every other value is the signed extension limb. The
+// model proves the terminal expression stays many bits away from these
+// extrema, so no finite value the float APIs can form aliases a sentinel
+// (CS-13).
 /// A complete accumulator: a fixed-point register spanning the entire product
-/// exponent range of a float codec, so that every add is exact and no ordering
-/// can perturb it (§3.3).
+/// exponent range of a float codec and the terminal integer-scaled expression,
+/// so that every add is exact and no ordering can perturb it (§3.3).
 ///
-/// This is the Kulisch construction, and it is the same object as the integer
-/// accumulator above, sized differently. It contains no float arithmetic: the
-/// decode from an IEEE bit pattern to the exact dyadic rational it names is
-/// [`FloatElement::decode`](crate::FloatElement::decode), and what arrives here
-/// is an integer magnitude, a binary exponent, and a sign.
+/// This is the terminal fixed-point object of the Atlas contraction. It
+/// contains no float arithmetic: the decode from an IEEE bit pattern to the
+/// exact dyadic rational it names is [`FloatElement::decode`](crate::FloatElement::decode),
+/// the pure-UOR body resolves signed Laurent coordinates through lookup and
+/// addition, and only their exact coefficients and grades arrive here.
 ///
-/// `L` is the limb count and `MIN_EXP` is the binary exponent of bit 0, both
-/// derived from the element type in `model/widths.toml`. The plan writes
-/// `Complete<const L: usize>`; the exponent origin is carried as a second const
-/// parameter rather than inferred, so that a `Complete` value cannot be
-/// combined with one of a different origin.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// `L` is the low-limb count and `MIN_EXP` is the binary exponent of bit 0,
+/// both derived from the element type in `model/widths.toml`. The exponent
+/// origin is carried as a second const parameter rather than inferred, so that
+/// a `Complete` value cannot be combined with one of a different origin. The
+/// existing aligned tail word supplies the derived scalar headroom without
+/// changing the concrete type or its size.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Complete<const L: usize, const MIN_EXP: i32> {
     limbs: Limbs<L>,
-    /// A NaN has been accumulated. Sticky, and it wins over everything.
-    ///
-    /// The non-finite state is carried as a flag rather than as a value
-    /// because a value would have to participate in the fixed-point addition,
-    /// and then the result would depend on *where* in the accumulation the
-    /// infinity arrived. IEEE 754 clause 6 is about the value, not the
-    /// schedule, so the flags are what make `CU-04` --- order-independence ---
-    /// hold for non-finite inputs as well as finite ones.
+    /// A signed extension limb, or one of the seven nonempty unions of the
+    /// former three flags. Reusing the old flag word preserves the concrete
+    /// layout without collapsing any observable flag state.
+    state: i64,
+}
+
+const COMPLETE_LIMB_RADIX: u128 = u64::MAX as u128 + 1;
+
+const fn radix_has_flag(mask: u8, place: u8) -> bool {
+    (mask / place) % 2 == 1
+}
+
+const fn radix_nonfinite_mask(nan: bool, pos_inf: bool, neg_inf: bool) -> u8 {
+    let mut mask = 0;
+    if nan {
+        mask += COMPLETE_NAN_MASK;
+    }
+    if pos_inf {
+        mask += COMPLETE_POS_INF_MASK;
+    }
+    if neg_inf {
+        mask += COMPLETE_NEG_INF_MASK;
+    }
+    mask
+}
+
+const fn radix_union_nonfinite_masks(left: u8, right: u8) -> u8 {
+    radix_nonfinite_mask(
+        radix_has_flag(left, COMPLETE_NAN_MASK) || radix_has_flag(right, COMPLETE_NAN_MASK),
+        radix_has_flag(left, COMPLETE_POS_INF_MASK) || radix_has_flag(right, COMPLETE_POS_INF_MASK),
+        radix_has_flag(left, COMPLETE_NEG_INF_MASK) || radix_has_flag(right, COMPLETE_NEG_INF_MASK),
+    )
+}
+
+fn radix_neg_limbs<const L: usize>(value: Limbs<L>) -> Limbs<L> {
+    let mut out = [0u64; L];
+    let mut carry = 1u64;
+    for (at, word) in out.iter_mut().enumerate() {
+        let complement = u64::MAX - value.0[at];
+        let (sum, next) = complement.overflowing_add(carry);
+        *word = sum;
+        carry = u64::from(next);
+    }
+    Limbs(out)
+}
+
+const fn radix_limbs_is_negative<const L: usize>(value: Limbs<L>) -> bool {
+    L != 0 && value.0[L - 1] / radix_power_u64(u64::BITS - 1) == 1
+}
+
+fn radix_binary_width(mut word: u64) -> u32 {
+    let mut width = 0;
+    while word != 0 {
+        word /= 2;
+        width += 1;
+    }
+    width
+}
+
+fn radix_spread_u128(magnitude: u128, coordinate: u32) -> [u64; 3] {
+    let mut words = [
+        (magnitude % COMPLETE_LIMB_RADIX) as u64,
+        (magnitude / COMPLETE_LIMB_RADIX) as u64,
+        0,
+    ];
+    let mut remaining = coordinate;
+    while remaining != 0 {
+        let mut carry = 0u128;
+        for word in &mut words {
+            let doubled = u128::from(*word) + u128::from(*word) + carry;
+            *word = (doubled % COMPLETE_LIMB_RADIX) as u64;
+            carry = doubled / COMPLETE_LIMB_RADIX;
+        }
+        debug_assert_eq!(carry, 0);
+        remaining -= 1;
+    }
+    words
+}
+
+const fn radix_power_u64(mut coordinate: u32) -> u64 {
+    let mut place = 1u64;
+    while coordinate != 0 {
+        place += place;
+        coordinate -= 1;
+    }
+    place
+}
+
+const fn radix_scale_u64(mut value: u64, mut coordinate: u32) -> u64 {
+    while coordinate != 0 {
+        value += value;
+        coordinate -= 1;
+    }
+    value
+}
+
+const fn compose_ieee_bits(
+    negative: bool,
+    exponent: u64,
+    fraction: u64,
+    mantissa_width: u32,
+    exponent_width: u32,
+) -> u64 {
+    let sign = if negative {
+        radix_power_u64(mantissa_width + exponent_width)
+    } else {
+        0
+    };
+    sign + radix_scale_u64(exponent, mantissa_width) + fraction
+}
+
+// `Debug` and `Hash` were derived over `limbs, nan, pos_inf, neg_inf` before
+// the aligned flag tail became a signed extension. Keep those public
+// observations in the former field order. The extension is deliberately not
+// hashed: values equal under the new representation still hash equally, while
+// every value representable before this change produces the same hash input it
+// did before. Distinct finite extension values may collide, which `Hash`
+// explicitly permits.
+impl<const L: usize, const MIN_EXP: i32> core::fmt::Debug for Complete<L, MIN_EXP> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mask = self.nonfinite_mask().unwrap_or(0);
+        formatter
+            .debug_struct("Complete")
+            .field("limbs", &self.limbs)
+            .field("nan", &radix_has_flag(mask, COMPLETE_NAN_MASK))
+            .field("pos_inf", &radix_has_flag(mask, COMPLETE_POS_INF_MASK))
+            .field("neg_inf", &radix_has_flag(mask, COMPLETE_NEG_INF_MASK))
+            .finish()
+    }
+}
+
+impl<const L: usize, const MIN_EXP: i32> core::hash::Hash for Complete<L, MIN_EXP> {
+    fn hash<H: core::hash::Hasher>(&self, hasher: &mut H) {
+        let mask = self.nonfinite_mask().unwrap_or(0);
+        core::hash::Hash::hash(&self.limbs, hasher);
+        core::hash::Hash::hash(&radix_has_flag(mask, COMPLETE_NAN_MASK), hasher);
+        core::hash::Hash::hash(&radix_has_flag(mask, COMPLETE_POS_INF_MASK), hasher);
+        core::hash::Hash::hash(&radix_has_flag(mask, COMPLETE_NEG_INF_MASK), hasher);
+    }
+}
+
+#[allow(dead_code)]
+struct CompleteFlagTailLayout<const L: usize> {
+    limbs: Limbs<L>,
     nan: bool,
-    /// A positive infinity has been accumulated. Sticky.
     pos_inf: bool,
-    /// A negative infinity has been accumulated. Sticky.
     neg_inf: bool,
+}
+
+// Evaluated by every library build, including no-std 32-bit targets: the
+// extension occupies exactly the storage and alignment of the former flags.
+// Keeping this outside the test harness makes the layout claim cross-checkable
+// on targets that cannot link `std` or `libtest`.
+const _: () = assert!(
+    core::mem::size_of::<
+        Complete<
+            { crate::generated::complete_width::F32_LIMBS },
+            { crate::generated::complete_width::F32_MIN_PRODUCT_EXP },
+        >,
+    >() == core::mem::size_of::<
+        CompleteFlagTailLayout<{ crate::generated::complete_width::F32_LIMBS }>,
+    >()
+);
+const _: () = assert!(
+    core::mem::align_of::<
+        Complete<
+            { crate::generated::complete_width::F32_LIMBS },
+            { crate::generated::complete_width::F32_MIN_PRODUCT_EXP },
+        >,
+    >() == core::mem::align_of::<
+        CompleteFlagTailLayout<{ crate::generated::complete_width::F32_LIMBS }>,
+    >()
+);
+const _: () = assert!(
+    core::mem::size_of::<
+        Complete<
+            { crate::generated::complete_width::F64_LIMBS },
+            { crate::generated::complete_width::F64_MIN_PRODUCT_EXP },
+        >,
+    >() == core::mem::size_of::<
+        CompleteFlagTailLayout<{ crate::generated::complete_width::F64_LIMBS }>,
+    >()
+);
+const _: () = assert!(
+    core::mem::align_of::<
+        Complete<
+            { crate::generated::complete_width::F64_LIMBS },
+            { crate::generated::complete_width::F64_MIN_PRODUCT_EXP },
+        >,
+    >() == core::mem::align_of::<
+        CompleteFlagTailLayout<{ crate::generated::complete_width::F64_LIMBS }>,
+    >()
+);
+
+#[derive(Clone, Copy)]
+struct CompleteMagnitude<const L: usize> {
+    low: Limbs<L>,
+    high: u64,
+}
+
+impl<const L: usize> CompleteMagnitude<L> {
+    fn limb(&self, at: usize) -> u64 {
+        if at < L {
+            self.low.0[at]
+        } else if at == L {
+            self.high
+        } else {
+            0
+        }
+    }
+
+    fn high_bit(&self) -> Option<u32> {
+        if self.high != 0 {
+            return Some((L as u32).wrapping_mul(u64::BITS) + radix_binary_width(self.high) - 1);
+        }
+        let mut at = L;
+        while at != 0 {
+            at -= 1;
+            let word = self.low.0[at];
+            if word != 0 {
+                return Some((at as u32).wrapping_mul(u64::BITS) + radix_binary_width(word) - 1);
+            }
+        }
+        None
+    }
+
+    fn radix_bit(&self, i: u32) -> bool {
+        let limb = (i / u64::BITS) as usize;
+        let mut word = self.limb(limb);
+        let mut coordinate = i % u64::BITS;
+        while coordinate != 0 {
+            word /= 2;
+            coordinate -= 1;
+        }
+        word % 2 == 1
+    }
+
+    fn radix_window(&self, at: u32, n: u32) -> u64 {
+        debug_assert!(n <= u64::BITS);
+        let mut limb = (at / u64::BITS) as usize;
+        let mut within = at % u64::BITS;
+        let mut word = self.limb(limb);
+        let mut discarded = within;
+        while discarded != 0 {
+            word /= 2;
+            discarded -= 1;
+        }
+
+        let mut remaining = n;
+        let mut out = 0u64;
+        let mut place = 1u64;
+        while remaining != 0 {
+            if word % 2 == 1 {
+                out += place;
+            }
+            word /= 2;
+            within += 1;
+            remaining -= 1;
+            if remaining != 0 {
+                place += place;
+            }
+            if within == u64::BITS {
+                limb += 1;
+                within = 0;
+                word = self.limb(limb);
+            }
+        }
+        out
+    }
+
+    fn radix_any_below(&self, i: u32) -> bool {
+        let full = (i / u64::BITS) as usize;
+        for at in 0..full.min(L + 1) {
+            if self.limb(at) != 0 {
+                return true;
+            }
+        }
+        if full <= L {
+            let mut remaining = i % u64::BITS;
+            let mut word = self.limb(full);
+            while remaining != 0 {
+                if word % 2 == 1 {
+                    return true;
+                }
+                word /= 2;
+                remaining -= 1;
+            }
+        }
+        false
+    }
 }
 
 impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
     /// Zero.
     pub const ZERO: Self = Self {
         limbs: Limbs::ZERO,
-        nan: false,
-        pos_inf: false,
-        neg_inf: false,
+        state: 0,
     };
 
     /// The binary exponent of bit 0 of the register.
     pub const MIN_EXP: i32 = MIN_EXP;
 
-    /// The register's width in bits.
-    pub const WIDTH: u32 = (L as u32).wrapping_mul(64);
+    /// The register's established low-carrier width in bits.
+    ///
+    /// The aligned tail word is terminal headroom, not another public limb:
+    /// retaining this value preserves the API contract while the model records
+    /// the physical width separately.
+    pub const WIDTH: u32 = (L as u32).wrapping_mul(u64::BITS);
+
+    const fn nonfinite_mask(&self) -> Option<u8> {
+        let first_finite =
+            COMPLETE_NONFINITE_STATE_BASE.wrapping_add(COMPLETE_NONFINITE_STATE_COUNT as i64);
+        if self.state < first_finite {
+            Some(
+                self.state
+                    .wrapping_sub(COMPLETE_NONFINITE_STATE_BASE)
+                    .wrapping_add(1) as u8,
+            )
+        } else {
+            None
+        }
+    }
+
+    const fn nonfinite_state(mask: u8) -> i64 {
+        debug_assert!(mask != 0 && mask as u32 <= COMPLETE_NONFINITE_STATE_COUNT);
+        match mask {
+            COMPLETE_NAN_MASK => COMPLETE_NAN_STATE,
+            COMPLETE_POS_INF_MASK => COMPLETE_POS_INF_STATE,
+            COMPLETE_NEG_INF_MASK => COMPLETE_NEG_INF_STATE,
+            _ => COMPLETE_NONFINITE_STATE_BASE
+                .wrapping_add(mask as i64)
+                .wrapping_sub(1),
+        }
+    }
+
+    const fn is_finite(&self) -> bool {
+        self.nonfinite_mask().is_none()
+    }
+
+    /// Keep arithmetic on a finite object from manufacturing a non-finite tag.
+    ///
+    /// The associated `f32` and `f64` widths prove this branch unreachable for
+    /// every matrix product and terminal scalar expression. It remains
+    /// load-bearing for a caller deliberately instantiating an undersized
+    /// public `Complete`: exhausting that chosen register must not silently
+    /// turn an integer into NaN or infinity.
+    fn retain_finite_state(&mut self) {
+        let first_finite =
+            COMPLETE_NONFINITE_STATE_BASE.wrapping_add(COMPLETE_NONFINITE_STATE_COUNT as i64);
+        if self.state < first_finite {
+            self.state = first_finite;
+        }
+    }
+
+    const fn nan_value() -> Self {
+        Self {
+            limbs: Limbs::ZERO,
+            state: Self::nonfinite_state(COMPLETE_NAN_MASK),
+        }
+    }
+
+    fn combine_nonfinite(self, other: Self) -> Self {
+        let mask = radix_union_nonfinite_masks(
+            self.nonfinite_mask().unwrap_or(0),
+            other.nonfinite_mask().unwrap_or(0),
+        );
+        debug_assert!(
+            mask != 0,
+            "the caller found at least one non-finite operand"
+        );
+        Self {
+            // The former flag representation always combined its low limbs as
+            // well as unioning flags. The high extension has no numeric
+            // meaning once a flag is present, but preserving this low combine
+            // keeps raw/magnitude/equality observations byte-compatible.
+            limbs: self.limbs.combine(other.limbs),
+            state: Self::nonfinite_state(mask),
+        }
+    }
+
+    fn scale_nonfinite(self, factor: i64) -> Self {
+        let flip = factor < 0;
+        let mut magnitude = factor.unsigned_abs();
+        let mut low = Limbs::ZERO;
+        let mut addend = if flip {
+            radix_neg_limbs(self.limbs)
+        } else {
+            self.limbs
+        };
+        while magnitude > 0 {
+            if magnitude % 2 == 1 {
+                low = low.combine(addend);
+            }
+            magnitude /= 2;
+            if magnitude != 0 {
+                addend = addend.combine(addend);
+            }
+        }
+
+        let mask = self
+            .nonfinite_mask()
+            .expect("the non-finite scaling helper has a flag union");
+        let mask = if flip {
+            radix_nonfinite_mask(
+                radix_has_flag(mask, COMPLETE_NAN_MASK),
+                radix_has_flag(mask, COMPLETE_NEG_INF_MASK),
+                radix_has_flag(mask, COMPLETE_POS_INF_MASK),
+            )
+        } else {
+            mask
+        };
+        Self {
+            limbs: low,
+            state: Self::nonfinite_state(mask),
+        }
+    }
+
+    fn finite_neg(self) -> Self {
+        let low_nonzero = self.limbs.0.iter().any(|&limb| limb != 0);
+        // -(h*B + lo) = (-h - [lo != 0])*B + (-lo mod B).
+        // The model-derived terminal bound leaves enough signed high bits that
+        // this conversion cannot reach a non-finite sentinel.
+        let high = -i128::from(self.state) - i128::from(u8::from(low_nonzero));
+        let mut out = Self {
+            limbs: radix_neg_limbs(self.limbs),
+            state: high as i64,
+        };
+        out.retain_finite_state();
+        out
+    }
+
+    fn full_magnitude(&self) -> CompleteMagnitude<L> {
+        if !self.is_finite() {
+            let low = if radix_limbs_is_negative(self.limbs) {
+                radix_neg_limbs(self.limbs)
+            } else {
+                self.limbs
+            };
+            return CompleteMagnitude { low, high: 0 };
+        }
+        if !self.is_negative() {
+            return CompleteMagnitude {
+                low: self.limbs,
+                high: self.state as u64,
+            };
+        }
+
+        // Two's-complement negation crosses into the high word exactly when
+        // every low limb is zero.
+        let low_is_zero = self.limbs.0.iter().all(|&limb| limb == 0);
+        CompleteMagnitude {
+            low: radix_neg_limbs(self.limbs),
+            high: (u64::MAX - self.state as u64).wrapping_add(u64::from(low_is_zero)),
+        }
+    }
 
     /// Accumulate `sign * mag * 2^exp`, exactly.
     ///
-    /// `mag` is the integer significand product of two decoded floats and `exp`
-    /// is its binary exponent. Every bit of the result lands in the register,
-    /// because the register spans the whole product exponent range; nothing is
-    /// rounded, and nothing is dropped.
+    /// `mag` is an already-resolved Atlas coefficient and `exp` is its Laurent
+    /// grade. Every bit of the result lands in the register, because the
+    /// register spans the whole product exponent range; nothing is rounded,
+    /// and nothing is dropped.
     ///
     /// A product whose exponent falls outside the register is impossible for
     /// any pair of finite inputs of the element type the register was sized
-    /// for. Should one be presented anyway --- by a caller constructing a
-    /// `Complete` directly --- the contribution is clamped into the register
-    /// rather than wrapping, because a wrap would silently change the answer
-    /// while a clamp cannot arise on any real input.
+    /// for. A hand-built, undersized `Complete` remains total by retaining only
+    /// its representable coordinates; no associated float accumulator can take
+    /// that branch.
     pub fn add_scaled(&mut self, mag: u128, exp: i32, negative: bool) {
+        self.add_scaled_i64(mag, i64::from(exp), negative);
+    }
+
+    /// The private terminal placement while an Atlas address is still the
+    /// signed sum of two public exponent coordinates. Narrowing that sum before
+    /// the register compares it with its own extent would introduce an
+    /// artificial overflow at the `i32` boundary.
+    pub(crate) fn add_scaled_i64(&mut self, mag: u128, exp: i64, negative: bool) {
         if mag == 0 {
             return;
         }
-        let shift = exp.saturating_sub(MIN_EXP); // R3-ok: an exponent placement, checked below
+        let Some(shift) = exp.checked_sub(i64::from(MIN_EXP)) else {
+            return;
+        };
         if shift < 0 {
             return;
         }
-        let shift = shift as u32;
-        let at = (shift / 64) as usize;
-        let bit = shift % 64;
-
-        // Spread `mag` across at most three limbs: 128 bits of magnitude can
-        // straddle two limb boundaries once shifted.
-        let spread: [u64; 3] = if bit == 0 {
-            [mag as u64, (mag >> 64) as u64, 0]
-        } else {
-            [
-                (mag << bit) as u64,
-                ((mag << bit) >> 64) as u64,
-                (mag >> (128 - bit)) as u64,
-            ]
+        let shift = shift as u64;
+        let Ok(at) = usize::try_from(shift / u64::from(u64::BITS)) else {
+            // The coordinate is beyond any addressable limb of this register.
+            return;
         };
+        // `L` is the width the public instantiation requested. The aligned
+        // tail word absorbs carries and terminal scalar growth; it is not an
+        // independently addressable coordinate limb.
+        if at >= L {
+            return;
+        }
+        let bit = (shift % u64::from(u64::BITS)) as u32;
 
-        // Add or subtract in place, at the offset, propagating only as far as
-        // the carry actually reaches. The obvious implementation --- build a
-        // full-width value and combine --- costs O(L) per product, which for
-        // `f64`'s 67 limbs is most of the work in a float GEMM. This costs
-        // three limbs plus a carry that almost always stops immediately.
-        if negative {
-            sub_at(&mut self.limbs.0, at, spread);
+        // Regrading is the Atlas action of `X`: repeated doubling with a radix
+        // carry. It retains all three words of a straddling coefficient
+        // without interpreting the carrier as a packed bit field.
+        let spread = radix_spread_u128(mag, bit);
+
+        // Add or subtract in place, at the resolved address, propagating only
+        // as far as the carry reaches. Materializing a full-width coordinate
+        // would cost O(L) per Atlas placement and would violate the zero-copy
+        // carrier discipline; this touches three limbs plus the live carry.
+        let finite = self.is_finite();
+        let mut discarded_extension = 0;
+        let extension = if finite {
+            &mut self.state
         } else {
-            add_at(&mut self.limbs.0, at, spread);
+            // The former flag representation retained low-limb arithmetic
+            // after a flag arrived and discarded its carry at the established
+            // low width. Preserve that public raw/equality observation while
+            // keeping the tail sentinel unchanged.
+            &mut discarded_extension
+        };
+        if negative {
+            sub_at(&mut self.limbs.0, extension, at, spread);
+        } else {
+            add_at(&mut self.limbs.0, extension, at, spread);
+        }
+        if finite {
+            self.retain_finite_state();
         }
     }
 
     /// The accumulator holding exactly the value `x` names.
     ///
-    /// The bridge the epilogue needs: `beta * C` requires the value already in
-    /// `C` to enter the accumulation, and it enters it *exactly*, by the same
-    /// decode every operand goes through.
+    /// The exact embedding the epilogue needs: `beta * C` requires the value
+    /// already in `C` to enter the accumulation, and it enters by the same
+    /// total code decode every operand uses.
     pub fn of<E>(x: E) -> Self
     where
         E: crate::alphabet::FloatElement,
@@ -563,107 +1029,92 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
         if self.is_nan() {
             return self;
         }
-        if factor == 0 {
-            // Zero times an infinity is a NaN, by IEEE 754 clause 7.2.
-            let mut out = Self::ZERO;
-            if self.pos_inf || self.neg_inf {
-                out.set_nan();
-            }
-            return out;
-        }
         if factor == 1 {
             // `alpha == 1` is the overwhelmingly common epilogue, and it is the
             // identity. Without this it walked the double-and-add loop once
             // anyway: one `combine` of `L` limbs into the accumulator plus one
             // dead `combine` doubling the addend, and two full-width register
-            // materializations, per output element. At 67 limbs that is 536 bytes
-            // moved four times to compute `x * 1`.
+            // materializations, per output element. At 67 low limbs plus the
+            // extension word that is 544 bytes moved four times to compute
+            // `x * 1`.
             return self;
+        }
+        if factor == 0 {
+            return if self.infinity_sign().is_some() {
+                Self::nan_value()
+            } else {
+                Self::ZERO
+            };
+        }
+        if self.infinity_sign().is_some() {
+            return self.scale_nonfinite(factor);
         }
         let flip = factor < 0;
         let mut magnitude = factor.unsigned_abs();
-        let mut acc = Self {
-            limbs: Limbs::ZERO,
-            nan: false,
-            pos_inf: false,
-            neg_inf: false,
-        };
-        let mut addend = if flip {
-            Self {
-                limbs: self.limbs.neg(),
-                ..Self::ZERO
-            }
-        } else {
-            Self {
-                limbs: self.limbs,
-                ..Self::ZERO
-            }
-        };
+        let mut acc = Self::ZERO;
+        let mut addend = if flip { self.finite_neg() } else { self };
         while magnitude > 0 {
-            if magnitude & 1 == 1 {
-                acc = Self {
-                    limbs: acc.limbs.combine(addend.limbs),
-                    ..acc
-                };
+            if magnitude % 2 == 1 {
+                acc = acc.combine(addend);
             }
-            addend = Self {
-                limbs: addend.limbs.combine(addend.limbs),
-                ..addend
-            };
-            magnitude >>= 1;
+            magnitude /= 2;
+            // Avoid forming a final, unused double. At `i64::MIN` that value
+            // has one more bit than the scalar product and is not part of the
+            // terminal expression's model-derived bound.
+            if magnitude != 0 {
+                addend = addend.combine(addend);
+            }
         }
-        // A scaled infinity is an infinity, with the sign of the product.
-        let (pos, neg) = match (self.pos_inf, self.neg_inf, flip) {
-            (false, false, _) => (false, false),
-            (p, n, false) => (p, n),
-            (p, n, true) => (n, p),
-        };
-        Self {
-            limbs: acc.limbs,
-            nan: false,
-            pos_inf: pos,
-            neg_inf: neg,
-        }
+        acc
     }
 
-    /// Accumulate `mantissa * 2^exp`, with the sign carried in the mantissa.
-    ///
-    /// The hot path of a float GEMM. A signed mantissa costs one branch on the
-    /// sign instead of threading a `bool` through the decode, the product, and
-    /// the placement --- and for `f32` the whole product fits a `u64`, so the
-    /// `u128` shifts the general form needs are not paid for.
+    /// Accumulate one already-resolved signed coefficient at Laurent grade
+    /// `exp`. This is a terminal embedding primitive, not a product route: the
+    /// pure-UOR traversal has performed normalization, projection, lookup and
+    /// coordinate contraction before calling it.
     pub fn add_signed(&mut self, mantissa: i64, exp: i32) {
         if mantissa == 0 {
             return;
         }
-        let shift = exp.saturating_sub(MIN_EXP); // R3-ok: an exponent placement, checked below
+        let Some(shift) = i64::from(exp).checked_sub(i64::from(MIN_EXP)) else {
+            return;
+        };
         if shift < 0 {
             return;
         }
-        let shift = shift as u32;
-        let at = (shift / 64) as usize;
-        let bit = shift % 64;
-        let negative = mantissa < 0;
+        let shift = shift as u64;
+        let Ok(at) = usize::try_from(shift / u64::from(u64::BITS)) else {
+            return;
+        };
+        if at >= L {
+            return;
+        }
+        let bit = (shift % u64::from(u64::BITS)) as u32;
         let mag = mantissa.unsigned_abs();
 
-        // Two limbs, not three: a 64-bit magnitude shifted by less than 64 bits
-        // spans at most 128, and the caller's `mantissa` is at most 2^48 for
-        // `f32` and comes pre-split for `f64`.
-        let spread = if bit == 0 {
-            [mag, 0, 0]
+        let spread = radix_spread_u128(u128::from(mag), bit);
+        let finite = self.is_finite();
+        let mut discarded_extension = 0;
+        let extension = if finite {
+            &mut self.state
         } else {
-            [mag << bit, mag >> (64 - bit), 0]
+            &mut discarded_extension
         };
-        if negative {
-            sub_at(&mut self.limbs.0, at, spread);
+        if mantissa < 0 {
+            sub_at(&mut self.limbs.0, extension, at, spread);
         } else {
-            add_at(&mut self.limbs.0, at, spread);
+            add_at(&mut self.limbs.0, extension, at, spread);
+        }
+        if finite {
+            self.retain_finite_state();
         }
     }
 
     /// Record that a NaN reached this accumulation. Sticky and absorbing.
     pub fn set_nan(&mut self) {
-        self.nan = true;
+        let mask =
+            radix_union_nonfinite_masks(self.nonfinite_mask().unwrap_or(0), COMPLETE_NAN_MASK);
+        self.state = Self::nonfinite_state(mask);
     }
 
     /// Record that an infinity of the given sign reached this accumulation.
@@ -671,16 +1122,23 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
     /// Two infinities of opposite sign make a NaN, by IEEE 754 clause 7.2, and
     /// they do so here whatever order they arrived in.
     pub fn set_infinity(&mut self, negative: bool) {
-        if negative {
-            self.neg_inf = true;
+        let bit = if negative {
+            COMPLETE_NEG_INF_MASK
         } else {
-            self.pos_inf = true;
-        }
+            COMPLETE_POS_INF_MASK
+        };
+        let mask = radix_union_nonfinite_masks(self.nonfinite_mask().unwrap_or(0), bit);
+        self.state = Self::nonfinite_state(mask);
     }
 
     /// Has a NaN been accumulated, or has the sum become one?
     pub const fn is_nan(self) -> bool {
-        self.nan || (self.pos_inf && self.neg_inf)
+        let Some(mask) = self.nonfinite_mask() else {
+            return false;
+        };
+        radix_has_flag(mask, COMPLETE_NAN_MASK)
+            || (radix_has_flag(mask, COMPLETE_POS_INF_MASK)
+                && radix_has_flag(mask, COMPLETE_NEG_INF_MASK))
     }
 
     /// The sign of the accumulated infinity, if the sum is infinite.
@@ -690,12 +1148,12 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
     pub const fn infinity_sign(self) -> Option<bool> {
         if self.is_nan() {
             None
-        } else if self.pos_inf {
-            Some(false)
-        } else if self.neg_inf {
-            Some(true)
         } else {
-            None
+            match self.nonfinite_mask() {
+                Some(COMPLETE_POS_INF_MASK) => Some(false),
+                Some(COMPLETE_NEG_INF_MASK) => Some(true),
+                _ => None,
+            }
         }
     }
 
@@ -706,7 +1164,11 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
 
     /// Is the accumulated value negative?
     pub const fn is_negative(&self) -> bool {
-        self.limbs.is_negative()
+        if self.is_finite() {
+            self.state < 0
+        } else {
+            radix_limbs_is_negative(self.limbs)
+        }
     }
 
     /// Is the accumulated value exactly zero?
@@ -714,23 +1176,21 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
     /// Exact cancellation is exact here, which is the property a classical
     /// accumulator loses first.
     pub fn is_zero(&self) -> bool {
-        !self.nan && !self.pos_inf && !self.neg_inf && self.limbs.limbs().iter().all(|&l| l == 0)
+        self.state == 0 && self.limbs.limbs().iter().all(|&limb| limb == 0)
     }
 
-    /// The magnitude of this register, as an unsigned limb string.
+    /// The low limbs of the magnitude of this register.
     ///
     /// An encoder wants the leading one, then `P` significand bits, then a round
     /// bit and a sticky bit --- and every one of those is a question about the
     /// *magnitude*. Forming it once and asking [`Limbs`] the questions is the
     /// difference between one negation and one per bit read, which for `f64`'s
     /// sixty-seven limbs is fifty-five passes over the register per output
-    /// element.
+    /// element. Terminal scalar headroom lives in the extension word; use the
+    /// bit-query methods below when the complete magnitude, rather than its
+    /// historical low-limb view, is required.
     pub fn magnitude(&self) -> Limbs<L> {
-        if self.is_negative() {
-            self.limbs.neg()
-        } else {
-            self.limbs
-        }
+        self.full_magnitude().low
     }
 
     /// The index of the highest set bit of the magnitude, or `None` for zero.
@@ -738,41 +1198,55 @@ impl<const L: usize, const MIN_EXP: i32> Complete<L, MIN_EXP> {
     /// This is what an encoder needs to find the leading one, from which the
     /// output exponent and the round and sticky bits follow.
     pub fn magnitude_high_bit(&self) -> Option<u32> {
-        self.magnitude().high_bit()
+        self.full_magnitude().high_bit()
     }
 
     /// Bit `i` of the magnitude, counting from bit 0 of the register.
     pub fn magnitude_bit(&self, i: u32) -> bool {
-        self.magnitude().bit(i)
+        self.full_magnitude().radix_bit(i)
     }
 
     /// Is any bit of the magnitude below `i` set? The sticky bit.
     pub fn magnitude_any_below(&self, i: u32) -> bool {
-        self.magnitude().any_below(i)
+        self.full_magnitude().radix_any_below(i)
     }
 }
 
 impl<const L: usize, const MIN_EXP: i32> Accumulator for Complete<L, MIN_EXP> {
     const ZERO: Self = Self::ZERO;
-    const BITS: u32 = (L as u32).wrapping_mul(64);
+    const BITS: u32 = (L as u32).wrapping_mul(u64::BITS);
 
     fn combine(self, other: Self) -> Self {
-        // The limbs add exactly and the non-finite flags union. Both are
-        // associative and commutative, so combining two partial accumulations
-        // gives the same answer in either order --- which is what makes the
-        // float result independent of the tile partition (`CU-04`).
-        Self {
-            limbs: self.limbs.combine(other.limbs),
-            nan: self.nan || other.nan,
-            pos_inf: self.pos_inf || other.pos_inf,
-            neg_inf: self.neg_inf || other.neg_inf,
+        // Every former flag union remains distinct, and the low limbs keep the
+        // same associative combine they had beside those flags.
+        if !self.is_finite() || !other.is_finite() {
+            return self.combine_nonfinite(other);
         }
+
+        let mut limbs = [0u64; L];
+        let mut carry = 0u64;
+        for (at, out) in limbs.iter_mut().enumerate() {
+            let (sum, c1) = self.limbs.0[at].overflowing_add(other.limbs.0[at]);
+            let (sum, c2) = sum.overflowing_add(carry);
+            *out = sum;
+            carry = u64::from(c1) + u64::from(c2);
+        }
+        // The model includes one terminal-expression bit above both scaled
+        // terms, so this signed addition is exact for every public float call.
+        let high = i128::from(self.state) + i128::from(other.state) + i128::from(carry);
+        let mut out = Self {
+            limbs: Limbs(limbs),
+            state: high as i64,
+        };
+        out.retain_finite_state();
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate std;
 
     /// The i128 accumulator is exact over the whole i8 x i8 domain at a depth
     /// far past the narrow-register threshold, which is the point: the
@@ -883,14 +1357,376 @@ mod tests {
         assert!(acc.is_zero());
         assert_eq!(acc.magnitude_high_bit(), None);
     }
+
+    /// The old non-finite flags already occupied an aligned word. Reusing that
+    /// word as signed terminal headroom therefore changes neither associated
+    /// accumulator type nor concrete layout, while its bit queries cross the
+    /// low-carrier boundary in both signs.
+    #[test]
+    fn complete_tail_word_is_exact_headroom_without_layout_growth_cs_13() {
+        type C32 = Complete<10, -298>;
+        type C64 = Complete<67, -2148>;
+        assert_eq!(C32::WIDTH, 10 * u64::BITS);
+        assert_eq!(C64::WIDTH, 67 * u64::BITS);
+        assert_eq!(<C32 as Accumulator>::BITS, C32::WIDTH);
+        assert_eq!(<C64 as Accumulator>::BITS, C64::WIDTH);
+        assert_eq!(
+            core::mem::size_of::<C32>(),
+            core::mem::size_of::<Limbs<10>>() + core::mem::size_of::<i64>()
+        );
+        assert_eq!(
+            core::mem::size_of::<C64>(),
+            core::mem::size_of::<Limbs<67>>() + core::mem::size_of::<i64>()
+        );
+
+        let mut value = C32::ZERO;
+        value.add_scaled(1, 319, false);
+        let scaled = value.scale(i64::MAX);
+        assert!(!scaled.is_negative());
+        assert!(scaled.magnitude_high_bit().is_some_and(|bit| bit >= 640));
+        assert!(scaled.magnitude_bit(640));
+        assert!(scaled.magnitude_any_below(640));
+
+        let negated = scaled.scale(-1);
+        assert!(negated.is_negative());
+        assert_eq!(scaled.combine(negated), C32::ZERO);
+    }
+
+    /// `CS-13`: reusing the former flag tail must not change observations of
+    /// the public `Complete` value. Every reachable union of the three former
+    /// flags remains distinct, low limbs survive flag operations and combines,
+    /// and the derived `Debug`/`Hash` views retain their former field order.
+    #[test]
+    fn complete_tail_preserves_former_flag_observations_cs_13() {
+        use core::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        use std::format;
+
+        #[derive(Hash)]
+        struct Former<const N: usize> {
+            limbs: Limbs<N>,
+            nan: bool,
+            pos_inf: bool,
+            neg_inf: bool,
+        }
+
+        fn digest(value: &impl Hash) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        type C = Complete<2, 0>;
+        let mut finite = C::ZERO;
+        finite.add_signed(5, 0);
+        let low = *finite.raw();
+        let mut states = [C::ZERO; COMPLETE_NONFINITE_STATE_COUNT as usize];
+
+        for mask in 1..=COMPLETE_NONFINITE_STATE_COUNT as u8 {
+            let mut value = finite;
+            if mask & COMPLETE_NAN_MASK != 0 {
+                value.set_nan();
+            }
+            if mask & COMPLETE_POS_INF_MASK != 0 {
+                value.set_infinity(false);
+            }
+            if mask & COMPLETE_NEG_INF_MASK != 0 {
+                value.set_infinity(true);
+            }
+            states[usize::from(mask - 1)] = value;
+
+            assert_eq!(value.nonfinite_mask(), Some(mask));
+            assert_eq!(*value.raw(), low, "mask {mask} discarded low limbs");
+            assert_eq!(
+                value.is_nan(),
+                mask & COMPLETE_NAN_MASK != 0
+                    || mask & (COMPLETE_POS_INF_MASK | COMPLETE_NEG_INF_MASK)
+                        == (COMPLETE_POS_INF_MASK | COMPLETE_NEG_INF_MASK)
+            );
+            let expected_sign = match mask {
+                COMPLETE_POS_INF_MASK => Some(false),
+                COMPLETE_NEG_INF_MASK => Some(true),
+                _ => None,
+            };
+            assert_eq!(value.infinity_sign(), expected_sign);
+
+            let nan = mask & COMPLETE_NAN_MASK != 0;
+            let pos_inf = mask & COMPLETE_POS_INF_MASK != 0;
+            let neg_inf = mask & COMPLETE_NEG_INF_MASK != 0;
+            assert_eq!(
+                format!("{value:?}"),
+                format!(
+                    "Complete {{ limbs: {low:?}, nan: {nan}, pos_inf: {pos_inf}, neg_inf: {neg_inf} }}"
+                )
+            );
+            assert_eq!(
+                digest(&value),
+                digest(&Former {
+                    limbs: low,
+                    nan,
+                    pos_inf,
+                    neg_inf,
+                }),
+                "mask {mask} changed the former derived Hash field stream"
+            );
+        }
+        for left in 0..states.len() {
+            for right in 0..states.len() {
+                assert_eq!(states[left] == states[right], left == right);
+            }
+        }
+
+        let mut negative = C::ZERO;
+        negative.add_signed(-5, 0);
+        let negative_low = *negative.raw();
+        negative.set_infinity(false);
+        assert!(negative.is_negative());
+        assert_eq!(negative.magnitude(), negative_low.neg());
+
+        let scaled = negative.scale(-3);
+        let mut expected_low = Limbs::ZERO;
+        expected_low = expected_low.combine(negative_low.neg());
+        expected_low = expected_low.combine(negative_low.neg());
+        expected_low = expected_low.combine(negative_low.neg());
+        assert_eq!(*scaled.raw(), expected_low);
+        assert_eq!(scaled.infinity_sign(), Some(true));
+
+        let mut left = finite;
+        left.set_infinity(false);
+        let mut right = finite;
+        right.set_nan();
+        let combined = left.combine(right);
+        assert_eq!(*combined.raw(), low.combine(low));
+        assert_eq!(
+            combined.nonfinite_mask(),
+            Some(COMPLETE_NAN_MASK | COMPLETE_POS_INF_MASK)
+        );
+
+        let mut opposite = finite;
+        opposite.set_infinity(false);
+        opposite.set_infinity(true);
+        assert!(opposite.is_nan());
+        assert_ne!(opposite, states[usize::from(COMPLETE_NAN_MASK - 1)]);
+
+        let zero_times_infinity = left.scale(0);
+        assert_eq!(*zero_times_infinity.raw(), Limbs::ZERO);
+        assert_eq!(
+            zero_times_infinity.nonfinite_mask(),
+            Some(COMPLETE_NAN_MASK)
+        );
+    }
+
+    /// `CS-13`: the tail sentinel replaces storage, not the former public
+    /// behaviour. Low-limb placement continues after every flag union, combine
+    /// still adds those low limbs while unioning flags, and scalar multiplication
+    /// retains HEAD's absorbing-NaN and signed-infinity rules.
+    #[test]
+    fn complete_public_operations_preserve_all_former_nonfinite_states_cs_13() {
+        use std::format;
+
+        type C = Complete<2, 0>;
+
+        fn flagged(mask: u8, low: i128) -> C {
+            let mut value = C::ZERO;
+            value.add_signed(low as i64, 0);
+            if mask & COMPLETE_NAN_MASK != 0 {
+                value.set_nan();
+            }
+            if mask & COMPLETE_POS_INF_MASK != 0 {
+                value.set_infinity(false);
+            }
+            if mask & COMPLETE_NEG_INF_MASK != 0 {
+                value.set_infinity(true);
+            }
+            value
+        }
+
+        for mask in 1..=COMPLETE_NONFINITE_STATE_COUNT as u8 {
+            let mut placed = flagged(mask, 5);
+            placed.add_scaled(3, 1, false);
+            placed.add_signed(-2, 0);
+            assert_eq!(placed.nonfinite_mask(), Some(mask));
+            assert_eq!(*placed.raw(), Limbs([9, 0]));
+
+            let nan = mask & COMPLETE_NAN_MASK != 0;
+            let pos_inf = mask & COMPLETE_POS_INF_MASK != 0;
+            let neg_inf = mask & COMPLETE_NEG_INF_MASK != 0;
+            assert_eq!(
+                format!("{placed:?}"),
+                format!(
+                    "Complete {{ limbs: {:?}, nan: {nan}, pos_inf: {pos_inf}, neg_inf: {neg_inf} }}",
+                    Limbs([9, 0])
+                )
+            );
+
+            // A carry out of the former low carrier was discarded after flags
+            // arrived. The sentinel must not accidentally turn that carry into
+            // a different flag union or a finite extension value.
+            let mut edge = flagged(mask, 0);
+            edge.add_scaled(1, 127, false);
+            assert_eq!(*edge.raw(), Limbs([0, radix_power_u64(63)]));
+            edge.add_scaled(1, 127, false);
+            assert_eq!(*edge.raw(), Limbs::ZERO);
+            assert_eq!(edge.nonfinite_mask(), Some(mask));
+
+            for factor in [-3, 0, 1, 2, i64::MIN] {
+                let scaled = flagged(mask, 5).scale(factor);
+                let absorbing_nan = nan || (pos_inf && neg_inf);
+                if absorbing_nan {
+                    assert_eq!(scaled, flagged(mask, 5));
+                } else if factor == 0 {
+                    assert_eq!(*scaled.raw(), Limbs::ZERO);
+                    assert_eq!(scaled.nonfinite_mask(), Some(COMPLETE_NAN_MASK));
+                } else {
+                    let expected_low = Limbs::ZERO.add_i128(i128::from(factor) * 5);
+                    let expected_mask = if factor < 0 {
+                        if pos_inf {
+                            COMPLETE_NEG_INF_MASK
+                        } else {
+                            COMPLETE_POS_INF_MASK
+                        }
+                    } else {
+                        mask
+                    };
+                    assert_eq!(*scaled.raw(), expected_low);
+                    assert_eq!(scaled.nonfinite_mask(), Some(expected_mask));
+                }
+            }
+        }
+
+        for left_mask in 1..=COMPLETE_NONFINITE_STATE_COUNT as u8 {
+            for right_mask in 1..=COMPLETE_NONFINITE_STATE_COUNT as u8 {
+                let combined = flagged(left_mask, 5).combine(flagged(right_mask, 7));
+                assert_eq!(*combined.raw(), Limbs([12, 0]));
+                assert_eq!(
+                    combined.nonfinite_mask(),
+                    Some(left_mask | right_mask),
+                    "left={left_mask}, right={right_mask}"
+                );
+            }
+        }
+    }
+
+    /// `CS-13`: an undersized public const-generic register can exhaust the
+    /// finite encoding, but a finite arithmetic operation can never alias one
+    /// of the seven nonempty non-finite flag unions.
+    #[test]
+    fn undersized_complete_arithmetic_never_aliases_nonfinite_state_cs_13() {
+        type Tiny = Complete<0, 0>;
+        let mut outside = Tiny::ZERO;
+        outside.add_scaled(1, 0, false);
+        let scaled = outside.scale(i64::MIN);
+        assert!(scaled.is_zero());
+        assert!(!scaled.is_nan());
+        assert_eq!(scaled.infinity_sign(), None);
+
+        type One = Complete<1, 0>;
+        let edge = One {
+            limbs: Limbs::ZERO,
+            state: i64::MIN / 2,
+        };
+        assert!(edge.is_finite());
+        let doubled = edge.combine(edge);
+        assert!(doubled.is_finite());
+        assert!(!doubled.is_nan());
+        assert_eq!(doubled.infinity_sign(), None);
+    }
+
+    /// `CS-13`: the public signed-coordinate specialization is byte-identical
+    /// to the general terminal placement, including a contribution that
+    /// crosses from the last low limb into the extension word.
+    #[test]
+    fn signed_coordinate_specialization_matches_general_placement_cs_13() {
+        type C = Complete<2, 0>;
+        for mantissa in [i64::MIN, i64::MIN + 1, -257, -1, 1, 257, i64::MAX] {
+            for exp in [0, 1, 63, 64, 65, 127] {
+                let mut signed = C::ZERO;
+                signed.add_signed(mantissa, exp);
+                let mut general = C::ZERO;
+                general.add_scaled(u128::from(mantissa.unsigned_abs()), exp, mantissa < 0);
+                assert_eq!(signed, general, "mantissa={mantissa}, exp={exp}");
+            }
+        }
+    }
+
+    #[test]
+    fn complete_radix_primitives_match_independent_bit_oracles_cu_11() {
+        let magnitudes = [
+            0,
+            1,
+            u128::from(u64::MAX),
+            1u128 << 64,
+            (1u128 << 64) + 1,
+            u128::MAX,
+        ];
+        for magnitude in magnitudes {
+            for coordinate in 0..u64::BITS {
+                let expected = if coordinate == 0 {
+                    [magnitude as u64, (magnitude >> 64) as u64, 0]
+                } else {
+                    [
+                        (magnitude << coordinate) as u64,
+                        ((magnitude << coordinate) >> 64) as u64,
+                        (magnitude >> (128 - coordinate)) as u64,
+                    ]
+                };
+                assert_eq!(radix_spread_u128(magnitude, coordinate), expected);
+            }
+        }
+
+        let magnitude = CompleteMagnitude {
+            low: Limbs([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210]),
+            high: 0x8000_0000_0000_0001,
+        };
+        let words = [magnitude.low.0[0], magnitude.low.0[1], magnitude.high];
+        for coordinate in 0..(words.len() as u32 * u64::BITS) {
+            let word = words[(coordinate / u64::BITS) as usize];
+            let expected = (word >> (coordinate % u64::BITS)) & 1 == 1;
+            assert_eq!(magnitude.radix_bit(coordinate), expected);
+            let expected_sticky = (0..coordinate).any(|lower| {
+                let word = words[(lower / u64::BITS) as usize];
+                (word >> (lower % u64::BITS)) & 1 == 1
+            });
+            assert_eq!(magnitude.radix_any_below(coordinate), expected_sticky);
+            for width in 0..=u64::BITS.min(words.len() as u32 * u64::BITS - coordinate) {
+                let expected_window = (0..width).fold(0u64, |window, offset| {
+                    let bit_at = coordinate + offset;
+                    let word = words[(bit_at / u64::BITS) as usize];
+                    window | (((word >> (bit_at % u64::BITS)) & 1) << offset)
+                });
+                assert_eq!(magnitude.radix_window(coordinate, width), expected_window);
+            }
+        }
+
+        for mask in 0..=COMPLETE_NONFINITE_STATE_COUNT as u8 {
+            for other in 0..=COMPLETE_NONFINITE_STATE_COUNT as u8 {
+                assert_eq!(radix_union_nonfinite_masks(mask, other), mask | other);
+            }
+        }
+        for (negative, exponent, fraction, mantissa, exponent_width) in [
+            (false, 0, 0, 23, 8),
+            (true, 0xff, 0, 23, 8),
+            (false, 0x7fe, (1u64 << 52) - 1, 52, 11),
+            (true, 0x3ff, 1, 52, 11),
+        ] {
+            let expected = ((u64::from(negative)) << (mantissa + exponent_width))
+                | (exponent << mantissa)
+                | fraction;
+            assert_eq!(
+                compose_ieee_bits(negative, exponent, fraction, mantissa, exponent_width),
+                expected
+            );
+        }
+    }
 }
 
 /// The correctly-rounded encode out of a complete accumulator (§3.3).
 ///
 /// This is the single encode step for the float family, and it is the only
 /// place in the float path where information is discarded. Everything upstream
-/// of it --- the decode, the significand product, the fixed-point add --- is
-/// exact, so what this rounds is the *exact sum*, once.
+/// of it --- code decode, canonical Laurent normalization, Atlas projection,
+/// lookup contraction and fixed-point embedding --- is exact, so what this
+/// rounds is the *exact sum*, once.
 ///
 /// That is what makes the result schedule-independent: a classical GEMM rounds
 /// after every add, so its answer depends on the order; this one rounds after
@@ -903,10 +1739,9 @@ macro_rules! impl_encode_into_float {
                 const EXPO: u32 = $expo;
                 /// Significand bits including the implicit one.
                 const P: u32 = MANT + 1;
-                const BIAS: i32 = (1 << (EXPO - 1)) - 1;
+                const BIAS: i32 = radix_power_u64(EXPO - 1) as i32 - 1;
                 /// The exponent of the least significant bit of a subnormal.
                 const SUB_LSB_EXP: i32 = 1 - BIAS - MANT as i32;
-                const SIGN_SHIFT: u32 = MANT + EXPO;
 
                 // The non-finite cases first, so that a NaN never reaches the
                 // rounding logic and an infinity never competes with it.
@@ -914,13 +1749,13 @@ macro_rules! impl_encode_into_float {
                     return <$t>::NAN;
                 }
                 if let Some(negative) = acc.infinity_sign() {
-                    let bits: $bits = ((negative as $bits) << SIGN_SHIFT)
-                        | ((((1 as $bits) << EXPO) - 1) << MANT);
+                    let bits = compose_ieee_bits(negative, radix_power_u64(EXPO) - 1, 0, MANT, EXPO)
+                        as $bits;
                     return <$t>::from_bits(bits);
                 }
 
                 let negative = acc.is_negative();
-                let mag = acc.magnitude();
+                let mag = acc.full_magnitude();
                 let Some(high) = mag.high_bit() else {
                     // An exactly zero sum. IEEE 754 gives `+0` for a sum that
                     // cancels under round-to-nearest, and the sign of a zero
@@ -955,7 +1790,7 @@ macro_rules! impl_encode_into_float {
 
                 // The P significand bits, read out of the register in one
                 // window rather than one at a time.
-                let sig: u64 = mag.window(lsb, P);
+                let sig: u64 = mag.radix_window(lsb, P);
 
                 // Round, once, under the caller's mode. `Nearest` is
                 // round-half-to-even, which is IEEE 754's default and what
@@ -964,34 +1799,34 @@ macro_rules! impl_encode_into_float {
                 let (round_bit, sticky) = if lsb == 0 {
                     (false, false)
                 } else {
-                    (mag.bit(lsb - 1), mag.any_below(lsb - 1))
+                    (mag.radix_bit(lsb - 1), mag.radix_any_below(lsb - 1))
                 };
                 let increment = match mode {
-                    EncodeMode::Nearest => round_bit && (sticky || (sig & 1) == 1),
+                    EncodeMode::Nearest => round_bit && (sticky || sig % 2 == 1),
                     // Truncation toward zero: the magnitude is already
                     // truncated, so there is nothing to add.
                     EncodeMode::TowardZero | EncodeMode::Saturating | EncodeMode::Wrapping => false,
                 };
                 let mut sig = sig + u64::from(increment);
                 let mut lsb_exp = lsb_exp;
-                if sig >> P == 1 {
+                if sig / radix_power_u64(P) == 1 {
                     // The increment carried out of the significand: halve it
                     // and step the exponent, which is exact.
-                    sig >>= 1;
+                    sig /= 2;
                     lsb_exp += 1;
                 }
 
                 if sig == 0 {
-                    return <$t>::from_bits((negative as $bits) << SIGN_SHIFT);
+                    return <$t>::from_bits(compose_ieee_bits(negative, 0, 0, MANT, EXPO) as $bits);
                 }
 
                 // Assemble. A significand with its top bit set is normal; one
                 // without is subnormal, and its biased exponent is zero.
-                let top = 64 - 1 - sig.leading_zeros();
+                let top = radix_binary_width(sig) - 1;
                 let value_exp = lsb_exp + top as i32;
-                let bits: $bits = if sig >> (P - 1) == 1 {
+                let bits = if sig / radix_power_u64(P - 1) == 1 {
                     let biased = value_exp + BIAS;
-                    if biased >= (1 << EXPO) - 1 {
+                    if biased >= radix_power_u64(EXPO) as i32 - 1 {
                         // Overflow. Round-to-nearest carries an overflowing
                         // magnitude to infinity; the directed modes clamp to
                         // the largest finite value, which is what `Saturating`
@@ -1013,12 +1848,16 @@ macro_rules! impl_encode_into_float {
                             }
                         };
                     }
-                    ((negative as $bits) << SIGN_SHIFT)
-                        | ((biased as $bits) << MANT)
-                        | ((sig as $bits) & (((1 as $bits) << MANT) - 1))
+                    compose_ieee_bits(
+                        negative,
+                        biased as u64,
+                        sig % radix_power_u64(MANT),
+                        MANT,
+                        EXPO,
+                    )
                 } else {
-                    ((negative as $bits) << SIGN_SHIFT) | (sig as $bits)
-                };
+                    compose_ieee_bits(negative, 0, sig, MANT, EXPO)
+                } as $bits;
                 <$t>::from_bits(bits)
             }
         }
@@ -1030,15 +1869,12 @@ impl_encode_into_float!(f64, u64, 52, 11);
 
 /// An exact integer sum encoding into a float.
 ///
-/// An `i128` accumulator is a dyadic rational at exponent zero, and the float
-/// placement bridge is what produces one for a float output: the scaled
-/// panels' product is an integer dot product, computed by the integer kernel
-/// table and placed into the format's complete accumulator at a declared
-/// scale by the epilogue. This impl is the scale-zero placement the traversal
-/// bound asks for (`CD-19`). It enters the register through the decode's own
-/// primitive, [`Complete::add_scaled`], so nothing is rounded on the way in;
-/// the register spans the format's whole product exponent range and then
-/// some, so no `i128` is too wide for it.
+/// An `i128` accumulator is a dyadic rational at exponent zero. This impl is
+/// the scale-zero embedding required by generic epilogues and compatibility
+/// bounds; the pure-UOR float traversal itself contracts Atlas octets directly
+/// into `Complete`. It enters through [`Complete::add_scaled`], so nothing is
+/// rounded on the way in; the register spans the format's whole product
+/// exponent range and then some, so no `i128` is too wide for it.
 macro_rules! impl_encode_from_i128_into_float {
     ($($t:ty),* $(,)?) => { $(
         impl EncodeFrom<i128> for $t {

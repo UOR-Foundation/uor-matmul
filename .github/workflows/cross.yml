@@ -83,8 +83,8 @@ jobs:
     # skip-guard below exists against. Intel's SDE executes AVX512VNNI
     # (its Icelake model), so the parity suite runs the sequences it skips
     # on every current runner. This is a correctness leg, never a timing
-    # one: an emulator's clock is not silicon's, and the VNNI break-even
-    # rows stay Unmeasured until a real host exists.
+    # one: an emulator's clock is not silicon's. The VNNI boundary rows are
+    # declaration-derived `build` claims and require no host clock.
     name: CB-02, AVX-512 VNNI parity under Intel SDE Icelake
     runs-on: ubuntu-latest
     steps:

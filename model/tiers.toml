@@ -147,13 +147,21 @@ honesty = "build"
 # the traversal. What it pays is `lane_bytes / block` bytes per product, so a
 # longer block buys traffic as well.
 #
-# `break_even_n` is the first `n` at which the table wins, and it is absent when no
-# `n` does --- either because `block = 1` names one element per code, or because
-# `block * lanes_per_add` does not even reach what one dense instruction covers.
+# `break_even_n` is the first `n` at which this declaration-derived reference
+# comparison wins. It is absent when no `n` does --- for the ordinary block-one
+# product build, and whenever `block * lanes_per_add` does not even reach what
+# one dense instruction covers. The contextual Scaled64 block-one builder is a
+# different declared operation census (lookup convolution plus Horner adds); its
+# CG-16 measurements are recorded as open evidence and explicitly found no
+# geometry-invariant scalar crossover, so they are not promoted into this
+# product-build derivation.
 #
 # CM-04 recomputes every `break_even_n` here from `code_space`, `block`,
-# `rows`, `lanes_per_add` and the row's dense-tile declaration, and checks the
-# first three against the codec's own `Enumerable` and `Codec` consts.
+# `rows`, `lanes_per_add`, `build_products_per_step`, and the row's dense-tile
+# declaration, and checks the first three against the codec's own `Enumerable`
+# and `Codec` consts. The exact comparison is
+# `n*q*(block*lanes-effective) > code_space*effective*block*lanes`; build and
+# gather density are independent declarations and cannot be substituted.
 # --------------------------------------------------------------------------
 
 [[tabulation]]
@@ -162,7 +170,7 @@ code_space = 16
 block = 1
 rows = 16
 lanes_per_add = 8
-note = "the i4 grid. One code, one element: the table saves the multiply and no adds, so no n makes it pay and `tabulation_pays` refuses it."
+note = "the i4 grid's ordinary product build: one code names one element, so the reference operation comparison saves no add and no n repays its build. This is not the contextual Scaled64 lookup/Horner declaration."
 honesty = "build"
 
 [[tabulation]]
@@ -180,7 +188,9 @@ code_space = 256
 block = 4
 rows = 16
 lanes_per_add = 8
-break_even_n = 1025
+build_products_per_step = 1
+break_even_n = 8193
+note = "the lookup build produces one table product per issued recurrence while the gather covers 32 products; pricing the two as the same density would understate the build by eight."
 honesty = "build"
 
 [[tabulation]]
@@ -189,8 +199,9 @@ code_space = 256
 block = 8
 rows = 16
 lanes_per_add = 8
+build_products_per_step = 8
 break_even_n = 683
-note = "the sign tier: one-bit codes, eight to a byte, over a [-1,+1] table. The same code space and block as E8's book, so the same break-even --- a longer block is what makes a table pay at all, and bound 1 is where the build's only multiply is a sign flip."
+note = "the sign tier: one-bit codes, eight to a byte, over a [-1,+1] table. Its bound-one AVX2 builder produces eight products per issued step, unlike E8's general lookup build, so equal code space and block do not imply equal break-even."
 honesty = "build"
 
 [[tabulation]]
@@ -199,8 +210,9 @@ code_space = 256
 block = 8
 rows = 16
 lanes_per_add = 8
-break_even_n = 683
-note = "E8. The row to read first: 683 is below every transformer layer width in practical use, and the amortization is over n, so it holds for a single decoded token as much as for a prefill. Measured, consistent with this derivation: the breakeven instrument (scaling.yml's x86 job, `just breakeven`) flips kernels to table between n = 512 and n = 683 on the CI x86 runner, which declares no AVX-512 and therefore resolves exactly this pair --- the crossing the runner's own lscpu line names."
+build_products_per_step = 1
+break_even_n = 5462
+note = "E8's general lookup builder emits one table product per issued recurrence; the eight-lane gather does not make that build eight-wide. CM-04 records the conservative declaration count. Wall-clock crossover remains CG-10/open and does not overwrite this derived instruction boundary."
 honesty = "build"
 
 [[tabulation]]
@@ -209,8 +221,9 @@ code_space = 256
 block = 8
 rows = 16
 lanes_per_add = 8
+build_products_per_step = 8
 break_even_n = 683
-note = "the sign tier as its own codec: one bit per element, the code being the index. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even --- what changes is not the op count but the gather, which reads the operand's own memory instead of a built index stream."
+note = "the sign tier as its own codec: one bit per element, the code being the index. The Gray walk inherits the AVX2 bound-one builder's eight-product declaration and changes only its build body/census."
 honesty = "build"
 
 [[tabulation]]
@@ -219,8 +232,9 @@ code_space = 256
 block = 4
 rows = 16
 lanes_per_add = 8
+build_products_per_step = 8
 break_even_n = 1025
-note = "the ternary tier as its own codec: two bits per element, the code being the index. The same code space and block as the Packed<Grid<4>,4> spelling, so the same break-even --- what changes is not the op count but the gather, which reads the operand's own memory instead of a built index stream."
+note = "the ternary tier as its own codec: two bits per element, the code being the index. Its bound-one AVX2 build covers eight products per issued step; the same-size general Grid lookup build does not."
 honesty = "build"
 
 [[tabulation]]
@@ -238,15 +252,15 @@ code_space = 4
 block = 1
 rows = 16
 lanes_per_add = 8
-note = "the float arena, at one representative code space --- the space is per-artifact, and at block = 1 the conclusion is the Grid<16> one: the table saves the multiply and no adds, so selection declines it and the byte-identical dense route runs (CD-14). The u8 code width (CK-14, CD-18) changes the residency and not this count. The scaled integer lane (CD-20) is what makes the table fit at all --- at 256 entries the slab is 8 bytes a word, not 80 --- so the forced traversal tabulates where it once declined; whether selection should follow is an op-kind question (a read and an add against a decode and a placement), not an instruction count, and CG-16's measurement is why it does not: the win is under 2.2x where the build amortizes over n, and 40--175x losses where it does not."
+note = "the float arena, at one representative code space --- the space is per artifact. Scaled64 (CD-20) keeps the slab at eight bytes a word and replaces the dense Atlas contraction with a balanced-octet lookup convolution plus Horner placement. That operation census is not Grid<16>'s product-build derivation. CG-16's retained open evidence found no geometry-invariant scalar threshold; forced Tabulated remains the measurement/control factorization without turning an overlapped clock result into a derived rule."
 honesty = "build"
 
 # --------------------------------------------------------------------------
 # The same derivation at the other pairs this workspace ships. Each section
 # names its two sequences; the numbers are declarations read off the specs,
 # and CM-04 recomputes them exactly as it does the AVX2 rows'. Only the codecs
-# with `block > 1` are repeated --- at `block = 1` no pair has an `n`, which is
-# the Grid<16> conclusion and does not move with the instruction set.
+# with `block > 1` are repeated. Their declaration-derived rows do not stand in
+# for the separately measured contextual Scaled64 block-one sequence.
 # --------------------------------------------------------------------------
 
 # NEON: `NEON_TABLE_LANES`, four `i32` lanes to a 128-bit add, against
@@ -275,6 +289,7 @@ block = 4
 rows = 16
 lanes_per_add = 4
 kernel_products_per_step = 16
+build_products_per_step = 1
 note = "one table instruction covers exactly what one dot-product instruction covers at this block, so the build is never repaid --- the AVX2 row's 1025 does not transfer to this pair."
 honesty = "build"
 
@@ -286,8 +301,9 @@ block = 8
 rows = 16
 lanes_per_add = 4
 kernel_products_per_step = 16
+build_products_per_step = 4
 break_even_n = 2049
-note = "the sign tier's composition spelling at this pair. The same code space and block as E8's book, so the same break-even."
+note = "the sign tier's composition spelling at this pair. The NEON bound-one builder produces four products per issued step."
 honesty = "build"
 
 [[tabulation]]
@@ -298,8 +314,9 @@ block = 8
 rows = 16
 lanes_per_add = 4
 kernel_products_per_step = 16
-break_even_n = 2049
-note = "E8 at the pair this host runs. Measured on an Apple M4 Max (aarch64, NEON with the dot-product extension), 2026-07-29, `tabulation_breakeven`: the shipped predicate flips from the kernels to the table between n = 2048 and 2049, exactly the derived crossing --- while the clock has the table ahead from n = 512 on, so the count is the conservative claim. The timing is `open` (CG-10); the crossing is this row."
+build_products_per_step = 1
+break_even_n = 8193
+note = "E8's general NEON lookup build produces one table product per issued recurrence. The four-lane gather density cannot be charged to that build; CG-10's wall-clock observation remains open and separate."
 honesty = "build"
 
 [[tabulation]]
@@ -310,8 +327,9 @@ block = 8
 rows = 16
 lanes_per_add = 4
 kernel_products_per_step = 16
+build_products_per_step = 4
 break_even_n = 2049
-note = "the sign tier as its own codec at this pair. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even."
+note = "the sign tier as its own codec at this pair. Its Gray walk retains the incumbent NEON bound-one builder's four-product declaration."
 honesty = "build"
 
 [[tabulation]]
@@ -322,13 +340,15 @@ block = 4
 rows = 16
 lanes_per_add = 4
 kernel_products_per_step = 16
+build_products_per_step = 4
 note = "the ternary tier as its own codec at this pair. The same code space and block as the Packed<Grid<4>,4> spelling, so the same conclusion: one table instruction covers exactly what one dot-product instruction covers, and no n repays the build."
 honesty = "build"
 
 # AVX-512 with VNNI: `A5_TABLE_LANES`, sixteen `i32` lanes to a 512-bit add,
 # against `AVX512_DPBUSD_I8_I32`'s 64 products a step --- the densest integer
-# sequence this workspace ships. Derived from the declarations and unmeasured:
-# no VNNI host was available, which is what the notes below keep saying.
+# sequence this workspace ships. These are `build` declarations recomputed by
+# CM-04 from the registered sequences. They are not wall-clock claims and need
+# no host timing to be complete.
 
 [[tabulation]]
 codec = "Packed<Grid<16>, 2>"
@@ -349,7 +369,7 @@ block = 4
 rows = 16
 lanes_per_add = 16
 kernel_products_per_step = 64
-note = "one 512-bit table instruction covers exactly what one `vpdpbusd` covers at this block, so the build is never repaid. Unmeasured: no VNNI host here."
+note = "one 512-bit table instruction covers exactly what one `vpdpbusd` covers at this block, so the declaration-derived comparison has no finite crossing."
 honesty = "build"
 
 [[tabulation]]
@@ -358,10 +378,10 @@ isa = "avx512"
 code_space = 256
 block = 8
 rows = 16
-lanes_per_add = 16
+lanes_per_add = 8
 kernel_products_per_step = 64
-break_even_n = 2049
-note = "the sign tier's composition spelling at this pair. The same code space and block as E8's book, so the same break-even. Unmeasured: no VNNI host here."
+build_products_per_step = 8
+note = "the sign tier resolves to the available AVX2 bound-one table sequence against the AVX-512/VNNI dense declaration; its 64-product gather only ties the dense tile, so the declaration-derived comparison has no finite crossing."
 honesty = "build"
 
 [[tabulation]]
@@ -372,8 +392,9 @@ block = 8
 rows = 16
 lanes_per_add = 16
 kernel_products_per_step = 64
-break_even_n = 2049
-note = "E8 on a VNNI host. The AVX2 table against this dense tile is the pair that never pays --- sixty-four against sixty-four, which CM-04's gemm half asserts --- but a VNNI host's table at a sixteen-row tile is the 512-bit one, twice the density of the dense instruction, and it wins from 2049. Unmeasured: no VNNI host here. The CI x86 runner is not one either --- its lscpu line and the breakeven instrument's resolved-pair print show it declares no AVX-512 at all (avx512_available() answers from avx512f and avx512bw, and without them the last admissible table is the AVX2 one and the dense side the AVX2 tile), so the artifact's flip between 512 and 683 is the AVX2 pair's crossing, not this one's. A flip at 683 on a host that resolved the 512-bit table would be a selection defect; the resolved-pair print is what would show it."
+build_products_per_step = 1
+break_even_n = 32769
+note = "E8 at the AVX-512/VNNI declaration pair. The 512-bit lookup gather covers 128 products, but its general builder still emits one product per issued recurrence; CM-04 therefore derives 32769 rather than assigning gather density to the build."
 honesty = "build"
 
 [[tabulation]]
@@ -382,10 +403,10 @@ isa = "avx512"
 code_space = 256
 block = 8
 rows = 16
-lanes_per_add = 16
+lanes_per_add = 8
 kernel_products_per_step = 64
-break_even_n = 2049
-note = "the sign tier as its own codec at this pair. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even. Unmeasured: no VNNI host here."
+build_products_per_step = 8
+note = "the Gray walk inherits the available AVX2 bound-one gather/build declaration; there is no separate AVX-512 bound-one TableSpec. Its gather ties the VNNI dense declaration and cannot repay the build."
 honesty = "build"
 
 [[tabulation]]
@@ -394,16 +415,16 @@ isa = "avx512"
 code_space = 256
 block = 4
 rows = 16
-lanes_per_add = 16
+lanes_per_add = 8
 kernel_products_per_step = 64
-note = "the ternary tier as its own codec at this pair. The same code space and block as the Packed<Grid<4>,4> spelling, so the same conclusion. Unmeasured: no VNNI host here."
+build_products_per_step = 8
+note = "the bound-one ternary table resolves to the available AVX2 builder; its 32-product gather is narrower than the VNNI dense declaration, so the declaration-derived comparison has no finite crossing."
 honesty = "build"
 
 # wasm SIMD128: `SIMD_TABLE_LANES`, four `i32` lanes to a 128-bit add, against
-# `SIMD128_I8_I32`'s eight products a step (`i32x4_dot_i16x8`). The same ratio
-# as the AVX2 pair, so the same numbers. Derived from the declarations and
-# unmeasured: the wasm sequences run under wasmtime in `just cross-run` for
-# correctness (CB-05), not for time.
+# `SIMD128_I8_I32`'s eight products a step (`i32x4_dot_i16x8`). These are also
+# `build` declarations. `just cross-run` executes their correctness witnesses
+# under wasmtime (CB-05); no clock measurement is part of CM-04's claim.
 
 [[tabulation]]
 codec = "Packed<Grid<16>, 2>"
@@ -424,7 +445,8 @@ block = 4
 rows = 16
 lanes_per_add = 4
 kernel_products_per_step = 8
-break_even_n = 1025
+build_products_per_step = 1
+break_even_n = 4097
 honesty = "build"
 
 [[tabulation]]
@@ -433,10 +455,10 @@ isa = "wasm"
 code_space = 256
 block = 8
 rows = 16
-lanes_per_add = 4
+lanes_per_add = 1
 kernel_products_per_step = 8
-break_even_n = 683
-note = "the sign tier's composition spelling at this pair. The same code space and block as E8's book, so the same break-even."
+build_products_per_step = 1
+note = "wasm ships no SIMD bound-one TableSpec, so Auto resolves the portable one-product build and one-lane gather. The gather only ties the dense step and no n repays the build."
 honesty = "build"
 
 [[tabulation]]
@@ -447,8 +469,9 @@ block = 8
 rows = 16
 lanes_per_add = 4
 kernel_products_per_step = 8
-break_even_n = 683
-note = "E8 at the wasm pair: half the table width and half the dense width of the AVX2 row, which cancel, so the AVX2 number."
+build_products_per_step = 1
+break_even_n = 2731
+note = "E8 at the wasm pair: the SIMD gather is four lanes wide while the general lookup build remains one product per issued recurrence."
 honesty = "build"
 
 [[tabulation]]
@@ -457,10 +480,10 @@ isa = "wasm"
 code_space = 256
 block = 8
 rows = 16
-lanes_per_add = 4
+lanes_per_add = 1
 kernel_products_per_step = 8
-break_even_n = 683
-note = "the sign tier as its own codec at this pair. The same code space and block as the Packed<Grid<2>,8> spelling, so the same break-even."
+build_products_per_step = 1
+note = "the Gray walk inherits wasm's portable bound-one TableSpec; the one-lane gather only ties the dense step, so no n repays the build."
 honesty = "build"
 
 [[tabulation]]
@@ -469,10 +492,10 @@ isa = "wasm"
 code_space = 256
 block = 4
 rows = 16
-lanes_per_add = 4
+lanes_per_add = 1
 kernel_products_per_step = 8
-break_even_n = 1025
-note = "the ternary tier as its own codec at this pair. The same code space and block as the Packed<Grid<4>,4> spelling, so the same break-even."
+build_products_per_step = 1
+note = "wasm's bound-one ternary table resolves to the portable sequence; its four-product gather is narrower than the dense step, so no n repays the build."
 honesty = "build"
 
 # --------------------------------------------------------------------------

@@ -1,0 +1,1204 @@
+CG16_UTC=2026-08-08T18:32:10Z
+Linux codespaces-8604ef 6.8.0-1052-azure #58~22.04.1-Ubuntu SMP Thu Mar 26 05:02:21 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+model name	: AMD EPYC 7763 64-Core Processor
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: x86_64-unknown-linux-gnu
+release: 1.97.1
+LLVM version: 22.1.6
+cargo 1.97.1 (c980f4866 2026-06-30)
+CG16_HEAD=54cca2ad51fae469e5a342902b034196c34cc3bf
+CG16_BRANCH=agent/pure-uor-float-fractal
+CG16_RUSTFLAGS=
+CG16_STATUS_BEGIN
+ M .github/workflows/cross.yml
+ M .github/workflows/scaling.yml
+ M AGENTS.md
+ M ANALYSIS.md
+ M ARCHITECTURE.md
+ M CONFORMANCE.md
+ M Cargo.lock
+ M Justfile
+ M MEASUREMENT-LOG.md
+ M README.md
+ M VERIFICATION.md
+ M crates/uor-matmul-codec/src/codecs.rs
+ M crates/uor-matmul-codec/tests/codec.rs
+ M crates/uor-matmul-conformance/api-baseline.txt
+ M crates/uor-matmul-core/src/acc.rs
+ M crates/uor-matmul-core/src/alphabet.rs
+ M crates/uor-matmul-core/src/generated.rs
+ M crates/uor-matmul-core/src/lib.rs
+ M crates/uor-matmul-gemm/Cargo.toml
+ M crates/uor-matmul-gemm/src/collapse.rs
+ M crates/uor-matmul-gemm/src/driver.rs
+ M crates/uor-matmul-gemm/src/epilogue.rs
+ M crates/uor-matmul-gemm/src/float.rs
+ M crates/uor-matmul-gemm/src/kernel.rs
+ M crates/uor-matmul-gemm/src/lib.rs
+ M crates/uor-matmul-gemm/src/strassen.rs
+ M crates/uor-matmul-gemm/src/tabulated.rs
+ M crates/uor-matmul-kernels/Cargo.toml
+ M crates/uor-matmul-kernels/src/isa/absent_arm.rs
+ M crates/uor-matmul-kernels/src/isa/absent_wasm.rs
+ M crates/uor-matmul-kernels/src/isa/absent_x86.rs
+ M crates/uor-matmul-kernels/src/isa/arm.rs
+ M crates/uor-matmul-kernels/src/isa/wasm.rs
+ M crates/uor-matmul-kernels/src/isa/x86.rs
+ M crates/uor-matmul-kernels/src/lib.rs
+ M crates/uor-matmul-kernels/src/lookup.rs
+ M crates/uor-matmul-kernels/src/spec.rs
+ M crates/uor-matmul-kernels/src/table.rs
+ M crates/uor-matmul-kernels/tests/parity.rs
+ M crates/uor-matmul-model/src/codegen.rs
+ M crates/uor-matmul-model/src/derive.rs
+ M crates/uor-matmul-model/src/lib.rs
+ M crates/uor-matmul-model/src/registry.rs
+ M crates/uor-matmul-validate/Cargo.toml
+ M crates/uor-matmul-validate/benches/scaling.rs
+ M crates/uor-matmul-validate/src/lib.rs
+ M crates/uor-matmul-validate/tests/block_sweep.rs
+ M crates/uor-matmul-validate/tests/bridge_sweep.rs
+ M crates/uor-matmul-validate/tests/environment.rs
+ D crates/uor-matmul-validate/tests/op_cost_fit.rs
+ M crates/uor-matmul-validate/tests/strassen_sweep.rs
+ M crates/uor-matmul-validate/tests/symbol_tabulated_sweep.rs
+ M crates/uor-matmul/src/raw.rs
+ M crates/uor-matmul/src/slice.rs
+ M crates/uor-matmul/tests/float_workspace.rs
+ M crates/uor-matmul/tests/raw.rs
+ M docs/conceptual-model/README.md
+ M features/suites/codec.feature
+ M features/suites/determinism.feature
+ M features/suites/environment.feature
+ M features/suites/purity.feature
+ M features/suites/scaling.feature
+ M features/suites/structural.feature
+ M model/authorities.toml
+ M model/constants.toml
+ M model/ids.toml
+ M model/ledger.toml
+ M model/tiers.toml
+ M model/widths.toml
+ M xtask/src/api.rs
+ M xtask/src/audit.rs
+ M xtask/src/census.rs
+ M xtask/src/main.rs
+?? crates/uor-matmul-conformance/tests/public_float_api.rs
+?? crates/uor-matmul-conformance/tests/uor_float_foundation.rs
+?? crates/uor-matmul-core/src/float_atlas.rs
+?? crates/uor-matmul-gemm/src/generated_atlas_dispatch.rs
+?? crates/uor-matmul-kernels/src/generated_capacity.rs
+?? crates/uor-matmul-kernels/tests/native_nibble_lookup.rs
+?? crates/uor-matmul-validate/benches/scaling/
+?? crates/uor-matmul-validate/src/float_corpus.rs
+?? crates/uor-matmul-validate/tests/uor_float.rs
+?? crates/uor-matmul-validate/tests/uor_float_sweep.rs
+?? xtask/src/uor_float.rs
+CG16_STATUS_END
+CG16_SOURCE_HASHES_BEGIN
+ecc3c605f188856daae87aae5e9ca5536ce621970ec4c737febc6e7628dbc7f2  .cargo/config.toml
+287d7784819bfdaf257aa5435fc92889ee6504228819f2b03e45e2a73aa67bc3  Cargo.lock
+12c023ab4b58599fa168cbf5169f38685bda5de6b28c2a7c7cb4ebdc9eb4ce94  Cargo.toml
+8b88c4460ed6c197d452b45557c9cb99099b686d8c54ed54db01505d8d4d733f  Justfile
+a3748a09707fb97878197c196bc35fca599c91ef328a510432ffb46f5b72be76  crates/uor-matmul-codec/Cargo.toml
+d366f8068fad13584272b256da2e7122cdc8cb6b64bce0c7bf72655073e4cf41  crates/uor-matmul-codec/src/codecs.rs
+aab308efe9d95cffdeab99c8f4f3151089086b2d876498428f016f33561ef079  crates/uor-matmul-codec/src/e8.rs
+ca608c9af4b112f530e4314455fcbafe6de9945d345c57eb93b996be9cad5370  crates/uor-matmul-codec/src/kappa.rs
+eb9ec583db787689b0f3a0668d88ee768bd9fe6089ac145128ca578cb4ba7baf  crates/uor-matmul-codec/src/lib.rs
+256f8873ba3fa8e3b694e9d5ab2ffc69bfbc04a551f114e7a4096a9e3f7b8251  crates/uor-matmul-codec/src/matrix.rs
+a4dda3938a8914dcc019631deb4e2feebd9f780af6198997751ce3d775cf76cb  crates/uor-matmul-codec/src/tier.rs
+b0354214bff95fc9557aa3d0b3fa269bf65639278d99a081b8251a7de7450b75  crates/uor-matmul-codec/tests/codec.rs
+83c35d161c093bf3aeb4de5a71a13f1ac9a717ec52e07323b8a68f94169005b1  crates/uor-matmul-conformance/Cargo.toml
+9a81a5a52e51b4bd6f5e203857bc4aad628f67065b9700cdfdbfb0a3daab0a90  crates/uor-matmul-conformance/src/harvest.rs
+a3ca9272452c5ae1841b15e1e124c47cb93c6690e227ec408852e4d810d7e15e  crates/uor-matmul-conformance/src/lib.rs
+878c72fe37b7e5f8d3480b741a7712d91e96bcee5a0c6f25a85f2a4f3ca1cd82  crates/uor-matmul-conformance/src/meta.rs
+5c069814f323dd6881e2b32fd27cde0e05f842189a7559ef9b999fb258e83930  crates/uor-matmul-conformance/src/runner.rs
+dcd43e34daf417bfefff4dfb25b1ecb5baecff441c0d802022893dfaa3b776e9  crates/uor-matmul-conformance/tests/bdd.rs
+b9dd1275944b6706018f0ab423aaefd3d4b4714d78543c166ee27345a1882785  crates/uor-matmul-conformance/tests/cortex_m.rs
+ef3a1c3d5cd8b1c5eca9fabd00fd363bcf037a0ec8f05c1624573198d484f292  crates/uor-matmul-conformance/tests/environment.rs
+03bb9bd7397ab1d0ac37eeba86e9f3d22c16b579f8e94053254d3ca23aa825a2  crates/uor-matmul-conformance/tests/issue_census.rs
+f002ae0b85104d8bc5fd4380da64f18b97cd9477088053869c336f5f88defeef  crates/uor-matmul-conformance/tests/public_float_api.rs
+c47a02c29de56162af449046104866bbba6a4527759507cc48703e405622f0ea  crates/uor-matmul-conformance/tests/uor_float_foundation.rs
+2c300eed4eb37979f66ce5930c020f826d8c293b8bbaab76e5f3a2eb744d211e  crates/uor-matmul-core/Cargo.toml
+816248b24565d5b4a9dfa4f757bf88d53178d5a3073c224ba79860b99481b6e3  crates/uor-matmul-core/src/acc.rs
+0b11d9e44a0f72fc7a5b37efc90df4134de7c74e1a5f727e96ff04c54a5d30c3  crates/uor-matmul-core/src/alphabet.rs
+4078cf6ef3bd63260bb0d27902f565197073c38afdcbeb57952ce2dff2d8bfee  crates/uor-matmul-core/src/bounds.rs
+7997af0edd72c99062b2485a5f9bd9e20be96dbae90115d544eebb91836721be  crates/uor-matmul-core/src/dot.rs
+394d331f06bee3a1f29a9eb3ff129ecc0c2ff3ada4ac91262dd63e79bd4aa3a5  crates/uor-matmul-core/src/error.rs
+0b5588f626e79848087645ae2f8a242845482a2c9aef8eb8586bbabc6ee005a9  crates/uor-matmul-core/src/float_atlas.rs
+ee7e2b77a38222c32d1c6a9e330f4b28ecb925daa07d774a875842796c3c94cf  crates/uor-matmul-core/src/gauge.rs
+a79ff11df5c9da8edfa6e8743cb0a17296459ef779e2bca75ad09363360935c0  crates/uor-matmul-core/src/generated.rs
+bda5537d0834e752e743eeec1041bef69685921d0b0bdcd53a711f0dda7044a5  crates/uor-matmul-core/src/layout.rs
+632aed2a42d205d4804c82ea3cfdce6e0cf7061b0bfb67d7df793b12deb78d8b  crates/uor-matmul-core/src/lib.rs
+d018e7e1e35a70c883819c2110588bebf8fc50bc7f0983a95ee8941848f29096  crates/uor-matmul-core/src/policy.rs
+073c870684cd9eb0b77492569bd24dc58b198fa4a23ed87f995e359ffc4d2f11  crates/uor-matmul-core/src/semiring.rs
+6e05ca8d6ddb4f6e57e3122951760e85bedeab3b80eb32fe23abb944264575d8  crates/uor-matmul-core/src/tropical.rs
+e4e164b385008754ce27a47854cf97d14b0efb6524f6c229a2505a818f243305  crates/uor-matmul-executor/Cargo.toml
+7210c31a32aee66e478402df8d2dea577028986e3861879757ba8bed917f0b90  crates/uor-matmul-executor/build.rs
+1db37395a3080c78d953d44ba62759fd09c254685041afed489f005d02e70e11  crates/uor-matmul-executor/src/main.rs
+405d1e30217146f7c1fe5c62471fa6d8301412135a86763f1a2dc103f9501f62  crates/uor-matmul-gemm/Cargo.toml
+af05a9c847b5729d9d6ed8305775f2fc6c916728331e051ced991944466d7330  crates/uor-matmul-gemm/src/coded.rs
+c22852d855fd89094c0bea718575d3aa948ae77d8fc0a75f9972403a99c74035  crates/uor-matmul-gemm/src/collapse.rs
+7e500c864e25a4c4ed732e1b9b2e017bbab89203e61c8f65eb928c2ced848718  crates/uor-matmul-gemm/src/driver.rs
+5ba45a0eee9a4a9976e8e881abc8269effbfd50a8f62dfdf3eb794996875f314  crates/uor-matmul-gemm/src/epilogue.rs
+de757e1b87b03d19b82763ea6d064816e96bcef2e68f7a1215a440ec45c146a4  crates/uor-matmul-gemm/src/float.rs
+4a758e5d18b27bae51201999966040704ac214d4e5e832d5991d47aeaf49c36d  crates/uor-matmul-gemm/src/generated_atlas_dispatch.rs
+0ec0bb16acc9db1a962609b0f0914c756a78cf8e777abef66534dc4a107d7b03  crates/uor-matmul-gemm/src/kernel.rs
+127ab847939542253d03984452a2dda061d9055bbc9cdac7206a6025aee18669  crates/uor-matmul-gemm/src/lib.rs
+f9b1be42fb06500aaa6d75cc7ed43859ee2be19289ccc680448f9c4790418568  crates/uor-matmul-gemm/src/partition.rs
+0fb61e420dc5c461b6e453f80cc3e70c41ef00a665deeb39ec44fb0aaacb1488  crates/uor-matmul-gemm/src/scratch.rs
+7bc222c62aa334728019269bdd9686ab9a70305e8d9bb4ee68d75623224bf27e  crates/uor-matmul-gemm/src/selection.rs
+c58820cc020ca60e4c26c52e2d0c0267a674cc04f0e45d176aa8581f54d70757  crates/uor-matmul-gemm/src/strassen.rs
+056066ae6cef811c089802f38ec01a3b8d7b7016c4489e5d541d73acba9b5a9d  crates/uor-matmul-gemm/src/tabulated.rs
+2047339a519b525f7046cc413e777739cfd6a5dd4509c0795c36ddf48a973cf7  crates/uor-matmul-kernels/Cargo.toml
+9d30dd557d21ff786eaa81c74de2194fdc278a252ddeb28c01c1db6974d51071  crates/uor-matmul-kernels/src/generated_capacity.rs
+a742d42f37ec2d5b33bcd1e8f115bacdb10b9842b185daba3f28561a26fa1253  crates/uor-matmul-kernels/src/isa/absent_arm.rs
+7453602845693593bdb9db630ceb72e577ec406bb400b61068ef860dd7c323d7  crates/uor-matmul-kernels/src/isa/absent_wasm.rs
+3f312c5f846c48142ffa2f80e3024ce684a9d7fc5998f3597d3056efe6113496  crates/uor-matmul-kernels/src/isa/absent_x86.rs
+3dc3b66dd252623cdcb0f579e4dd7c94a2cfd6e227b0d49c7a367a308a581f65  crates/uor-matmul-kernels/src/isa/arm.rs
+e9d83a795cbda8d4c8a64817e91ff8bca47d1d9d48073c940e56ca354a1574d8  crates/uor-matmul-kernels/src/isa/mod.rs
+1c8db4845c8172480744f7d14d640ae89c248bd1c238829f015d09d245f23efb  crates/uor-matmul-kernels/src/isa/portable.rs
+cac0ed7ad74c2514a180b1d8b1c44d689746084b48a59ffbaab302a194cf7b4a  crates/uor-matmul-kernels/src/isa/wasm.rs
+5a55309cff22b3a100fff564bbd9d109f1f75b51abcca079053198aeeacb6ab9  crates/uor-matmul-kernels/src/isa/x86.rs
+60d903dc770e46a2a738c476c86e4959b12bc31fbb38f1e45248613de2dae8c4  crates/uor-matmul-kernels/src/lib.rs
+982d1216b9ba03b90ca5b50fc0b8877ecf0368a8a956887cc807fbdcb1d83407  crates/uor-matmul-kernels/src/lookup.rs
+0335fb1cee003daf0f26824a85dedcb98ed91a016e800b186fff77cc1acdbe53  crates/uor-matmul-kernels/src/parity.rs
+f277142e0c781ccc1516c83be0a7a47962b6c9b3276b4e7e77b3ecee16cae0de  crates/uor-matmul-kernels/src/spec.rs
+aecd2221392e1bc9f099add0c276d9a5c2d49d771439e258def95d7f031dcf6b  crates/uor-matmul-kernels/src/table.rs
+9a2468a5ce75c4071238822d45fa5d67f59395c5ded393940c863318a35ba73b  crates/uor-matmul-kernels/src/tropical.rs
+d58463131fb3faf96cd5f26ec13eb35191e21959a0caf447456a28e458ee0cf7  crates/uor-matmul-kernels/tests/native_nibble_lookup.rs
+4ad824ffedf7f54a0b6b786ff037643aa1bde7ddff5492b00a8746c5c3a8ca86  crates/uor-matmul-kernels/tests/parity.rs
+4c3be35867f6bd4b660004e1b3cef572b31aea547af855c4b9fa5c73ec75e392  crates/uor-matmul-kernels/tests/swar_sweep.rs
+9c9904424dbe3c59ec0e98f5b1ecd91eb43d3228981ddfa9ff77f4966ff8ccaf  crates/uor-matmul-model/Cargo.toml
+2f2d6ca1543a8ef2ae849d6b0cb2e9c50d1cb4096bec112705002115a991a1e8  crates/uor-matmul-model/src/codegen.rs
+42c25faadff8d7d241bf1cbcc406942f77f0319a9c56ead59058d8623c63f74c  crates/uor-matmul-model/src/derive.rs
+afec40532e39899273a6644fb92c3a90ce81c48730c1684a0404194e78134416  crates/uor-matmul-model/src/lib.rs
+111ee03e4a500a21e5e580d678bc5766e6834dab67d22904c6cf117f875a8d45  crates/uor-matmul-model/src/registry.rs
+cd0fae521eda5a176c687fa84b5d99e4cbbe3e04a7aa1fdaa2ef0fb01a72e430  crates/uor-matmul-validate/Cargo.toml
+f625fe12f2bd0f40c01170a7d6ae07b1c2d61d149c8962804d94811f7036e442  crates/uor-matmul-validate/benches/scaling.rs
+60a396ab08b577a5cdccdd54bed8fbb61c7149f779ba94f166cc89f973f3d262  crates/uor-matmul-validate/benches/scaling/native_lookup.rs
+b3bf139a4c123c99fb135de96d0bfa2f026c459b2820071e8e2179d4be6ba3ce  crates/uor-matmul-validate/examples/collapse_sweep.rs
+1f0dc699534f2668f7f9600bef9d5ee24dd4299a7d90dbc636fb8a520e049dba  crates/uor-matmul-validate/examples/float_tabulation.rs
+4b8e35cd32ab09c81d0d8fac2da08271566d92b34c2fc26f557b186a8c02afa5  crates/uor-matmul-validate/examples/oracle_sweep.rs
+373b51178e7b746ec7cc448ae52399bfd69623f51395ba42222e8e8336374165  crates/uor-matmul-validate/examples/tabulation_breakeven.rs
+8060c7d003ba8ee5d9302cba5a08c97d00ba2644d686d4edb3768742d7f96f0c  crates/uor-matmul-validate/examples/tabulation_sweep.rs
+647ee6fb1b8251caf802c76edbae3c852cb4aa8cd7a4c99e42d82b35d793bd9c  crates/uor-matmul-validate/src/bin/benchmark_report.rs
+6787a8fad80c31940421b9b548a1eb8d15c47ae3af3d30b1fba4072a8411f3a3  crates/uor-matmul-validate/src/coissue.rs
+e0003e7116129aa74e25be4a5a7e110559176e81f169ce8b6a011ddb4ef48134  crates/uor-matmul-validate/src/corpus.rs
+52ecf3fcbd8cefc44ecf7f32120e6f5f1ecc7914b50f1b9ec494e4e3b224317f  crates/uor-matmul-validate/src/counting.rs
+4ac6d9bc06e43c5d206de79360f5e6005fa2b425c6b0ab080a5550460f6d4f24  crates/uor-matmul-validate/src/float_corpus.rs
+842f12c581f27a2c3fd147c981f00cb47b9ffb45e806e062c1e4314c5d1e424a  crates/uor-matmul-validate/src/float_tab.rs
+fded5ad9274c30496b641a30531ed71aa7f915d15e8f8df13265973b2da56111  crates/uor-matmul-validate/src/lib.rs
+5cef60c58a8280f297cb4ff330ff57594f9ec77826207ba6e18d5b8c035e1260  crates/uor-matmul-validate/src/oracle.rs
+d28272b499ee13ec6442174e08f9a90bcafbfe8fd2fb0b2862c2a877f701086c  crates/uor-matmul-validate/src/scaling.rs
+a60aa96f016efb45964cd8d4bd08c98cca7ee828c19401d9ed397b00e4e9f902  crates/uor-matmul-validate/tests/block_sweep.rs
+268b1e8a20ca7415c0bebd5505c53bc28a447eaefc1baf06dfe6179d387d718c  crates/uor-matmul-validate/tests/bridge_sweep.rs
+8a5919d128702cb9adb1731730dafa3d6f498ffed33b1bec75c268013631ae87  crates/uor-matmul-validate/tests/common/mod.rs
+85f9d5216161d5e4b419ab04c68b2dd6bae2aa8b61f23c7034c5740b4e3ea43a  crates/uor-matmul-validate/tests/cross_library.rs
+87ec9b791a8792a0911a511b25f7b2012c542ea84c2c4f5a5c34c241f865047c  crates/uor-matmul-validate/tests/environment.rs
+987e8ee5bc5fdea6f0d9e9bc973ccd042d68d25596687f33d935481353a9ebfe  crates/uor-matmul-validate/tests/float_oracles.rs
+ff2344702706e101f6f1797d702f2c165d6c18468dfe8c10b2a387b73684063e  crates/uor-matmul-validate/tests/massive.rs
+0cdb9d476ef124a56857226e95f60360e1c4b6c7ca790eed8d1472cd92309150  crates/uor-matmul-validate/tests/numpy.rs
+329f0ee9ea5e8981a94957cc23234378338fa49665df6df9c1abe087cfda0627  crates/uor-matmul-validate/tests/provenance.rs
+181eca87c2f7dcdeb1e6348edfc9503b7ecdd7cb6ab25ab642a0f87e56376c1f  crates/uor-matmul-validate/tests/scaling_report.rs
+df4cdf4ad1128aa351f77c03555afc91306a89aea15b7973a5f4ba39360129da  crates/uor-matmul-validate/tests/selection.rs
+eadd77d59845f671a0181480492709939b8680992699b2f9402f827931794da5  crates/uor-matmul-validate/tests/strassen.rs
+0b6782018c95216bdfb3483c3c4bb864d2f7369f681cd2b12107bf767236704a  crates/uor-matmul-validate/tests/strassen_sweep.rs
+d575c3cc349277b1b9342f214d522362731465b9b128d116f3ecbc8488831c44  crates/uor-matmul-validate/tests/symbol_bandwidth.rs
+0b125d0e1b309570ddf5cce566e14392cd165d2a750c612a3ffe82d76400f965  crates/uor-matmul-validate/tests/symbol_corpus.rs
+2d262d5465efb2f643f1ec383ffb9ceca1af2ddd61e1c55f0486dfb148d93c2f  crates/uor-matmul-validate/tests/symbol_tabulated_sweep.rs
+7f8d6dc41aee66a4bbe30781399d7032dd42afb011a5fdb6a41916ba7f819c04  crates/uor-matmul-validate/tests/tropical_oracle.rs
+bc7ca7ce854732ae979e8f5adda7ce48089a021c5f430f4617a9ec62e044358a  crates/uor-matmul-validate/tests/tropical_sweep.rs
+0788eb16d5dfc3c3fafc0bdfd88da7e2e323e51c1069ffdc8f9da871db54e835  crates/uor-matmul-validate/tests/uor_float.rs
+54162a9c91e6c4650fa82679e840295b590a263fc3e9721a806fa412ed6d8136  crates/uor-matmul-validate/tests/uor_float_sweep.rs
+b76328a59dc6c3eeb8f2e37eb12ce95b6f79a5cc85d8f00ac101c9cf4772a162  crates/uor-matmul/Cargo.toml
+436c16b0c166886df62fcb74cb4b06d4b45c1cc8e18ce18e152665e391e7c004  crates/uor-matmul/src/lib.rs
+6fedafc056a256d966110a6f54a59595a32e63e350d6495b9e4dd729613edbef  crates/uor-matmul/src/raw.rs
+09ac4be40355e5f38ab6c2656ef1a844e7b30734132dabe1179b79d084c3eedf  crates/uor-matmul/src/slice.rs
+b8529462d5dec4d4b72ddebd9a1e925e458af4247663f9162b99e8024122cc4e  crates/uor-matmul/tests/auto.rs
+62ecf66884c71051e98967d8d0a80a212b327e8e82249616055bd9c944857114  crates/uor-matmul/tests/float_workspace.rs
+2dce5150fa72d943f6f383e985f3080ec61be7b943a4a3ac97e4820ec630e0f5  crates/uor-matmul/tests/raw.rs
+eca644fb145a73089139f980260ad4e50910dba303e5540cd1857477d78a82e9  crates/uor-matmul/tests/workspace.rs
+7cf7c40eae161c2f5652c470949032b41cb00b942f5424f0a9cc500be34d5d55  model/authorities.toml
+306d0914490e07c8fe462ce38f7fa6d9588bb9b97937623f12a775f5f488fb76  model/constants.toml
+325e2c8bd04961ba36810bdf14c39a77dd4bec002accd1f2780ef88474a5a99d  model/ids.toml
+5faea90afbcdbcf789c8a6c30c9844b76b90eefccfe24eb2e5f4f01bf433f7b3  model/ledger.toml
+f78155cf6d2cfc8b3beef0f6727de3fe3d94c8f36d59318dfa2063fcaf038ab7  model/oracles.toml
+fe6c03698d871fc8556f3e6cc1388e3430053af63aa95a725fbaecc34f0d40b7  model/tiers.toml
+61d95e052695a60da927ef5e3c3eeb2701a065f3f9f1ea9a7e529f2231578c75  model/widths.toml
+ab31e7cd341da17e1574ed40c4a2e99433410ba2fbb659e39dcd3d7a4fd19677  rust-toolchain.toml
+5e91b89bc80eeb2ac065ac6124a0753496292a0ebbfa4c84f8c252237cb26f84  xtask/Cargo.toml
+7091eed20416a1a562ab5228c6246f41afe70b4f80750e69cd7b72379abb6616  xtask/src/api.rs
+8c98cdb2a5caf92d3596d324e7fe9130c1daf80c758db473697d158c52c03dae  xtask/src/audit.rs
+1d91625c4ef277f319d2694d75d61187fe90d6d20404f83ebaec835c13cfc547  xtask/src/census.rs
+97955fdf64cdc74ac67f7e6565e25559bd6a50d622f336fcdaa61d97a15dd0db  xtask/src/main.rs
+3187ed95bfc5887ea046be44b062fbab6cb19c91b818f5106d72863be264e6d3  xtask/src/uor_float.rs
+CG16_SOURCE_HASHES_END
+CG16_SOURCE_MANIFEST_PRE=88f1ee00d2e4e1a60b70a8568f6b4aadcaca40ae4ba2044298436d4602dbeed1
+CG16_INVOCATION=cargo test -p uor-matmul-validate --test symbol_tabulated_sweep symbol_tabulated_selector_structure_and_plants_cg_16 -- --exact --nocapture --test-threads=1
+   Compiling uor-matmul-gemm v0.1.0 (/workspaces/uor-matmul/crates/uor-matmul-gemm)
+   Compiling uor-matmul v0.1.0 (/workspaces/uor-matmul/crates/uor-matmul)
+   Compiling uor-matmul-validate v0.1.0 (/workspaces/uor-matmul/crates/uor-matmul-validate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.69s
+     Running tests/symbol_tabulated_sweep.rs (target/debug/deps/symbol_tabulated_sweep-86207cc51fcd7674)
+
+running 1 test
+test symbol_tabulated_selector_structure_and_plants_cg_16 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.12s
+
+CG16_INVOCATION=cargo test -p uor-matmul-validate --test symbol_tabulated_sweep symbol_tabulated_replay_reconciles_live_census_cg_16 -- --exact --nocapture --test-threads=1
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.62s
+     Running tests/symbol_tabulated_sweep.rs (target/debug/deps/symbol_tabulated_sweep-86207cc51fcd7674)
+
+running 1 test
+test symbol_tabulated_replay_reconciles_live_census_cg_16 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.14s
+
+CG16_INVOCATION=cargo test --release -p uor-matmul-validate --test symbol_tabulated_sweep symbol_tabulated_value_blind_boundary_cg_16 -- --exact --ignored --nocapture --test-threads=1
+   Compiling uor-matmul-gemm v0.1.0 (/workspaces/uor-matmul/crates/uor-matmul-gemm)
+   Compiling uor-matmul v0.1.0 (/workspaces/uor-matmul/crates/uor-matmul)
+   Compiling uor-matmul-validate v0.1.0 (/workspaces/uor-matmul/crates/uor-matmul-validate)
+    Finished `release` profile [optimized] target(s) in 1m 55s
+     Running tests/symbol_tabulated_sweep.rs (target/release/deps/symbol_tabulated_sweep-87a34962900fbbd3)
+
+running 1 test
+test symbol_tabulated_value_blind_boundary_cg_16 ... CG-16 hash_prefix=16 q_ceiling=8935141660703064063 q_tag_base=8935141660703064064
+model,coordinate,central_s,lower95_s,upper95_s
+table,intercept,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,columns,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,hash_coordinates,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,workspace_clear_words,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,entry_attempt_ceiling,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,activation_observations,1.568136695854e-7,6.532018767169e-8,1.743914199439e-7
+table,book_site_ceiling,4.494847587145e-6,2.723605909446e-6,4.494847587145e-6
+table,activation_projections,3.935658496799e-8,1.983722268526e-8,6.536706410367e-8
+table,row_source_sites,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,tile_source_sites,2.230746175211e-8,6.533266093941e-9,2.286137805550e-8
+table,demand_build_ceiling,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,resident_lane_words,0.000000000000e0,0.000000000000e0,1.017594471641e-8
+table,padding_words,0.000000000000e0,0.000000000000e0,0.000000000000e0
+table,tile_block_presentations,1.700018635306e-5,1.202456200407e-5,1.700018635306e-5
+dense,intercept,0.000000000000e0,0.000000000000e0,0.000000000000e0
+dense,output_cells,1.096853106746e-6,1.016350585995e-6,1.696087564641e-6
+dense,dense_decodes,0.000000000000e0,0.000000000000e0,0.000000000000e0
+dense,row_source_sites,1.632301143094e-7,1.632301143094e-7,1.937858242867e-7
+dense,dense_calls,0.000000000000e0,0.000000000000e0,4.238324947318e-7
+dense,dense_joins,6.825864157037e-7,3.118535566248e-8,2.416526845133e-6
+fit,table,active=5,rss=2.962146178607e-6
+fit,dense,active=3,rss=1.282755807339e-5
+calibration_key,ids,table_target_s,table_fit_s,dense_target_s,dense_fit_s
+D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,C01,5.077436597534e-7,2.171351165651e-5,2.396753902286e-7,1.260083221056e-6
+D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,C02,2.567581363706e-6,3.101091439412e-5,1.329827948046e-6,4.269940006095e-6
+D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,C26,8.946205599168e-4,1.422334440954e-3,1.445750196986e-2,1.397189718041e-2
+D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,C06,5.645502389946e-5,9.028989479937e-5,1.170978631770e-3,1.053120093602e-3
+D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,C21,4.136432742822e-4,8.397088019736e-4,7.394960648994e-4,8.281181723855e-4
+D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,C14,1.795789721320e-3,1.149419329543e-3,5.051399894475e-3,4.294784460033e-3
+D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,C13,1.233663373039e-3,1.149419329543e-3,5.084389402187e-3,4.294784460033e-3
+D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,C03,1.233189709334e-5,4.703259155680e-5,5.046289801658e-5,3.545304821387e-5
+D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,C16,3.188452879262e-4,2.205477050652e-4,2.907913991417e-3,3.669009046866e-3
+D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,C15,9.154300411967e-5,2.205477050652e-4,3.062108422060e-3,3.669009046866e-3
+D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,C27,5.800022550010e-5,1.764318918443e-4,5.037581329569e-5,1.538393072463e-4
+D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,C07+C29,2.692622646040e-4,4.092880344910e-4,7.644516664741e-5,1.772932199596e-3
+D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,C08,2.959450530271e-4,3.229790436562e-4,5.694370873400e-4,1.517644880123e-3
+D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,C22,2.216407535799e-5,1.893600653074e-4,1.264555871715e-4,3.287853804693e-4
+D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,C24,1.470509289037e-4,2.291684323185e-4,2.107620675202e-3,1.588502555787e-3
+D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,C23,1.045474424568e-4,2.291684323185e-4,2.182451614182e-3,1.588502555787e-3
+D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,C17+C31,3.591008564530e-4,2.316536586506e-4,2.735182336791e-5,6.446205955210e-4
+D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,C18,3.462941489717e-4,2.316536586506e-4,2.676146144853e-4,5.893310958490e-4
+D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,C04,1.567987860768e-4,1.969929107643e-4,1.441133014015e-4,3.893961682481e-4
+D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,C28,2.139654654970e-4,4.131468369641e-4,6.261849032401e-4,6.274552016766e-4
+D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,C09,3.788290155831e-5,3.873667593320e-4,9.352888363897e-5,3.641640508850e-4
+D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,C10,7.138632687298e-5,3.820142637764e-4,1.319557688133e-4,3.641640508850e-4
+D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,C05,4.874086835520e-4,1.281160118456e-3,5.573857196946e-4,4.735169173268e-4
+D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,C20,3.094392614135e-3,2.514884743041e-3,3.110637070269e-3,2.719704790214e-3
+D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,C19+C32,2.227281038765e-3,2.336679984659e-3,7.595872682648e-4,2.719704790214e-3
+D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,C11+C30,1.476467300615e-3,1.461892635966e-3,2.045424604623e-3,1.500665454931e-3
+D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,C12,2.168678436367e-3,1.421591492958e-3,2.374335428993e-3,1.500665454931e-3
+D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,C25,1.067406535723e-3,1.437870083363e-3,5.066181710658e-3,5.557431271085e-3
+sample_kind,split,id,key,round,route,seconds
+split,id,D,m,k,n,predicted,table_mean_s,table_ci_s,dense_mean_s,dense_ci_s,ratio,ratio_ci_s,table_upper_prediction_s,dense_lower_prediction_s,distinct_columns,repeated_columns,hash_coordinates,call_entry_attempts,call_entry_full,build_entry_attempts,build_entry_full,scalar_calls,scalar_replays,safe_aggregates,fractured_aggregates,finite_tags,special_tags,capacity_flushes,singletons,tail_placements,build_contractions,gather_adds,full_q_rectangles,table_adds,dense_calls,table_batch,dense_batch,call_per_step
+CAL,C01,1,1,1,1,dense,4.358737214e-7,7.186993834e-8,3.112082880e-7,7.153289774e-8,1.432162124e0,1.500319592e-1,0.000021713511656510356,0.0000012600832210555116,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,3,1,4747,8572,171805429006849
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,0,table,3.696488308405e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,0,dense,2.633215118992e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,1,table,3.699507057089e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,1,dense,2.656074428371e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,2,table,3.687689066779e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,2,dense,2.629345543630e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,3,table,3.686549399621e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,3,dense,2.648794913672e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,4,table,3.691740046345e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,4,dense,2.660598460103e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,5,table,4.320467663788e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,5,dense,2.663778581428e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,6,table,5.459315357068e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,6,dense,5.023219785348e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,7,table,6.195464503897e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,7,dense,4.443521931871e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,8,table,4.791413524331e-7
+SAMPLE,CAL,C01,D1:M1:K1:N1:R1:C1:P1:PANEL17:EXACT1:LANE2:INDEX5,8,dense,2.650197153523e-7
+CAL,C02,3,1,2,3,dense,2.059651081e-6,5.079302824e-7,1.609188104e-6,2.793601555e-7,1.274551792e0,1.673268871e-1,0.000031010914394115015,0.000004269940006094668,3,0,6,6,0,6,0,12,6,0,2,2,0,0,2,0,4,6,4,22,3,1490,2094,8935141660703064064
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,0,table,1.696924161074e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,0,dense,1.334725405922e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,1,table,1.692285234899e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,1,dense,1.340633715377e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,2,table,1.690274496644e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,2,dense,1.336059694365e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,3,table,1.667406040268e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,3,dense,1.548820439351e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,4,table,2.095937583893e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,4,dense,2.214566380134e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,5,table,2.923702684564e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,5,dense,2.031249283668e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,6,table,3.432040939597e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,6,dense,1.989906399236e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,7,table,1.667412751678e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,7,dense,1.350150429799e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,8,table,1.670875838926e-6
+SAMPLE,CAL,C02,D3:M1:K2:N3:R1:C3:P2:PANEL19:EXACT3:LANE11:INDEX19,8,dense,1.336581184336e-6
+CAL,C03,5,2,15,5,dense,1.001523216e-5,2.316664932e-6,6.464650327e-5,1.418360525e-5,1.546600503e-1,1.053703861e-2,0.000047032591556795356,0.00003545304821386797,5,0,75,75,0,75,0,0,0,0,0,0,0,0,0,1,146,150,146,296,5,436,68,281474943156225
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,0,table,6.512172018349e-6
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,0,dense,4.490010294118e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,1,table,6.512217889908e-6
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,1,dense,4.557945588235e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,2,table,6.493467889908e-6
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,2,dense,4.508852941176e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,3,table,8.437782110092e-6
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,3,dense,4.602939705882e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,4,table,1.171688302752e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,4,dense,7.944616176471e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,5,table,1.165334633028e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,5,dense,7.815254411765e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,6,table,1.410312844037e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,6,dense,8.494405882353e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,7,table,1.231209862385e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,7,dense,8.237367647059e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,8,table,1.239599311927e-5
+SAMPLE,CAL,C03,D5:M2:K15:N5:R2:C5:P15:PANEL21:EXACT10:LANE250:INDEX37,8,dense,7.530460294118e-5
+CAL,C04,16,15,16,7,table,1.238009708e-4,3.299781532e-5,2.056646296e-4,6.155132823e-5,6.098429884e-1,5.590535734e-2,0.00019699291076431482,0.0003893961682480983,7,0,112,112,0,448,0,896,448,0,64,0,64,0,64,0,1665,1680,240,3425,7,19,12,8935141660703064064
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,0,table,1.907490000000e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,0,dense,3.654885833333e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,1,table,1.730170000000e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,1,dense,2.768857500000e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,2,table,1.483182631579e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,2,dense,2.487040000000e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,3,table,1.516587368421e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,3,dense,2.324311666667e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,4,table,1.149138421053e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,4,dense,1.478909166667e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,5,table,8.664115789474e-5
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,5,dense,1.446540000000e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,6,table,8.260936842105e-5
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,6,dense,1.460808333333e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,7,table,8.322636842105e-5
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,7,dense,1.446532500000e-4
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,8,table,8.307500000000e-5
+SAMPLE,CAL,C04,D16:M15:K16:N7:R8:C7:P16:PANEL32:EXACT56:LANE2104:INDEX39,8,dense,1.441931666667e-4
+CAL,C05,256,1,257,11,dense,4.179211852e-4,6.948749837e-5,6.738199259e-4,1.164342062e-4,6.359590718e-1,1.133936415e-1,0.0012811601184557063,0.00047351691732681775,11,0,176,33,1,2827,0,2827,0,257,0,0,0,68,0,1,2827,2827,2827,8481,11,9,6,4611685468671590400
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,0,table,3.698600000000e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,0,dense,5.744233333333e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,1,table,3.719917777778e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,1,dense,5.749026666667e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,2,table,3.736716666667e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,2,dense,5.714311666667e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,3,table,3.735368888889e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,3,dense,5.798116666667e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,4,table,3.749695555556e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,4,dense,5.779031666667e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,5,table,5.800298888889e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,5,dense,6.038266666667e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,6,table,5.746310000000e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,6,dense,9.464475000000e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,7,table,3.718526666667e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,7,dense,9.034840000000e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,8,table,3.707472222222e-4
+SAMPLE,CAL,C05,D256:M1:K257:N11:R1:C11:P128:PANEL272:EXACT11:LANE32779:INDEX75,8,dense,7.321491666667e-4
+CAL,C06,3,16,17,17,table,4.843512222e-5,8.019901677e-6,1.240681741e-3,6.970310897e-5,3.925104509e-2,7.028730746e-3,0.00009028989479936796,0.00105312009360151,3,14,272,289,0,51,0,0,0,0,0,0,0,0,0,1,784,816,784,1600,17,70,3,281474943156225
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,0,table,4.242515714286e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,0,dense,1.209419666667e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,1,table,6.757264285714e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,1,dense,1.207145666667e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,2,table,6.584752857143e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,2,dense,1.218850666667e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,3,table,4.233240000000e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,3,dense,1.208424333333e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,4,table,4.259962857143e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,4,dense,1.208651333333e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,5,table,4.541817142857e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,5,dense,1.207028666667e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,6,table,4.222950000000e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,6,dense,1.213093333333e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,7,table,4.484451428571e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,7,dense,1.482295333333e-3
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,8,table,4.264655714286e-5
+SAMPLE,CAL,C06,D3:M16:K17:N17:R16:C17:P17:PANEL19:EXACT272:LANE1360:INDEX145,8,dense,1.211226666667e-3
+CAL,C07,5,17,43,11,table,1.946908889e-4,7.457137572e-5,2.088840500e-3,4.360561316e-4,9.325349618e-2,2.600618653e-2,0.0004247001016379247,0.0017729321995964124,3,8,176,473,0,516,0,0,0,0,0,0,0,0,0,8,2958,4386,2958,7344,561,17,2,281474943156225
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,0,table,1.958335882353e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,0,dense,2.529524500000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,1,table,1.280565882353e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,1,dense,2.589130500000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,2,table,1.206315294118e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,2,dense,1.592586500000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,3,table,2.328338235294e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,3,dense,1.596523500000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,4,table,4.243399411765e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,4,dense,2.934935500000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,5,table,2.062654117647e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,5,dense,2.636328500000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,6,table,2.030005294118e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,6,dense,1.760790000000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,7,table,1.206680588235e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,7,dense,1.585127500000e-3
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,8,table,1.205885294118e-4
+SAMPLE,CAL,C07,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,8,dense,1.574618000000e-3
+CAL,C08,5,17,43,11,table,2.342627516e-4,6.168230139e-5,8.662196667e-4,2.967825793e-4,2.808847848e-1,4.757026500e-2,0.0003229790436562018,0.0015176448801232317,3,8,176,473,0,516,0,1016,500,11,333,24,309,8,333,3,2958,4386,385,7436,22,17,5,8935141660703064064
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,0,table,1.753459411765e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,0,dense,6.654816000000e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,1,table,1.786545294118e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,1,dense,6.702866000000e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,2,table,1.776143529412e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,2,dense,6.709178000000e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,3,table,3.156801176471e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,3,dense,7.331078000000e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,4,table,3.161085882353e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,4,dense,1.321773600000e-3
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,5,table,3.796070588235e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,5,dense,1.723694400000e-3
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,6,table,2.141807647059e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,6,dense,6.737890000000e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,7,table,1.762676470588e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,7,dense,6.687276000000e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,8,table,1.749057647059e-4
+SAMPLE,CAL,C08,D5:M17:K43:N11:R16:C3:P43:PANEL752:EXACT48:LANE5680:INDEX75,8,dense,6.681986000000e-4
+CAL,C09,16,17,1,17,dense,3.282874074e-5,5.054160818e-6,1.057843154e-4,1.225543177e-5,3.105834841e-1,3.521282095e-2,0.0003873667593320221,0.00035372516083022516,1,16,17,17,0,18,0,0,0,0,0,0,0,0,0,18,153,153,153,307,34,102,31,171805429006849
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,0,table,2.930712745098e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,0,dense,1.013012258065e-4
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,1,table,2.972781372549e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,1,dense,1.005304838710e-4
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,2,table,3.006609803922e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,2,dense,1.003168387097e-4
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,3,table,2.924455882353e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,3,dense,1.000731612903e-4
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,4,table,2.954315686275e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,4,dense,1.016027741935e-4
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,5,table,2.965816666667e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,5,dense,9.998525806452e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,6,table,2.918091176471e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,6,dense,1.000893225806e-4
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,7,table,4.313498039216e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,7,dense,9.988893548387e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,8,table,4.559585294118e-5
+SAMPLE,CAL,C09,D16:M17:K1:N17:R16:C2:P1:PANEL32:EXACT32:LANE528:INDEX145,8,dense,1.482708387097e-4
+CAL,C10,16,17,1,17,dense,5.275896595e-5,1.862736092e-5,1.902297544e-4,5.827398557e-5,2.853742343e-1,5.453662470e-2,0.0003820142637763761,0.00035372516083022516,1,16,17,17,0,18,0,0,0,0,0,0,0,0,0,18,153,153,153,307,34,62,19,171805429006849
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,0,table,4.821011290323e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,0,dense,2.548844736842e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,1,table,1.127404838710e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,1,dense,2.668499473684e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,2,table,5.909748387097e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,2,dense,3.228903157895e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,3,table,4.818554838710e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,3,dense,1.667326315789e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,4,table,4.807388709677e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,4,dense,1.670468947368e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,5,table,4.743251612903e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,5,dense,1.682201578947e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,6,table,4.912779032258e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,6,dense,1.643403157895e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,7,table,3.277388709677e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,7,dense,1.012272631579e-4
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,8,table,2.918898387097e-5
+SAMPLE,CAL,C10,D16:M17:K1:N17:R16:C2:P1:PANEL49:EXACT32:LANE528:INDEX145,8,dense,9.987578947368e-5
+CAL,C11,256,2,64,65,table,3.708966222e-4,5.390251502e-5,2.610892722e-3,4.745404532e-4,1.445102529e-1,1.577041738e-2,0.0014618926359655816,0.0015006654549310184,65,0,1040,4160,0,4160,0,0,0,0,0,0,0,0,0,9,8320,8320,8320,16640,65,10,2,281474943156225
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,0,table,4.237365000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,0,dense,2.340341500000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,1,table,3.551698000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,1,dense,2.290999000000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,2,table,5.349480000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,2,dense,3.703670000000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,3,table,3.783829000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,3,dense,3.695083500000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,4,table,3.514605000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,4,dense,2.280164000000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,5,table,3.232451000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,5,dense,2.300758000000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,6,table,3.232591000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,6,dense,2.303728000000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,7,table,3.250715000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,7,dense,2.284757500000e-3
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,8,table,3.227962000000e-4
+SAMPLE,CAL,C11,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,8,dense,2.298533000000e-3
+CAL,C12,256,2,64,65,table,1.786458556e-3,3.822198808e-4,2.928369500e-3,5.540340710e-4,6.242201294e-1,1.520887035e-1,0.0014215914929583647,0.0015006654549310184,65,0,1040,4160,0,4160,0,8320,4160,0,576,576,0,0,576,0,8320,8320,8320,24960,65,3,2,8935141660703064064
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,0,table,1.180966666667e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,0,dense,2.207463500000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,1,table,1.198663000000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,1,dense,2.203365500000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,2,table,1.187301666667e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,2,dense,2.207633500000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,3,table,2.003688333333e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,3,dense,3.218406000000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,4,table,2.627405333333e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,4,dense,2.312108500000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,5,table,1.895683333333e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,5,dense,2.899739000000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,6,table,1.929256000000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,6,dense,3.835841500000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,7,table,2.072092666667e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,7,dense,3.751629500000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,8,table,1.983070000000e-3
+SAMPLE,CAL,C12,D256:M2:K64:N65:R2:C8:P64:PANEL400:EXACT16:LANE32898:INDEX577,8,dense,3.719138500000e-3
+CAL,C13,3,31,19,33,table,1.170662222e-3,6.300115082e-5,6.066265556e-3,9.818761534e-4,1.971877805e-1,1.765602380e-2,0.0011494193295430559,0.004294784460032666,5,28,528,627,0,2470,0,2470,0,855,0,0,0,224,0,45,14725,15314,14725,32509,66,3,1,4611685468671590400
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,0,table,1.295146000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,0,dense,7.976742000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,1,table,1.321248333333e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,1,dense,8.625022000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,2,table,1.118687000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,2,dense,5.425803000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,3,table,1.195016333333e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,3,dense,5.408811000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,4,table,1.117231000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,4,dense,5.417528000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,5,table,1.123700000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,5,dense,5.427175000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,6,table,1.119689000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,6,dense,5.411476000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,7,table,1.122574333333e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,7,dense,5.473983000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,8,table,1.122668000000e-3
+SAMPLE,CAL,C13,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX289,8,dense,5.429850000000e-3
+CAL,C14,3,31,19,33,table,1.491620722e-3,3.041689991e-4,5.861000444e-3,8.096005500e-4,2.550207471e-1,4.351651460e-2,0.0011494193295430559,0.004294784460032666,0,0,0,0,0,0,0,3135,0,855,0,0,0,224,0,45,14725,19437,14725,37297,66,2,1,4611685468671590400
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,0,table,2.085606500000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,0,dense,5.733537000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,1,table,1.237990000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,1,dense,5.433507000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,2,table,1.233631500000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,2,dense,5.408260000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,3,table,1.226378000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,3,dense,5.413019000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,4,table,1.229353500000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,4,dense,5.397249000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,5,table,1.230621000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,5,dense,5.396969000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,6,table,1.229153500000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,6,dense,5.893277000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,7,table,2.084849500000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,7,dense,8.629480000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,8,table,1.867003000000e-3
+SAMPLE,CAL,C14,D3:M31:K19:N33:R16:C4:P19:PANEL19:EXACT64:LANE1744:INDEX0,8,dense,5.443706000000e-3
+CAL,C15,5,8,33,64,table,8.066865741e-5,1.087434671e-5,3.680638111e-3,6.185296891e-4,2.220901819e-2,1.848239322e-3,0.00022054770506515424,0.003669009046865553,3,61,1024,2112,0,198,0,0,0,0,0,0,0,0,0,4,1072,1584,1072,2656,1024,24,1,281474943156225
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,0,table,1.182519166667e-4
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,0,dense,5.430251000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,1,table,7.528962500000e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,1,dense,4.692766000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,2,table,7.471858333333e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,2,dense,3.271093000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,3,table,7.744033333333e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,3,dense,3.260683000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,4,table,7.647475000000e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,4,dense,3.274889000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,5,table,7.611033333333e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,5,dense,3.266525000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,6,table,7.814079166667e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,6,dense,3.283777000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,7,table,7.457037500000e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,7,dense,3.342917000000e-3
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,8,table,7.502120833333e-5
+SAMPLE,CAL,C15,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX320,8,dense,3.302842000000e-3
+CAL,C16,5,8,33,64,table,2.670796496e-4,5.176563835e-5,3.984049556e-3,1.076135564e-3,6.917612504e-2,1.009334562e-2,0.00022054770506515424,0.003669009046865553,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,5280,16896,5280,22176,1024,13,1,281474943156225
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,0,table,2.325839230769e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,0,dense,3.293014000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,1,table,2.326086153846e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,1,dense,3.308693000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,2,table,2.327889230769e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,2,dense,3.286271000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,3,table,2.340906153846e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,3,dense,3.504899000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,4,table,2.341806923077e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,4,dense,4.438000000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,5,table,3.900530769231e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,5,dense,7.560976000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,6,table,3.815480000000e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,6,dense,3.929221000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,7,table,2.328374615385e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,7,dense,3.262276000000e-3
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,8,table,2.330255384615e-4
+SAMPLE,CAL,C16,D5:M8:K33:N64:R8:C16:P33:PANEL21:EXACT128:LANE2624:INDEX0,8,dense,3.273096000000e-3
+CAL,C17,16,3,127,9,table,3.541034691e-4,4.997387317e-6,7.128544000e-4,3.068746508e-5,4.975709607e-1,1.285810058e-2,0.00023165365865059976,0.0006446205955210002,9,0,144,1143,0,2286,0,2286,0,254,0,0,0,75,0,2,3051,3429,3051,8766,108,9,5,4611685468671590400
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,0,table,3.510994444444e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,0,dense,6.953292000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,1,table,3.527370000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,1,dense,6.953574000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,2,table,3.519376666667e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,2,dense,7.004528000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,3,table,3.521013333333e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,3,dense,6.978620000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,4,table,3.525310000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,4,dense,7.083536000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,5,table,3.510572222222e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,5,dense,6.980284000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,6,table,3.512908888889e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,6,dense,6.955396000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,7,table,3.528316666667e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,7,dense,7.062016000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,8,table,3.713450000000e-4
+SAMPLE,CAL,C17,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,8,dense,8.185650000000e-4
+CAL,C18,16,3,127,9,table,2.864961667e-4,5.979798231e-5,3.519570185e-4,8.434240403e-5,8.279095793e-1,1.096746800e-1,0.00023165365865059976,0.0005893310958490012,9,0,144,1143,0,2286,0,4572,2286,0,254,0,254,0,254,0,3051,3429,505,7236,9,8,6,8935141660703064064
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,0,table,4.254712500000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,0,dense,5.428461666667e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,1,table,3.786890000000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,1,dense,5.480825000000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,2,table,3.587153750000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,2,dense,2.997658333333e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,3,table,2.419615000000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,3,dense,2.978873333333e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,4,table,2.346966250000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,4,dense,2.962861666667e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,5,table,2.339615000000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,5,dense,2.959873333333e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,6,table,2.359263750000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,6,dense,2.962110000000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,7,table,2.346578750000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,7,dense,2.957451666667e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,8,table,2.343860000000e-4
+SAMPLE,CAL,C18,D16:M3:K127:N9:R2:C9:P127:PANEL413:EXACT18:LANE4082:INDEX73,8,dense,2.948016666667e-4
+CAL,C19,256,1,4096,4,table,8.334208889e-4,1.369973309e-4,3.542247667e-3,6.684659448e-4,2.376977297e-1,1.777104574e-2,0.0023366799846594065,0.0027197047902140473,4,0,64,9,1,16384,0,0,0,0,0,0,0,0,0,1,16383,16384,16383,32767,64,5,1,281474943156225
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,0,table,7.373538000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,0,dense,3.050471000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,1,table,7.370230000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,1,dense,3.042597000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,2,table,7.372454000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,2,dense,3.055792000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,3,table,7.319056000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,3,dense,3.255654000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,4,table,7.312122000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,4,dense,3.122365000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,5,table,7.453646000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,5,dense,3.117146000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,6,table,9.599890000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,6,dense,5.052386000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,7,table,1.258880600000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,7,dense,5.091449000000e-3
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,8,table,8.618138000000e-4
+SAMPLE,CAL,C19,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,8,dense,3.092369000000e-3
+CAL,C20,256,1,4096,4,table,2.650529556e-3,4.438630586e-4,3.713960222e-3,6.033231520e-4,7.229825205e-1,8.950533218e-2,0.002514884743041334,0.0027197047902140473,4,0,64,9,1,16384,0,16384,0,8192,0,0,0,2184,0,2,16384,16384,16384,49152,64,2,1,4611685468671590400
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,0,table,2.384378500000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,0,dense,3.338859000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,1,table,2.397072500000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,1,dense,3.356793000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,2,table,2.387228500000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,2,dense,3.292453000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,3,table,2.383837500000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,3,dense,3.300588000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,4,table,2.379625000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,4,dense,3.327769000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,5,table,2.407341500000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,5,dense,3.308693000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,6,table,2.384333500000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,6,dense,5.046335000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,7,table,4.072608000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,7,dense,5.148074000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,8,table,3.058341000000e-3
+SAMPLE,CAL,C20,D256:M1:K4096:N4:R1:C2:P128:PANEL272:EXACT2:LANE32772:INDEX20,8,dense,3.306078000000e-3
+CAL,C21,3,16,256,1,dense,4.104901389e-4,3.153135393e-6,7.457276944e-4,6.231629545e-6,5.505226090e-1,6.765577102e-3,0.0009250625287750013,0.0008238757725021453,1,0,16,256,1,256,0,512,256,0,256,256,0,0,256,0,4096,4096,4096,8704,224,8,4,8935141660703064064
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,0,table,4.089905000000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,0,dense,7.619392500000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,1,table,4.036143750000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,1,dense,7.441732500000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,2,table,4.088076250000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,2,dense,7.496737500000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,3,table,4.143467500000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,3,dense,7.414635000000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,4,table,4.116180000000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,4,dense,7.379042500000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,5,table,4.174851250000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,5,dense,7.391565000000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,6,table,4.129316250000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,6,dense,7.539817500000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,7,table,4.073850000000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,7,dense,7.384125000000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,8,table,4.092322500000e-4
+SAMPLE,CAL,C21,D3:M16:K256:N1:R16:C1:P256:PANEL19:EXACT16:LANE16400:INDEX5,8,dense,7.448445000000e-4
+CAL,C22,5,33,2,7,table,1.912374116e-5,3.040334196e-6,1.531198696e-4,2.666428239e-5,1.254960739e-1,6.778217797e-3,0.00018936006530737254,0.0003242288481084041,1,6,14,14,0,18,0,0,0,0,0,0,0,0,0,9,198,198,198,396,21,176,23,281474943156225
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,0,table,1.710856818182e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,0,dense,1.346342173913e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,1,table,1.886514204545e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,1,dense,1.360006956522e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,2,table,2.700322159091e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,2,dense,2.183747826087e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,3,table,2.451408522727e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,3,dense,2.099220869565e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,4,table,1.904860795455e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,4,dense,1.346642608696e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,5,table,1.624969318182e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,5,dense,1.342983913043e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,6,table,1.638545454545e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,6,dense,1.387536521739e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,7,table,1.659710227273e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,7,dense,1.358212173913e-4
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,8,table,1.634179545455e-5
+SAMPLE,CAL,C22,D5:M33:K2:N7:R16:C3:P2:PANEL87:EXACT48:LANE368:INDEX39,8,dense,1.356095217391e-4
+CAL,C23,16,2,31,129,table,8.908172222e-5,1.546572023e-5,2.511145056e-3,3.286934414e-4,3.556749894e-2,4.642864475e-3,0.00022916843231853695,0.001588502555786904,18,111,2064,3999,0,1054,0,0,0,0,0,0,0,0,0,3,1060,2108,1060,3168,129,40,2,281474943156225
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,0,table,7.270687500000e-5
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,0,dense,2.274834000000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,1,table,8.015727500000e-5
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,1,dense,2.328058500000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,2,table,8.045310000000e-5
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,2,dense,2.274408000000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,3,table,8.332722500000e-5
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,3,dense,2.277489000000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,4,table,8.914082500000e-5
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,4,dense,2.303513000000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,5,table,1.259086500000e-4
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,5,dense,2.554015000000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,6,table,1.208076500000e-4
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,6,dense,3.562717000000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,7,table,7.561607500000e-5
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,7,dense,2.749354500000e-3
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,8,table,7.361782500000e-5
+SAMPLE,CAL,C23,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX1153,8,dense,2.275916500000e-3
+CAL,C24,16,2,31,129,table,1.230589732e-4,2.399195572e-5,2.472336944e-3,3.647162692e-4,4.987989634e-2,7.502864382e-3,0.00022916843231853695,0.001588502555786904,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,2046,7998,2046,10044,129,29,2,281474943156225
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,0,table,1.067453448276e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,0,dense,2.283109500000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,1,table,1.076694827586e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,1,dense,2.332927500000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,2,table,1.076359655172e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,2,dense,2.278280500000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,3,table,1.069471034483e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,3,dense,2.333694000000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,4,table,1.080035517241e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,4,dense,2.308617000000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,5,table,1.068068620690e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,5,dense,2.276201500000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,6,table,1.080574827586e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,6,dense,2.281130500000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,7,table,1.840433793103e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,7,dense,2.425800500000e-3
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,8,table,1.716215862069e-4
+SAMPLE,CAL,C24,D16:M2:K31:N129:R2:C64:P31:PANEL32:EXACT128:LANE1250:INDEX0,8,dense,3.731271500000e-3
+CAL,C25,256,9,8,257,table,9.098210833e-4,1.575854524e-4,5.820892111e-3,7.547104005e-4,1.557428346e-1,1.347911787e-2,0.0014378700833631152,0.00555743127108453,257,0,2056,2056,0,4112,0,0,0,0,0,0,0,0,0,10,18504,18504,18504,37008,257,4,1,281474943156225
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,0,table,8.009917500000e-4
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,0,dense,5.452433000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,1,table,7.996570000000e-4
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,1,dense,5.390116000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,2,table,8.024597500000e-4
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,2,dense,5.331888000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,3,table,8.019762500000e-4
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,3,dense,5.400737000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,4,table,8.215630000000e-4
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,4,dense,5.336025000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,5,table,8.124882500000e-4
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,5,dense,5.289779000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,6,table,8.170142500000e-4
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,6,dense,5.381640000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,7,table,1.197835000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,7,dense,8.196662000000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,8,table,1.334404500000e-3
+SAMPLE,CAL,C25,D256:M9:K8:N257:R8:C64:P8:PANEL272:EXACT512:LANE18440:INDEX2305,8,dense,6.608749000000e-3
+CAL,C26,3,4,64,257,table,7.162101746e-4,1.784103853e-4,1.793504011e-2,3.477538141e-3,3.945667117e-2,3.637104874e-3,0.0014223344409539807,0.013971897180407776,1,256,4112,16448,0,2368,0,0,0,0,0,0,0,0,0,37,9472,9472,9472,18944,4112,7,1,281474943156225
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,0,table,4.836967142857e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,0,dense,1.285885000000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,1,table,4.747914285714e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,1,dense,1.279105400000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,2,table,8.103475714286e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,2,dense,2.360938800000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,3,table,1.122548571429e-3
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,3,dense,2.388212600000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,4,table,9.145390000000e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,4,dense,2.150868900000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,5,table,8.094187142857e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,5,dense,1.798168800000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,6,table,8.094645714286e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,6,dense,2.015677700000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,7,table,5.514101428571e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,7,dense,1.426721800000e-2
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,8,table,4.696748571429e-4
+SAMPLE,CAL,C26,D3:M4:K64:N257:R4:C7:P64:PANEL19:EXACT28:LANE2052:INDEX2305,8,dense,1.435957100000e-2
+CAL,C27,5,17,21,2,dense,4.300032459e-5,1.499990091e-5,6.007817963e-5,9.702366334e-6,7.010300250e-1,1.555294019e-1,0.00017643189184426015,0.0001538393072462641,2,0,32,6,1,84,0,166,82,2,82,10,72,2,82,0,714,714,85,1450,4,89,60,8935141660703064064
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,0,table,2.939202247191e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,0,dense,5.107363333333e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,1,table,4.171784269663e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,1,dense,4.980710000000e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,2,table,3.295339325843e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,2,dense,4.926808333333e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,3,table,3.440980898876e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,3,dense,5.313230000000e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,4,table,2.976608988764e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,4,dense,6.264020000000e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,5,table,5.854237078652e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,5,dense,8.414246666667e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,6,table,8.878834831461e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,6,dense,7.571910000000e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,7,table,4.143911235955e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,7,dense,6.374141666667e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,8,table,2.999393258427e-5
+SAMPLE,CAL,C27,D5:M17:K21:N2:R16:C1:P21:PANEL21:EXACT16:LANE2720:INDEX10,8,dense,5.117931666667e-5
+CAL,C28,16,16,65,3,table,2.024331699e-4,1.153229556e-5,6.798568519e-4,5.367194861e-5,2.997892244e-1,2.372802044e-2,0.0004973094359903838,0.0006274552016766266,3,0,48,10,1,195,0,195,0,195,0,0,0,40,0,3,3120,3120,3120,6435,144,17,3,4611685468671590400
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,0,table,1.924490588235e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,0,dense,6.714693333333e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,1,table,2.240285882353e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,1,dense,6.495583333333e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,2,table,1.988586470588e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,2,dense,8.267656666667e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,3,table,1.962791176471e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,3,dense,6.370483333333e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,4,table,2.229123529412e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,4,dense,7.710320000000e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,5,table,1.945070000000e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,5,dense,6.510346666667e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,6,table,2.181481764706e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,6,dense,6.404616666667e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,7,table,1.869706470588e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,7,dense,6.360433333333e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,8,table,1.877449411765e-4
+SAMPLE,CAL,C28,D16:M16:K65:N3:R16:C1:P65:PANEL32:EXACT16:LANE16688:INDEX19,8,dense,6.352983333333e-4
+CAL,C29,5,17,43,11,table,1.085937407e-4,2.639096402e-5,9.317181790e-5,1.672665125e-5,1.184815049e0,2.537866259e-1,0.0004247001016379247,0.0017729321995964124,3,8,176,473,0,516,0,1032,516,0,344,0,344,0,344,0,2958,4386,0,7344,561,33,36,8935141660703064064
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,0,table,9.229218181818e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,0,dense,8.908872222222e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,1,table,1.730264545455e-4
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,1,dense,8.872247222222e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,2,table,1.650621818182e-4
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,2,dense,1.291876944444e-4
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,3,table,9.139506060606e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,3,dense,1.326313333333e-4
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,4,table,9.130639393939e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,4,dense,8.012475000000e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,5,table,9.105839393939e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,5,dense,7.980694444444e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,6,table,9.065093939394e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,6,dense,7.984283333333e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,7,table,9.169803030303e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,7,dense,7.885322222222e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,8,table,9.085403030303e-5
+SAMPLE,CAL,C29,D5:M17:K43:N11:R16:C3:P43:PANEL21:EXACT48:LANE5680:INDEX75,8,dense,8.028838888889e-5
+CAL,C30,256,2,64,65,table,1.298571667e-3,1.778956339e-4,2.509362778e-3,4.639381732e-4,5.268690442e-1,4.781640981e-2,0.0014618926359655816,0.0015006654549310184,65,0,1040,4160,0,4160,0,8320,4160,0,576,576,0,0,576,0,8320,8320,8320,24960,65,3,2,8935141660703064064
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,0,table,1.202246666667e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,0,dense,2.209803000000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,1,table,1.248215333333e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,1,dense,2.214050500000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,2,table,1.191165666667e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,2,dense,2.199674000000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,3,table,1.212251666667e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,3,dense,2.209081500000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,4,table,1.347711000000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,4,dense,3.718457500000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,5,table,1.900753000000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,5,dense,3.411960500000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,6,table,1.211887666667e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,6,dense,2.224329500000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,7,table,1.186764333333e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,7,dense,2.205605000000e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,8,table,1.186149666667e-3
+SAMPLE,CAL,C30,D256:M2:K64:N65:R2:C8:P64:PANEL272:EXACT16:LANE32898:INDEX577,8,dense,2.191303500000e-3
+CAL,C31,16,3,127,9,table,1.073797203e-4,1.524040595e-7,2.925634683e-5,1.904523465e-6,3.689991301e0,2.011164364e-1,0.00023165365865059976,0.0006446205955210002,9,0,144,1143,0,2286,0,4572,2286,0,254,0,254,0,254,0,3051,3429,0,6480,108,29,107,8935141660703064064
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,0,table,1.076201034483e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,0,dense,2.832077570093e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,1,table,1.072107241379e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,1,dense,2.829896261682e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,2,table,1.076252758621e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,2,dense,2.831946728972e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,3,table,1.071340000000e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,3,dense,2.834306542056e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,4,table,1.071688965517e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,4,dense,2.826338317757e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,5,table,1.073316206897e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,5,dense,2.888173831776e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,6,table,1.073288620690e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,6,dense,2.853959813084e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,7,table,1.076207931034e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,7,dense,2.849661682243e-5
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,8,table,1.073772068966e-4
+SAMPLE,CAL,C31,D16:M3:K127:N9:R2:C9:P127:PANEL32:EXACT18:LANE4082:INDEX73,8,dense,3.584351401869e-5
+CAL,C32,256,1,4096,4,table,1.844362222e-3,3.829188165e-4,7.643248519e-4,4.737583587e-6,2.411790924e0,4.939087440e-1,0.0023366799846594065,0.0027197047902140473,4,0,64,9,1,16384,0,32768,16384,0,4096,0,4096,0,4096,0,16383,16384,1834,40955,64,1,3,8935141660703064064
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,0,table,3.171848000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,0,dense,7.691716666667e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,1,table,1.686316000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,1,dense,7.725076666667e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,2,table,1.673703000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,2,dense,7.595503333333e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,3,table,1.690795000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,3,dense,7.661226666667e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,4,table,1.719468000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,4,dense,7.633176666667e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,5,table,1.664436000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,5,dense,7.576033333333e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,6,table,1.661379000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,6,dense,7.731593333333e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,7,table,1.671489000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,7,dense,7.580676666667e-4
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,8,table,1.659826000000e-3
+SAMPLE,CAL,C32,D256:M1:K4096:N4:R1:C4:P128:PANEL272:EXACT4:LANE32772:INDEX20,8,dense,7.594233333333e-4
+HOLDOUT,H01,3,2,43,13,table,6.177316435e-5,7.236327137e-6,3.611466889e-4,7.465318169e-5,1.791820980e-1,3.178966772e-2,0.00012097980010643316,0.0002465039421898755,5,8,208,559,0,473,0,0,0,0,0,0,0,0,0,4,860,946,860,1806,78,48,10,281474943156225
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,0,table,4.931970833333e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,0,dense,3.093381000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,1,table,5.556450000000e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,1,dense,2.174086000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,2,table,6.196143750000e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,2,dense,3.310636000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,3,table,5.814868750000e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,3,dense,3.344510000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,4,table,5.771789583333e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,4,dense,5.780935000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,5,table,7.843050000000e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,5,dense,4.169759000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,6,table,7.470687500000e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,6,dense,3.637046000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,7,table,6.424339583333e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,7,dense,3.542339000000e-4
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,8,table,5.586547916667e-5
+SAMPLE,HOLDOUT,H01,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,8,dense,3.450510000000e-4
+HOLDOUT,H02,3,2,43,13,table,8.011895207e-5,3.355115840e-5,2.007383766e-5,9.239048236e-7,3.996845791e0,1.700608215e0,0.00012097980010643316,0.0002465039421898755,5,8,208,559,0,473,0,946,473,0,172,0,172,0,172,0,860,946,0,1806,78,51,167,8935141660703064064
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,0,table,8.046601960784e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,0,dense,2.150071257485e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,1,table,7.011158823529e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,1,dense,2.137155089820e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,2,table,6.971339215686e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,2,dense,1.784628742515e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,3,table,6.865829411765e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,3,dense,1.965553293413e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,4,table,3.545672549020e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,4,dense,1.886003592814e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,5,table,6.626284313725e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,5,dense,2.109684431138e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,6,table,1.918331960784e-4
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,6,dense,1.979315568862e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,7,table,6.914625490196e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,7,dense,2.038161676647e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,8,table,6.942225490196e-5
+SAMPLE,HOLDOUT,H02,D3:M2:K43:N13:R2:C4:P43:PANEL19:EXACT8:LANE370:INDEX77,8,dense,2.015880239521e-5
+HOLDOUT,H03,5,17,64,19,table,2.171163889e-4,4.567233399e-5,5.029381778e-3,8.674129685e-4,4.307986795e-2,3.695957175e-3,0.000582136969150006,0.00439000271329933,1,18,304,1216,0,512,0,0,0,0,0,0,0,0,0,8,4352,4352,4352,8704,1292,10,1,281474943156225
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,0,table,3.056523000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,0,dense,6.445014000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,1,table,2.841040000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,1,dense,6.128062000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,2,table,2.980200000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,2,dense,6.457818000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,3,table,1.772928000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,3,dense,4.760572000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,4,table,1.843248000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,4,dense,5.610296000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,5,table,1.772336000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,5,dense,3.975858000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,6,table,1.762729000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,6,dense,3.964265000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,7,table,1.750616000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,7,dense,3.955460000000e-3
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,8,table,1.760855000000e-4
+SAMPLE,HOLDOUT,H03,D5:M17:K64:N19:R16:C5:P64:PANEL21:EXACT80:LANE8496:INDEX147,8,dense,3.967091000000e-3
+HOLDOUT,H04,5,17,64,19,table,2.142415152e-4,4.891291259e-5,6.479037000e-3,1.137159666e-3,3.288044740e-2,3.065491764e-3,0.0004297247964532473,0.0037285764764824533,1,18,304,1216,0,512,0,0,0,0,0,0,0,0,0,8,4352,4352,4352,8704,38,11,1,281474943156225
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,0,table,3.272195454545e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,0,dense,8.172046000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,1,table,2.877468181818e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,1,dense,8.285208000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,2,table,2.766270000000e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,2,dense,8.350700000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,3,table,1.753161818182e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,3,dense,7.180288000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,4,table,1.737013636364e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,4,dense,5.232101000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,5,table,1.711000909091e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,5,dense,5.227002000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,6,table,1.718314545455e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,6,dense,5.263100000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,7,table,1.728406363636e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,7,dense,5.244595000000e-3
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,8,table,1.717905454545e-4
+SAMPLE,HOLDOUT,H04,D5:M17:K64:N19:R16:C5:P64:PANEL1109:EXACT80:LANE8496:INDEX147,8,dense,5.356293000000e-3
+HOLDOUT,H05,16,1,15,33,dense,1.291722267e-4,2.538354780e-5,1.071991405e-4,1.813357048e-5,1.209089159e0,1.170453261e-1,0.00017326463564329826,0.0001169950591057643,18,15,495,495,0,495,0,990,495,0,75,75,0,0,75,0,468,495,468,1953,33,25,34,8935141660703064064
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,0,table,1.107654400000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,0,dense,9.345726470588e-5
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,1,table,1.866530400000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,1,dense,1.340763235294e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,2,table,1.875675200000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,2,dense,1.442476176471e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,3,table,1.166688400000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,3,dense,1.365960294118e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,4,table,1.100525200000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,4,dense,9.659138235294e-5
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,5,table,1.194837200000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,5,dense,9.127558823529e-5
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,6,table,1.098521200000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,6,dense,8.930041176471e-5
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,7,table,1.120999200000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,7,dense,8.973182352941e-5
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,8,table,1.094069200000e-4
+SAMPLE,HOLDOUT,H05,D16:M1:K15:N33:R1:C8:P15:PANEL32:EXACT8:LANE273:INDEX289,8,dense,8.951582352941e-5
+HOLDOUT,H06,16,1,15,34,dense,1.278575397e-4,2.369154547e-5,1.065603232e-4,1.669065919e-5,1.202650548e0,1.206595242e-1,0.00017359924756957994,0.00012054036392715109,0,0,0,0,0,0,0,1020,510,0,75,75,0,0,75,0,510,510,510,2040,34,28,33,8935141660703064064
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,0,table,1.112972500000e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,0,dense,9.308881818182e-5
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,1,table,1.111634642857e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,1,dense,9.336633333333e-5
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,2,table,1.110511071429e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,2,dense,9.381136363636e-5
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,3,table,1.133815357143e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,3,dense,9.278827272727e-5
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,4,table,1.113513214286e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,4,dense,9.278430303030e-5
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,5,table,1.140888928571e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,5,dense,9.233227272727e-5
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,6,table,1.141747857143e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,6,dense,1.277189090909e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,7,table,1.789399285714e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,7,dense,1.511073636364e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,8,table,1.852695714286e-4
+SAMPLE,HOLDOUT,H06,D16:M1:K15:N34:R1:C8:P15:PANEL32:EXACT8:LANE274:INDEX289,8,dense,1.220452727273e-4
+HOLDOUT,H07,256,1,1024,16,table,7.257021778e-4,5.712818957e-5,3.272978444e-3,2.677826633e-4,2.229520336e-1,1.795382591e-2,0.0017340449626715058,0.0027246759905065563,16,0,256,33,1,16384,0,0,0,0,0,0,0,0,0,1,16383,16384,16383,32767,64,5,1,281474943156225
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,0,table,6.901858000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,0,dense,3.045422000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,1,table,6.910332000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,1,dense,3.099462000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,2,table,6.917326000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,2,dense,3.042476000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,3,table,6.933836000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,3,dense,3.046013000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,4,table,6.886208000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,4,dense,3.066892000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,5,table,6.925280000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,5,dense,3.060069000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,6,table,7.507228000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,6,dense,3.719530000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,7,table,9.163476000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,7,dense,3.412887000000e-3
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,8,table,7.167652000000e-4
+SAMPLE,HOLDOUT,H07,D256:M1:K1024:N16:R1:C16:P128:PANEL272:EXACT16:LANE32784:INDEX80,8,dense,3.964055000000e-3
+HOLDOUT,H08,256,1,1024,1,dense,1.053565833e-4,2.131498796e-5,8.414402180e-6,1.799238296e-6,1.285682268e1,2.460417240e0,0.0013914023501590711,0.00017029224940665977,1,0,16,3,1,1024,0,2048,1024,0,1024,0,1024,0,1024,0,1024,1024,0,2048,4,36,418,8935141660703064064
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,0,table,9.893513888889e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,0,dense,1.179780143541e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,1,table,1.580935555556e-4
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,1,dense,1.319469138756e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,2,table,1.439424166667e-4
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,2,dense,7.240375598086e-6
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,3,table,1.142665000000e-4
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,3,dense,7.296892344498e-6
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,4,table,8.732347222222e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,4,dense,7.321459330144e-6
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,5,table,8.634022222222e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,5,dense,7.251590909091e-6
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,6,table,8.630377777778e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,6,dense,7.205645933014e-6
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,7,table,8.663608333333e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,7,dense,7.211851674641e-6
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,8,table,8.636808333333e-5
+SAMPLE,HOLDOUT,H08,D256:M1:K1024:N1:R1:C1:P128:PANEL272:EXACT1:LANE32769:INDEX5,8,dense,7.209311004785e-6
+HOLDOUT,H09,3,33,31,65,table,2.374253889e-3,3.353354864e-4,1.960514256e-2,1.892870707e-3,1.206490038e-1,8.751022533e-3,0.0008590209100528168,0.013206736364972516,4,61,1040,2015,0,2790,0,2790,0,930,0,0,0,280,0,30,29667,30690,29667,63147,195,1,1,4611685468671590400
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,0,table,2.099176000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,0,dense,1.807473100000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,1,table,2.105268000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,1,dense,1.810286400000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,2,table,2.082505000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,2,dense,1.813308100000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,3,table,2.806857000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,3,dense,2.485230700000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,4,table,2.081473000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,4,dense,1.805669800000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,5,table,2.091291000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,5,dense,1.814181700000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,6,table,2.082225000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,6,dense,1.829210700000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,7,table,2.862270000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,7,dense,2.052054500000e-2
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,8,table,3.157220000000e-3
+SAMPLE,HOLDOUT,H09,D3:M33:K31:N65:R16:C7:P31:PANEL1042:EXACT112:LANE3024:INDEX577,8,dense,2.227213300000e-2
+HOLDOUT,H10,5,15,22,7,table,6.429181560e-5,9.325433948e-8,4.514242381e-4,2.116559970e-6,1.424249763e-1,7.406494345e-4,0.00016895256378987225,0.0005639027139118937,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,1650,2310,1650,3960,210,47,7,281474943156225
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,0,table,6.424112765957e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,0,dense,4.533687142857e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,1,table,6.435046808511e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,1,dense,4.471728571429e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,2,table,6.418782978723e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,2,dense,4.559520000000e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,3,table,6.437670212766e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,3,dense,4.513591428571e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,4,table,6.418976595745e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,4,dense,4.487300000000e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,5,table,6.417357446809e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,5,dense,4.496745714286e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,6,table,6.418527659574e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,6,dense,4.538952857143e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,7,table,6.448157446809e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,7,dense,4.522952857143e-4
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,8,table,6.444002127660e-5
+SAMPLE,HOLDOUT,H10,D5:M15:K22:N7:R8:C7:P22:PANEL21:EXACT56:LANE1464:INDEX0,8,dense,4.503702857143e-4
+HOLDOUT,H11,16,18,257,5,table,1.093924194e-3,1.802344043e-4,1.326597185e-3,2.357285354e-4,8.355186481e-1,9.143357211e-2,0.001717558007077784,0.004365691542889712,5,0,80,1285,0,2570,0,5140,2570,0,1542,75,1467,0,1542,0,23130,23130,2886,46582,810,4,3,8935141660703064064
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,0,table,1.015291750000e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,0,dense,1.734349000000e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,1,table,1.673209000000e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,1,dense,1.978905333333e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,2,table,1.251272000000e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,2,dense,1.182222333333e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,3,table,9.779972500000e-4
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,3,dense,1.173082000000e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,4,table,9.758982500000e-4
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,4,dense,1.174237333333e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,5,table,1.015041000000e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,5,dense,1.175169000000e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,6,table,9.770652500000e-4
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,6,dense,1.177276333333e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,7,table,9.773985000000e-4
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,7,dense,1.171619333333e-3
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,8,table,9.821447500000e-4
+SAMPLE,HOLDOUT,H11,D16:M18:K257:N5:R16:C2:P128:PANEL32:EXACT32:LANE32848:INDEX37,8,dense,1.172514000000e-3
+HOLDOUT,H12,256,9,273,129,table,2.551527200e-2,4.045336378e-3,8.570243278e-2,1.893723996e-2,3.098796683e-1,5.338753714e-2,0.0037606734393909884,0.05380220370626438,129,0,2064,35217,0,70434,0,70434,0,2730,0,0,0,774,0,10,315846,316953,315846,703233,2322,1,1,4611685468671590400
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,0,table,2.394395200000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,0,dense,7.112257100000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,1,table,2.627895000000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,1,dense,7.513859400000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,2,table,2.171977200000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,2,dense,7.261970500000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,3,table,2.167971700000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,3,dense,7.227014200000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,4,table,2.156996200000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,4,dense,7.242398000000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,5,table,3.165524600000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,5,dense,7.347117300000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,6,table,3.648914700000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,6,dense,1.285022450000e-1
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,7,table,2.164544300000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,7,dense,1.296405650000e-1
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,8,table,2.465525900000e-2
+SAMPLE,HOLDOUT,H12,D256:M9:K273:N129:R8:C32:P16:PANEL272:EXACT256:LANE33800:INDEX1153,8,dense,7.613292000000e-2
+HOLDOUT_ROUTE_COUNTS,table=9,dense=3
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,0,table,6.520746000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,0,dense,7.731946000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,1,table,6.523670000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,1,dense,7.598396000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,2,table,6.705812000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,2,dense,7.217224000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,3,table,6.089460000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,3,dense,7.779656000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,4,table,6.776222000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,4,dense,7.670872000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,5,table,5.420092000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,5,dense,7.565534000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,6,table,5.808256000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,6,dense,7.289098000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,7,table,4.943422000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,7,dense,7.237082000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,8,table,3.881200000000e-4
+SAMPLE,CONTROL,H13-B3-D3,B3:D3:M17:BLOCKS11:N7,8,dense,4.543096000000e-4
+CONTROL,H13-B3-D3,3,3,798,462,22,66,57,0,2,1683,3927,5.852097778e-4,7.181433778e-4,8.164220361e-1,6.102627207e-2
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,0,table,4.681342000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,0,dense,4.447441428571e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,1,table,3.246898000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,1,dense,4.181960000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,2,table,3.237961000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,2,dense,4.166187142857e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,3,table,3.299866000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,3,dense,4.166844285714e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,4,table,3.239173000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,4,dense,4.195728571429e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,5,table,3.231760000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,5,dense,4.215221428571e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,6,table,3.237560000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,6,dense,4.393997142857e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,7,table,4.824802000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,7,dense,4.888562857143e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,8,table,4.752376000000e-4
+SAMPLE,CONTROL,H14-B5-D5,B5:D5:M9:BLOCKS7:N11,8,dense,6.655202857143e-4
+CONTROL,H14-B5-D5,5,5,1232,770,14,70,54,0,2,1575,3465,3.750193111e-4,4.590127302e-4,8.194103099e-1,9.004134583e-2
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 5.32s
+
+CG16_SOURCE_MANIFEST_POST=88f1ee00d2e4e1a60b70a8568f6b4aadcaca40ae4ba2044298436d4602dbeed1

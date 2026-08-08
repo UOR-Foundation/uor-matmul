@@ -144,7 +144,7 @@ data, nor by the host. Deliberately absent, each absence load-bearing:
 | an alphabet violation | every value of `E` is in `Alphabet<E, Full<E>>` |
 | a scratch error | scratch is an offer; too little means a different traversal, not a failure |
 | an accumulator-policy error | there is no policy |
-| an epilogue capacity error | the epilogue evaluates in the accumulator's width, which cannot overflow |
+| an epilogue capacity error | the complete width derives arbitrary `i64` scalar growth and both terminal terms before the one encode |
 | a backend-unavailable error | the portable backend is always present and always correct |
 | a non-finite-input error | non-finite floats are codes with IEEE-defined behaviour |
 
@@ -157,7 +157,58 @@ dressed as rigour.
 An IEEE 754 value is a bit pattern naming an exact dyadic rational. That is a
 codec, with the same shape as a codebook, so the float path is not a second
 method: decode exactly, accumulate into a *complete accumulator* spanning the
-entire product exponent range, and round once at the end.
+entire product exponent range and the integer-scaled terminal expression, and
+round once at the end.
+
+Between decode and encode, finite values stay in the UOR Atlas. The canonical
+reference normalizes each dyadic to the unique finite non-adjacent Laurent word
+in `Z[X, X^-1]/(X - 2)`, reads sign as the Atlas modality involution, and gives
+every signed grade the mixed-radix address `(word, scope, context)`. `CK-19` and
+`CK-20` execute that construction as formal witnesses; they are not runtime
+buffers or a second implementation.
+
+The optimized embedding projects the same normalized coefficient directly into
+balanced signed octets, the coordinates of the complete signed-`i8` lookup
+alphabet. Projection repeats the identical quotient step until the coefficient
+is zero. More required precision therefore means another self-similar word,
+not a format arm, cutoff, or representation change. `CD-30` differentially
+pins this optimized contraction to the canonical finite-NAF reference for both
+float formats and every public entry.
+
+There is one shipped float arithmetic, exposed through several factorizations.
+At each reduction position it contracts equal `u+v` Laurent diagonals by lookup
+and addition into one bounded product carrier per output cell. Only after every
+diagonal of that mathematical source product has arrived does the carrier
+resolve its sign and magnitude;
+one Euclidean fracture in the signed-place radix `i128::MAX + 1` then yields a
+low digit and at most one unit high digit, placed at the base grade and its
+radix-successor grade. The only selector globally compares every eligible
+group-one tile, narrow, and reduce lookup declaration by model-derived executed
+work, including exact output-cell residency, the fixed Atlas workspace, and
+full tiles plus row, column, and corner edges. One exact frame owns every live
+cell of a tile for its entire reduction; a model-generated contiguous capacity
+dispatch gives that frame exactly `rows * columns` cells, with no replay or
+maximum-tile allocation. There is no scalar support mask, population count,
+common-gauge route, tuned threshold, significand multiply, float arithmetic,
+whole-operand integer reification, or reserve route (`CU-11`, `CG-22`). The
+interval and projector objects used by `CD-31` and `CK-20` remain borrowed
+theorem certificates, not objects materialized by the hot loop. Each offered
+sixteen-byte `PackedCode` slot becomes the source's balanced-octet/grade
+projection in place, so panels reuse both decode and projection without a
+second buffer or copy. An empty offer streams one reduction position through
+the same fixed workspace and changes reuse but never arithmetic, allocation,
+or output bytes (`CA-05`, `CD-19`, `CD-30`).
+
+The public coded traversal can also force this arithmetic through its
+block-one q table, but automatic selection does not speculate on that route.
+The post-native `CG-16` fit predicted the table for two holdouts with the
+identical pre-admission structural key; their unlike values produced opposite
+decisive clock outcomes (`0.1792 +/- 0.0318` and `3.9968 +/- 1.7006`
+table/decline).
+`CS-10` forbids inspecting those values to choose a route, so that candidate is
+rejected and the value-blind block-one default remains the coded Atlas decline.
+Forced tabulation remains available and byte-identical for a caller that names
+it; no rejected clock rule becomes a model constant.
 
 Consequences, stated plainly:
 
@@ -304,12 +355,12 @@ carries what is still short and what has not been attributed.
 | N3 | Any quality claim about a codebook | discipline | VQ quality is measured per (model, codebook) and reported `open`, never asserted |
 | N4 | A second method for any case, however hard | design | there is nothing this library does not do with decode-accumulate-encode, so there is nothing left over for a second method to cover |
 
-Note what is **not** on that list. **Throughput is not a non-goal.** It used to be
-one, on floats, on the grounds that a complete accumulator costs more per element
-than one FMA. That was wrong: most of the gap was not the price of exactness, it
-was a placement done once per product that belongs once per reduction, and moving
-it was worth `3.4x` with no change to a single output byte. Every remaining gap is
-measured, named, and carried in `ANALYSIS.md` as work, not as scope.
+Note what is **not** on that list. **Throughput is not a non-goal.** Float work
+is admitted only through the pure-UOR operation census, and route selection is
+derived from that census rather than from a hand-restated size threshold
+(`CG-22`). Performance claims remain measurements: `CG-21` reports latency,
+traffic and throughput with output poisoning before and complete byte checks
+after every calibrated batch; only production calls are inside the timer.
 
 Asymmetric quantization is not a non-goal: a zero point is the codec `d(c) = c - z`, expressed as `Offset<C>`. A reduction
 depth is not a non-goal: the accumulator cannot overflow. An unaligned or prime
@@ -342,7 +393,7 @@ the documentation.
 | `model/` | the single source of every constant, tier, oracle, and claim |
 | `features/suites/` | one Gherkin scenario per conformance ID |
 | `oracles/` | committed external artifacts, with provenance and checksums |
-| `crates/uor-matmul-core` | alphabet, accumulator, reference accumulation, views. `no_std`, no `alloc`, `forbid(unsafe_code)`, no float arithmetic |
+| `crates/uor-matmul-core` | alphabet, borrowed Atlas carrier/projectors, accumulator, reference accumulation, views. `no_std`, no `alloc`, `forbid(unsafe_code)`, no float arithmetic |
 | `crates/uor-matmul-codec` | the `Codec` trait, every tier, and the E8 codebook |
 | `crates/uor-matmul-kernels` | one module per ISA: the dense tile sequences and the table sequences. The only crate that writes `#[target_feature]`, which is why every sequence lives here |
 | `crates/uor-matmul-gemm` | the driver: traversal, scratch, epilogue, tile partition |
@@ -372,15 +423,28 @@ meant. `uor_matmul::kernels::available_i8()` says which kernels a build can run.
 
 ## Performance
 
-`ANALYSIS.md` §"Against the oracles" has the sweep --- throughput, latency, and
-fitted exponents from `n = 1` to `n = 1024`, beside every oracle. Two sections,
-kept separate because confusing them is the oldest mistake in this repository's
+`ANALYSIS.md` §"Against the oracles" has the integer sweep --- throughput,
+latency, and fitted exponents from `n = 1` to `n = 1024`, beside every oracle.
+`MEASUREMENT-LOG.md` §"Current pure-Atlas CG-16 and CG-21 measurement record"
+records the completed block-one selector experiment: its same-key H01/H02
+holdout rejected the fitted `CG-16` candidate, so the value-blind default still
+declines. The fresh `CG-21` sweep records the current one-frame implementation:
+all exact-byte guards passed, the full finite-range cases fell from the old
+multi-millisecond gauge path to `226.5 +/- 27.7` us (`f32`, offered) and
+`501.3 +/- 81.2` us (`f64`, offered), and all timing figures remain host-scoped
+`open` observations rather than selector thresholds.
+Two classes remain separate, because confusing them is the oldest mistake in
+this repository's
 performance prose: **arbitrary-data results** (dense kernels, exponents,
 fraction of peak --- caller-supplied seed, operands generated at runtime, no
 structural assumption) and **structured-data results** (tabulation, collapse,
 the symbol path --- these win because the data has a small effective alphabet,
-and every figure comes with its corpus). In short, on a two-core runner with
-AVX2, arbitrary data:
+and every figure comes with its corpus).
+
+The following integer table is the pre-Atlas oracle sweep on a two-core AVX2
+runner. Its former `f32` row is intentionally omitted: the bridge/scalar
+implementation it measured has been removed, so that number is historical
+evidence rather than a description of this implementation.
 
 | | uor-matmul | oracle | |
 | --- | --- | --- | --- |
@@ -389,22 +453,27 @@ AVX2, arbitrary data:
 | `i32`, `n = 1024` | 29.1 Gmac/s | nalgebra 4.58 | **6.3x ahead** |
 | `i8`, `1024x1024x1` | 37.5 Gmac/s | ndarray 3.24 | **12x ahead** |
 | `i8`, `1x1048576x1` | 40.1 Gmac/s | ndarray 2.41 | **17x ahead** |
-| `f32`, `n = 1024` | 15.3 Gmac/s | matrixmultiply 58.6 | 3.8x behind, cross-type and expected |
 | latency at `n = 1` | 22.5 ns (`i8`) | ndarray 60 ns (measured on an M4 Max; the x86 runner's figure was 140 ns before the resolved-kernel cache) | |
 
-The integer paths are ahead of both integer oracles at every size that is not
+The integer paths in that sweep are ahead of both integer oracles at every size that is not
 latency-bound, and hold their throughput from `n = 128` upward while `ndarray`
 falls away --- with the caveat, stated wherever these figures appear, that the
-integer oracles have no integer BLAS and their paths are generic kernels, so a
-production integer baseline is still owed and every integer figure is `open`
-until it lands. The float path was once 134x behind `matrixmultiply`; most of
-that was not the price of exactness. Scaling both panels' significands to a
-common base turns the exact float dot into an exact *integer* dot at one known
-scale, handed to the integer kernel table --- the placement bridge, now the
-default driver's own selection (`CD-19`), worth 3.0--3.5x over the scalar lanes
-and closing the gap to ~3.8x on the measured hosts. What is left of the gap is
-structural: the widening multiply covers two columns an instruction where the
-FMA path covers four lanes across two units.
+integer oracles have no integer BLAS and their paths are generic kernels. These
+rows therefore claim only the recorded comparisons, not parity with an unnamed
+production baseline, and every integer figure remains `open`.
+
+The historical pre-one-frame pure-UOR body, in the 2026-08-06 shared-host
+census, measured
+the offered `f32` Atlas route at `0.0160 +/- 0.0099` Gproduct/s on the
+few-grades `32^3` case, against `0.0003 +/- 0.0001` for the deliberately
+unoptimized exact reference and `8.609 +/- 1.775` for `matrixmultiply`.
+The analogous offered `f64` rate was `0.0062 +/- 0.0008`, against `0.0001`
+for the exact reference and `6.242 +/- 1.032` for `matrixmultiply`. These are
+`open` observations, not acceptance thresholds. That run identified full-range
+gauge projection as slower than the exact reference at its V&V shape and drove
+the direct one-pass refactor. The log preserves the finding as a baseline
+without turning it into a fallback or weakening the purity and byte-identity
+gates; it does not claim those rates for the frozen implementation.
 
 `ANALYSIS.md` §"The constraint that is nobody's" has the structured-data
 figures: the collapse traversal charges per *distinct* row of `A` rather than

@@ -68,6 +68,13 @@ pub struct Constants {
     /// Declared, not probed, so the accumulator type is the same on a 64-bit
     /// host, a 32-bit host, and wasm32 (§3.2).
     pub max_k_bits: u32,
+    /// The source tuple of the canonical UOR Atlas instance.
+    pub atlas: Atlas,
+    /// The exact output-cell and source-site extents of the declared kernel
+    /// families.
+    pub kernel_capacity: KernelCapacity,
+    /// Measured work boundary and derived carrier width for the column hash.
+    pub column_hash: ColumnHash,
     /// Machine integer types usable as alphabet elements.
     pub element: Vec<Element>,
     /// Named `(element, bound)` pairs. Exactly one is canonical.
@@ -76,6 +83,57 @@ pub struct Constants {
     pub narrow: Narrow,
     /// Cache-shaped tuning parameters, allowlisted out of R1.
     pub blocking: Blocking,
+}
+
+/// The measured work boundary for the column dictionary's exact hash filter.
+///
+/// Equality of canonical index streams remains authoritative, so this row can
+/// change traversal work but cannot change an output byte. Its prefix is an
+/// honest open measurement; its carrier width is derived from that prefix.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ColumnHash {
+    /// Honesty level of the measured prefix; must be `open`.
+    pub level: Level,
+    /// Leading canonical coordinates sampled by the order-sensitive filter.
+    pub prefix: usize,
+    /// Exact unsigned bits required by the unreduced ternary recurrence.
+    pub accumulator_bits: u32,
+    /// Harness, host, date, and log provenance for the measurement.
+    pub source: String,
+}
+
+/// The generated fixed-frame extents required by the declared kernel families.
+///
+/// These are derived pins, not spare capacity: the semantic float gate walks
+/// every family and requires its largest `mr * nr` and `mr + nr` to equal the
+/// respective values. The pins live in the model so the public kernel
+/// constant, the private source workspace extent, and the exhaustive
+/// const-generic dispatcher are generated from one source.
+#[derive(Debug, Clone, Deserialize)]
+pub struct KernelCapacity {
+    /// Exact maximum `mr * nr` across every declared kernel family.
+    pub max_tile_lanes: usize,
+    /// Exact maximum `mr + nr` across every declared kernel family.
+    pub max_source_sites: usize,
+    /// Provenance for the independently audited derivation.
+    pub source: String,
+}
+
+/// The source tuple of the canonical UOR Atlas instance.
+///
+/// Scope indexes copies of the `modality * context` carrier. It is deliberately
+/// represented separately rather than folded into the derived scoped class
+/// count, because TF1 S-18 makes that distinction load-bearing.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Atlas {
+    /// Number of scoped copies of the carrier.
+    pub scope: u32,
+    /// The carrier's modality dimension.
+    pub modality: u32,
+    /// The carrier's context dimension.
+    pub context: u32,
+    /// Clause-level provenance for the declared tuple.
+    pub source: String,
 }
 
 /// A machine integer type usable as an alphabet element and as a coded weight.
@@ -204,10 +262,64 @@ pub struct Blocking {
 pub struct Widths {
     /// The schema tag.
     pub spec: String,
+    /// Shared representation of a complete terminal expression.
+    pub complete_state: CompleteState,
+    /// The total compact-or-tagged product carrier for binary32 tabulation.
+    pub f32_q_carrier: F32QCarrier,
     /// One row per integer element type.
     pub width: Vec<Width>,
     /// One row per float element type.
     pub complete: Vec<Complete>,
+}
+
+/// The exact compact-or-tagged product geometry for binary32 tabulation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct F32QCarrier {
+    /// Significant coefficient bits in one decoded binary32 value.
+    pub significand_bits: u32,
+    /// Minimum decoded binary32 factor exponent, including subnormals.
+    pub min_factor_exp: i32,
+    /// Maximum decoded binary32 finite factor exponent.
+    pub max_factor_exp: i32,
+    /// Bits sufficient for the product of two significant coefficients.
+    pub product_magnitude_bits: u32,
+    /// Largest product of two binary32 significant coefficients.
+    pub product_bound: u64,
+    /// Relative product grades across the complete binary32 exponent range.
+    pub relative_grade_count: u32,
+    /// Relative-grade states after retaining the product sign.
+    pub signed_finite_states: u32,
+    /// Signed finite states and all Complete non-finite unions.
+    pub state_count: u32,
+    /// Bits sufficient to distinguish every product state.
+    pub state_bits: u32,
+    /// Product-magnitude and state bits carried by a tagged token.
+    pub tag_payload_bits: u32,
+    /// Number of positive extension-word values reserved for tags.
+    pub tag_interval: u64,
+    /// First value in the top-positive tag interval.
+    pub tag_base: u64,
+    /// Largest untagged positive compact coefficient.
+    pub compact_ceiling: u64,
+    /// Products a zero-span compact lane can add without entering the tag interval.
+    pub zero_span_capacity: u64,
+}
+
+/// The tail word shared by every complete float accumulator.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompleteState {
+    /// Exponent-growth bits required by an arbitrary `i64` scalar.
+    pub scalar_bits: u32,
+    /// Terms in `alpha * sum + beta * C`.
+    pub terminal_terms: u32,
+    /// Headroom required to add those terminal terms.
+    pub terminal_terms_bits: u32,
+    /// Bits in the signed extension word.
+    pub extension_bits: u32,
+    /// Former independent non-finite flags represented in the shared word.
+    pub nonfinite_flag_count: u32,
+    /// Every nonempty union of those flags, derived as `2^count - 1`.
+    pub nonfinite_states: u32,
 }
 
 /// The derived accumulator for one integer element type.
@@ -240,10 +352,20 @@ pub struct Complete {
     pub guard_bits: u32,
     /// One.
     pub sign_bits: u32,
-    /// Span plus guard plus sign.
+    /// Span plus guard plus sign, before terminal scalar application.
+    pub accumulation_bits: i64,
+    /// Accumulation, arbitrary scalar growth, and terminal addition.
     pub total_bits: i64,
-    /// 64-bit limbs sufficient for `total_bits`.
+    /// Canonical signed-binary sites sufficient for `accumulation_bits`.
+    pub naf_sites: usize,
+    /// Atlas address words sufficient for `naf_sites`.
+    pub atlas_pages: usize,
+    /// 64-bit low limbs sufficient for `accumulation_bits`.
     pub limbs: usize,
+    /// Signed bits the terminal expression occupies in the extension word.
+    pub finite_state_bits: u32,
+    /// Low limbs plus the extension word.
+    pub physical_bits: u32,
     /// The accumulator's size in bytes.
     pub bytes: usize,
 }
@@ -287,6 +409,10 @@ fn default_isa() -> String {
     "avx2".to_string()
 }
 
+const fn default_build_products_per_step() -> usize {
+    1
+}
+
 /// One enumerable codec at one named pair of sequences, with the break-even
 /// the op counts put it at.
 ///
@@ -313,6 +439,11 @@ pub struct Tabulation {
     /// Lane words one issued add covers: the register width the recorded
     /// break-even is written for.
     pub lanes_per_add: usize,
+    /// Products one issued table-build instruction covers. Lookup builders
+    /// default to one; bound-one/vector builders state their wider density on
+    /// the row. This is independent of gather density.
+    #[serde(default = "default_build_products_per_step")]
+    pub build_products_per_step: usize,
     /// Products one instruction of the dense tile issues on this row's ISA:
     /// the `products_per_step` of the `KernelSpec` the dense path would run
     /// there. Absent on the AVX2 rows, which read the model's
@@ -322,11 +453,11 @@ pub struct Tabulation {
     /// rather than the chosen tile's `mr`.
     #[serde(default)]
     pub kernel_products_per_step: Option<usize>,
-    /// The first `n` at which tabulation issues fewer operations than blocking.
-    ///
-    /// Absent when `block == 1`, where no such `n` exists: one code names one
-    /// element, so the table replaces every multiply with a read and removes no
-    /// add at all.
+    /// The first `n` at which the declared table build and gather issue fewer
+    /// instructions than the declared dense tile. Absent when no representable
+    /// `n` satisfies that exact comparison. Block-one contextual float cells are
+    /// measured separately because their lookup/Horner recurrence is not this
+    /// product-build model.
     #[serde(default)]
     pub break_even_n: Option<usize>,
     /// Free-form notes.
@@ -444,7 +575,7 @@ pub struct Ledger {
 /// constant inside the gate.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Suspension {
-    /// Stable identifier, e.g. `SUSP-R15-WIDTH-PHASE`.
+    /// Stable identifier, e.g. `SUSP-R15-NAMED-SCOPE`.
     pub id: String,
     /// The rule suspended, e.g. `R15`.
     pub rule: String,

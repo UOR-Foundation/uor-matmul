@@ -118,12 +118,12 @@ pub trait Kernelized: IntegerElement {
     /// The smallest base-case extent at which a level of the sub-cubic
     /// recursion pays on this lane, from the measured-constants table.
     ///
-    /// `None` where the lane has no measurement: an unmeasured lane declines
-    /// the recursion, because a gain that cannot be measured cannot be
-    /// selected. The `i16` lane's analysis is recorded in ANALYSIS.md --- at a
+    /// `None` is the lane's complete declaration that automatic recursion is
+    /// not selected. The `i16` lane's recorded analysis, for example, is a
+    /// decline: at a
     /// per-operation penalty of two the break-even sits near five levels, which
-    /// the alphabet's headroom does not admit at any useful bound --- and that
-    /// is a measurement of a different kind: the decline is the finding.
+    /// the alphabet's headroom does not admit at any useful bound. Absence here
+    /// is that finding, not a capability waiting behind a clock result.
     fn strassen_min_extent() -> Option<usize> {
         None
     }
@@ -345,9 +345,8 @@ impl Kernelized for i64 {
     fn exact_spec(backend: Backend, bound: u128, rows: usize) -> KernelSpec<Self, i128> {
         // An `i64 x i64` product needs 128 bits, so the lane is an `i128`. No
         // SIMD integer multiply reaches that width on any supported target, so
-        // this is not a placeholder --- it is the whole of what the hardware
-        // offers, and the packing still buys it the locality every other family
-        // gets.
+        // this is the complete hardware-realizable sequence, and packing still
+        // buys it the locality every other family gets.
         choose_for_rows(cached::available_i64_exact(), backend, bound, rows)
             .expect("the portable kernel is always present")
     }
@@ -620,74 +619,11 @@ pub(crate) fn gemm_packed_impl<E, Bd, O, Ep>(
     gemm_packed_cubic_at(triple, epilogue, options, scratch, Bd::VALUE, ledger);
 }
 
-/// The exact arm of [`gemm_packed`], with the alphabet bound measured rather
-/// than read from the type.
+/// The cubic exact traversal, with no recursion above it.
 ///
-/// [`gemm_packed`] derives the bound from `Bd`; the float placement bridge is
-/// the caller that cannot, because its alphabet is a scaled float panel whose
-/// bound is a fact of the data's exponent spans, established by measuring them
-/// one walk ahead of the arithmetic. The bound here is that measurement, and
-/// it is a declaration in the same sense `Bd::VALUE` is: the lane depth is
-/// derived from it, so a bound below the data's true magnitude is a wrong
-/// answer, not a fast one.
-///
-/// There is no modular arm. The modular lane is legitimate when the caller
-/// asked to wrap into an integer quotient; this caller's encode is a float
-/// rounding, a question the quotient does not answer, so the exact lane is the
-/// only one the bridge can mean.
-pub(crate) fn gemm_packed_exact_at<E, Bd, O, Ep>(
-    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
-    epilogue: &Ep,
-    options: GemmOptions,
-    scratch: &mut Scratch<'_, E, Bd>,
-    bound: u128,
-    recurse: bool,
-    ledger: &mut impl RouteLedger,
-) where
-    E: Kernelized,
-    Bd: Bound,
-    O: Element + EncodeFrom<AccOf<E>>,
-    Ep: Epilogue<E, O>,
-{
-    let shape = triple.shape();
-    if shape.m == 0 || shape.n == 0 {
-        return;
-    }
-    // The sub-cubic regrouping, taken when the declarations admit at least one
-    // level: the shape (even, and past the measured crossover), the bound's
-    // headroom in the element type, and the offer. Every factorization below
-    // computes the same integer, so this decides which instructions run and
-    // nothing else --- `CD-21` asserts the bytes at every level count and every
-    // offer, including none (R13). `recurse` is `false` for exactly one caller:
-    // the recursion's own decline path, which must not re-enter what it
-    // declined --- a caller who asked for zero levels gets the cubic walk.
-    let take = if recurse {
-        crate::strassen::levels::<E>(
-            shape,
-            bound,
-            scratch.len(),
-            scratch.accumulators(),
-            usize::MAX,
-        )
-    } else {
-        0
-    };
-    if take > 0 {
-        // Recorded here rather than inside the recursion: the plan admitted
-        // these levels against this offer, so the carve's own decline guard
-        // cannot fire from this path, and the base-case products below are the
-        // recursion's internals, not a route the caller chose.
-        ledger.routed(Route::Strassen { levels: take });
-        crate::strassen::run(triple, epilogue, options, scratch, bound, take);
-        return;
-    }
-    gemm_packed_cubic_at(triple, epilogue, options, scratch, bound, ledger);
-}
-
-/// The cubic half of [`gemm_packed_exact_at`]: the packed traversal with no
-/// recursion above it. This is what a declined level falls to, and a decline
-/// is not a fallback to something less exact --- it is the same identity with
-/// fewer regroupings, which is why the bytes cannot tell (`CD-21`).
+/// This is what a declined level runs, and a decline is not a fallback to
+/// something less exact: it is the same identity with fewer regroupings,
+/// which is why the bytes cannot tell (`CD-21`).
 pub(crate) fn gemm_packed_cubic_at<E, Bd, O, Ep>(
     triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
     epilogue: &Ep,
@@ -1293,7 +1229,7 @@ where
             // does not change here --- what changes is that the last block is a
             // full one instead of a sliver, so every panel is the same size and
             // the tail costs a repack of the same block rather than of a
-            // sixteen-column stub.
+            // partial sixteen-column block.
             (
                 shape.m.div_ceil(shape.m.div_ceil(mc)).div_ceil(mr) * mr,
                 shape.n.div_ceil(shape.n.div_ceil(nc)).div_ceil(nr) * nr,
@@ -1844,6 +1780,96 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, Full, MatView, MatViewMut};
+
+    /// `CG-22`: the ordinary integer driver applies no float-role policy to the
+    /// kernel family's declarations.
+    ///
+    /// Lookup and grouped entries are performance factorizations of the same
+    /// exact integer product. Their ordering belongs to the kernel family; a
+    /// driver-side filter would silently change that measured selection while
+    /// the route ledger continued to report `Kernel`.
+    #[test]
+    fn ordinary_i8_dispatch_is_the_declared_kernel_selection_cg_22() {
+        fn assert_same(
+            actual: Option<KernelSpec<i8, i32>>,
+            declared: Option<KernelSpec<i8, i32>>,
+            label: &str,
+        ) {
+            match (actual, declared) {
+                (Some(actual), Some(declared)) => {
+                    assert_eq!(actual.backend, declared.backend, "{label}: backend");
+                    assert_eq!(
+                        actual.factorization, declared.factorization,
+                        "{label}: factorization"
+                    );
+                    assert_eq!(actual.mr, declared.mr, "{label}: mr");
+                    assert_eq!(actual.nr, declared.nr, "{label}: nr");
+                    assert_eq!(actual.lane_layout, declared.lane_layout, "{label}: layout");
+                    assert_eq!(actual.k_group, declared.k_group, "{label}: k_group");
+                    assert_eq!(
+                        actual.products_per_step, declared.products_per_step,
+                        "{label}: products_per_step"
+                    );
+                    assert_eq!(actual.lane_cap, declared.lane_cap, "{label}: lane_cap");
+                    assert_eq!(actual.max_bound, declared.max_bound, "{label}: max_bound");
+                    assert!(
+                        core::ptr::fn_addr_eq(actual.mac_tile, declared.mac_tile),
+                        "{label}: sequence"
+                    );
+                }
+                (None, None) => {}
+                _ => panic!("{label}: availability differs"),
+            }
+        }
+
+        let bound = <Full<i8> as Bound>::VALUE;
+        for backend in core::iter::once(Backend::Auto).chain(Backend::ALL) {
+            for rows in [1usize, 4, 6, 8, 64] {
+                let label = backend.as_str();
+                let tile = choose_for_rows(cached::available_i8(), backend, bound, rows);
+                let reduce = choose_for_rows(cached::available_reduce_i8(), backend, bound, rows);
+                let narrow = choose_for_rows(cached::available_i8_narrow(), backend, bound, rows);
+
+                assert_same(
+                    Some(<i8 as Kernelized>::exact_spec(backend, bound, rows)),
+                    tile,
+                    label,
+                );
+                assert_same(
+                    Some(<i8 as Kernelized>::exact_reduce(backend, bound, rows)),
+                    reduce,
+                    label,
+                );
+                assert_same(
+                    <i8 as Kernelized>::exact_narrow(backend, bound, rows),
+                    narrow,
+                    label,
+                );
+
+                let modular = |spec: Option<KernelSpec<i8, i32>>| {
+                    spec.map(|spec| KernelSpec {
+                        factorization: Factorization::Modular,
+                        ..spec
+                    })
+                };
+                assert_same(
+                    <i8 as Kernelized>::modular_spec(backend, 32, bound, rows),
+                    modular(tile),
+                    label,
+                );
+                assert_same(
+                    <i8 as Kernelized>::modular_reduce(backend, 32, bound, rows),
+                    modular(reduce),
+                    label,
+                );
+                assert_same(
+                    <i8 as Kernelized>::modular_narrow(backend, 32, bound, rows),
+                    modular(narrow),
+                    label,
+                );
+            }
+        }
+    }
 
     /// `CS-02`, R14: a strided `A` takes the packed path and gives the same bytes.
     ///

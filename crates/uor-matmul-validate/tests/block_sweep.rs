@@ -19,10 +19,9 @@
 //! are identical, and the `u8` spelling's census is the `u16` one's, field
 //! for field.
 //!
-//! Every figure this prints is `open` --- measured, reported, never asserted
-//! --- and none of it is recorded anywhere yet: the timed run is pending a
-//! quiet window (the host was loaded when this landed), and `MEASUREMENT-LOG.md`
-//! registers the harness rather than a result.
+//! Every figure this prints is `open` --- measured and reported, never asserted.
+//! `MEASUREMENT-LOG.md` records the quiet-window run: block 16 won at every
+//! shape where the table pays, while every timed closure asserted byte identity.
 
 use std::mem::size_of;
 use std::time::Instant;

@@ -123,8 +123,16 @@ algebra (A-4), a masked position is the semiring zero (A-6), the witness's
 tie-break is the smallest index and is total (D-6), the native operation set is
 matrix products under complete accumulation, max, addition, table lookup and
 power-of-two shifts (D-8), and the two gauges have canonical sections ---
-recentring (G-2) and dyadic placement (G-5)."""
+recentring (G-2) and dyadic placement (G-5). The canonical Atlas instance is
+`(q,T,O)=(4,3,8)`, scope indexes copies outside the `T*O` carrier (D-1, S-18),
+addresses are words of unbounded depth (D-2), modality carries a mirror (S-3),
+the four spectral projectors resolve the carrier exactly (S-12), and
+the context block's rank derives the sign-refinement leaf count (S-17), while
+whole-carrier selection consumes interaction information that marginal block
+selection cannot (S-19, S-20)."""
 realized_by = [
+  "CK-19",
+  "CK-20",
   "CK-16",
   "CK-17",
   "CS-11",
@@ -134,9 +142,12 @@ realized_by = [
   "CD-25",
   "CD-26",
   "CD-27",
+  "CD-31",
+  "CD-32",
   "CD-29",
   "CB-13",
   "CU-10",
+  "CU-11",
 ]
 
 [[authority]]

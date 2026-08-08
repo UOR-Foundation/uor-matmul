@@ -25,6 +25,49 @@ spec = "uor-matmul/1"
 max_k_bits = 64
 
 # --------------------------------------------------------------------------
+# The canonical UOR Atlas instance.
+#
+# These are source parameters of the declared instance, in the same sense that
+# an element type's width below is a source property rather than a tuning
+# choice. Everything the implementation consumes --- carrier and class
+# dimensions, address-page width, projector scale, refinement width, and
+# alphabet cardinality --- is derived from this tuple by `uor-matmul-model`.
+# Scope indexes copies of the carrier; it is not a fourth carrier axis.
+# --------------------------------------------------------------------------
+
+[atlas]
+scope = 4
+modality = 3
+context = 8
+source = "TF1 D-1, S-12, S-17, S-18; canonical UOR Atlas instance"
+
+# This is an exact derived pin, not reserved headroom. `CG-22` walks every
+# declared tile, narrow, and reduce family and requires the largest `mr * nr`
+# and `mr + nr` to equal these values; exceeding either or leaving either
+# larger than necessary is a gate failure. The model generator owns the public
+# kernel capacity, the private Atlas source-site capacity, and every
+# const-generic Atlas frame arm from one through the output-cell maximum.
+[kernel_capacity]
+max_tile_lanes = 128
+max_source_sites = 24
+source = "derived maxima mr * nr and mr + nr across every declared KernelSpec family; independently audited by CG-22"
+
+# The column dictionary's hash is only a filter: canonical index-stream
+# equality remains the authority, so this measured prefix can change work but
+# never bytes. The retained pre-refactor comparator and the pure ternary Atlas
+# recurrence were measured pairwise on the development host at every recorded
+# depth; MEASUREMENT-LOG.md records the corpus, samples, intervals, and result.
+# `accumulator_bits` is not tuning: it is the exact derived width of the largest
+# unreduced recurrence admitted by `prefix` when both its initial source length
+# and every canonical index occupy the full 64-bit address space, pinned here so
+# a longer measured prefix cannot silently overflow its u128 carrier.
+[column_hash]
+level = "open"
+prefix = 16
+accumulator_bits = 90
+source = "retained column-collapse comparator, paired release clock on the development host, 2026-08-08; MEASUREMENT-LOG.md 'Column dictionary radix recurrence'"
+
+# --------------------------------------------------------------------------
 # Element types. `bits` and `full` are properties of the type, not choices.
 # `full` is the largest magnitude the type can hold, so that `Full<E>` admits
 # every value of `E` and the default path cannot reject anything (§5.2). It is

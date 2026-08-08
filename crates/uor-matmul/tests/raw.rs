@@ -364,15 +364,13 @@ fn the_f64_face_reaches_the_same_window_cs_05() {
     assert_eq!(c, expected, "the f64 face agrees with the safe API");
 }
 
-/// The raw face offers no panels, so at a shape the placement bridge would
-/// admit if it had them, the auto-selecting float driver it now calls declines
-/// to the scalar lanes --- the same bytes `gemm_float` produces on the same
+/// The raw face offers no decode caches, so it streams bounded Atlas pages from
+/// the source views and produces the same bytes as the view entry over the same
 /// triple.
 #[test]
-fn the_raw_face_offers_no_panels_and_keeps_the_scalar_bytes() {
-    // 13x17x19: `m * n > m + n` and small dyadic values, so the bridge's
-    // admission questions are all yes --- except the offer's, which a raw
-    // pointer cannot make. The decline is the claim under test.
+fn the_raw_face_streams_the_same_atlas_bytes_without_panels() {
+    // 13x17x19 exercises reuse in both dimensions. An empty offer may repeat
+    // decode work, but cannot change the Atlas coordinates or their sum.
     let (m, k, n) = (13usize, 17usize, 19usize);
     let a: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.5 - 3.0).collect();
     let b: Vec<f32> = (0..k * n).map(|i| (i as f32) * -0.25 + 1.5).collect();
@@ -407,5 +405,5 @@ fn the_raw_face_offers_no_panels_and_keeps_the_scalar_bytes() {
             1,
         );
     }
-    assert_eq!(c, want, "the raw face must keep the scalar lanes' bytes");
+    assert_eq!(c, want, "the raw face must keep the Atlas result bytes");
 }

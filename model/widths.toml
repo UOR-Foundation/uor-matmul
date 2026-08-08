@@ -18,6 +18,40 @@
 
 spec = "uor-matmul/1"
 
+# The terminal `Linear` expression has two terms, each scaled by an `i64`.
+# Its derived headroom reuses the alignment-rounded word that formerly stored
+# three independent booleans, so the concrete associated accumulator types and
+# their layouts do not change.
+[complete_state]
+scalar_bits = 63 # i64::BITS - 1 exponent-growth bits at |i64::MIN| = 2^63
+terminal_terms = 2 # alpha * sum, beta * C
+terminal_terms_bits = 1 # ceil(log2(terminal_terms))
+extension_bits = 64 # one i64 tail word
+nonfinite_flag_count = 3 # former public Debug order: NaN, positive infinity, negative infinity
+nonfinite_states = 7 # derived as 2^nonfinite_flag_count - 1; every nonempty flag union
+
+# The total f32 table carrier retains the IEEE-shaped 24-bit coefficient in
+# one existing four-byte panel cell. A product token uses the exact coefficient
+# product below a reserved top-positive interval, or the same 48-bit magnitude
+# together with one of the relative-grade/sign/nonfinite states in that
+# interval. Every numeral after the two binary32 source dimensions is checked
+# from the preceding fields by CM-01; none is a fitted threshold.
+[f32_q_carrier]
+significand_bits = 24
+min_factor_exp = -149
+max_factor_exp = 104
+product_magnitude_bits = 48
+product_bound = 281474943156225 # (2^24 - 1)^2
+relative_grade_count = 507
+signed_finite_states = 1014 # two signs at each relative grade
+state_count = 1021 # signed finite states plus all seven Complete unions
+state_bits = 10
+tag_payload_bits = 58 # 48 magnitude bits plus 10 state bits
+tag_interval = 288230376151711744 # 2^58
+tag_base = 8935141660703064064 # 2^63 - 2^58
+compact_ceiling = 8935141660703064063 # tag_base - 1
+zero_span_capacity = 31744 # floor(compact_ceiling / product_bound)
+
 [[width]]
 element = "i8"
 bits = 79
@@ -78,9 +112,14 @@ max_product_exp = 256  # 2 * 128
 span_bits = 554
 guard_bits = 64 # log2 of the largest k the machine can address
 sign_bits = 1
-total_bits = 619
+accumulation_bits = 619
+total_bits = 683 # accumulation + scalar growth + the two-term sum
+naf_sites = 619
+atlas_pages = 20 # ceil(619 / (4 * 8)); depth is derived, never capped
 limbs = 10
-bytes = 80
+finite_state_bits = 43 # total_bits - 10 * 64 low bits
+physical_bits = 704 # 10 low limbs + one extension word
+bytes = 88
 
 [[complete]]
 element = "f64"
@@ -89,10 +128,15 @@ max_product_exp = 2048  # 2 * 1024
 span_bits = 4196
 guard_bits = 64
 sign_bits = 1
-total_bits = 4261
+accumulation_bits = 4261
+total_bits = 4325
+naf_sites = 4261
+atlas_pages = 134 # ceil(4261 / (4 * 8)); depth is derived, never capped
 limbs = 67
-bytes = 536
+finite_state_bits = 37
+physical_bits = 4352
+bytes = 544
 
-# The engineering cost is real and is not hidden: a 536-byte accumulator per
+# The engineering cost is real and is not hidden: a 544-byte accumulator per
 # output element makes a large register-blocked tile expensive on a small
 # target. The mitigation is a traversal choice, not a method choice (D-12).

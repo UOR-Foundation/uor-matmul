@@ -286,14 +286,16 @@ where
 /// end. That is why this is *not* bit-identical to a classical `sgemm` (N1) --- it
 /// is the correctly-rounded value of the exact sum.
 ///
-/// `pa` and `pb` are decode panels, the float analogue of `scratch`, and the
-/// offer decides which factorization of the one identity runs --- never what
-/// the bytes are (`CD-19`). `&mut []` runs the streaming traversal. `k` and
-/// `k * n` elements let each operand be decoded once instead of once per row.
-/// [`uor_matmul_gemm::suggested_float_panels`] names the offer that also
-/// admits the float placement bridge, which hands the reduction to the
-/// integer kernel table; it is the fast path a caller who follows the
-/// suggestion gets.
+/// `pa` and `pb` are caller-owned caches of decoded codes, the float analogue
+/// of `scratch`. The offer changes only how often source codes are decoded;
+/// every size, including `&mut []`, streams bounded pages through the same
+/// Atlas-octet contraction (`CD-19`, `CA-05`). The established full-reuse
+/// query offers one complete A row in `pa` and every B column in `pb`. Kernel
+/// selection prices exactly that geometry: it uses the cached row across all
+/// columns and does not choose a multi-row tile that would repeat an uncached
+/// A projection. [`uor_matmul_gemm::suggested_float_panels`] derives that
+/// unchanged offer. Initial cache bytes are never operand data, and cache
+/// contents after return are unspecified.
 ///
 /// # Errors and panics
 ///
@@ -340,15 +342,17 @@ where
 /// `C := alpha * A * B + beta * C` over float operands, exactly, with the
 /// complete caller-owned workspace.
 ///
-/// `pa` and `pb` are the decode panels. `scaled` holds the bridge's reified
-/// integer operands, `panels` holds its kernel panels, and `accumulators` keeps
-/// deep reductions exact between chunks. None of these buffers is allocated or
-/// retained by the library. Offering the full set lets the bridge use the same
-/// large blocked kernel as [`uor_matmul_gemm::gemm_float_bridged`], including
-/// when `k` exceeds the selected lane's depth.
+/// Every workspace slice is an in/out offer. Its initial bytes cannot affect
+/// the product, and its contents after return are unspecified: callers may
+/// retain and reuse the allocation, but must not interpret its residue. The
+/// `scaled`, `panels`, and `accumulators` parameters remain in the established
+/// public API without requiring the pure-UOR implementation to reify either
+/// operand into them. Atlas execution storage is bounded by the selected
+/// kernel tile, so arbitrary `k` is streamed without an operand-sized carrier.
 ///
 /// The result is byte-identical to [`gemm_float_ex`] at every offer, including
-/// empty offers (`CD-19`).
+/// empty offers (`CD-19`), and neither spelling changes the backing addresses
+/// of caller storage (`CA-05`).
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_float_ex_full<E, O>(
     m: usize,

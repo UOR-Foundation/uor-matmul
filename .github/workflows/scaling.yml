@@ -47,23 +47,25 @@ jobs:
           set -o pipefail
           mkdir -p target/measurements
           just strassen-sweep 2>&1 | tee target/measurements/strassen-x86.txt
-      - name: CG-15, the float placement bridge
+      - name: CG-15, retained float workspace spellings
         run: |
           set -o pipefail
           just bridge-sweep 2>&1 | tee target/measurements/bridge-x86.txt
+      - name: CG-21, pure-UOR float census and non-float controls
+        run: |
+          set -o pipefail
+          just uor-float-sweep 2>&1 | tee target/measurements/uor-float-x86.txt
       - name: CG-14, the symbol path against the bus
         run: |
           set -o pipefail
           just symbol-bandwidth 2>&1 | tee target/measurements/symbol-bandwidth-x86.txt
-      - name: CG-16, the symbol table in the scaled lane
+      - name: CG-16, symbol tabulation over Atlas
         run: |
           set -o pipefail
           just symbol-tabulated 2>&1 | tee target/measurements/symbol-tabulated-x86.txt
-      # The VNNI break-even rows in model/tiers.toml are `Unmeasured` until a
-      # VNNI host runs the instrument: the first line is the host's own
-      # answer, printed rather than assumed; the sweep measures the shipped
-      # predicate's crossing against the derived one at whatever the runner
-      # declares, and if that is not VNNI the rows say why they still stand.
+      # The VNNI rows in model/tiers.toml are complete `build` declarations,
+      # recomputed by CM-04 without a clock. The host line makes the separate
+      # open timing artifact say which registered pair it actually exercised.
       - name: the runner's ISA, printed not assumed
         run: lscpu | grep -i 'flags\|model name' | head -2
       - name: the tabulation break-even, measured at the runner's own declarations
@@ -71,7 +73,7 @@ jobs:
           set -o pipefail
           just breakeven 2>&1 | tee target/measurements/breakeven-x86.txt
       # The scalar-port co-issue experiment (the port-multiplexing thesis, the
-      # last item in MEASUREMENT-LOG.md's queue): x86-only by construction,
+      # recorded decline in MEASUREMENT-LOG.md): x86-only by construction,
       # and the runner above just printed what it has. The harness asserts
       # byte-identity inside every timed run, so a red step is a correctness
       # failure and never a slow day.
@@ -124,15 +126,19 @@ jobs:
         run: |
           mkdir -p target/measurements
           just strassen-sweep 2>&1 | tee target/measurements/strassen-aarch64.txt
-      - name: CG-15, the float placement bridge
+      - name: CG-15, retained float workspace spellings
         run: |
           set -o pipefail
           just bridge-sweep 2>&1 | tee target/measurements/bridge-aarch64.txt
+      - name: CG-21, pure-UOR float census and non-float controls
+        run: |
+          set -o pipefail
+          just uor-float-sweep 2>&1 | tee target/measurements/uor-float-aarch64.txt
       - name: CG-14, the symbol path against the bus
         run: |
           set -o pipefail
           just symbol-bandwidth 2>&1 | tee target/measurements/symbol-bandwidth-aarch64.txt
-      - name: CG-16, the symbol table in the scaled lane
+      - name: CG-16, symbol tabulation over Atlas
         run: |
           set -o pipefail
           just symbol-tabulated 2>&1 | tee target/measurements/symbol-tabulated-aarch64.txt

@@ -107,3 +107,21 @@ Feature: Codec
     Given the standing corpus
     When the suite exercises CK-18
     Then every pair equals its independent shift-add product
+
+  @CK-19 @build
+  Scenario: Finite NAF is the canonical section of the dyadic quotient and its Atlas page address never wraps
+    Given signed dyadic values and grades straddling context, scope, and word boundaries
+    When the suite normalizes, evaluates, negates, encodes, and decodes CK-19
+    Then the representative is unique, non-adjacent, evaluation-preserving, and addressed at the original grade
+
+  @CK-20 @build
+  Scenario: The scaled Atlas carrier decomposes exactly and its interaction block is load-bearing
+    Given carriers in `3 Z^(3x8)` including the registered equal-marginal interaction witness
+    When the suite applies all four canonical projectors for CK-20
+    Then every coordinate is dyadic, the blocks reconstruct exactly, and the differing signed-digit values remain distinguishable
+
+  @CK-21 @build
+  Scenario: Every decoded float code has a lossless sixteen-byte packed form
+    Given finite codes spanning both signs, the full mantissa and exponent domains, both non-finite sentinels, and nonreserved historical padding words
+    When the suite packs and interprets each code for CK-21
+    Then every decoded field is recovered, every kind is distinct, ordinary IEEE finite values remain inline, and nonreserved padding retains its prior kind

@@ -58,6 +58,7 @@ checked:
 # R2, R3, R13, and CU-01's disassembly.
 purity:
     cargo run -q -p xtask -- audit-purity
+    cargo run -q -p xtask -- audit-uor-float
     cargo run -q -p xtask -- audit-disassembly
 
 # R7, C1, CA-03: every shipped crate builds for a target with no allocator at
@@ -200,6 +201,19 @@ bench:
     cargo bench -p uor-matmul-validate
     cargo run --release -p uor-matmul-validate --bin benchmark_report
 
+# CG-23's native lookup protocol is deliberately absent from ordinary Criterion
+# runs. It collects and emits 256 paired 50 ms epochs for all seven cases on one
+# pinned CPU. Exact linked-ELF inspection on the recorded compiler/host found
+# the MR1 reduction and unchanged NR16 tiles normalized-static-equivalent to
+# their controls, with the production alphabet 64-byte aligned and addressed by
+# direct LEA. Their clocks are labeled open/static-control and never asserted as
+# build truth. The four structurally changed cases retain the preregistered
+# demonstrated-superiority rule `upper95 <= 1`; poison, complete-output checks,
+# and identical safe wrappers apply to both classes.
+native-lookup-acceptance:
+    @mkdir -p target/measurements
+    bash -o pipefail -c 'taskset -c 0 cargo bench -p uor-matmul-validate --bench scaling -- __native_lookup_acceptance_only__ --noplot 2>&1 | tee target/measurements/native-lookup-acceptance-2026-08-08.log'
+
 # Regenerate the comparison report from an existing Criterion directory.
 bench-report:
     cargo run --release -p uor-matmul-validate --bin benchmark_report
@@ -215,6 +229,18 @@ bench-report:
 # Fitted scaling exponents against the oracle's, every figure `open`.
 scaling: bench
     cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
+
+# CG-21: both IEEE widths walk the same structural shapes against the retained
+# exact reference, matrixmultiply, and faer, followed by matched integer and
+# tropical controls.  Every calibrated batch is poisoned before timing and
+# checks all result bytes after timing; latency, throughput, and logical caller
+# traffic carry 95% confidence intervals, and every raw calibrated duration is
+# emitted with its width, case, route, round, and batch.  The
+# oracle features are intentionally enabled: a performance recipe that silently
+# omitted its comparison would not discharge the claim.
+uor-float-sweep:
+    cargo test --release -p uor-matmul-gemm --lib float::tests::every_atlas_candidate_is_measurable_with_byte_checks_cg_21 -- --ignored --exact --nocapture --test-threads=1
+    cargo test --release -p uor-matmul-validate --test uor_float_sweep -- --ignored --nocapture --test-threads=1
 
 # CG-09: throughput against the degeneracy of the operand, over the large shapes
 # `just vv` has no time for. Minutes.
@@ -303,12 +329,13 @@ symbol-bandwidth:
     cargo test --release -p uor-matmul-validate --test symbol_bandwidth -- \
         --ignored --nocapture --test-threads=1
 
-# CG-15: the float placement bridge against the scalar scaled lanes it
-# factorizes, on the shapes ANALYSIS tables, with byte-identity asserted
-# inside every timed run. Minutes, and every figure is `open`. `--release` is
-# not optional: a throughput figure from an unoptimised build is not a figure.
+# CG-15: the retained default and compatibility float-workspace spellings over
+# one Atlas operation, on the recorded workspace-sweep shapes, with byte
+# identity asserted inside every timed run. Minutes, and every figure is
+# `open`. `--release` is not optional: an unoptimised throughput figure is not
+# a figure.
 #
-# The bridge against the scalar lanes, measured. Minutes.
+# The retained float-workspace protocol over the one Atlas operation. Minutes.
 bridge-sweep:
     cargo test --release -p uor-matmul-validate --test bridge_sweep -- \
         --ignored --nocapture --test-threads=1
@@ -337,30 +364,15 @@ coissue:
     cargo test --release -p uor-matmul-validate --lib coissue -- \
         --ignored --nocapture --test-threads=1
 
-# CG-16: the symbol tabulated traversal in the scaled integer lane against the
-# float placement bridge, the dense float driver, and the oracle, on gemv,
-# skinny, and tabulation-sweep shapes, with byte-identity asserted inside
-# every timed run. Minutes, and every figure is `open`. `--release` is not
-# optional: a throughput figure from an unoptimised build is not a figure.
+# CG-16: the symbol-tabulated Atlas traversal against the compatibility
+# spelling, dense Atlas, and the oracle, on gemv, skinny, and tabulation-sweep
+# shapes, with byte identity asserted inside every timed run. Minutes, and
+# every figure is `open`. `--release` is not optional: an unoptimised
+# throughput figure is not a figure.
 #
-# The narrow lane against the bridge and the bus, measured. Minutes.
+# Atlas symbol tabulation against dense Atlas and the bus. Minutes.
 symbol-tabulated:
     cargo test --release -p uor-matmul-validate --test symbol_tabulated_sweep -- \
-        --ignored --nocapture --test-threads=1
-
-# CG-16 follow-on: the feasibility test for a per-op-kind cost model of the
-# symbol-table selection boundary. Fits nanosecond constants per op kind over
-# the sweep's (shape, fill) grid --- the table's counts read off its census,
-# the dense side's derived from the drivers' own arithmetic --- and reports
-# the residuals and whether a safety-margin boundary separates every measured
-# win from every measured loss. If the intervals do not overlap the output
-# says so plainly: that is the "nothing" outcome, and it is the evidence the
-# queue item closes on. Minutes, and every figure is `open`. `--release` is
-# not optional: a throughput figure from an unoptimised build is not a figure.
-#
-# The per-op-kind cost fit, measured. Minutes.
-op-cost-fit:
-    cargo test --release -p uor-matmul-validate --test op_cost_fit -- \
         --ignored --nocapture --test-threads=1
 
 # CG-12: the sub-cubic recursion against the cubic packed walk on the

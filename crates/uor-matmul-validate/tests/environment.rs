@@ -7,8 +7,12 @@
 //! one.
 
 use uor_matmul::prelude::*;
-use uor_matmul_core::{dot_ref, dot_wide, EncodeMode, PackedCode, Shape};
-use uor_matmul_gemm::Partition;
+use uor_matmul_core::{
+    dot_ref, dot_wide, AccOf, EncodeFrom, EncodeMode, FloatElement, PackedCode, Shape,
+};
+use uor_matmul_gemm::epilogue::{AbsorbPrior, ScaleExact};
+use uor_matmul_gemm::{Partition, PlaceAt, SignedPlace};
+use uor_matmul_validate::float_corpus::{operands, CorpusFloat, FloatCase, FloatFill};
 use uor_matmul_validate::{counting, Case, Corpus};
 
 /// `CA-01`: the counting allocator observes zero allocations during a call.
@@ -102,6 +106,74 @@ fn a_gemm_call_allocates_nothing_ca_01() {
         "the counting allocator must actually count"
     );
     drop(v);
+}
+
+fn assert_float_call_borrows_every_buffer<E>()
+where
+    E: CorpusFloat + FloatElement + EncodeFrom<AccOf<E>> + EncodeFrom<i128>,
+    AccOf<E>: SignedPlace + PlaceAt + ScaleExact + AbsorbPrior<E>,
+{
+    let case = FloatCase {
+        m: 7,
+        k: 67,
+        n: 9,
+        fill: FloatFill::InverseGauge,
+        seed: 0xCA05,
+    };
+    let shape = Shape {
+        m: case.m,
+        k: case.k,
+        n: case.n,
+    };
+    let (a, b) = operands::<E>(case);
+    let mut c = vec![E::ZERO; case.m * case.n];
+    let (pa_len, pb_len) = uor_matmul::suggested_float_panels(shape);
+    let mut pa = vec![PackedCode::default(); pa_len];
+    let mut pb = vec![PackedCode::default(); pb_len];
+
+    // Warm runtime feature detection before observing the operation itself.
+    {
+        let av = MatView::row_major(&a, case.m, case.k).expect("A fits");
+        let bv = MatView::row_major(&b, case.k, case.n).expect("B fits");
+        let cv = MatViewMut::row_major(&mut c, case.m, case.n).expect("C fits");
+        let mut triple = Triple::new(av, bv, cv).expect("the product exists");
+        uor_matmul::gemm_float_packed(
+            &mut triple,
+            &Linear::OVERWRITE,
+            GemmOptions::default(),
+            &mut pa,
+            &mut pb,
+        );
+    }
+
+    let ((), reading) = counting::measure(|| {
+        let av = MatView::row_major(&a, case.m, case.k).expect("A fits");
+        let bv = MatView::row_major(&b, case.k, case.n).expect("B fits");
+        let cv = MatViewMut::row_major(&mut c, case.m, case.n).expect("C fits");
+        let mut triple = Triple::new(av, bv, cv).expect("the product exists");
+        uor_matmul::gemm_float_packed(
+            &mut triple,
+            &Linear::OVERWRITE,
+            GemmOptions::default(),
+            &mut pa,
+            &mut pb,
+        );
+    });
+    assert_eq!(
+        reading.allocations,
+        0,
+        "{} float call allocated instead of borrowing its carrier/panels",
+        core::any::type_name::<E>()
+    );
+    assert_eq!(reading.bytes, 0);
+}
+
+/// `CA-05`: a float carrier is a borrowed/lazy view; constructing and consuming
+/// it never creates an owned operand or allocation, at either IEEE width.
+#[test]
+fn float_carriers_borrow_and_never_own_the_operands_ca_05() {
+    assert_float_call_borrows_every_buffer::<f32>();
+    assert_float_call_borrows_every_buffer::<f64>();
 }
 
 /// `CD-06`: the serialized output does not depend on the host's endianness.

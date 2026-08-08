@@ -10,13 +10,11 @@
 //! float entry points below compute the correctly-rounded value of the exact
 //! sum, not an order-dependent approximation of it.
 //!
-//! A raw pointer carries no panel offer, so these entries call the
-//! auto-selecting float driver with an empty one: the placement bridge's
-//! reification has nowhere to live, the driver declines, and the scalar lanes
-//! run --- the same lanes [`uor_matmul_gemm::gemm_float`] walks directly, at
-//! the same bytes (`CD-19`). The throughput of the kernel-table lane is reached
-//! through the safe API by offering
-//! [`uor_matmul_gemm::suggested_float_panels`].
+//! A raw pointer carries no panel offer, so these entries call the same Atlas
+//! driver with empty caller caches. The traversal streams bounded Atlas pages
+//! directly from the source views; no operand is reified, no alternate
+//! arithmetic is selected, and the bytes match every safe workspace spelling
+//! (`CD-19`, `CA-05`).
 
 use uor_matmul_core::{MatView, MatViewMut, Strides, Triple};
 use uor_matmul_gemm::epilogue::{AbsorbPrior, ScaleExact};
@@ -148,9 +146,8 @@ unsafe fn raw_gemm<E>(
     let Ok(mut t) = Triple::new(av, bv, cv) else {
         return;
     };
-    // The raw face offers no panels, so the packed driver's offer question is
-    // answered before it is asked and the scalar lanes run --- the same bytes
-    // `gemm_float` produces on the same triple (`CD-19`).
+    // Empty caller caches select bounded streaming through the same Atlas body;
+    // the offer changes reuse, never arithmetic or output bytes (`CD-19`).
     gemm_float_packed(
         &mut t,
         &Linear { alpha, beta },

@@ -100,16 +100,16 @@ Feature: Scaling
     Then the figure is reported and not asserted
 
   @CG-15 @open
-  Scenario: Achieved MACs per second of the float placement bridge, the default auto-selection against the explicit entry, on the shapes ANALYSIS tables
-    Given the standing sweep and its recorded seed
+  Scenario: Historical float workspace spellings execute one Atlas operation
+    Given the retained workspace-sweep shapes and exponent-span fills
     When the harness measures CG-15
-    Then the figure is reported and not asserted
+    Then byte identity holds inside every timed region and the product rates are reported but not asserted
 
   @CG-16 @open
-  Scenario: Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes
-    Given the standing sweep and its recorded seed
-    When the harness measures CG-16
-    Then the figure is reported and not asserted
+  Scenario: Public block-one Atlas table crossover against the public coded Atlas decline
+    Given the recorded code spaces, shapes, exponent spans, seeds, and caller offers
+    When paired calibrated batches run only the named production calls between the clock reads
+    Then poison and complete byte identity bracket every timed batch, counted calls establish both routes and a multiply-free table, and the paired intervals are reported but not asserted
 
   @CG-17 @open
   Scenario: Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime
@@ -122,7 +122,7 @@ Feature: Scaling
     Given the break-even recomputed at test time from the sequences' own per-ISA declarations
     When the suite exercises CG-18
     Then below the break-even the census shows the dense route, and at and above it the table
-    And the table's multiplies are exactly the build's charge, and a block-1 codec is declined at every size
+    And the table's multiplies are exactly the build's charge, and an ordinary product-build block-1 codec is declined at every size
 
   @CG-19 @open
   Scenario: Tropical selection throughput against the ring lane at matched shapes, and witness mechanism A against B
@@ -130,3 +130,24 @@ Feature: Scaling
     When the harness measures CG-19
     Then the figure is reported with its confidence interval
     And nothing asserts it as established
+
+  @CG-21 @open
+  Scenario: Pure-UOR float throughput, traffic, and latency against the incumbent and oracles, with non-float controls
+    Given the standing f32, f64, integer, and tropical sweeps and their recorded seed
+    When the harness brackets each CG-21 batch with poison and complete byte identity outside a timer containing only the real production call
+    Then every figure is reported with its confidence interval
+    And nothing asserts it as established
+
+  @CG-22 @build
+  Scenario: The direct pure-UOR traversal chooses the global model-derived executed-work lookup orientation and leaves non-float routes unchanged
+    Given every eligible group-one lookup-add family, both float accumulator sizes, exact-cell residency, fixed Atlas workspace, full and edge subcells, the direct coordinate census, and captured integer and tropical control counts
+    When the suite exercises shapes selecting each executed-work orientation for CG-22
+    Then the route census names the global model-derived minimum, shipped storage and work equal their independent model twins, and every non-float route and operation count is unchanged
+
+  @CG-23 @open
+  Scenario: Native lookup changes retain demonstrated superiority while linked static-equivalent controls remain open
+    Given exact ELF inspection of every linked native lookup body and the aligned direct production alphabet address on the recorded compiler and host
+    When the sentinel measures each changed case and each static-equivalent control through identical safe wrappers with poison and complete byte checks
+    Then every case emits 256 interleaved paired samples and its confidence interval
+    And only the structurally changed cases assert the preregistered upper 95% endpoint at or below one
+    And every static-equivalent timing is labeled open static-control and never asserted as build truth

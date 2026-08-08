@@ -51,6 +51,7 @@ pub mod alphabet;
 pub mod bounds;
 pub mod dot;
 pub mod error;
+mod float_atlas;
 pub mod gauge;
 pub mod generated;
 pub mod layout;

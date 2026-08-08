@@ -115,15 +115,15 @@ Feature: Determinism
     Then the claim holds byte for byte
 
   @CD-19 @build
-  Scenario: The float driver's scaled lanes give byte-identical output whether the integer dot product runs as the scalar loop or on the integer kernel table, at every shape and every offer
-    Given the standing corpus
-    When the suite exercises CD-19
-    Then the claim holds byte for byte
+  Scenario: Every historical float workspace spelling is the same zero-copy Atlas-octet reduction at every shape, offer, and initial workspace pattern
+    Given the standing corpus and caller-owned workspace filled with distinct poison patterns
+    When the suite exercises CD-19 without interpreting post-call workspace residue
+    Then the outputs are byte-identical, backing storage is retained, and neither initial bytes nor unspecified residue become operand data
 
   @CD-20 @build
-  Scenario: A u8-symbol-coded float weight matrix tabulated in the scaled integer lane gives byte-identical output to the dense float driver at every shape and every offer, with the span walk admitted and declined alike
+  Scenario: Symbol-coded floats match dense Atlas bytes through a contextual f32 octet pair and codec-parametric f64 complete tables
     Given the standing corpus
-    When the suite exercises CD-20
+    When the suite composes f32 projection with Scaled64 consumption and exercises both block-one and downstream block-two f64 codecs for CD-20
     Then the claim holds byte for byte
 
   @CD-21 @build
@@ -179,3 +179,26 @@ Feature: Determinism
     Given the standing corpus
     When the suite exercises CD-29
     Then the claim holds byte for byte
+
+  @CD-30 @build
+  Scenario: Every pure-UOR float factorization returns the exact reference bytes through every public workspace spelling and offer
+    Given the standing float corpus over both formats, every IEEE code class, and every offer including none
+    When the suite exercises every pure-UOR float factorization and public entry for CD-30
+    Then every output is byte-identical to the independently computed exact reference
+
+  @CD-31 @build
+  Scenario: The common-base interval theorem certifies admission and minimum grouping without becoming a runtime route
+    Given formal variable-capacity intervals small enough for exhaustive comparison
+    When the suite derives admission, grouping, and the greatest common base for CD-31
+    Then direct construction admits exactly those bases, exhaustive search finds no smaller grouping, and no smaller base has more headroom
+    And the certificate declares no second float execution route
+
+  @CD-32 @build
+  Scenario: The total binary32 q-carrier tags every boundary and scalar-fractures every short run without changing traversal selection
+    Given the compact binary32 corpus, every IEEE code class and exponent-span boundary, all seven Complete non-finite unions, an empty reduction, and codec blocks and code spaces 2, 3, and 5 including a block wider than a one-product lane
+    When the suite executes resident forced tables and equal-shape automatic calls through the contextual q-carrier across repeated columns, reduction and column tails, non-unit source strides, and absent, short, and complete offers for CD-32
+    Then the 48-bit product, 507 relative grades, 1021 states, 10-bit state, 58-bit tag payload and top-positive interval, and zero-span capacity 31744 equal their model derivations
+    And every forced table executes with zero traditional multiplies, the exact declared Census, and reference-identical bytes; the empty reduction has zero work; every non-finite product is placed immediately in source order as a one-product run; and a capacity below the codec block scalar-fractures with the original block stride instead of declining
+    And compact products retain their complete bytes while the maximal-prefix recurrence groups already-projected source slots by the least nonnegative per-slot L-infinity certificate rather than by a global span
+    And exhaustive ordered partitions find no fewer common-boundary groups under those certificates, without claiming cancellation-sensitive or independent-lane optimality
+    And equal shapes select the same traversal independently of their values

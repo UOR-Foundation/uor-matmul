@@ -35,6 +35,7 @@
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+mod generated_capacity;
 pub mod isa;
 mod lookup;
 #[doc(hidden)]

@@ -279,6 +279,31 @@ fn every_i8_tile() -> impl Iterator<Item = KernelSpec<i8, i32>> {
     available_i8().chain(available_i8_narrow())
 }
 
+/// `CU-11`: group one is the table-level Atlas lookup/add declaration for all
+/// three signed-octet organizations. The native nibble test exhausts the
+/// declared bodies; this gate pins the admission fields the float selector
+/// consumes, including the separately listed narrow tiles.
+#[test]
+fn group_one_i8_specs_declare_the_complete_exact_atlas_alphabet_cu_11() {
+    let full = u128::from(i8::MIN.unsigned_abs());
+    let mut tile_declarations = 0usize;
+    let mut reduce_declarations = 0usize;
+    for spec in every_i8_tile().filter(|spec| spec.k_group == 1) {
+        assert!(matches!(spec.factorization, Factorization::Exact));
+        assert!(spec.max_bound >= full);
+        tile_declarations += 1;
+    }
+    for spec in available_reduce_i8().filter(|spec| spec.k_group == 1) {
+        assert!(matches!(spec.factorization, Factorization::Exact));
+        assert!(spec.max_bound >= full);
+        reduce_declarations += 1;
+    }
+    assert!(
+        tile_declarations > 0 && reduce_declarations > 0,
+        "portable tile and reduction declarations make the contract non-vacuous"
+    );
+}
+
 /// `CB-02`: every `i8` backend this host can run equals the portable
 /// reference, byte for byte.
 #[test]

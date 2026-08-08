@@ -20,6 +20,65 @@ pub const SPEC: &str = "uor-matmul/1";
 /// there and never wrong anywhere.
 pub const MAX_K_BITS: u32 = 64;
 
+/// Model-owned constants for the canonical Atlas embedding.
+///
+/// Crate-private: the representation phase does not change the public API.
+#[allow(dead_code)]
+pub(crate) mod atlas {
+    /// Scoped copies of the carrier.
+    pub(crate) const SCOPE: u32 = 4;
+    /// Modality rows in one carrier.
+    pub(crate) const MODALITY: u32 = 3;
+    /// Ordered context sites in one scope.
+    pub(crate) const CONTEXT: u32 = 8;
+    /// Dimension of one modality-context carrier.
+    pub(crate) const CARRIER_DIM: u64 = 24;
+    /// Scoped class count.
+    pub(crate) const CLASS_COUNT: u128 = 96;
+    /// Ordered grade sites in one address word.
+    pub(crate) const PAGE_SITES: u64 = 32;
+    /// Independent context refinement signs.
+    pub(crate) const REFINEMENT_BITS: u32 = 7;
+    /// Context refinement leaves as `(coefficient, power_of_two)`.
+    pub(crate) const REFINEMENT_LEAVES: (u128, u32) = (1, 7);
+    /// Full scoped Atlas alphabet cardinality as `(coefficient, power_of_two)`.
+    pub(crate) const ALPHABET: (u128, u32) = (96, 7);
+    /// Input lattice scale cancelling the modality mean.
+    pub(crate) const PROJECTOR_INPUT_SCALE: u32 = 3;
+    /// Remaining implicit dyadic projector denominator.
+    pub(crate) const PROJECTOR_DENOMINATOR: u32 = 8;
+    /// Ranks of the four canonical projector blocks.
+    pub(crate) const PROJECTOR_RANKS: [u128; 4] = [1, 2, 7, 14];
+    /// Canonical signed-binary sites sufficient for `f32`.
+    pub(crate) const F32_NAF_SITES: usize = 619;
+    /// Atlas address words sufficient for `f32`.
+    pub(crate) const F32_PAGES: usize = 20;
+    /// Canonical signed-binary sites sufficient for `f64`.
+    pub(crate) const F64_NAF_SITES: usize = 4261;
+    /// Atlas address words sufficient for `f64`.
+    pub(crate) const F64_PAGES: usize = 134;
+}
+
+/// Complete accumulator tail-word states (§3.3).
+pub(crate) mod complete_state {
+    /// First tail value reserved for a nonempty flag union.
+    pub(crate) const BASE: i64 = i64::MIN;
+    /// NaN bit in the former public Debug field order.
+    pub(crate) const NAN_MASK: u8 = 1;
+    /// Positive-infinity bit in the former public Debug field order.
+    pub(crate) const POS_INF_MASK: u8 = 2;
+    /// Negative-infinity bit in the former public Debug field order.
+    pub(crate) const NEG_INF_MASK: u8 = 4;
+    /// Singleton NaN sentinel.
+    pub(crate) const NAN: i64 = BASE + NAN_MASK as i64 - 1;
+    /// Singleton positive-infinity sentinel.
+    pub(crate) const POS_INF: i64 = BASE + POS_INF_MASK as i64 - 1;
+    /// Singleton negative-infinity sentinel.
+    pub(crate) const NEG_INF: i64 = BASE + NEG_INF_MASK as i64 - 1;
+    /// Number of nonempty flag unions reserved from the extension word.
+    pub(crate) const COUNT: u32 = 7;
+}
+
 /// Worst-case accumulation width per element type (§3.2).
 ///
 /// These are pins for `CM-01`. The library reads `acc_bits::<E>()`,
@@ -139,9 +198,9 @@ pub mod blocking {
     /// The smallest base-case extent at which a level of the sub-cubic recursion pays on the i32-exact lane.
     pub const STRASSEN_MIN_EXTENT: usize = 384;
     /// The smallest base-case extent at which one level of the modular bilinear
-    /// factorization pays on a modular lane. `usize::MAX` while the lane has no
-    /// measurement: the modular arm consults it and declines until the
-    /// pre-registered sweep in `MEASUREMENT-LOG.md` records one.
+    /// factorization pays on a modular lane. `usize::MAX` declares no finite
+    /// automatic crossing for that row; the modular arm then declines while the
+    /// explicit factorization remains total. `MEASUREMENT-LOG.md` owns the evidence.
     pub const STRASSEN_MODULAR_MIN_EXTENT: usize = 1024;
 }
 

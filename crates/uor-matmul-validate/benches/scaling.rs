@@ -33,6 +33,18 @@ use uor_matmul_gemm::{gemm as gemm_dense, gemm_selected, SelectedTriple, Witness
 use uor_matmul_validate::corpus::{Case, Corpus, Mask};
 use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 
+#[cfg(target_arch = "x86_64")]
+#[path = "scaling/native_lookup.rs"]
+mod native_lookup;
+
+/// Retained pre/post clock for the pure radix-address native lookup refactor.
+fn native_lookup_report(c: &mut Criterion) {
+    #[cfg(target_arch = "x86_64")]
+    native_lookup::bench(c);
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = c;
+}
+
 /// Emit the fitted exponents, then time a few shapes so `cargo bench` has
 /// something to report alongside them.
 fn scaling_report(c: &mut Criterion) {
@@ -620,7 +632,9 @@ fn finite_i8_table_build(c: &mut Criterion) {
     let logical_acts: Vec<i8> = (0..rows * block)
         .map(|i| ((i.wrapping_mul(7) % 255) as i16 - 127) as i8)
         .collect();
-    let portable = uor_matmul::kernels::portable_table_i8_lookup(rows, 1);
+    let portable = uor_matmul::kernels::available_table_i8(rows, 1)
+        .find(|spec| spec.backend == Backend::Portable)
+        .expect("the portable lookup table build is always present");
     let native = uor_matmul::kernels::available_table_i8(rows, 1)
         .find(|spec| spec.backend != Backend::Portable)
         .unwrap_or(portable);
@@ -654,13 +668,12 @@ fn finite_i8_table_build(c: &mut Criterion) {
 }
 
 /// The one-level modular bilinear factorization against the direct packed
-/// modular walk it would displace, at the squares the crossover will be read
+/// modular walk it would displace, at the squares from which the crossover was read
 /// from. `Auto` and the explicit entry run the level where it is admitted
-/// (which today is only through the explicit entry: the arm's threshold is
-/// `usize::MAX` until the lane is measured); `Packed` is the direct walk.
+/// (the current model-owned automatic threshold is the measured 1024);
+/// `Packed` is the direct walk.
 /// Byte-identity is asserted inside each timed closure, as everywhere in this
-/// file, and the verdict rule is pre-registered in `MEASUREMENT-LOG.md`.
-/// Compiled here; the run waits for a quiet window.
+/// file, and `MEASUREMENT-LOG.md` records the retained result.
 fn modular_strassen(c: &mut Criterion) {
     let mut group = c.benchmark_group("modular_strassen");
     let wrapping = GemmOptions {
@@ -950,6 +963,7 @@ fn tropical(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    native_lookup_report,
     scaling_report,
     vs_oracles,
     public_api,

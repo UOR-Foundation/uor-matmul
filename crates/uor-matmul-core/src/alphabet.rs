@@ -46,7 +46,7 @@ pub trait Element: Copy + PartialEq + Send + Sync + core::fmt::Debug + 'static {
     /// In place, by `&mut`, rather than by value. For an `i128` that is a wash;
     /// for a complete accumulator it is the difference between a float GEMM
     /// that works and one that spends most of its time copying an 88- or
-    /// 536-byte register in and out of this call, twice per product.
+    /// 544-byte register in and out of this call, twice per product.
     fn mac(acc: &mut Self::Acc, a: Self, w: Self);
 
     /// Does this element type have a narrow register at all?
@@ -176,34 +176,42 @@ pub enum Decoded {
 /// Named for what it is rather than `Packed`, which in this workspace is a
 /// codec tier --- a different thing that would otherwise share the name.
 ///
-/// Sixteen bytes: a signed significand and an exponent. The sign lives in the
-/// mantissa, so a product is one signed multiply; the non-finite kinds live in
-/// a sentinel exponent, so the struct needs no flag bytes and a packed panel
-/// costs half the cache it otherwise would. Both matter: this array is read
-/// once per multiply-accumulate.
+/// Sixteen bytes: a significand word, its exact exponent, and the layout word
+/// that makes the representation lossless on the whole public [`Decoded`]
+/// domain. Ordinary IEEE finite values keep the signed-`i64` inline form. A
+/// finite value that cannot use that form stores its raw `u64` magnitude bits
+/// and the reserved sign tag `-1` or `+1` in the trailing word. Non-finite
+/// kinds retain the zero-tag sentinel-exponent form (`CK-21`).
 ///
-/// The trailing word is the padding the layout would carry anyway, named so
-/// that the code is plain data (`Pod`) and a panel offer can be re-read as the
-/// sixteen-byte words it is. That re-read is the float placement bridge's:
-/// its reified `i32` operands live in the caller's panel offer rather than in
-/// an allocation the library does not make (R7), and a `PackedCode` is four
-/// `i32` words exactly.
+/// These finite fields seed a lazy canonical Laurent word: valuation becomes
+/// its grade, sign becomes modality, and the remaining odd coefficient is
+/// refined into as many Atlas pages as its precision requires. The struct stays
+/// plain data (`Pod`), so a panel remains a zero-copy cache of decoded source
+/// codes rather than a reified arithmetic operand (R7, `CA-05`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, bytemuck::Zeroable, bytemuck::Pod)]
 #[repr(C)]
 pub struct PackedCode {
-    /// The signed integer significand, or the sign for a non-finite code.
+    /// The signed inline significand, raw escaped `u64` bits, or non-finite sign.
     pub mantissa: i64,
-    /// The binary exponent of bit 0 of `mantissa`, or a sentinel.
+    /// The exact binary exponent of bit 0 of the finite magnitude, or a sentinel.
     pub exp: i32,
-    /// The layout's fourth word. Written as zero; never read.
+    /// Zero for inline and non-finite codes; exactly `-1` or `+1` for an
+    /// escaped finite code, with the tag's sign carrying the value's sign.
+    ///
+    /// This field remains public because changing its visibility would break
+    /// existing struct literals and plain-data tooling. Its original published
+    /// invariant required callers to write zero. Consequently, reading the two
+    /// formerly-unused reserved values extends the representation without
+    /// changing the meaning of any value that satisfied that invariant; every
+    /// other noncanonical padding value retains the old exponent-based kind.
     #[doc(hidden)]
     pub _pad: i32,
 }
 
-/// The exponent that marks an infinity. Below every real product exponent, and
-/// distinct from [`PackedCode::NAN_EXP`].
+/// The exponent that marks an infinity when the finite escape tag is zero.
+/// Below every real IEEE exponent, and distinct from [`PackedCode::NAN_EXP`].
 const INF_EXP: i32 = i32::MIN + 1;
-/// The exponent that marks a NaN.
+/// The exponent that marks a NaN when the finite escape tag is zero.
 const NAN_EXP: i32 = i32::MIN;
 
 impl PackedCode {
@@ -212,6 +220,12 @@ impl PackedCode {
     /// The sentinel exponent of a NaN.
     pub const NAN_EXP: i32 = NAN_EXP;
 
+    /// Whether the trailing layout word carries the canonical finite escape.
+    #[inline(always)]
+    const fn has_finite_escape(&self) -> bool {
+        self._pad == -1 || self._pad == 1
+    }
+
     /// Pack a decoded code.
     pub const fn of(d: Decoded) -> Self {
         match d {
@@ -219,15 +233,31 @@ impl PackedCode {
                 sign,
                 mantissa,
                 exp,
-            } => Self {
-                mantissa: if sign {
-                    -(mantissa as i64)
+            } => {
+                // The inline coefficient is symmetric around zero so its sign
+                // and magnitude recover uniquely. Negative zero, the high half
+                // of `u64`, and a finite sentinel exponent use the layout word
+                // as a sign tag and leave every source bit untouched.
+                let inline =
+                    exp > INF_EXP && mantissa <= i64::MAX as u64 && !(sign && mantissa == 0);
+                if inline {
+                    Self {
+                        mantissa: if sign {
+                            -(mantissa as i64)
+                        } else {
+                            mantissa as i64
+                        },
+                        exp,
+                        _pad: 0,
+                    }
                 } else {
-                    mantissa as i64
-                },
-                exp,
-                _pad: 0,
-            },
+                    Self {
+                        mantissa: mantissa as i64,
+                        exp,
+                        _pad: if sign { -1 } else { 1 },
+                    }
+                }
+            }
             // The sign of an infinity rides in the mantissa, as `-1` or `1`,
             // so the product's sign is the product of the two mantissas and
             // needs no separate rule.
@@ -246,40 +276,56 @@ impl PackedCode {
 
     /// Is this an ordinary finite value?
     ///
-    /// The overwhelmingly common case, and the one the inner loop is written
-    /// straight-line for. One comparison, because both sentinels are below
-    /// every real exponent.
+    /// The overwhelmingly common IEEE case remains the first comparison,
+    /// because both sentinels are below every real IEEE exponent. The second
+    /// term admits the lossless finite escape at those exponents (`CK-21`).
     pub const fn is_finite(&self) -> bool {
-        self.exp > INF_EXP
+        self.exp > INF_EXP || self.has_finite_escape()
     }
 
     /// Is this a NaN?
     pub const fn is_nan(&self) -> bool {
-        self.exp == NAN_EXP
+        !self.has_finite_escape() && self.exp == NAN_EXP
     }
 
     /// Is this an infinity?
     pub const fn is_infinite(&self) -> bool {
-        self.exp == INF_EXP
+        !self.has_finite_escape() && self.exp == INF_EXP
     }
 }
 
-/// Elements that are IEEE codes.
+/// Elements that are finite-width dyadic codes.
 ///
 /// A float is a code, and this trait is its codec: the decode from a bit
 /// pattern to the exact dyadic rational it names. It is total, it never rounds,
 /// and it is the same shape as any other codec in `uor-matmul-codec` (§3.3).
+///
+/// # Validity law
+///
+/// Every Laurent grade occupied by the exact product of any two finite values
+/// returned by [`FloatElement::decode`] must lie in the inclusive interval
+/// [`FloatElement::MIN_PRODUCT_EXP`] ..= [`FloatElement::MAX_PRODUCT_EXP`], and
+/// `Self::Acc` must span that interval plus its reduction guard. This is the
+/// float analogue of [`Element`]'s requirement that its one accumulator be
+/// wide enough for every product the element can name. The range constants use
+/// `i32`, so implementing this trait asserts that the format's complete product
+/// support is representable by the public placement channel; a codec that can
+/// emit a product outside its own declaration is not a valid implementation.
 pub trait FloatElement: Element {
     /// Bits in a significand, implicit bit included: 24 for `f32`, 53 for `f64`.
     ///
-    /// What it decides is whether a product of two of them can leave an `i64`,
-    /// which is a question about the *type* and never about the data.
+    /// This declares the finite support available to the canonical Laurent
+    /// refinement. It is a property of the format, never a data-dependent
+    /// route selector.
     const SIGNIFICAND_BITS: u32;
 
-    /// Twice the minimum subnormal exponent: the lowest exponent a product of
-    /// two values of this type can reach.
+    /// Inclusive lower bound on every Laurent grade a finite product can
+    /// occupy. For an IEEE interchange format this is twice its minimum
+    /// subnormal exponent.
     const MIN_PRODUCT_EXP: i32;
-    /// Twice the maximum finite exponent.
+    /// Inclusive upper bound on every Laurent grade a finite product can
+    /// occupy. For an IEEE interchange format, twice its exclusive maximum
+    /// finite exponent is a convenient exact bound.
     const MAX_PRODUCT_EXP: i32;
     /// The codec. Total on all bit patterns, non-finite ones included.
     fn decode(self) -> Decoded;
@@ -287,9 +333,9 @@ pub trait FloatElement: Element {
     /// The bit pattern, widened to `u64`.
     ///
     /// The symbol's *identity*: two codes are the same symbol exactly when
-    /// their patterns are equal, so `-0.0` and `+0.0` are distinct symbols
-    /// with equal decodes, and two NaNs with different payloads are distinct
-    /// symbols. Canonical order on symbols is unsigned order on patterns
+    /// their patterns are equal, so `-0.0` and `+0.0` are distinct symbols with
+    /// equal dyadic evaluations, and two NaNs with different payloads are
+    /// distinct symbols. Canonical order on symbols is unsigned order on patterns
     /// (`CK-10`). No float arithmetic is involved in producing it.
     fn symbol_bits(self) -> u64;
 
@@ -793,9 +839,10 @@ mod tests {
 //
 // R2 forbids float *arithmetic*, not the float *types*. `f32` and `f64` appear
 // here as element types being decoded, and in the encode step, and nowhere
-// else: the decode below is bit manipulation on `to_bits()` output, and the
-// accumulation it feeds is the same integer accumulation every other element
-// family uses. No float is ever added to a float (`CU-01`).
+// else: `to_bits()` is the symbol boundary and the decode below takes exact
+// radix quotients and remainders of that code. The accumulation it feeds is
+// the same integer accumulation every other element family uses. No float is
+// ever added to a float (`CU-01`).
 
 /// Implement the float family for one IEEE interchange format.
 macro_rules! impl_float_element {
@@ -803,21 +850,22 @@ macro_rules! impl_float_element {
         impl Element for $t {
             type Acc = crate::acc::Complete<{ $limbs }, { $min_prod }>;
             // The format's whole width: stored mantissa, exponent, and sign.
-            const BITS: u32 = (core::mem::size_of::<$t>() * 8) as u32;
+            const BITS: u32 = <$bits>::BITS;
             const ZERO: Self = 0.0;
 
             fn mac(acc: &mut Self::Acc, a: Self, w: Self) {
-                // Decode, multiply the significands as integers, place the
-                // exact product in the complete accumulator. Every step is
-                // exact and none of them is a float operation.
+                // Decode the symbols, normalize their finite values into the
+                // canonical Atlas section, contract signed coordinates by
+                // lookup and addition, and encode only after the reduction.
+                // Every step is exact and none is float arithmetic.
                 match (a.decode(), w.decode()) {
                     (Decoded::NotANumber, _) | (_, Decoded::NotANumber) => acc.set_nan(),
                     (Decoded::Infinite { sign: sa }, other)
                     | (other, Decoded::Infinite { sign: sa }) => match other {
                         // Infinity times zero is NaN, by IEEE 754 clause 7.2.
                         Decoded::Finite { mantissa: 0, .. } => acc.set_nan(),
-                        Decoded::Finite { sign: sb, .. } => acc.set_infinity(sa ^ sb),
-                        Decoded::Infinite { sign: sb } => acc.set_infinity(sa ^ sb),
+                        Decoded::Finite { sign: sb, .. } => acc.set_infinity(sa != sb),
+                        Decoded::Infinite { sign: sb } => acc.set_infinity(sa != sb),
                         Decoded::NotANumber => acc.set_nan(),
                     },
                     (
@@ -832,9 +880,7 @@ macro_rules! impl_float_element {
                             exp: eb,
                         },
                     ) => {
-                        // Both significands fit in 53 bits, so their product
-                        // fits in 106 and the u128 multiply is exact.
-                        acc.add_scaled((ma as u128) * (mb as u128), ea + eb, sa != sb);
+                        crate::float_atlas::finite_product(acc, (sa, ma, ea), (sb, mb, eb));
                     }
                 }
             }
@@ -864,16 +910,20 @@ macro_rules! impl_float_element {
                 // Whatever the format has left: its width, less the stored
                 // mantissa and the sign. Asked rather than told, so `f16` or
                 // `bf16` would need no numeral here either.
-                const EXP_BITS: u32 = (core::mem::size_of::<$t>() * 8) as u32 - MANT_BITS - 1;
-                const BIAS: i32 = (1 << (EXP_BITS - 1)) - 1;
+                const EXP_BITS: u32 = <$bits>::BITS - MANT_BITS - 1;
+                const MANT_RADIX: $bits = (2 as $bits).pow(MANT_BITS);
+                const EXP_RADIX: $bits = (2 as $bits).pow(EXP_BITS);
+                const LAST_EXPONENT: $bits = EXP_RADIX - 1;
+                const BIAS: i32 = (EXP_RADIX / 2 - 1) as i32;
 
                 let bits = self.to_bits();
-                let sign = (bits >> (MANT_BITS + EXP_BITS)) & 1 == 1;
-                let biased = ((bits >> MANT_BITS) & ((1 << EXP_BITS) - 1)) as i32;
-                let frac = bits & ((1 << MANT_BITS) - 1);
+                let fraction = bits % MANT_RADIX;
+                let upper = bits / MANT_RADIX;
+                let biased = upper % EXP_RADIX;
+                let sign = upper / EXP_RADIX != 0;
 
-                if biased == (1 << EXP_BITS) - 1 {
-                    return if frac == 0 {
+                if biased == LAST_EXPONENT {
+                    return if fraction == 0 {
                         Decoded::Infinite { sign }
                     } else {
                         Decoded::NotANumber
@@ -884,14 +934,14 @@ macro_rules! impl_float_element {
                     // normal, and there is no implicit leading one.
                     return Decoded::Finite {
                         sign,
-                        mantissa: frac as u64,
+                        mantissa: fraction as u64,
                         exp: 1 - BIAS - MANT_BITS as i32,
                     };
                 }
                 Decoded::Finite {
                     sign,
-                    mantissa: (frac | (1 << MANT_BITS)) as u64,
-                    exp: biased - BIAS - MANT_BITS as i32,
+                    mantissa: (fraction + MANT_RADIX) as u64,
+                    exp: biased as i32 - BIAS - MANT_BITS as i32,
                 }
             }
         }
@@ -924,6 +974,118 @@ impl_float_element!(
 #[cfg(test)]
 mod float_tests {
     use super::*;
+
+    /// A deliberately conventional, test-only field oracle. The production
+    /// codec is a radix section; retaining a distinct factorization here makes
+    /// an extraction defect observable instead of comparing the codec with
+    /// itself (R6).
+    fn reference_ieee_decode(bits: u64, total_bits: u32, mant_bits: u32) -> Decoded {
+        let exp_bits = total_bits - mant_bits - 1;
+        let fraction_mask = (1u64 << mant_bits) - 1;
+        let exponent_mask = (1u64 << exp_bits) - 1;
+        let sign = bits >> (mant_bits + exp_bits) == 1;
+        let biased = (bits >> mant_bits) & exponent_mask;
+        let fraction = bits & fraction_mask;
+        let bias = ((1u64 << (exp_bits - 1)) - 1) as i32;
+
+        if biased == exponent_mask {
+            return if fraction == 0 {
+                Decoded::Infinite { sign }
+            } else {
+                Decoded::NotANumber
+            };
+        }
+        if biased == 0 {
+            return Decoded::Finite {
+                sign,
+                mantissa: fraction,
+                exp: 1 - bias - mant_bits as i32,
+            };
+        }
+        Decoded::Finite {
+            sign,
+            mantissa: fraction | (1u64 << mant_bits),
+            exp: biased as i32 - bias - mant_bits as i32,
+        }
+    }
+
+    fn assert_f32_decode(bits: u32) {
+        assert_eq!(
+            f32::from_bits(bits).decode(),
+            reference_ieee_decode(
+                bits as u64,
+                <f32 as Element>::BITS,
+                f32::MANTISSA_DIGITS - 1,
+            ),
+            "f32 symbol {bits:#010x}"
+        );
+    }
+
+    fn assert_f64_decode(bits: u64) {
+        assert_eq!(
+            f64::from_bits(bits).decode(),
+            reference_ieee_decode(bits, <f64 as Element>::BITS, f64::MANTISSA_DIGITS - 1),
+            "f64 symbol {bits:#018x}"
+        );
+    }
+
+    /// `CU-11`: the production IEEE section is pinned independently at every
+    /// exponent code for both formats, on both signs and on every fraction
+    /// transition that changes its interpretation. The f32 half-word sweeps
+    /// additionally exhaust every field prefix and suffix.
+    #[test]
+    fn ieee_decode_matches_the_independent_field_oracle_cu_11() {
+        let f32_mant_bits = f32::MANTISSA_DIGITS - 1;
+        let f32_exp_bits = <f32 as Element>::BITS - f32_mant_bits - 1;
+        let f32_fraction_radix = 1u32 << f32_mant_bits;
+        let f32_fraction_edges = [
+            0,
+            1,
+            f32_fraction_radix / 2 - 1,
+            f32_fraction_radix / 2,
+            f32_fraction_radix - 2,
+            f32_fraction_radix - 1,
+        ];
+        for sign in 0u32..=1 {
+            for biased in 0u32..(1u32 << f32_exp_bits) {
+                for fraction in f32_fraction_edges {
+                    let bits = (sign << (f32_exp_bits + f32_mant_bits))
+                        | (biased << f32_mant_bits)
+                        | fraction;
+                    assert_f32_decode(bits);
+                }
+            }
+        }
+        for half in 0u32..=u16::MAX as u32 {
+            assert_f32_decode(half << 16);
+            for prefix in [0, 0x007f_0000, 0x3f80_0000, 0x7f7f_0000, 0x7f80_0000] {
+                assert_f32_decode(prefix | half);
+                assert_f32_decode((prefix | half) | 0x8000_0000);
+            }
+        }
+
+        let f64_mant_bits = f64::MANTISSA_DIGITS - 1;
+        let f64_exp_bits = <f64 as Element>::BITS - f64_mant_bits - 1;
+        let f64_fraction_radix = 1u64 << f64_mant_bits;
+        let f64_fraction_edges = [
+            0,
+            1,
+            f64_fraction_radix / 2 - 1,
+            f64_fraction_radix / 2,
+            f64_fraction_radix - 2,
+            f64_fraction_radix - 1,
+        ];
+        for sign in 0u64..=1 {
+            for biased in 0u64..(1u64 << f64_exp_bits) {
+                for fraction in f64_fraction_edges {
+                    let bits = (sign << (f64_exp_bits + f64_mant_bits))
+                        | (biased << f64_mant_bits)
+                        | fraction;
+                    assert_f64_decode(bits);
+                }
+            }
+        }
+    }
 
     /// The decode is exact: reading the name of a dyadic rational and
     /// reconstructing it must round-trip, for every kind of finite value.
@@ -995,6 +1157,158 @@ mod float_tests {
         for hi in 0u32..=0xFFFF {
             let _ = f32::from_bits(hi << 16).decode();
         }
+    }
+
+    fn interpret_packed(code: PackedCode) -> Decoded {
+        if code._pad == -1 || code._pad == 1 {
+            return Decoded::Finite {
+                sign: code._pad < 0,
+                mantissa: code.mantissa as u64,
+                exp: code.exp,
+            };
+        }
+        if code.exp == PackedCode::NAN_EXP {
+            return Decoded::NotANumber;
+        }
+        if code.exp == PackedCode::INF_EXP {
+            return Decoded::Infinite {
+                sign: code.mantissa < 0,
+            };
+        }
+        Decoded::Finite {
+            sign: code.mantissa < 0,
+            mantissa: code.mantissa.unsigned_abs(),
+            exp: code.exp,
+        }
+    }
+
+    /// `CK-21`: the fourth layout word is a finite escape, so the public
+    /// `Decoded` domain has a left inverse without widening the packed cache.
+    #[test]
+    fn every_decoded_code_has_a_lossless_packed_interpretation_ck_21() {
+        let mantissas = [0, 1, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX];
+        let exponents = [
+            PackedCode::NAN_EXP,
+            PackedCode::INF_EXP,
+            PackedCode::INF_EXP + 1,
+            -1074,
+            -149,
+            0,
+            i32::MAX,
+        ];
+        for sign in [false, true] {
+            for mantissa in mantissas {
+                for exp in exponents {
+                    let decoded = Decoded::Finite {
+                        sign,
+                        mantissa,
+                        exp,
+                    };
+                    let packed = PackedCode::of(decoded);
+                    assert_eq!(interpret_packed(packed), decoded, "{decoded:?}");
+                }
+            }
+        }
+
+        for decoded in [
+            Decoded::Infinite { sign: false },
+            Decoded::Infinite { sign: true },
+            Decoded::NotANumber,
+        ] {
+            assert_eq!(interpret_packed(PackedCode::of(decoded)), decoded);
+        }
+    }
+
+    /// `CK-21`: kind predicates are a total partition even on noncanonical
+    /// `Pod` words, the two reserved tags are the only escapes, and ordinary
+    /// IEEE values retain the signed inline form.
+    #[test]
+    fn packed_kind_layout_and_inline_ieee_codes_are_stable_ck_21() {
+        for pad in [-1, 1] {
+            for exp in [PackedCode::NAN_EXP, PackedCode::INF_EXP, 0, i32::MAX] {
+                let code = PackedCode {
+                    mantissa: -1,
+                    exp,
+                    _pad: pad,
+                };
+                assert!(code.is_finite(), "reserved tag {pad} at exponent {exp}");
+                assert!(!code.is_nan());
+                assert!(!code.is_infinite());
+            }
+        }
+
+        // Padding values outside the published zero invariant were ignored by
+        // the original representation. Keep their exponent-based meaning so
+        // the extension consumes only the two tags `PackedCode::of` writes.
+        for pad in [i32::MIN, -2, 2, i32::MAX] {
+            let nan = PackedCode {
+                mantissa: -1,
+                exp: PackedCode::NAN_EXP,
+                _pad: pad,
+            };
+            let infinity = PackedCode {
+                mantissa: -1,
+                exp: PackedCode::INF_EXP,
+                _pad: pad,
+            };
+            assert!(nan.is_nan(), "noncanonical padding {pad} stays ignored");
+            assert!(
+                infinity.is_infinite(),
+                "noncanonical padding {pad} stays ignored"
+            );
+        }
+
+        for (decoded, negative) in [
+            (0.0f64.decode(), false),
+            (1.5f64.decode(), false),
+            ((-1.5f64).decode(), true),
+            (f64::MAX.decode(), false),
+            (f64::MIN.decode(), true),
+        ] {
+            let Decoded::Finite {
+                sign,
+                mantissa,
+                exp,
+            } = decoded
+            else {
+                panic!("the inline corpus is finite")
+            };
+            let packed = PackedCode::of(decoded);
+            assert_eq!(packed._pad, 0);
+            assert_eq!(packed.exp, exp);
+            assert_eq!(packed.mantissa < 0, negative && mantissa != 0);
+            assert_eq!(packed.mantissa.unsigned_abs(), mantissa);
+            assert_eq!(sign, negative);
+        }
+
+        let negative_zero = PackedCode::of((-0.0f64).decode());
+        assert_ne!(negative_zero, PackedCode::of(0.0f64.decode()));
+        assert!(negative_zero.is_finite());
+        assert_eq!(interpret_packed(negative_zero), (-0.0f64).decode());
+
+        let nan = PackedCode::of(Decoded::NotANumber);
+        let positive_infinity = PackedCode::of(Decoded::Infinite { sign: false });
+        let negative_infinity = PackedCode::of(Decoded::Infinite { sign: true });
+        assert!(nan.is_nan());
+        assert!(positive_infinity.is_infinite());
+        assert!(negative_infinity.is_infinite());
+        assert_eq!(nan._pad, 0);
+        assert_eq!(positive_infinity._pad, 0);
+        assert_eq!(negative_infinity._pad, 0);
+
+        assert_eq!(core::mem::size_of::<PackedCode>(), 16);
+        assert_eq!(core::mem::align_of::<PackedCode>(), 8);
+        assert_eq!(core::mem::offset_of!(PackedCode, mantissa), 0);
+        assert_eq!(core::mem::offset_of!(PackedCode, exp), 8);
+        assert_eq!(core::mem::offset_of!(PackedCode, _pad), 12);
+        assert_eq!(
+            interpret_packed(PackedCode::default()),
+            Decoded::Finite {
+                sign: false,
+                mantissa: 0,
+                exp: 0,
+            }
+        );
     }
 
     /// §3.3: the product exponent range in `model/widths.toml` is the range

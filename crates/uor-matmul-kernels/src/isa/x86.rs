@@ -743,7 +743,7 @@ unsafe fn avx512_lookup_i8<const MR: usize, const NR: usize>(
     pb: *const i8,
     acc: *mut i32,
 ) {
-    debug_assert_eq!(NR, 16);
+    const { assert!(NR == 16) };
     // SAFETY: the KernelSpec caller guarantees all three extents.
     let (pa, pb, acc) = unsafe {
         (
@@ -752,22 +752,26 @@ unsafe fn avx512_lookup_i8<const MR: usize, const NR: usize>(
             core::slice::from_raw_parts_mut(acc, MR * NR),
         )
     };
+    let product_alphabet = crate::lookup::i8_products_native();
     let mut tile = [_mm512_setzero_si512(); MR];
     for p in 0..kc {
+        // SAFETY: this depth owns exactly the sixteen right-panel octets
+        // widened below into their numeric table-column coordinates.
+        let columns =
+            _mm512_cvtepu8_epi32(unsafe { _mm_loadu_si128(pb.as_ptr().add(p * NR).cast()) });
         for i in 0..MR {
-            let a = pa[p * MR + i] as u8 as i32;
-            let mut indices = [0i32; NR];
-            for j in 0..NR {
-                indices[j] = (a << 8) | (pb[p * NR + j] as u8 as i32);
-            }
-            let index = unsafe { _mm512_loadu_si512(indices.as_ptr().cast()) };
-            let products = unsafe {
-                _mm512_i32gather_epi32(index, crate::lookup::I8_PRODUCTS.as_ptr().cast(), 4)
-            };
+            let a = pa[p * MR + i];
+            let row_address = crate::lookup::I8_PRODUCT_ROW_ADDRESSES[a as u8 as usize];
+            let index = _mm512_add_epi32(_mm512_set1_epi32(row_address), columns);
+            // SAFETY: every index is an unsigned-octet pair, so it addresses an
+            // in-bounds entry of the complete 256-by-256 product table.
+            let products =
+                unsafe { _mm512_i32gather_epi32(index, product_alphabet.as_ptr().cast(), 4) };
             tile[i] = _mm512_add_epi32(tile[i], products);
         }
     }
     for (i, value) in tile.iter().enumerate() {
+        // SAFETY: row `i` spans sixteen lanes inside the `MR * NR` output.
         unsafe { _mm512_storeu_si512(acc.as_mut_ptr().add(i * NR).cast(), *value) };
     }
 }
@@ -925,10 +929,9 @@ const A2_TROP_NR: usize = 16;
 /// `i16::MIN + i16::MIN` wraps to `0` and becomes the *largest* value in the
 /// reduction instead of the smallest.
 ///
-/// Deliberately AVX2 and not AVX-512: this sequence issues no dot product, so
-/// VNNI has nothing to offer it, and no runner in this project's CI has
-/// AVX-512 at all --- a sequence nobody executes is worth nothing here
-/// (`CB-13`).
+/// Deliberately the AVX2 tropical declaration rather than a VNNI declaration:
+/// this sequence issues no dot product, so VNNI contributes no operation to
+/// it. AVX2 remains admissible on AVX-512 hosts and CB-13 pins these bytes.
 pub const AVX2_TROP_I16: KernelSpec<i16, i16> = KernelSpec {
     backend: Backend::Avx2,
     factorization: Factorization::Exact,
@@ -1457,7 +1460,115 @@ const fn avx2_lookup_reduce_spec<const MR: usize>(backend: Backend) -> KernelSpe
     }
 }
 
-/// AVX2 lookup reduction: one native gather and add combines the row lookups.
+/// Project the low eight signed-octet products from one left-coordinate row.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_nibble_products_low(a: i8, low_index: __m128i, high_index: __m128i) -> __m128i {
+    let row = crate::lookup::i8_nibble_products(a);
+    let span = crate::lookup::NIBBLE_SPACE;
+    let low_low_at = row.as_ptr();
+    // SAFETY: the projector row is four adjacent `span`-byte alphabets.
+    let (low_high_at, high_low_at, high_high_at) = unsafe {
+        let low_high = low_low_at.add(span);
+        let high_low = low_high.add(span);
+        (low_high, high_low, high_low.add(span))
+    };
+    // SAFETY: every load stays inside the selected complete projector row.
+    let (low_low, low_high, high_low, high_high) = unsafe {
+        (
+            _mm_loadu_si128(low_low_at.cast()),
+            _mm_loadu_si128(low_high_at.cast()),
+            _mm_loadu_si128(high_low_at.cast()),
+            _mm_loadu_si128(high_high_at.cast()),
+        )
+    };
+    let low_bytes = _mm_shuffle_epi8(low_low, low_index);
+    let low_sign = _mm_shuffle_epi8(low_high, low_index);
+    let high_bytes = _mm_shuffle_epi8(high_low, high_index);
+    let high_sign = _mm_shuffle_epi8(high_high, high_index);
+    _mm_add_epi16(
+        _mm_unpacklo_epi8(low_bytes, low_sign),
+        _mm_unpacklo_epi8(high_bytes, high_sign),
+    )
+}
+
+/// One native vector's coordinates in the radix-16 atlas.
+struct Radix16Coordinates {
+    low: __m128i,
+    high: __m128i,
+}
+
+/// Resolve exactly the live panel octets into their radix-16 coordinates.
+///
+/// Every consumption geometry has the same canonical native-vector embedding:
+/// its live alphabet occupies the prefix and the unused suffix is zero. The
+/// fixed object lets the quotient/remainder recurrence remain one native map
+/// even when a consumer observes only its low half.
+#[inline(always)]
+unsafe fn radix16_coordinates<const LANES: usize>(
+    codes: *const i8,
+    stride: usize,
+) -> Radix16Coordinates {
+    const { assert!(LANES > 0 && LANES <= 16) };
+    let mut symbols = [0u8; 16];
+    let mut code_at = codes;
+    let mut lane = 0usize;
+    while lane < LANES {
+        // SAFETY: the caller guarantees `LANES` readable coordinates separated
+        // by `stride`; the final iteration forms no following pointer.
+        symbols[lane] = unsafe { *code_at as u8 };
+        lane += 1;
+        if lane < LANES {
+            // SAFETY: another promised coordinate remains at exactly `stride`.
+            code_at = unsafe { code_at.add(stride) };
+        }
+    }
+
+    let mut low = [0u8; 16];
+    let mut high = [0u8; 16];
+    let radix = crate::lookup::NIBBLE_SPACE as u8;
+    lane = 0;
+    while lane < symbols.len() {
+        let symbol = symbols[lane];
+        low[lane] = symbol % radix;
+        high[lane] = symbol / radix;
+        lane += 1;
+    }
+    // SAFETY: both arrays contain their complete sixteen-byte native vectors;
+    // the unaligned relabel changes representation without changing a symbol.
+    unsafe {
+        Radix16Coordinates {
+            low: _mm_loadu_si128(low.as_ptr().cast()),
+            high: _mm_loadu_si128(high.as_ptr().cast()),
+        }
+    }
+}
+
+/// AVX2 lookup reduction: native byte interleave reifies each pair coordinate,
+/// and one gather reads its complete signed-octet product symbol.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_lookup_reduce_octet<const ENTRIES: usize>(
+    product_alphabet: &[i32; ENTRIES],
+    left_octets: __m128i,
+    right_octets: __m128i,
+) -> __m256i {
+    // Widening only reifies each alphabet symbol in its native gather lane.
+    // The additive recurrence refines the left coordinate through radix 256
+    // before the right coordinate is adjoined.
+    let mut addresses = _mm256_cvtepu8_epi32(left_octets);
+    let right_coordinates = _mm256_cvtepu8_epi32(right_octets);
+    let mut digit = 0u32;
+    while digit < u8::BITS {
+        addresses = _mm256_add_epi32(addresses, addresses);
+        digit += 1;
+    }
+    let indices = _mm256_add_epi32(addresses, right_coordinates);
+    // SAFETY: every index is an unsigned-octet pair, so all eight lanes
+    // address the complete 256-by-256 product alphabet.
+    unsafe { _mm256_i32gather_epi32(product_alphabet.as_ptr(), indices, 4) }
+}
+
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_lookup_reduce_i8<const MR: usize>(
     kc: usize,
@@ -1465,7 +1576,7 @@ unsafe fn avx2_lookup_reduce_i8<const MR: usize>(
     pb: *const i8,
     acc: *mut i32,
 ) {
-    debug_assert!(MR == 1 || MR == 4);
+    const { assert!(MR == 1 || MR == 4) };
     // SAFETY: the KernelSpec caller guarantees all three extents.
     let (pa, pb, acc) = unsafe {
         (
@@ -1474,21 +1585,94 @@ unsafe fn avx2_lookup_reduce_i8<const MR: usize>(
             core::slice::from_raw_parts_mut(acc, MR),
         )
     };
-    let mut sum = _mm256_setzero_si256();
-    for p in 0..kc {
-        let mut indices = [0i32; 8];
-        let b = pb[p] as u8 as i32;
-        for i in 0..MR {
-            indices[i] = ((pa[i * kc + p] as u8 as i32) << 8) | b;
+    if MR == 1 {
+        const NATIVE_LANES: usize = core::mem::size_of::<__m256i>() / core::mem::size_of::<i32>();
+        const PAIRED_DEPTH: usize = 2 * NATIVE_LANES;
+        let product_alphabet = crate::lookup::i8_products_native();
+        let mut sum = _mm256_setzero_si256();
+        let paired_end = kc - kc % PAIRED_DEPTH;
+        let mut p = 0usize;
+        while p != paired_end {
+            // SAFETY: `p + PAIRED_DEPTH <= paired_end <= kc` supplies both
+            // complete native coordinate vectors.
+            let (left_octets0, right_octets0) = unsafe {
+                (
+                    _mm_loadl_epi64(pa.as_ptr().add(p).cast()),
+                    _mm_loadl_epi64(pb.as_ptr().add(p).cast()),
+                )
+            };
+            // SAFETY: this AVX2 body loaded both complete octet vectors above.
+            let products0 =
+                unsafe { avx2_lookup_reduce_octet(product_alphabet, left_octets0, right_octets0) };
+            sum = _mm256_add_epi32(sum, products0);
+
+            // Loading the second complete coordinate discharges every use of
+            // this byte cursor. Advancing it here keeps cursor progress off the
+            // following refinement/gather dependency chain.
+            // SAFETY: the paired-loop bound supplies the second complete vector.
+            let (left_octets1, right_octets1) = unsafe {
+                (
+                    _mm_loadl_epi64(pa.as_ptr().add(p + NATIVE_LANES).cast()),
+                    _mm_loadl_epi64(pb.as_ptr().add(p + NATIVE_LANES).cast()),
+                )
+            };
+            p += PAIRED_DEPTH;
+            // SAFETY: this AVX2 body loaded both complete octet vectors above.
+            let products1 =
+                unsafe { avx2_lookup_reduce_octet(product_alphabet, left_octets1, right_octets1) };
+            sum = _mm256_add_epi32(sum, products1);
         }
-        let index = unsafe { _mm256_loadu_si256(indices.as_ptr().cast()) };
-        let products =
-            unsafe { _mm256_i32gather_epi32(crate::lookup::I8_PRODUCTS.as_ptr(), index, 4) };
-        sum = _mm256_add_epi32(sum, products);
+
+        let vector_end = kc - kc % NATIVE_LANES;
+        if p < vector_end {
+            // The unpaired terminal vector is the same complete coordinate
+            // object and traverses the identical radix/table recurrence.
+            // SAFETY: `p + NATIVE_LANES == vector_end <= kc`.
+            let (left_octets, right_octets) = unsafe {
+                (
+                    _mm_loadl_epi64(pa.as_ptr().add(p).cast()),
+                    _mm_loadl_epi64(pb.as_ptr().add(p).cast()),
+                )
+            };
+            // SAFETY: this AVX2 body loaded both complete octet vectors above.
+            let products =
+                unsafe { avx2_lookup_reduce_octet(product_alphabet, left_octets, right_octets) };
+            sum = _mm256_add_epi32(sum, products);
+        }
+
+        let mut lanes = [0i32; 8];
+        // SAFETY: `lanes` contains exactly the eight lanes stored here.
+        unsafe { _mm256_storeu_si256(lanes.as_mut_ptr().cast(), sum) };
+        let mut total = lanes
+            .into_iter()
+            .fold(0i32, |total, lane| total.wrapping_add(lane));
+        for p in vector_end..kc {
+            total = total.wrapping_add(crate::lookup::i8_product_from(
+                product_alphabet,
+                pa[p],
+                pb[p],
+            ));
+        }
+        acc[0] = total;
+        return;
     }
-    let mut result = [0i32; 8];
-    unsafe { _mm256_storeu_si256(result.as_mut_ptr().cast(), sum) };
-    acc.copy_from_slice(&result[..MR]);
+
+    let mut sum = _mm_setzero_si128();
+    let row0 = pa.as_ptr();
+    for (p, &right) in pb.iter().enumerate() {
+        // SAFETY: the four rows are separated by exactly `kc`, and `p` is in
+        // their common reduction extent.
+        let coordinates = unsafe { radix16_coordinates::<4>(row0.add(p), kc) };
+        // Multiplication is commutative, so the shared B coordinate selects
+        // one row while the four A coordinates address it in parallel.
+        // SAFETY: the selected projector row is complete for every octet.
+        let products =
+            unsafe { avx2_nibble_products_low(right, coordinates.low, coordinates.high) };
+        sum = _mm_add_epi32(sum, _mm_cvtepi16_epi32(products));
+    }
+    // SAFETY: this arm is the four-row instantiation, so `acc` has exactly the
+    // four writable lanes stored here.
+    unsafe { _mm_storeu_si128(acc.as_mut_ptr().cast(), sum) };
 }
 
 /// # Safety
@@ -1701,7 +1885,58 @@ const fn avx2_lookup_spec<const MR: usize, const NR: usize>(
     }
 }
 
-/// AVX2 lookup/add tile: native gathers and adds cover eight products at once.
+/// Accumulate one depth coordinate from the native radix-16 projector.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_lookup_i8_depth<const MR: usize, const NR: usize>(
+    tile: &mut [[__m256i; 2]; MR],
+    left_at: *const i8,
+    low_index: __m128i,
+    high_index: __m128i,
+) {
+    const { assert!(NR == 8 || NR == 16) };
+    for (row_index, accumulator) in tile.iter_mut().enumerate() {
+        // SAFETY: the caller supplies the beginning of one complete `MR`-row
+        // depth, and this loop visits each row exactly once.
+        let left = unsafe { *left_at.add(row_index) };
+        let row = crate::lookup::i8_nibble_products(left);
+        let span = crate::lookup::NIBBLE_SPACE;
+        let low_low_at = row.as_ptr();
+        // SAFETY: the row is four adjacent `span`-byte alphabets.
+        let (low_high_at, high_low_at, high_high_at) = unsafe {
+            let low_high = low_low_at.add(span);
+            let high_low = low_high.add(span);
+            (low_high, high_low, high_low.add(span))
+        };
+        // SAFETY: every load stays inside the selected complete row.
+        let (low_low, low_high, high_low, high_high) = unsafe {
+            (
+                _mm_loadu_si128(low_low_at.cast()),
+                _mm_loadu_si128(low_high_at.cast()),
+                _mm_loadu_si128(high_low_at.cast()),
+                _mm_loadu_si128(high_high_at.cast()),
+            )
+        };
+        let low_bytes = _mm_shuffle_epi8(low_low, low_index);
+        let low_sign = _mm_shuffle_epi8(low_high, low_index);
+        let high_bytes = _mm_shuffle_epi8(high_low, high_index);
+        let high_sign = _mm_shuffle_epi8(high_high, high_index);
+        let products0 = _mm_add_epi16(
+            _mm_unpacklo_epi8(low_bytes, low_sign),
+            _mm_unpacklo_epi8(high_bytes, high_sign),
+        );
+        accumulator[0] = _mm256_add_epi32(accumulator[0], _mm256_cvtepi16_epi32(products0));
+        if NR == 16 {
+            let products1 = _mm_add_epi16(
+                _mm_unpackhi_epi8(low_bytes, low_sign),
+                _mm_unpackhi_epi8(high_bytes, high_sign),
+            );
+            accumulator[1] = _mm256_add_epi32(accumulator[1], _mm256_cvtepi16_epi32(products1));
+        }
+    }
+}
+
+/// AVX2 lookup/add tile: one native radix map serves every live half.
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_lookup_i8<const MR: usize, const NR: usize>(
     kc: usize,
@@ -1709,7 +1944,7 @@ unsafe fn avx2_lookup_i8<const MR: usize, const NR: usize>(
     pb: *const i8,
     acc: *mut i32,
 ) {
-    debug_assert!(NR == 8 || NR == 16);
+    const { assert!(NR == 8 || NR == 16) };
     // SAFETY: the KernelSpec caller guarantees all three extents.
     let (pa, pb, acc) = unsafe {
         (
@@ -1719,23 +1954,62 @@ unsafe fn avx2_lookup_i8<const MR: usize, const NR: usize>(
         )
     };
     let mut tile = [[_mm256_setzero_si256(); 2]; MR];
-    for p in 0..kc {
-        for i in 0..MR {
-            let a = pa[p * MR + i] as u8 as i32;
-            let mut indices = [0i32; NR];
-            for j in 0..NR {
-                indices[j] = (a << 8) | (pb[p * NR + j] as u8 as i32);
-            }
-            for v in 0..NR / 8 {
-                let index = unsafe { _mm256_loadu_si256(indices.as_ptr().add(v * 8).cast()) };
-                let products = unsafe {
-                    _mm256_i32gather_epi32(crate::lookup::I8_PRODUCTS.as_ptr(), index, 4)
-                };
-                tile[i][v] = _mm256_add_epi32(tile[i][v], products);
-            }
+    let depths_per_map = 16 / NR;
+    let grouped_end = kc - kc % depths_per_map;
+    let mut p = 0usize;
+    while p < grouped_end {
+        // `depths_per_map * NR == 16`: every map consumes exactly one complete
+        // native coordinate vector, independent of the panel factorization.
+        // SAFETY: the grouped bound leaves exactly 16 readable panel symbols.
+        let coordinates = unsafe { radix16_coordinates::<16>(pb.as_ptr().add(p * NR), 1) };
+        let mut depth = 0usize;
+        while depth < depths_per_map {
+            // The second narrow depth is the upper native half. A fixed lane
+            // permutation exposes it as the low projector half; no symbol is
+            // recomputed and no second coordinate map exists.
+            let (low_index, high_index) = if depth == 0 {
+                (coordinates.low, coordinates.high)
+            } else {
+                (
+                    _mm_unpackhi_epi64(coordinates.low, coordinates.low),
+                    _mm_unpackhi_epi64(coordinates.high, coordinates.high),
+                )
+            };
+            // SAFETY: `p + depth < grouped_end <= kc`; this points at exactly
+            // one interleaved `MR`-row left-panel depth.
+            unsafe {
+                avx2_lookup_i8_depth::<MR, NR>(
+                    &mut tile,
+                    pa.as_ptr().add((p + depth) * MR),
+                    low_index,
+                    high_index,
+                )
+            };
+            depth += 1;
         }
+        p += depths_per_map;
+    }
+
+    // A narrow odd terminal depth is the exact prefix embedding of the same
+    // coordinate object. It changes neither the projector nor the arithmetic;
+    // it merely totalizes a panel whose final native vector is half occupied.
+    while p < kc {
+        // SAFETY: the terminal depth owns exactly `NR` readable coordinates.
+        let coordinates = unsafe { radix16_coordinates::<NR>(pb.as_ptr().add(p * NR), 1) };
+        // SAFETY: `p < kc`, so this points at one complete left-panel depth.
+        unsafe {
+            avx2_lookup_i8_depth::<MR, NR>(
+                &mut tile,
+                pa.as_ptr().add(p * MR),
+                coordinates.low,
+                coordinates.high,
+            )
+        };
+        p += 1;
     }
     for (i, row) in tile.iter().enumerate() {
+        // SAFETY: row `i` spans `NR` lanes inside the `MR * NR` output; the
+        // second store is reached only for the sixteen-lane form.
         unsafe {
             _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast(), row[0]);
             if NR == 16 {
@@ -2514,22 +2788,22 @@ unsafe fn avx2_table_build_lookup<const V: usize>(
 ) {
     debug_assert_eq!(rows, V * A2_TABLE_LANES);
     debug_assert!(block.is_multiple_of(2));
+    let product_alphabet = crate::lookup::i8_products_native();
     // SAFETY: the TableBuild caller guarantees all three extents.
     unsafe {
         for c in 0..space {
             let mut entry = [_mm256_setzero_si256(); V];
             for t in 0..block {
-                let weight = *book.add(c * block + t) as u8 as i32;
+                let weight = *book.add(c * block + t);
                 for (v, cell) in entry.iter_mut().enumerate() {
                     let mut indices = [0i32; A2_TABLE_LANES];
-                    for lane in 0..A2_TABLE_LANES {
+                    for (lane, index) in indices.iter_mut().enumerate() {
                         let row = v * A2_TABLE_LANES + lane;
-                        let activation =
-                            *acts.add(crate::spec::packed_slot(t, row, rows, 2)) as u8 as i32;
-                        indices[lane] = (activation << 8) | weight;
+                        let activation = *acts.add(crate::spec::packed_slot(t, row, rows, 2));
+                        *index = crate::lookup::i8_product_address(activation, weight);
                     }
                     let products = _mm256_i32gather_epi32(
-                        crate::lookup::I8_PRODUCTS.as_ptr(),
+                        product_alphabet.as_ptr(),
                         _mm256_loadu_si256(indices.as_ptr().cast()),
                         4,
                     );
@@ -3252,21 +3526,21 @@ unsafe fn a5_build_lookup8(
 ) {
     debug_assert_eq!(rows, A5_TABLE_LANES);
     debug_assert!(block.is_multiple_of(2));
+    let product_alphabet = crate::lookup::i8_products_native();
     // SAFETY: the TableBuild caller guarantees all three extents.
     unsafe {
         for c in 0..space {
             let mut entry = _mm512_setzero_si512();
             for t in 0..block {
-                let weight = *book.add(c * block + t) as u8 as i32;
+                let weight = *book.add(c * block + t);
                 let mut indices = [0i32; A5_TABLE_LANES];
-                for row in 0..A5_TABLE_LANES {
-                    let activation =
-                        *acts.add(crate::spec::packed_slot(t, row, rows, 2)) as u8 as i32;
-                    indices[row] = (activation << 8) | weight;
+                for (row, index) in indices.iter_mut().enumerate() {
+                    let activation = *acts.add(crate::spec::packed_slot(t, row, rows, 2));
+                    *index = crate::lookup::i8_product_address(activation, weight);
                 }
                 let products = _mm512_i32gather_epi32(
                     _mm512_loadu_si512(indices.as_ptr().cast()),
-                    crate::lookup::I8_PRODUCTS.as_ptr().cast(),
+                    product_alphabet.as_ptr().cast(),
                     4,
                 );
                 entry = _mm512_add_epi32(entry, products);

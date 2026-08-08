@@ -29,3 +29,9 @@ Feature: Allocation and environment
     Given the standing corpus
     When the suite exercises CA-04
     Then the claim holds byte for byte
+
+  @CA-05 @build
+  Scenario: The Atlas carrier and projector layer is a zero-copy view over caller-owned storage
+    Given caller-owned panels at every offer including none
+    When the suite exercises the carrier and projector layer for CA-05
+    Then no carrier is owned or allocated, the backing address is preserved, and the dyadic denominator remains implicit

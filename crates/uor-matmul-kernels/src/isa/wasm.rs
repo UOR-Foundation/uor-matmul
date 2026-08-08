@@ -62,7 +62,113 @@ const fn simd128_lookup_spec<const MR: usize, const NR: usize>(
     }
 }
 
-/// SIMD128 lookup/add tile: scalar table reads feed native four-lane adds.
+/// Reconstruct two vectors of signed `i16` values from projector bytes.
+///
+/// Unsigned extension recovers the low byte and signed extension recovers the
+/// high byte. This is the exact inverse of the projector representation and
+/// does not depend on the host spelling of a halfword.
+#[inline]
+#[target_feature(enable = "simd128")]
+fn simd128_rebuild_i16(low: v128, high: v128) -> [v128; 2] {
+    [
+        i8x16_shuffle::<0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23>(low, high),
+        i8x16_shuffle::<8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31>(low, high),
+    ]
+}
+
+/// Sixteen exact signed-octet products through SIMD128 byte swizzles.
+///
+/// The complete product alphabet factors into low and signed-high nibbles.
+/// Four sixteen-byte projector rows supply the two bytes of both contributions;
+/// `i8x16.swizzle` observes all requested coordinates in parallel.
+#[inline]
+#[target_feature(enable = "simd128")]
+unsafe fn simd128_nibble_products(a: i8, low_index: v128, high_index: v128) -> [v128; 2] {
+    let row = crate::lookup::i8_nibble_products(a);
+    let span = crate::lookup::NIBBLE_SPACE;
+    let low_low_at = row.as_ptr();
+    // SAFETY: the projector row is four adjacent `span`-byte alphabets.
+    let (low_high_at, high_low_at, high_high_at) = unsafe {
+        let low_high = low_low_at.add(span);
+        let high_low = low_high.add(span);
+        (low_high, high_low, high_low.add(span))
+    };
+    // SAFETY: the projector row consists of four contiguous sixteen-byte
+    // tables, so every load stays within the selected 64-byte row.
+    let tables = unsafe {
+        [
+            v128_load(low_low_at.cast()),
+            v128_load(low_high_at.cast()),
+            v128_load(high_low_at.cast()),
+            v128_load(high_high_at.cast()),
+        ]
+    };
+    let low = simd128_rebuild_i16(
+        i8x16_swizzle(tables[0], low_index),
+        i8x16_swizzle(tables[1], low_index),
+    );
+    let high = simd128_rebuild_i16(
+        i8x16_swizzle(tables[2], high_index),
+        i8x16_swizzle(tables[3], high_index),
+    );
+    [i16x8_add(low[0], high[0]), i16x8_add(low[1], high[1])]
+}
+
+/// Project sixteen octet symbols into their radix-16 coordinates.
+///
+/// Swizzle supplies two native half-alphabet pages. Removing the low
+/// coordinate makes four rounded averages with zero exact radix quotients at
+/// every refinement level.
+#[inline]
+#[target_feature(enable = "simd128")]
+fn simd128_nibble_address_vectors_from_codes(codes: v128) -> [v128; 2] {
+    let identity = i8x16(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    let translated = i8x16_add(codes, i8x16_splat(i8::MIN));
+    let low = i8x16_add(
+        i8x16_swizzle(identity, codes),
+        i8x16_swizzle(identity, translated),
+    );
+    let zero = i8x16_splat(0);
+    let mut high = i8x16_sub(codes, low);
+    let mut digit = 0u32;
+    while digit < crate::lookup::NIBBLE_BITS {
+        high = u8x16_avgr(high, zero);
+        digit += 1;
+    }
+    [low, high]
+}
+
+/// Load up to sixteen signed octets and project their radix-16 coordinates.
+#[inline]
+#[target_feature(enable = "simd128")]
+unsafe fn simd128_nibble_address_vectors<const LANES: usize>(
+    codes: *const i8,
+    stride: usize,
+) -> [v128; 2] {
+    const { assert!(LANES > 0 && LANES <= 16) };
+    let packed = if stride == 1 && LANES == 8 {
+        // SAFETY: this specialization reads exactly the eight contiguous
+        // right-panel octets supplied by the shipped tile.
+        unsafe { v128_load64_zero(codes.cast()) }
+    } else {
+        let mut octets = [0u8; 16];
+        let mut code_at = codes;
+        for (lane, octet) in octets.iter_mut().enumerate().take(LANES) {
+            // SAFETY: the caller guarantees `LANES` readable codes separated
+            // by `stride`; the final iteration forms no following pointer.
+            *octet = unsafe { *code_at as u8 };
+            if lane + 1 < LANES {
+                code_at = unsafe { code_at.add(stride) };
+            }
+        }
+        // SAFETY: the local contains one complete native vector.
+        unsafe { v128_load(octets.as_ptr().cast()) }
+    };
+    simd128_nibble_address_vectors_from_codes(packed)
+}
+
+/// SIMD128 lookup/add tile: byte swizzles project signed-octet products and
+/// native widening adds accumulate them into the output lanes.
 #[target_feature(enable = "simd128")]
 unsafe fn simd128_lookup_i8<const MR: usize, const NR: usize>(
     kc: usize,
@@ -70,34 +176,62 @@ unsafe fn simd128_lookup_i8<const MR: usize, const NR: usize>(
     pb: *const i8,
     acc: *mut i32,
 ) {
-    debug_assert!(NR.is_multiple_of(4));
-    // SAFETY: the KernelSpec caller guarantees all three extents.
-    let (pa, pb, acc) = unsafe {
-        (
-            core::slice::from_raw_parts(pa, MR * kc),
-            core::slice::from_raw_parts(pb, NR * kc),
-            core::slice::from_raw_parts_mut(acc, MR * NR),
-        )
-    };
-    let mut tile = [[i32x4_splat(0); 3]; MR];
-    for p in 0..kc {
-        for i in 0..MR {
-            let a = pa[p * MR + i];
-            let mut products = [0i32; NR];
-            for j in 0..NR {
-                products[j] = crate::lookup::i8_product(a, pb[p * NR + j]);
-            }
-            for v in 0..NR / 4 {
-                let values = unsafe { v128_load(products.as_ptr().add(v * 4).cast()) };
-                tile[i][v] = i32x4_add(tile[i][v], values);
-            }
+    const { assert!(MR == 4 && NR == 8) };
+    let (mut pa_at, mut pb_at) = (pa, pb);
+    let zero = i32x4_splat(0);
+    let mut row0 = (zero, zero);
+    let mut row1 = (zero, zero);
+    let mut row2 = (zero, zero);
+    let mut row3 = (zero, zero);
+    for _ in 0..kc {
+        // SAFETY: the shipped lookup tile has exactly eight contiguous right
+        // coordinates at this depth.
+        let [low_index, high_index] = unsafe { simd128_nibble_address_vectors::<NR>(pb_at, 1) };
+        // SAFETY: this depth supplies four left-panel octets, and every tuple
+        // is the complete eight-column accumulator for its corresponding row.
+        unsafe {
+            simd128_lookup_accumulate(*pa_at, low_index, high_index, &mut row0);
+            simd128_lookup_accumulate(*pa_at.add(1), low_index, high_index, &mut row1);
+            simd128_lookup_accumulate(*pa_at.add(2), low_index, high_index, &mut row2);
+            simd128_lookup_accumulate(*pa_at.add(3), low_index, high_index, &mut row3);
         }
+        // SAFETY: the caller guaranteed `MR * kc` and `NR * kc` readable
+        // octets, and these pointers advance to the next panel step or one
+        // past their allocation on the final iteration.
+        (pa_at, pb_at) = unsafe { (pa_at.add(MR), pb_at.add(NR)) };
     }
-    for (i, row) in tile.iter().enumerate() {
-        for (v, value) in row.iter().enumerate() {
-            unsafe { v128_store(acc.as_mut_ptr().add(i * NR + v * 4).cast(), *value) };
-        }
+    // SAFETY: the eight stores cover the four disjoint eight-lane rows in the
+    // caller-guaranteed output tile exactly once.
+    unsafe {
+        v128_store(acc.cast(), row0.0);
+        v128_store(acc.add(4).cast(), row0.1);
+        v128_store(acc.add(8).cast(), row1.0);
+        v128_store(acc.add(12).cast(), row1.1);
+        v128_store(acc.add(16).cast(), row2.0);
+        v128_store(acc.add(20).cast(), row2.1);
+        v128_store(acc.add(24).cast(), row3.0);
+        v128_store(acc.add(28).cast(), row3.1);
     }
+}
+
+/// Accumulate one eight-column projector row while retaining both carriers as
+/// separately named SIMD values.
+///
+/// The tuple is deliberate: indexing a `[[v128; 2]; 4]` keeps the tile
+/// address-taken in the emitted Wasm, introducing a 128-byte fill and copy.
+#[inline]
+#[target_feature(enable = "simd128")]
+unsafe fn simd128_lookup_accumulate(
+    a: i8,
+    low_index: v128,
+    high_index: v128,
+    row: &mut (v128, v128),
+) {
+    // SAFETY: the caller selected the complete Atlas row for this signed
+    // octet, and the first eight indices are live panel coordinates.
+    let products = unsafe { simd128_nibble_products(a, low_index, high_index) };
+    row.0 = i32x4_add(row.0, i32x4_extend_low_i16x8(products[0]));
+    row.1 = i32x4_add(row.1, i32x4_extend_high_i16x8(products[0]));
 }
 
 /// # Safety
@@ -254,7 +388,8 @@ const fn simd128_lookup_reduce_spec<const MR: usize>(backend: Backend) -> Kernel
     }
 }
 
-/// SIMD128 lookup reduction: four row lookups are combined by one native add.
+/// SIMD128 lookup reduction: product commutativity makes the shared right
+/// octet the projector row, so one native swizzle projection covers four rows.
 #[target_feature(enable = "simd128")]
 unsafe fn simd128_lookup_reduce_i8<const MR: usize>(
     kc: usize,
@@ -262,27 +397,41 @@ unsafe fn simd128_lookup_reduce_i8<const MR: usize>(
     pb: *const i8,
     acc: *mut i32,
 ) {
-    debug_assert!(MR == 1 || MR == 4);
-    // SAFETY: the KernelSpec caller guarantees all three extents.
-    let (pa, pb, acc) = unsafe {
-        (
-            core::slice::from_raw_parts(pa, MR * kc),
-            core::slice::from_raw_parts(pb, kc),
-            core::slice::from_raw_parts_mut(acc, MR),
-        )
-    };
-    let mut sum = i32x4_splat(0);
-    for p in 0..kc {
-        let mut products = [0i32; 4];
-        for i in 0..MR {
-            products[i] = crate::lookup::i8_product(pa[i * kc + p], pb[p]);
-        }
-        let values = unsafe { v128_load(products.as_ptr().cast()) };
-        sum = i32x4_add(sum, values);
+    const { assert!(MR == 1 || MR == 4) };
+    let mut rows = [pa; 4];
+    if MR == 4 {
+        // SAFETY: the caller guaranteed four contiguous `kc`-octet rows.
+        (rows[1], rows[2], rows[3]) = unsafe {
+            let row1 = rows[0].add(kc);
+            let row2 = row1.add(kc);
+            (row1, row2, row2.add(kc))
+        };
     }
-    let mut result = [0i32; 4];
-    unsafe { v128_store(result.as_mut_ptr().cast(), sum) };
-    acc.copy_from_slice(&result[..MR]);
+    let mut pb_at = pb;
+    let mut sum = i32x4_splat(0);
+    for _ in 0..kc {
+        // SAFETY: the live row coordinates are separated by exactly `kc`.
+        let [low_index, high_index] = unsafe { simd128_nibble_address_vectors::<MR>(rows[0], kc) };
+        // SAFETY: the selected Atlas row is complete for this right octet; only
+        // the first `MR` indices contribute to the stored answer, and `pb_at`
+        // addresses this iteration's caller-guaranteed value.
+        let products = unsafe { simd128_nibble_products(*pb_at, low_index, high_index) };
+        sum = i32x4_add(sum, i32x4_extend_low_i16x8(products[0]));
+        for row in rows.iter_mut().take(MR) {
+            // SAFETY: each live row has `kc` octets and advances exactly once
+            // per iteration, reaching one past only after its final read.
+            *row = unsafe { row.add(1) };
+        }
+        // SAFETY: the right panel has `kc` octets and advances in lockstep.
+        pb_at = unsafe { pb_at.add(1) };
+    }
+    if MR == 4 {
+        // SAFETY: the four-row spec guarantees four writable output lanes.
+        unsafe { v128_store(acc.cast(), sum) };
+    } else {
+        // SAFETY: the one-row spec guarantees its single writable output lane.
+        unsafe { acc.write(i32x4_extract_lane::<0>(sum)) };
+    }
 }
 
 /// # Safety

@@ -13,6 +13,7 @@ categories.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+bytemuck = { workspace = true }
 uor-matmul-core = { workspace = true }
 
 [features]
@@ -31,3 +32,4 @@ workspace = true
 # what it did until `CB-02` was made to assert otherwise.
 [dev-dependencies]
 uor-matmul-kernels = { version = "0.1.0", path = ".", features = ["std"] }
+uor-matmul-model = { workspace = true }

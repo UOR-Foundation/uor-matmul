@@ -112,15 +112,56 @@ pub fn check_constants(root: &Path) -> Result<(), Fail> {
         pinned.push(t.k_max.to_string());
         pinned.push(t.per_step.to_string());
     }
+    let atlas = &model.constants.atlas;
+    let refinement = uor_matmul_model::derive::atlas_refinement_leaves(atlas.context);
+    let alphabet =
+        uor_matmul_model::derive::atlas_alphabet(atlas.scope, atlas.modality, atlas.context);
+    let atlas_pinned = [
+        atlas.scope.to_string(),
+        atlas.modality.to_string(),
+        atlas.context.to_string(),
+        uor_matmul_model::derive::atlas_carrier_dim(atlas.modality, atlas.context).to_string(),
+        uor_matmul_model::derive::atlas_class_count(atlas.scope, atlas.modality, atlas.context)
+            .to_string(),
+        uor_matmul_model::derive::atlas_page_sites(atlas.scope, atlas.context).to_string(),
+        uor_matmul_model::derive::atlas_refinement_bits(atlas.context).to_string(),
+        refinement.coefficient().to_string(),
+        refinement.power().to_string(),
+        alphabet.coefficient().to_string(),
+        alphabet.power().to_string(),
+    ];
 
     let mut violations = Vec::new();
     for src in &sources {
         if NUMERAL_ALLOWLIST.iter().any(|a| src.path.ends_with(a)) {
             continue;
         }
+        let mut in_atlas_const = false;
         for (line_no, line) in effective_lines(&src.text) {
             if line.contains("const _: () = assert!") {
                 continue;
+            }
+            // The canonical Atlas tuple is necessarily made from small
+            // numerals. Scanning every `3`, `4`, or `8` in a numerical crate
+            // would be noise, but restating one beside an `ATLAS_` declaration
+            // is precisely the R10 defect the private generated views prevent.
+            if line.contains("const ATLAS_") {
+                in_atlas_const = true;
+            }
+            if in_atlas_const {
+                let right_hand_side = line.split_once('=').map_or(line, |(_, rhs)| rhs);
+                for numeral in &atlas_pinned {
+                    if contains_literal_numeral(right_hand_side, numeral) {
+                        violations.push(format!(
+                            "{}:{line_no}: the Atlas numeral {numeral} is model-owned\n    {}",
+                            src.rel,
+                            line.trim()
+                        ));
+                    }
+                }
+                if line.contains(';') {
+                    in_atlas_const = false;
+                }
             }
             for numeral in &pinned {
                 // Numerals below four digits are ubiquitous and carry no claim
@@ -162,6 +203,25 @@ fn contains_numeral(line: &str, numeral: &str) -> bool {
         let start = from + pos;
         let end = start + numeral.len();
         let before_ok = start == 0 || !bytes[start - 1].is_ascii_digit();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+/// As [`contains_numeral`], but reject digits that are part of an identifier
+/// such as the `128` in `i128`.
+fn contains_literal_numeral(line: &str, numeral: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = line[from..].find(numeral) {
+        let start = from + pos;
+        let end = start + numeral.len();
+        let before_ok =
+            start == 0 || (!bytes[start - 1].is_ascii_alphanumeric() && bytes[start - 1] != b'_');
         let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
         if before_ok && after_ok {
             return true;
@@ -449,23 +509,24 @@ impl FloatScope {
             let after = &line[at + 4..];
             let after = after.strip_prefix("mut ").unwrap_or(after);
             let Some(eq) = after.find('=') else { continue };
-            let name = after[..eq]
-                .trim()
-                .split(':')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let binding = after[..eq].trim();
+            let name = binding.split(':').next().unwrap_or("").trim().to_string();
             let stop = after[eq + 1..]
                 .find(';')
                 .map_or(after.len(), |e| eq + 1 + e);
             let rhs = &after[eq + 1..stop];
-            let is_float = rhs.contains("as f32")
-                || rhs.contains("as f64")
-                || rhs.contains("f32::")
-                || rhs.contains("f64::")
-                || has_float_literal(rhs)
-                || self.names.iter().any(|n| rhs.contains(n.as_str()));
+            let declared = binding.split_once(':').map(|(_, ty)| ty.trim());
+            let is_float = declared.map_or_else(
+                || {
+                    rhs.contains("as f32")
+                        || rhs.contains("as f64")
+                        || rhs.contains("f32::")
+                        || rhs.contains("f64::")
+                        || has_float_literal(rhs)
+                        || self.names.iter().any(|n| rhs.contains(n.as_str()))
+                },
+                |ty| ty.contains("f32") || ty.contains("f64"),
+            );
             if is_float && is_ident(&name) {
                 self.push(name);
             }
@@ -655,8 +716,8 @@ fn contains_word(line: &str, word: &str) -> bool {
     false
 }
 
-/// R15: nothing is deferred --- no stub, no placeholder document section, no
-/// capability behind a flag that turns it off.
+/// R15: nothing is deferred: every declared capability is complete and present
+/// in the one release.
 ///
 /// The vocabulary this reads as a deferral is `model/ledger.toml`'s
 /// `deferral_markers`, not a table written here. That is not tidiness: this
@@ -665,14 +726,11 @@ fn contains_word(line: &str, word: &str) -> bool {
 /// The alternative was exempting this file, which is a hole in exactly the place
 /// nobody looks (R10).
 ///
-/// R15 is suspended for one named phase (`SUSP-R15-WIDTH-PHASE` in
-/// `model/ledger.toml`). What the suspension admits is read from the ledger
-/// rather than hard-coded here: a gate with a hard-coded hole is a hole nobody
-/// reviews, and a suspension recorded in the model is rendered into
-/// `CONFORMANCE.md`, where it is reviewed like any other claim. The admitted
-/// set is bounded by the model's own check, which refuses any path under
-/// `crates/` or `xtask/` --- a deferral parked in shipped code or in a gate is
-/// a deferral, whatever the ledger says.
+/// The steady-state ledger has no suspension. If a bounded suspension is ever
+/// recorded, its admitted paths are read from the ledger rather than hard-coded
+/// here: a gate with a hard-coded hole is a hole nobody reviews. The model also
+/// refuses any admitted path under `crates/` or `xtask/`, so shipped code and
+/// gates remain covered unconditionally.
 pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
     let ledger = Model::load(&root.join("model"))?.ledger;
     let markers: Vec<String> = ledger.deferral_markers.clone();
@@ -720,9 +778,8 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
     // The recipes are prose to a reader and a program to `just`, and a deferral
     // parked in a comment there is as deferred as one in a crate.
     //
-    // `MEASUREMENT-LOG.md` is reached by the directory read above, and the
-    // suspension is what currently spares it; when the suspension's ledger row
-    // goes, the log is held to the rule like everything else.
+    // `MEASUREMENT-LOG.md` is reached by the directory read above and is held to
+    // the rule like every other document.
     let recipes = root.join("Justfile");
     if recipes.exists() {
         files.push(recipes);
@@ -766,8 +823,7 @@ pub fn audit_deferral(root: &Path) -> Result<(), Fail> {
 
     if !violations.is_empty() {
         return Err(format!(
-            "R15: nothing is deferred. No stub, no placeholder section, no capability \
-             behind a flag that turns it off. Every capability ships in the one release. \
+            "R15: nothing is deferred. Every capability is complete and ships in the one release. \
              The vocabulary is `model/ledger.toml`'s `deferral_markers`.\n\n{}",
             violations.join("\n")
         )
@@ -1193,6 +1249,31 @@ pub(crate) fn asm_files(dir: &Path) -> Result<Vec<PathBuf>, Fail> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atlas_literals_are_not_integer_type_names_cm_01() {
+        assert!(contains_literal_numeral("3;", "3"));
+        assert!(contains_literal_numeral("-3i32;", "3"));
+        assert!(!contains_literal_numeral(
+            "atlas::PROJECTOR_INPUT_SCALE as i128;",
+            "128"
+        ));
+        assert!(!contains_literal_numeral("atlas::CONTEXT as u32;", "32"));
+    }
+
+    #[test]
+    fn an_explicit_integer_cast_boundary_stops_float_taint_cu_01() {
+        let mut scope = FloatScope::default();
+        scope.observe("fn relabel(x: f32) -> u32 {");
+        scope.observe("let raw: u32 = bytemuck::cast::<f32, u32>(x);");
+        assert_eq!(scope.arithmetic_on_a_float("raw + raw"), None);
+
+        scope.observe("let planted: f32 = x;");
+        assert_eq!(
+            scope.arithmetic_on_a_float("planted + planted"),
+            Some("planted".to_string())
+        );
+    }
 
     /// `CU-10`: no tropical sequence issues a multiply.
     ///

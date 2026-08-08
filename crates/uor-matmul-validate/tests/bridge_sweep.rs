@@ -1,28 +1,22 @@
-//! `CG-15` (open): achieved MACs per second of the float placement bridge,
-//! through the default driver's auto-selection and through the explicit
-//! entry's richer offers.
+//! Historical `CG-15` instrument, retained to reproduce the workspace-spelling
+//! comparison after removal of the float placement bridge.
 //!
-//! The bridge reifies the float driver's scaled panels as an `i32` alphabet
-//! and hands the reduction to the integer kernel table, placing the table's
-//! exact sum at the one known scale (`CD-19` pins the bytes). The default
-//! driver takes the same lane when its panel offer re-reads as the room the
-//! bridge needs, so the two columns are: `default`, the packed entry at the
-//! panel offer every caller has (`k` and `k * n` codes), and `explicit`,
-//! [`slice::gemm_float_full`] at its full named offers, kernel scratch and
-//! accumulators included. At admitted spans the default now supplies a
-//! tile-sized exact accumulator for deep reductions; at spans past the
-//! alphabet both entries use the scalar scaled lanes, which is the wide
-//! fill's row.
+//! Both columns now delegate to the same pure-UOR Atlas-octet body. `default`
+//! offers only decoded-code caches; `compatibility` calls
+//! [`slice::gemm_float_full`] with every historical workspace parameter. The
+//! latter's scaled, integer-panel, and accumulator buffers are untouched
+//! compatibility channels: no operand is reified and no alternate arithmetic
+//! can be selected (`CD-19`, `CA-05`).
 //!
-//! What is left to ask is the economics, and either answer is the finding:
-//! the prediction recorded in ANALYSIS.md before this harness ran is
-//! single-digit Gmac/s on the AVX2 runner --- four `i64` lanes against eight
-//! `f32` FMA lanes --- and a lesser, auto-vectorization-dependent figure on
-//! this host, where the `i32`-exact family has no hand-written NEON
-//! sequence.
+//! The exponent fills remain useful because they exercise different numbers of
+//! finite Atlas pages and gauge-coherent groups. They no longer express an
+//! admission boundary. Current float throughput, traffic, latency, confidence
+//! intervals, and controls belong to `CG-21` (`just uor-float-sweep`); numbers
+//! emitted here are a reproducibility record for the superseded `CG-15`
+//! protocol.
 //!
 //! Every figure is `open`: printed, never asserted. What *is* asserted,
-//! inside each timed run, is byte-identity between the two columns --- a
+//! inside each timed run, is byte-identity between the two spellings --- a
 //! speed measured on the wrong bytes is not a measurement.
 //!
 //! Ignored by default, like the other minute-long sweeps: `just
@@ -91,17 +85,15 @@ fn spanned(len: usize, salt: u64, span: i32) -> Vec<f32> {
     })
 }
 
-/// The oracle sweep's fill: eighteen and twenty-two binades of span, which no
-/// scaled lane admits. The bridge declines it; the row is here so the report
-/// shows the boundary rather than silently measuring only the admitted case.
+/// The oracle sweep's wide fill. It exercises many Atlas grade pages rather
+/// than an admission boundary: every finite span reaches the same total body.
 fn wide(len: usize, salt: u64) -> Vec<f32> {
     fill(len, salt, |v| {
         (v % 2048) as f32 * 2.0f32.powi((v % 19) as i32 - 9)
     })
 }
 
-/// The shapes ANALYSIS tables for the float placement: the two cubes and the
-/// one awkward product, plus the small end where latency dominates.
+/// The original CG-15 shapes, retained so its historical records reproduce.
 const SHAPES: &[(usize, usize, usize)] = &[
     (32, 32, 32),
     (256, 256, 256),
@@ -128,9 +120,7 @@ fn measure(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Row {
     let mut kernel_buf = vec![0i32; suggested_scratch(shape)];
     let mut acc_buf = vec![0i128; suggested_accumulators(shape)];
 
-    // The default driver at the panel offer every caller has. Where the offer
-    // and the spans admit, this *is* the table lane --- that is the point of
-    // the auto-selection --- and where they do not, it is the scalar lanes.
+    // The default public spelling, with decoded-code caches only.
     let default = best(|| {
         let av = MatView::row_major(a, m, k).unwrap();
         let bv = MatView::row_major(b, k, n).unwrap();
@@ -160,7 +150,7 @@ fn measure(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Row {
             &mut acc_buf,
         )
         .expect("the full float product exists");
-        // Byte-identity between the two entries, inside the timed region
+        // Byte-identity between the two spellings, inside the timed region
         // (`CD-19`): a speed measured on the wrong bytes is not a measurement.
         assert_eq!(
             c_explicit.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
@@ -182,24 +172,26 @@ fn measure(m: usize, k: usize, n: usize, a: &[f32], b: &[f32]) -> Row {
 }
 
 #[test]
-#[ignore = "a minutes-long release-mode sweep: `just bridge-sweep`"]
-fn the_bridge_against_the_scalar_lanes_cg_15() {
+#[ignore = "a historical release-mode workspace sweep: `just bridge-sweep`"]
+fn the_historical_workspace_spellings_share_atlas_cg_15() {
     let gmacs = |m: usize, k: usize, n: usize, secs: f64| (m * k * n) as f64 / secs / 1e9;
     println!();
-    println!("# CG-15 (open): the float placement bridge, default auto-selection against the explicit entry, Gmac/s");
+    println!(
+        "# CG-15 (historical, superseded by CG-21): pure-Atlas workspace spellings, Gproduct/s"
+    );
     println!(
         "# host: {}-{}; best of a 0.35 s budget per point;",
         std::env::consts::ARCH,
         std::env::consts::OS
     );
-    println!("# byte-identity between the two entries is asserted inside every timed run;");
-    println!("# at admitted spans the default column uses the table, chunking deep reductions with exact tile accumulators;");
-    println!("# wide spans past the i32 alphabet still decline to the scalar scaled lanes;");
+    println!("# byte-identity between the two spellings is asserted inside every timed run;");
+    println!("# default offers decoded-code caches; compatibility also supplies the inert historical buffers;");
+    println!("# every exponent span uses the same Atlas-octet operation family;");
     println!("# matrixmultiply is the inexact oracle, reported for scale (`CX-05` records its deviation)");
     for (label, span_a, span_b) in [("one exponent", 0, 0), ("a few binades", 3, 4)] {
         println!();
         println!(
-            "| fill: {label} (spans {span_a}/{span_b}) | default | explicit | matrixmultiply |"
+            "| fill: {label} (spans {span_a}/{span_b}) | default | compatibility | matrixmultiply |"
         );
         println!("| --- | --- | --- | --- |");
         for &(m, k, n) in SHAPES {
@@ -215,9 +207,7 @@ fn the_bridge_against_the_scalar_lanes_cg_15() {
         }
     }
     println!();
-    println!(
-        "| fill: wide spans (18/22 binades, both columns decline to the scalar lanes) | default | explicit | matrixmultiply |"
-    );
+    println!("| fill: wide spans (18/22 binades) | default | compatibility | matrixmultiply |");
     println!("| --- | --- | --- | --- |");
     for &(m, k, n) in SHAPES {
         let a = wide(m * k, 5);

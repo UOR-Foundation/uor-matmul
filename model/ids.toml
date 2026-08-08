@@ -88,6 +88,13 @@ statement = """The tropical epilogue's `alpha` and `beta` are applied exactly, i
 refuted_by = """a scalar the epilogue discards, a `-inf` in C absorbed to a finite zero rather than contributing nothing, or an `alpha` at the semiring zero that fails to absorb the product"""
 
 [[id]]
+id = "CS-13"
+level = "build"
+suite = "structural"
+statement = """The float `Linear` epilogue evaluates the complete terminal expression `alpha * sum + beta * C` exactly for every `i64` scalar, then applies the requested float encoding once with the sign and magnitude of that exact expression"""
+refuted_by = """one `i64` scalar pair whose exact cancellation changes the encoded zero, one reachable scaled sum whose terminal sign or magnitude is lost before encoding, or one float encode mode applied to a wrapped intermediate instead of the exact terminal expression"""
+
+[[id]]
 id = "CT-01"
 level = "build"
 suite = "totality"
@@ -714,7 +721,7 @@ refuted_by = """one enumerable codec whose recorded break-even differs from the 
 id = "CK-10"
 level = "build"
 suite = "codec"
-statement = """An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols"""
+statement = """An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal dyadic evaluations and NaN payloads are distinct symbols"""
 refuted_by = """a codebook that is not the source's distinct bit patterns sorted as unsigned integers and deduplicated --- `-0.0` merged with `+0.0`, or two NaN payloads merged"""
 
 [[id]]
@@ -749,15 +756,15 @@ refuted_by = """one shape or offer at which the u8-symbol-coded operand differs 
 id = "CD-19"
 level = "build"
 suite = "determinism"
-statement = """The float driver's scaled lanes give byte-identical output whether the integer dot product runs as the scalar loop or on the integer kernel table, at every shape and every offer, including none"""
-refuted_by = """one shape or offer at which the scalar integer dot and the integer kernel table give different bytes through the scaled lanes"""
+statement = """Every historical float workspace spelling is a zero-copy view of the same Atlas-octet reduction and gives byte-identical output at every shape and offer, including none, without whole-operand reification"""
+refuted_by = """one public float workspace spelling producing different bytes, reaching a non-Atlas arithmetic body, requiring an offer, or materializing either complete operand"""
 
 [[id]]
 id = "CD-20"
 level = "build"
 suite = "determinism"
-statement = """A u8-symbol-coded float weight matrix tabulated in the scaled integer lane gives byte-identical output to the dense float driver at every shape and every offer, including none, with the span walk admitted and declined alike, and a depth past the lane's run is chunked exactly"""
-refuted_by = """one shape or offer at which the symbol-tabulated scaled lane differs by a byte from the dense float driver, or a depth past the lane's run chunked inexactly"""
+statement = """A symbol-coded float weight matrix gives the dense Atlas driver's bytes at every shape and offer; admitted f32 common-grade projection and Scaled64 consumption compose as one contextual balanced-octet lookup protocol, while the f64 complete Atlas lane is selected parametrically from each Enumerable codec's declaration and executes when its table pays"""
+refuted_by = """one coded float product differing by a byte from the dense Atlas driver, either half of the contextual f32 carrier protocol being interpreted standalone or severed from the other, an admitted table product using a traditional multiply, a coefficient lost when a table run is chunked, or one downstream f64 codec being categorically declined despite a fitting paying declaration"""
 
 [[id]]
 id = "CG-14"
@@ -770,15 +777,15 @@ refuted_by = """the recorded bytes per second not reproducing at the host and sh
 id = "CG-15"
 level = "open"
 suite = "scaling"
-statement = """Achieved MACs per second of the float placement bridge --- the default driver's auto-selected lane against the explicit entry's richer offers, with the decline fills pricing the scalar lanes both fall to --- measured on the shapes ANALYSIS tables, with byte-identity asserted inside the timed region"""
-refuted_by = """the recorded MACs per second not reproducing at the host and shapes the record names, or the byte-identity assertion inside the timed region failing"""
+statement = """Historical float-workspace throughput protocol, rerun over the default and compatibility spellings of the one Atlas-octet operation at the recorded shapes and exponent fills, with byte identity asserted inside every timed region"""
+refuted_by = """the recorded product rates not reproducing at the host and shapes the record names, either spelling reaching distinct arithmetic, or the byte-identity assertion inside the timed region failing"""
 
 [[id]]
 id = "CG-16"
 level = "open"
 suite = "scaling"
-statement = """Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes, with byte-identity asserted inside the timed region"""
-refuted_by = """the recorded MACs per second not reproducing at the host and shapes the record names, or the byte-identity assertion inside the timed region failing"""
+statement = """Paired product-rate crossover of the public forced block-one Atlas table against the public coded Atlas decline at the recorded code spaces, shapes, spans, and offers; every calibrated batch is poisoned before timing and completely byte-checked after timing while only repeated production calls occupy the measured interval, and counted calls independently establish both routes and a multiply-free table"""
+refuted_by = """a repeated run at the recorded host, seed, shapes, offers, and harness not reproducing the reported paired intervals, either measured arm not invoking its named public production route, a setup or correctness guard entering the timer, a complete post-batch byte comparison failing, or the counted table naming a traditional multiply"""
 
 [[id]]
 id = "CG-17"
@@ -913,3 +920,80 @@ level = "open"
 suite = "scaling"
 statement = """Tropical selection throughput against the ring lane at matched shapes, and witness mechanism A against B"""
 refuted_by = """the recorded rates not reproducing at the host, shapes, and seed the record names"""
+
+[[id]]
+id = "CK-19"
+level = "build"
+suite = "codec"
+statement = """Finite non-adjacent form is the canonical section of `Z[X,X^-1]/(X-2)`: evaluation is preserved, normalization is idempotent and unique, `mu` is coefficient negation, and the mixed-radix Atlas page address crosses context, scope, and word boundaries without cyclic wrap"""
+refuted_by = """one dyadic value with no finite canonical representative, two distinct canonical representatives of one value, normalization changing evaluation, negation failing to commute with the section, or one grade failing to round-trip through `(word, scope, context)`"""
+
+[[id]]
+id = "CK-20"
+level = "build"
+suite = "codec"
+statement = """The declared `3 Z^(3x8)` Atlas carrier embeds in the ambient dyadic module, its four canonical projectors reconstruct it exactly, and the interaction block is load-bearing for signed-digit value and full-carrier selection"""
+refuted_by = """one projected coordinate requiring a denominator other than a power of two, the four blocks failing to reconstruct their carrier, or two carriers with equal global, modality, and context blocks whose differing interaction fails to distinguish their signed-digit values"""
+
+[[id]]
+id = "CK-21"
+level = "build"
+suite = "codec"
+statement = """`PackedCode::of` is a lossless sixteen-byte encoding of every `Decoded` variant: the two reserved finite tags recover every sign, `u64` mantissa, and `i32` exponent including signed zero and the non-finite sentinel exponents; ordinary IEEE finite values retain the inline layout, and every other formerly ignored padding value retains its exponent-based kind"""
+refuted_by = """two distinct decoded codes producing one packed code, one finite field changing under the reserved-tag interpretation, one finite sentinel exponent classified as non-finite, one ordinary nonzero IEEE finite value leaving the inline layout, or a nonreserved padding value changing the exponent-based kind it had before the extension"""
+
+[[id]]
+id = "CD-30"
+level = "build"
+suite = "determinism"
+statement = """Every pure-UOR float factorization returns the exact reference bytes for `f32` and `f64`, at every IEEE code class, shape, schedule, public workspace spelling, and offer including none"""
+refuted_by = """one float input, shape, schedule, public entry, or offer at which a pure-UOR factorization differs from the independently computed exact reference by one byte"""
+
+[[id]]
+id = "CD-31"
+level = "build"
+suite = "determinism"
+statement = """As an executable formal certificate, variable-capacity common-base intervals equal direct coefficient admission, greedy interval stabbing uses the minimum number of gauge-coherent groups, and the greatest common base maximizes exact accumulator headroom; this theorem does not declare a runtime selector"""
+refuted_by = """one coefficient set whose derived interval admits a base direct construction refuses or omits one it accepts, one interval family for which greedy uses more groups than exhaustive search, or one smaller admissible base giving more headroom than the greatest one"""
+
+[[id]]
+id = "CD-32"
+level = "build"
+suite = "determinism"
+statement = """Binary32 tabulation is total through one contextual q-carrier and one self-describing product-grade token: the exact coefficient-product bound is `(2^24-1)^2 < 2^48`; 507 relative grades at two signs plus all seven Complete non-finite unions make 1021 states in 10 bits; the 48-bit magnitude and state reserve the top-positive `2^58` interval beginning at `0x7c00_0000_0000_0000`; and the compact capacity is `max(1,floor((TAG_BASE-1)/(P*2^(wa+wb))))`, equal to 31744 at zero span and one on denominator overflow or a non-finite witness. Every IEEE value and span remains table-executable, a capacity below the codec block scalar-fractures without declining, non-finite products place immediately, compact composition is unchanged, and already-projected source slots use the maximal prefix recurrence `H=0; accept b_s iff b_s<=Q-H; H=H+b_s` for the least scalar certificate `b_s=||v_s||_infinity`. Its groups are minimum only among source-ordered common-boundary schedules using those nonnegative per-slot certificates; traversal selection remains value-blind, and the global span capacity is only a totality bound rather than the schedule"""
+refuted_by = """one binary32 bit pattern or exponent span declining a resident forced table, one compact product changing its complete bytes, one finite sign/grade state or Complete non-finite union aliasing another state or an untagged coefficient, one run exceeding the exact compact ceiling, a non-finite product entering a multi-product run, one capacity below a codec block declining instead of scalar-fracturing with the codec's original stride, one projected source slot being split although its nonnegative certificate fits the current headroom, one accepted group whose certificate sum exceeds the compact ceiling, one source-ordered common-boundary certificate schedule using fewer groups than the maximal-prefix recurrence, a global-span fracture replacing per-slot grouping, or two equal-shape operands selecting different traversals because of their values"""
+
+[[id]]
+id = "CA-05"
+level = "build"
+suite = "environment"
+statement = """The Atlas carrier and projector layer is a zero-copy view over caller-owned storage: it owns no carrier buffer, allocates nothing, carries its dyadic denominator implicitly, and remains total when the caller offers no scratch"""
+refuted_by = """one carrier view changing the backing address, one owned carrier allocation or materialization, one explicit per-coordinate denominator, or one no-scratch call refusing or changing the result"""
+
+[[id]]
+id = "CU-11"
+level = "build"
+suite = "purity"
+statement = """Between IEEE decode and the single encode, the float call graph contains only operations in the declared UOR census: total q contraction walks the occupied extent-fractal grades from their highest site, and its column dictionary, TableBuild, and portable gathers use canonical radix recurrence and Euclidean address projection without legacy limb placement, scalar support-mask routing, hash seeds or value multiplication, packed shifts, masks, XOR, bit scans, float arithmetic, or an undeclared reserve path"""
+refuted_by = """one reachable post-decode/pre-encode operation absent from the UOR census, one q contraction scanning an unoccupied leading grade or zero-initializing the whole grade carrier, one seeded or multiplied hash, one shift/mask/XOR/bit-scan address projection in the float-reachable column dictionary, TableBuild, or portable gathers, one legacy limb-placement call, one scalar packed-support mask or population-count route, one float arithmetic instruction, one reserve route, or the audit finding no pure-UOR float body to inspect"""
+
+[[id]]
+id = "CG-21"
+level = "open"
+suite = "scaling"
+statement = """Pure-UOR `f32` and `f64` throughput, traffic, and latency against the incumbent exact route and float oracles, with integer and tropical controls measured in the same run; every calibrated batch is poisoned before timing and completely byte-checked after timing while only the real production call occupies the measured interval"""
+refuted_by = """a repeated run at the recorded host, seed, shapes, and harness not reproducing the reported intervals, one measured arm not invoking its real production API, one correctness guard entering the timer, or one post-batch complete byte comparison failing"""
+
+[[id]]
+id = "CG-22"
+level = "build"
+suite = "scaling"
+statement = """The one direct pure-UOR float traversal selects only among eligible group-one lookup/add kernel orientations by model-derived executed work after exact-cell residency and fixed-workspace factorization, and its executed coordinate census equals the model while every non-float route and operation count remains unchanged"""
+refuted_by = """one shape selecting a lookup/add orientation other than the global model-derived executed-work minimum, one selector omitting exact-cell residency, fixed workspace, or an eligible family, one support-mask or alternative factorization route, one threshold literal in the selector, one executed coordinate count differing from the model, a silent route census, or one integer or tropical control changing route or operation count"""
+
+[[id]]
+id = "CG-23"
+level = "open"
+suite = "scaling"
+statement = """On the recorded compiler and host, every structurally changed native lookup case retains the preregistered demonstrated-superiority rule, while cases whose linked hot bodies are statically equivalent to their retained controls after exact ELF inspection are completely measured and reported as open static controls; all cases use the same safe wrappers, poisoned outputs, complete byte checks, and 256 interleaved paired samples"""
+refuted_by = """one changed case whose paired upper 95% confidence endpoint exceeds one, one changed case being classified as a static-equivalent control, one static control turning its open clock into a hard truth assertion, one case emitting fewer than 256 paired samples, raw and resolved clocks traversing different wrappers, poison or complete-output verification failing, or the recorded ELF inspection not showing the claimed normalized hot-body equivalence and no-worse aligned direct production alphabet address"""

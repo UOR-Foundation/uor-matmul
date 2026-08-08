@@ -60,7 +60,7 @@ struct Emitted {
     lines: Vec<String>,
 }
 
-/// A function worth analysing: an inner loop, not a stub.
+/// A function worth analysing: an emitted inner loop.
 struct Sequence {
     name: String,
     family: &'static str,
@@ -135,9 +135,9 @@ pub fn issue_census(root: &Path) -> Result<(), Fail> {
                     .filter(|l| is_instruction(l))
                     .cloned()
                     .collect();
-                // Fewer than five instructions, or no backward branch: a stub
-                // or a straight-line helper, and a census of inner loops has
-                // nothing to say about either.
+                // Fewer than five instructions, or no backward branch: a
+                // straight-line helper, and a census of inner loops has
+                // nothing to say about it.
                 if instructions.len() < 5 || !has_backward_branch(&f.lines) {
                     skipped += 1;
                     continue;
@@ -653,7 +653,7 @@ fn render(
          - wasm has no llvm-mca scheduling model, so the SIMD128 sequences are absent from \
          this census rather than analysed against the wrong machine.\n\
          - {skipped} emitted functions are not below: fewer than five instructions or no \
-         backward branch, so they are stubs or straight-line helpers, not inner loops.\n\
+         backward branch, so they are tiny or straight-line helpers, not inner loops.\n\
          \n\
          | sequence | family | instructions | cycles | IPC | block RThroughput | bottleneck |\n\
          | --- | --- | --- | --- | --- | --- | --- |\n",

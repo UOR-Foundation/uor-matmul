@@ -35,6 +35,9 @@ deferral_markers = [
     "todo!",
     "for now",
     "later version",
+    "stub",
+    "placeholder",
+    "unfinished work",
 ]
 
 # ==========================================================================
@@ -152,6 +155,76 @@ refuted_by = """TF1's D-8 census naming an operation outside this list, or
 omitting one of these five."""
 
 [[claim]]
+id = "AUTH-TF1-D1"
+level = "some-true"
+authority = "TF1"
+statement = """the canonical Atlas instance has scope, modality, and context
+`(q,T,O) = (4,3,8)`; one carrier is `V_T tensor V_O`, while scope indexes four
+copies outside that 24-dimensional carrier."""
+refuted_by = """TF1's D-1 or S-18 giving a different canonical tuple, placing
+scope inside the carrier, or assigning the carrier a dimension other than
+`T*O`."""
+
+[[claim]]
+id = "AUTH-TF1-D2"
+level = "some-true"
+authority = "TF1"
+statement = """Atlas addresses are words over the fixed alphabet, so composition
+depth extends without widening the alphabet or imposing a fixed ceiling."""
+refuted_by = """TF1's D-2 bounding address-word depth, widening the alphabet as
+depth grows, or defining an address as only one fixed-depth symbol."""
+
+[[claim]]
+id = "AUTH-TF1-S3"
+level = "some-true"
+authority = "TF1"
+statement = """the modality generator is the mirror `mu(d) = (T-1)-d`; at
+`T=3` it swaps the outer modalities and fixes the middle one."""
+refuted_by = """TF1's S-3 assigning `mu` another action, another order, or a
+full modality cycle rather than a mirror."""
+
+[[claim]]
+id = "AUTH-TF1-S12"
+level = "some-true"
+authority = "TF1"
+statement = """the global, modality, context, and interaction projectors are
+pairwise annihilating idempotents whose sum is the identity on
+`V_T tensor V_O`."""
+refuted_by = """TF1's S-12 omitting a block, failing reconstruction, or assigning
+the four blocks ranks other than `1`, `T-1`, `O-1`, and `(T-1)(O-1)`."""
+
+[[claim]]
+id = "AUTH-TF1-S17"
+level = "some-true"
+authority = "TF1"
+statement = """the context block has rank `O-1`, so its sign refinement has
+`2^(O-1)` leaves and the full alphabet has `(q*T*O)*2^(O-1)` symbols."""
+refuted_by = """TF1's S-17 giving the context block another rank, deriving a
+different leaf count, or leaving the alphabet's refinement factor posited
+rather than derived."""
+
+[[claim]]
+id = "AUTH-TF1-S19"
+level = "some-true"
+authority = "TF1"
+statement = """the primary Atlas address selects from the whole carrier under
+the declared least-index tie-break rather than selecting independently from
+proper spectral projections."""
+refuted_by = """TF1's S-19 defining the primary address through a proper block
+projection, a hash, or a non-total selection."""
+
+[[claim]]
+id = "AUTH-TF1-S20"
+level = "some-true"
+authority = "TF1"
+statement = """a coordinate form reading only modality and context projections
+is blind to the interaction block, while whole-carrier selection can separate
+interaction perturbations."""
+refuted_by = """TF1's S-20 exhibiting no interaction perturbation invisible to
+the marginal projections, or showing whole-carrier selection factors through
+those proper projections."""
+
+[[claim]]
 id = "AUTH-TF1-G2"
 level = "some-true"
 authority = "TF1"
@@ -197,25 +270,3 @@ statement = """the residency collapse of the coded tiers, measured as a scaling
 constant against the oracle (CG-03), never asserted."""
 refuted_by = """the recorded residency constant not reproducing at the host and
 codec the record names."""
-
-# ==========================================================================
-# Suspended rules. A working rule deliberately suspended for one named scope,
-# recorded here because a suspension that lived only in a gate's exemption
-# list would be a hole nobody reviews. The gate the suspension exempts reads
-# this file, so what is admitted is model data (R10).
-# ==========================================================================
-
-[[suspension]]
-id = "SUSP-R15-WIDTH-PHASE"
-rule = "R15"
-scope = "the representation-width performance phase"
-reason = """R15 was written about a plan being complete before implementation
-began. Performance work is iterative: a measurement lands, what bound it is
-learned, and the next step follows from that. Forbidding a named next step
-makes the honest artifact of such work --- a measurement log --- unwritable,
-so for this phase the log may name next steps. Everywhere else the rule and
-its gate stand exactly as written."""
-admits = ["MEASUREMENT-LOG.md"]
-ends = """the phase closes: the log's open items have each either shipped with
-their IDs and gates, or been measured and recorded as results, and this row and
-the exemption are removed together."""

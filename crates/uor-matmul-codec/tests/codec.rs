@@ -637,7 +637,7 @@ fn the_enumeration_round_trips_and_is_total_ck_09() {
 
 /// CK-10: an arena's codebook is canonical --- the source stream's distinct
 /// bit patterns in unsigned order, duplicates collapsed. Signed zeros and NaN
-/// payloads are distinct symbols, and the two zeros decode alike.
+/// payloads are distinct symbols, and the two zeros evaluate alike.
 #[test]
 fn arena_construction_is_canonical_ck_10() {
     let mut values = [
@@ -666,7 +666,8 @@ fn arena_construction_is_canonical_ck_10() {
         "unsigned order on bit patterns, duplicates collapsed"
     );
 
-    // Distinct symbols, equal decodes: both zeros name the same exact zero.
+    // Distinct symbols, equal dyadic evaluations: both name exact zero, while
+    // the decoded-code cache faithfully retains the source sign (`CK-21`).
     let table: &[Alphabet<f32, Whole<f32>>; 6] =
         as_alphabet_whole(&values[..n]).try_into().unwrap();
     let arena: Arena<'_, f32, 6> = Arena::new(table);
@@ -674,10 +675,10 @@ fn arena_construction_is_canonical_ck_10() {
     let neg = Codec::<f32, Whole<f32>>::decode_element(&arena, 4, 0).get();
     assert_eq!(pos.to_bits(), 0x0000_0000);
     assert_eq!(neg.to_bits(), 0x8000_0000);
-    assert_eq!(
+    assert_ne!(
         pos.pack(),
         neg.pack(),
-        "-0.0 and +0.0 name the same exact zero"
+        "the packed decode retains the signs of equal-valued zeros"
     );
 
     // A code past the codebook indexes it modulo N, like any table tier (C6).

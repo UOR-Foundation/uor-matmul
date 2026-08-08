@@ -18,14 +18,9 @@ sentence". Everything else follows from those two.
    blocking factor, a prefetch distance) is recorded with what measured it;
    inventing a derivation for one is fiction (R1's allowlist).
 
-2. **Nothing is deferred (R15).** No `TODO`, no stub, no placeholder section, no
+2. **Nothing is deferred (R15).** No `TODO`, no `stub`, no `placeholder` section, no
    capability behind a flag that turns it off. If a change cannot be finished,
    it should not be started --- and `cargo xtask audit-deferral` will say so.
-   Suspended for the representation-width performance phase: the phase's
-   measurement log (`MEASUREMENT-LOG.md`) may name next steps, because a rule
-   forbidding that makes the log unwritable. The suspension is recorded in
-   `model/ledger.toml` (`SUSP-R15-WIDTH-PHASE`), the gate reads its exemption
-   from there, and it ends when the phase closes.
 
 3. **One answer, many factorizations (R13, C5).** There is no fast path and no
    careful path. Lanes, traversals, tile and reduce kernels, narrow and wide

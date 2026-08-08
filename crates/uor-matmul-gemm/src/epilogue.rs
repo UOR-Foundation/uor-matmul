@@ -267,11 +267,10 @@ impl<O: FloatElement, const L: usize, const MIN_EXP: i32> AbsorbPrior<O> for Com
 pub trait ScaleExact: Accumulator {
     /// Multiply by an exact integer scalar.
     ///
-    /// Saturating, and this is the one place in the library where that word is
-    /// allowed: it is inside the single encode step. The saturation is not a
-    /// fallback and not an approximation --- an `alpha * sum` past the
-    /// accumulator's range is also past every output type's range, so the
-    /// clamp is the same value a wider intermediate would have produced (R3).
+    /// The implementation must be observationally exact at the terminal
+    /// expression's output alphabet. A complete float accumulator retains
+    /// every bit through the combine: its requested rounding depends on the
+    /// full sign and magnitude, not only on low congruence bits (`CS-13`).
     fn scale_exact(self, factor: i64) -> Self;
 
     /// Widen a machine integer into this accumulator.
@@ -290,9 +289,8 @@ impl ScaleExact for i128 {
 
 impl<const L: usize, const MIN_EXP: i32> ScaleExact for uor_matmul_core::Complete<L, MIN_EXP> {
     fn scale_exact(self, factor: i64) -> Self {
-        // Exact: an integer scaling of an exact fixed-point value is exact, and
-        // the register is wide enough that `alpha` cannot push a representable
-        // sum out of it.
+        // Exact: the model derives an extension word from arbitrary i64 growth
+        // plus the two terms of `alpha * sum + beta * C`.
         self.scale(factor)
     }
 
@@ -333,10 +331,9 @@ impl<const L: usize> ScaleExact for uor_matmul_core::Limbs<L> {
 /// An accumulator that can take an exact integer at a dyadic scale.
 ///
 /// [`ScaleExact::from_i128`] is this at exponent zero. The general form is the
-/// float placement bridge's channel: the integer kernel table's exact sum
-/// arrives at the scale the panels were scaled to, and placing it there is
-/// [`Complete::add_scaled`] --- the decode's own primitive, so nothing is
-/// rounded on the way in (`CD-19`).
+/// terminal embedding shared by Atlas factorizations: a resolved exact
+/// coefficient arrives at its Laurent grade and [`Complete::add_scaled`]
+/// places it without rounding (`CD-19`).
 pub trait PlaceAt: Accumulator {
     /// Accumulate exactly `v * 2^exponent`.
     fn place_at(&mut self, v: i128, exponent: i32);
@@ -348,17 +345,14 @@ impl<const L: usize, const MIN_EXP: i32> PlaceAt for Complete<L, MIN_EXP> {
     }
 }
 
-/// The scale channel between the integer kernel table and a float output.
+/// A compatibility scale channel between an exact integer sum and float output.
 ///
-/// The float driver's scaled panels are exact integers, so their product is an
-/// exact integer dot product at one known scale --- `2^-(base_a + base_b)`,
-/// where the bases are the panels' measured exponent minima. The kernel table
-/// computes that integer; this epilogue is the far end of the bridge: the
-/// table's exact `i128` sum is placed into the float accumulator at the
-/// declared scale, exactly, and the inner epilogue runs on the placed value
-/// precisely as if the float driver had accumulated it there itself. Which is
-/// the same sentence the modular factorization tells for integers: an
-/// identity, not an approximation, and `CD-19` asserts the bytes.
+/// The public type predates the pure-Atlas float body and therefore retains its
+/// spelling. Its operation is nevertheless the same terminal Atlas embedding:
+/// place an exact `i128` coefficient at the declared Laurent grade, then run
+/// the inner epilogue. Dense float GEMM no longer reifies operands to reach
+/// this type; symbol tabulation contracts its compact coefficients through
+/// signed-octet lookup before placement (`CD-19`, `CD-20`).
 #[derive(Clone, Copy, Debug)]
 pub struct Scaled<'e, F: FloatElement, Ep> {
     /// The epilogue that runs on the placed accumulator.
@@ -394,5 +388,132 @@ where
         let mut placed = <AccOf<F> as Accumulator>::ZERO;
         placed.place_at(acc, self.base);
         self.inner.finish(placed, prior, mode)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deepest_reachable_sum<F: FloatElement>(max_finite: F) -> AccOf<F> {
+        let mut sum = AccOf::<F>::ZERO;
+        F::mac(&mut sum, max_finite, max_finite);
+        // One term doubled MAX_K_BITS - 1 times represents 2^(MAX_K_BITS - 1)
+        // equal terms, a depth a 64-bit address space can present. Building the
+        // value by association is the executable witness; the test need not
+        // allocate the address space it represents.
+        for _ in 1..uor_matmul_core::generated::MAX_K_BITS {
+            sum = sum.combine(sum);
+        }
+        sum
+    }
+
+    fn assert_float_linear_terminal_expression<F>(
+        half: F,
+        one: F,
+        positive_infinity: F,
+        negative_infinity: F,
+        max_finite: F,
+        min_finite: F,
+    ) where
+        F: FloatElement + EncodeFrom<AccOf<F>> + PartialEq + core::fmt::Debug,
+        AccOf<F>: ScaleExact + AbsorbPrior<F>,
+    {
+        let half_min = (i64::MIN.unsigned_abs() >> 1) as i64;
+        for mode in [
+            EncodeMode::Nearest,
+            EncodeMode::TowardZero,
+            EncodeMode::Saturating,
+            EncodeMode::Wrapping,
+        ] {
+            let canceled = <Linear as Epilogue<F, F>>::finish(
+                &Linear {
+                    alpha: i64::MIN,
+                    beta: half_min,
+                },
+                AccOf::<F>::of_prior(half),
+                Some(one),
+                mode,
+            );
+            assert_eq!(
+                canceled,
+                F::ZERO,
+                "large alpha/beta cancellation changed under {mode:?}"
+            );
+        }
+
+        for (mode, expected_positive, expected_negative) in [
+            (EncodeMode::Nearest, positive_infinity, negative_infinity),
+            (EncodeMode::TowardZero, max_finite, min_finite),
+            (EncodeMode::Saturating, max_finite, min_finite),
+            (EncodeMode::Wrapping, max_finite, min_finite),
+        ] {
+            let positive = <Linear as Epilogue<F, F>>::finish(
+                &Linear {
+                    alpha: i64::MAX,
+                    beta: 0,
+                },
+                deepest_reachable_sum(max_finite),
+                None,
+                mode,
+            );
+            assert_eq!(
+                positive, expected_positive,
+                "a reachable positive terminal overflow lost its sign under {mode:?}"
+            );
+
+            let negative = <Linear as Epilogue<F, F>>::finish(
+                &Linear {
+                    alpha: i64::MIN,
+                    beta: 0,
+                },
+                deepest_reachable_sum(max_finite),
+                None,
+                mode,
+            );
+            assert_eq!(
+                negative, expected_negative,
+                "a reachable negative terminal overflow lost its sign under {mode:?}"
+            );
+        }
+
+        let infinity = AccOf::<F>::of_prior(positive_infinity);
+        let flipped = <Linear as Epilogue<F, F>>::finish(
+            &Linear { alpha: -1, beta: 0 },
+            infinity,
+            None,
+            EncodeMode::Nearest,
+        );
+        assert_eq!(flipped, negative_infinity);
+        let zero_times_infinity = <Linear as Epilogue<F, F>>::finish(
+            &Linear { alpha: 0, beta: 0 },
+            infinity,
+            None,
+            EncodeMode::Nearest,
+        );
+        assert!(matches!(
+            zero_times_infinity.decode(),
+            uor_matmul_core::Decoded::NotANumber
+        ));
+    }
+
+    #[test]
+    fn float_linear_scalars_preserve_the_terminal_expression_cs_13() {
+        assert_float_linear_terminal_expression::<f32>(
+            0.5,
+            1.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::MAX,
+            f32::MIN,
+        );
+        assert_float_linear_terminal_expression::<f64>(
+            0.5,
+            1.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+        );
     }
 }

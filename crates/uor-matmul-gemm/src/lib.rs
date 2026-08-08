@@ -36,7 +36,7 @@
 // The unit tests below build operands on the heap. That is a property of the
 // tests, not of the library: nothing in the shipped code path can allocate,
 // which is what `CA-01` witnesses with a counting allocator.
-#[cfg(test)]
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 pub mod coded;

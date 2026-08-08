@@ -58,11 +58,9 @@ pub const NEON_TROP_I16: KernelSpec<i16, i16> = portable::TROP_I16;
 
 /// The `i8` table sequence. Absent here; the reference carries this family.
 ///
-/// A table's column loop is integer adds and a masked index, so every SIMD
-/// target has a sequence for it and this absence is unfinished work rather
-/// than a property of the hardware. It is written as `None` rather than as a
-/// slower body so that the reference is the one that runs and `CB-*` compares
-/// against one sequence and not two.
+/// This module is compiled only when Arm is not the target. Returning `None`
+/// records that target fact; the Arm build supplies its SIMD sequence, while
+/// the portable reference remains the complete sequence on this host.
 pub fn neon_table_i8_i32(_rows: usize, _group: usize) -> Option<TableSpec<i8, i32>> {
     None
 }

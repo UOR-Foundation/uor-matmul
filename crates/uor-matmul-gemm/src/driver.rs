@@ -75,6 +75,44 @@ pub fn gemm<E, Bd, O, Ep>(
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
+    gemm_with_ledger(triple, epilogue, options, scratch, &mut ());
+}
+
+/// Zero-cost census channel for the algebra-parametric reference traversal.
+/// The production instantiation is `()`, whose empty methods monomorphize
+/// away; CG-22 instantiates this same body with counters.
+trait DenseLedger {
+    fn routed(&mut self, traversal: Traversal, panel: usize);
+    fn operated(&mut self);
+    fn combined(&mut self);
+    fn encoded(&mut self);
+}
+
+impl DenseLedger for () {
+    #[inline(always)]
+    fn routed(&mut self, _: Traversal, _: usize) {}
+    #[inline(always)]
+    fn operated(&mut self) {}
+    #[inline(always)]
+    fn combined(&mut self) {}
+    #[inline(always)]
+    fn encoded(&mut self) {}
+}
+
+#[inline]
+fn gemm_with_ledger<E, Bd, O, Ep, Lg>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    ledger: &mut Lg,
+) where
+    E: Element,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: DenseLedger,
+{
     // The backend is not consulted here. Every backend computes the same
     // integer, so selecting one is a question about instructions and never
     // about which function is being computed (R13). The portable factorization
@@ -101,6 +139,7 @@ pub fn gemm<E, Bd, O, Ep>(
         // and `CD-13` asserts the bytes (R13, C5).
         Traversal::Blocked | Traversal::Tabulated => scratch.panel(shape.k),
     };
+    ledger.routed(options.traversal, panel);
 
     let (a, b, c) = triple.parts();
     let reads_c = epilogue.reads_c();
@@ -112,6 +151,7 @@ pub fn gemm<E, Bd, O, Ep>(
             if panel == 0 {
                 for p in 0..shape.k {
                     E::mac(&mut acc, a.at(i, p).get(), b.at(p, j).get());
+                    ledger.operated();
                 }
             } else {
                 // The same accumulation, in panels. `combine` is associative on
@@ -123,8 +163,10 @@ pub fn gemm<E, Bd, O, Ep>(
                     let mut part = <AccOf<E> as Accumulator>::ZERO;
                     for q in p..end {
                         E::mac(&mut part, a.at(i, q).get(), b.at(q, j).get());
+                        ledger.operated();
                     }
                     acc = acc.combine(part);
+                    ledger.combined();
                     p = end;
                 }
             }
@@ -134,6 +176,7 @@ pub fn gemm<E, Bd, O, Ep>(
             // uninitialised output buffer is admissible (`CS-04`).
             let prior = if reads_c { Some(*c.at(i, j)) } else { None };
             *c.at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
+            ledger.encoded();
         }
     }
 }
@@ -150,6 +193,100 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, MatView, MatViewMut, Strides};
+
+    #[derive(Default, Debug, PartialEq, Eq)]
+    struct DenseCensus {
+        route: Option<(Traversal, usize)>,
+        operations: usize,
+        combines: usize,
+        encodes: usize,
+    }
+
+    impl DenseLedger for DenseCensus {
+        fn routed(&mut self, traversal: Traversal, panel: usize) {
+            assert!(self.route.replace((traversal, panel)).is_none());
+        }
+
+        fn operated(&mut self) {
+            self.operations += 1;
+        }
+
+        fn combined(&mut self) {
+            self.combines += 1;
+        }
+
+        fn encoded(&mut self) {
+            self.encodes += 1;
+        }
+    }
+
+    fn assert_dense_census(census: &DenseCensus, traversal: Traversal, panel: usize) {
+        let expected = uor_matmul_model::derive::dense_reference_census(3, 7, 5, panel);
+        assert_eq!(census.route, Some((traversal, panel)));
+        assert_eq!(census.operations, expected[0]);
+        assert_eq!(census.combines, expected[1]);
+        assert_eq!(census.encodes, expected[2]);
+    }
+
+    /// `CG-22`: the float work cannot perturb the one algebra-parametric
+    /// reference route. Ring and tropical instantiations execute the exact same
+    /// model-derived operation census on both sides of the panel boundary.
+    #[test]
+    fn integer_and_tropical_reference_counts_remain_identical_cg_22() {
+        use crate::epilogue::MaxPlus;
+        use uor_matmul_core::{as_alphabet_tropical, Trop};
+
+        for (traversal, offered) in [
+            (Traversal::OutputMajor, 0usize),
+            (Traversal::Blocked, 3usize),
+        ] {
+            let a = vec![1i8; 3 * 7];
+            let b = vec![1i8; 7 * 5];
+            let mut c = vec![0i32; 3 * 5];
+            let mut panel = vec![Alphabet::ZERO; offered];
+            let av = MatView::row_major(as_alphabet_full(&a), 3, 7).unwrap();
+            let bv = MatView::row_major(as_alphabet_full(&b), 7, 5).unwrap();
+            let cv = MatViewMut::row_major(&mut c, 3, 5).unwrap();
+            let mut triple = Triple::new(av, bv, cv).unwrap();
+            let mut ring = DenseCensus::default();
+            gemm_with_ledger(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    ..GemmOptions::default()
+                },
+                &mut Scratch::new(&mut panel),
+                &mut ring,
+            );
+            assert_dense_census(&ring, traversal, offered);
+            assert!(c.iter().all(|&value| value == 7));
+
+            let finite = Trop::<i8>::finite;
+            let ta = vec![finite(1); 3 * 7];
+            let tb = vec![finite(1); 7 * 5];
+            let mut tc = vec![Trop::<i32>::NEG_INF; 3 * 5];
+            let mut tpanel = vec![Alphabet::ZERO; offered];
+            let av = MatView::row_major(as_alphabet_tropical(&ta), 3, 7).unwrap();
+            let bv = MatView::row_major(as_alphabet_tropical(&tb), 7, 5).unwrap();
+            let cv = MatViewMut::row_major(&mut tc, 3, 5).unwrap();
+            let mut triple = Triple::new(av, bv, cv).unwrap();
+            let mut tropical = DenseCensus::default();
+            gemm_with_ledger(
+                &mut triple,
+                &MaxPlus::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    ..GemmOptions::default()
+                },
+                &mut Scratch::new(&mut tpanel),
+                &mut tropical,
+            );
+            assert_dense_census(&tropical, traversal, offered);
+            assert_eq!(tropical, ring);
+            assert!(tc.iter().all(|&value| value == Trop::finite(2)));
+        }
+    }
 
     fn product(m: usize, k: usize, n: usize, traversal: Traversal, panel: usize) -> Vec<i32> {
         let a: Vec<i8> = (0..m * k).map(|i| ((i * 37) % 255) as i8).collect();

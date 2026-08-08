@@ -13,6 +13,7 @@ use uor_matmul_model::{codegen, Model};
 mod api;
 mod audit;
 mod census;
+mod uor_float;
 
 fn main() -> ExitCode {
     let task = std::env::args()
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
         "check-constants" => audit::check_constants(&root),
         "audit-limits" => audit::audit_limits(&root),
         "audit-purity" => audit::audit_purity(&root),
+        "audit-uor-float" => uor_float::audit_uor_float(&root),
         "audit-disassembly" => audit::audit_disassembly(&root),
         "audit-deferral" => audit::audit_deferral(&root),
         "issue-census" => census::issue_census(&root),
@@ -37,10 +39,11 @@ fn main() -> ExitCode {
                 "cargo xtask <task>\n\
                  \n\
                  check-model       R10: model/*.toml is the single source; regenerate and diff\n\
-                 check-api         no public item is removed or renamed; diff against the baseline\n\
+                 check-api         public declarations equal the committed surface exactly\n\
                  check-constants   R1:  every constant derives or is measured; no magic numeral\n\
                  audit-limits      R8:  no bound that cannot be traced to a parameter\n\
                  audit-purity      R13: one method; no float addition, no fallback\n\
+                 audit-uor-float   CA-05/CU-11: live float roots use borrowed Atlas lookup/add\n\
                  audit-disassembly CU-01: no float arithmetic opcode in any shipped kernel\n\
                  audit-deferral    R15: nothing is deferred, anywhere in the workspace\n\
                  issue-census      CG-11: a named bottleneck for every emitted inner loop\n\
@@ -71,19 +74,31 @@ fn check_model(root: &Path, write: bool) -> Result<(), Fail> {
     let model = Model::load(&root.join("model"))?;
     model.check()?;
 
-    let rendered = codegen::render(&model);
-    let path: PathBuf = root.join(codegen::GENERATED_PATH);
+    let generated = [
+        (codegen::GENERATED_PATH, codegen::render(&model)),
+        (
+            codegen::KERNEL_CAPACITY_PATH,
+            codegen::render_kernel_capacity(&model),
+        ),
+        (
+            codegen::ATLAS_DISPATCH_PATH,
+            codegen::render_atlas_dispatch(&model),
+        ),
+    ];
 
     let conformance = codegen::render_conformance(&model);
     let conformance_path = root.join(codegen::CONFORMANCE_PATH);
 
     if write {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        for (relative, rendered) in &generated {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, rendered)?;
+            println!("wrote {}", path.display());
         }
-        std::fs::write(&path, &rendered)?;
         std::fs::write(&conformance_path, &conformance)?;
-        println!("wrote {}", path.display());
         println!("wrote {}", conformance_path.display());
         return Ok(());
     }
@@ -104,21 +119,24 @@ fn check_model(root: &Path, write: bool) -> Result<(), Fail> {
         .into());
     }
 
-    let committed = std::fs::read_to_string(&path).map_err(|e| {
-        format!(
-            "{}: {e}\nrun `cargo xtask check-model --write`",
-            path.display()
-        )
-    })?;
-    if committed != rendered {
-        return Err(format!(
-            "{} is stale: it disagrees with model/*.toml.\n\
-             R10: constants have exactly one source. Run `cargo xtask check-model --write`.",
-            path.display()
-        )
-        .into());
+    for (relative, rendered) in &generated {
+        let path: PathBuf = root.join(relative);
+        let committed = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "{}: {e}\nrun `cargo xtask check-model --write`",
+                path.display()
+            )
+        })?;
+        if committed != *rendered {
+            return Err(format!(
+                "{} is stale: it disagrees with model/*.toml.\n\
+                 R10: constants have exactly one source. Run `cargo xtask check-model --write`.",
+                path.display()
+            )
+            .into());
+        }
     }
-    println!("check-model: the generated consts equal the model (CM-01)");
+    println!("check-model: every generated artifact equals the model (CM-01)");
     Ok(())
 }
 
@@ -165,6 +183,7 @@ fn validate(root: &Path) -> Result<(), Fail> {
     audit::check_constants(root)?;
     audit::audit_limits(root)?;
     audit::audit_purity(root)?;
+    uor_float::audit_uor_float(root)?;
     audit::audit_disassembly(root)?;
     audit::audit_deferral(root)?;
     verify_oracles(root)?;
