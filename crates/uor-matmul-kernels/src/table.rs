@@ -1139,15 +1139,49 @@ mod scaled64_tests {
         atlas_f32_q_magnitude_product_observed, atlas_octet_product, gray_sign_build_adds,
         product_build_adds, Lane, LaneWord, Scaled64,
     };
+    use crate::generated_capacity::f32_q;
     use core::cell::Cell;
     use uor_matmul_core::{Accumulator, Element};
 
     type F32Acc = <f32 as Element>::Acc;
 
-    fn checked_model() -> uor_matmul_model::Model {
-        let model = uor_matmul_model::Model::load_from_repo_root().expect("the model loads");
-        model.check().expect("the model-derived q carrier checks");
-        model
+    struct GeneratedCompleteState {
+        nonfinite_states: u32,
+    }
+
+    struct GeneratedWidths {
+        f32_q_carrier: uor_matmul_model::registry::F32QCarrier,
+        complete_state: GeneratedCompleteState,
+    }
+
+    struct GeneratedModel {
+        widths: GeneratedWidths,
+    }
+
+    fn generated_model() -> GeneratedModel {
+        GeneratedModel {
+            widths: GeneratedWidths {
+                f32_q_carrier: uor_matmul_model::registry::F32QCarrier {
+                    significand_bits: f32_q::SIGNIFICAND_BITS,
+                    min_factor_exp: f32_q::MIN_FACTOR_EXP,
+                    max_factor_exp: f32_q::MAX_FACTOR_EXP,
+                    product_magnitude_bits: f32_q::PRODUCT_MAGNITUDE_BITS,
+                    product_bound: f32_q::PRODUCT_BOUND,
+                    relative_grade_count: f32_q::RELATIVE_GRADE_COUNT,
+                    signed_finite_states: f32_q::SIGNED_FINITE_STATES,
+                    state_count: f32_q::STATE_COUNT,
+                    state_bits: f32_q::STATE_BITS,
+                    tag_payload_bits: f32_q::TAG_PAYLOAD_BITS,
+                    tag_interval: f32_q::TAG_INTERVAL,
+                    tag_base: f32_q::TAG_BASE,
+                    compact_ceiling: f32_q::COMPACT_CEILING,
+                    zero_span_capacity: f32_q::ZERO_SPAN_CAPACITY,
+                },
+                complete_state: GeneratedCompleteState {
+                    nonfinite_states: f32_q::STATE_COUNT - f32_q::SIGNED_FINITE_STATES,
+                },
+            },
+        }
     }
 
     fn power_of_two(bits: u32) -> u128 {
@@ -1275,7 +1309,7 @@ mod scaled64_tests {
     /// normalize or scalar-fracture an opaque word.
     #[test]
     fn scaled64_zero_is_raw_identity_for_every_token_class_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         let zero = <Scaled64 as LaneWord>::ZERO;
         let words = [
@@ -1309,7 +1343,7 @@ mod scaled64_tests {
     /// retain the exact union required by Complete.
     #[test]
     fn mixed_nonfinite_and_finite_words_scalar_fracture_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         let complete = &model.widths.complete_state;
         let split = tagged(q, q.state_count, 0);
@@ -1357,7 +1391,7 @@ mod scaled64_tests {
             }
         }
 
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         let hidden = u32::try_from(power_of_two(q.significand_bits - 1)).unwrap();
         let maximum = u32::try_from(power_of_two(q.significand_bits)).unwrap() - 1;
@@ -1451,7 +1485,7 @@ mod scaled64_tests {
     /// distinct from a NaN payload.
     #[test]
     fn q_carrier_round_trips_ieee_boundaries_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         assert_eq!(q.significand_bits, f32::MANTISSA_DIGITS);
 
@@ -1540,7 +1574,7 @@ mod scaled64_tests {
     /// overflow cannot alias a finite grade or a Complete non-finite union.
     #[test]
     fn tag_interval_round_trips_every_state_and_split_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         let complete = &model.widths.complete_state;
         let sign_count = q.signed_finite_states / q.relative_grade_count;
@@ -1592,7 +1626,7 @@ mod scaled64_tests {
     /// singleton observations one at a time into `Complete`.
     #[test]
     fn all_complete_nonfinite_unions_survive_tag_placement_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         let complete = &model.widths.complete_state;
         let base = q.min_factor_exp.checked_mul(2).unwrap();
@@ -1635,7 +1669,7 @@ mod scaled64_tests {
     /// product into a signed infinity or a finite zero.
     #[test]
     fn infinity_times_zero_is_nan_in_q_carrier_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         let exponent_bits = u32::BITS - q.significand_bits;
         let special_q = u32::try_from(power_of_two(exponent_bits)).unwrap() - 1;
@@ -1662,7 +1696,7 @@ mod scaled64_tests {
     /// lookup/add composition.
     #[test]
     fn former_common_grade_compact_composition_is_unchanged_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         let fraction_bits = q.significand_bits - 1;
         let fraction_radix = u32::try_from(power_of_two(fraction_bits)).unwrap();
@@ -1712,7 +1746,7 @@ mod scaled64_tests {
     /// entering the reserved interval with an accidental semantic tag.
     #[test]
     fn compact_ceiling_accepts_capacity_and_marks_cap_plus_one_split_cd_32() {
-        let model = checked_model();
+        let model = generated_model();
         let q = &model.widths.f32_q_carrier;
         assert_eq!(
             <Scaled64 as Lane<f32>>::capacity(u128::from(q.product_bound)),

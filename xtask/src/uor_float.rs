@@ -2962,6 +2962,33 @@ fn audit_cd32_total_q_contract(
         );
     }
 
+    let generated_kernel_model = table_tests
+        .iter()
+        .find(|function| function.name == "generated_model");
+    if table_tests
+        .iter()
+        .any(|function| function.body.contains("Model::load_from_repo_root"))
+        || generated_kernel_model.is_none_or(|function| {
+            let compact = function.body.split_whitespace().collect::<String>();
+            [
+                "F32QCarrier{",
+                "significand_bits:f32_q::SIGNIFICAND_BITS",
+                "product_bound:f32_q::PRODUCT_BOUND",
+                "state_count:f32_q::STATE_COUNT",
+                "compact_ceiling:f32_q::COMPACT_CEILING",
+                "zero_span_capacity:f32_q::ZERO_SPAN_CAPACITY",
+                "nonfinite_states:f32_q::STATE_COUNT-f32_q::SIGNED_FINITE_STATES",
+            ]
+            .iter()
+            .any(|witness| !compact.contains(witness))
+        })
+    {
+        violations.push(
+            "CD-32 kernel differentials do not use the generated target-independent q model"
+                .to_string(),
+        );
+    }
+
     for (test, label, witnesses) in [
         (
             "empty_f32_q_reduction_has_zero_work_cd_32",
@@ -3015,6 +3042,7 @@ fn audit_cd32_total_q_contract(
             "q_precision_fractal_matches_wide_product_and_exact_work_cd_32",
             "extent-fractal lookup/Horner work",
             &[
+                "letmodel=generated_model()",
                 "expected_lookups=left_extent*right_extent",
                 "left_extent+right_extent-1",
                 "(one_lookups.get(),one_grades.get()),(1,1)",
@@ -3025,6 +3053,7 @@ fn audit_cd32_total_q_contract(
             "mixed_nonfinite_and_finite_words_scalar_fracture_cd_32",
             "mixed finite/special split and special union",
             &[
+                "letmodel=generated_model()",
                 "LaneWord>::add(special,finite)",
                 "LaneWord>::add(finite,special)",
                 "q.signed_finite_states+union-1",
@@ -3034,6 +3063,7 @@ fn audit_cd32_total_q_contract(
             "scaled64_zero_is_raw_identity_for_every_token_class_cd_32",
             "raw public-lane zero identity",
             &[
+                "letmodel=generated_model()",
                 "LaneWord>::add(zero,word)",
                 "LaneWord>::add(word,zero)",
                 "Scaled64(i64::MIN)",
@@ -8570,6 +8600,19 @@ mod tests {
                 violation.contains("non-power block/space, tail, stride, and offer")
             }),
             "the planted missing parametric non-power differential was not rejected: {violations:?}"
+        );
+
+        let runtime_kernel_model = plant(
+            table,
+            "fn generated_model() -> GeneratedModel {",
+            "fn generated_model() -> GeneratedModel {\n        let _ = uor_matmul_model::Model::load_from_repo_root();",
+        );
+        violations = tabulated_float_fixture_violations(tabulated, &runtime_kernel_model, float);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| { violation.contains("generated target-independent q model") }),
+            "the planted kernel target-time model reload was not rejected: {violations:?}"
         );
 
         let missing_special_order = plant(
