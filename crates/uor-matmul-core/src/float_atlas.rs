@@ -919,25 +919,24 @@ mod tests {
         );
     }
 
-    fn brute_minimum(intervals: &[GradeInterval]) -> usize {
-        for count in 0..=5usize {
-            for chosen in 0..32u32 {
-                if chosen.count_ones() as usize != count {
-                    continue;
-                }
-                if intervals.iter().all(|interval| {
-                    (0..5).any(|point| chosen & (1 << point) != 0 && interval.contains(point))
-                }) {
-                    return count;
-                }
-            }
-        }
-        intervals.len()
+    fn brute_minimum(family: u16, coverage_by_points: &[u16; 32]) -> usize {
+        coverage_by_points
+            .iter()
+            .enumerate()
+            .filter_map(|(chosen, &coverage)| {
+                (family & !coverage == 0).then_some(chosen.count_ones() as usize)
+            })
+            .min()
+            .expect("the five-point set covers every interval in the universe")
     }
 
     /// `CD-31`: product supports, translation supports, and the unbounded
     /// right-endpoint grouping are exact and minimal.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "pure exhaustive interval theorem; `just vv` runs every family while Miri owns provenance"
+    )]
     fn gauge_intervals_have_the_minimum_exact_grouping_cd_31() {
         let a = GradeInterval::new(-7, 4).unwrap();
         let b = GradeInterval::new(2, 11).unwrap();
@@ -1022,6 +1021,24 @@ mod tests {
             }
             unreachable!()
         });
+        // The independent oracle is the complete 32-element powerset of the
+        // five possible points.  Cache each subset's exact interval coverage
+        // once so the exhaustive 32,768-family proof spends its time on new
+        // families rather than reinterpreting the same containment predicates.
+        let coverage_by_points = core::array::from_fn::<_, 32, _>(|chosen| {
+            all.iter()
+                .enumerate()
+                .fold(0u16, |coverage, (index, interval)| {
+                    let covers = (0..5u32).any(|point| {
+                        chosen & (1usize << point) != 0 && interval.contains(i64::from(point))
+                    });
+                    if covers {
+                        coverage | (1u16 << index)
+                    } else {
+                        coverage
+                    }
+                })
+        });
         for family in 0..(1u32 << all.len()) {
             let mut selected = [GradeInterval::new(0, 0).unwrap(); 15];
             let mut len = 0;
@@ -1032,10 +1049,25 @@ mod tests {
                 }
             }
             let intervals = &selected[..len];
-            let count = MinimumGauges::new(intervals).count();
-            assert_eq!(count, brute_minimum(intervals), "family {family:#x}");
+            let mut gauges = [0i64; 5];
+            let mut count = 0;
+            for gauge in MinimumGauges::new(intervals) {
+                assert!(
+                    count < gauges.len(),
+                    "the five-point universe cannot need a sixth gauge"
+                );
+                gauges[count] = gauge;
+                count += 1;
+            }
+            assert_eq!(
+                count,
+                brute_minimum(u16::try_from(family).unwrap(), &coverage_by_points),
+                "family {family:#x}"
+            );
             assert!(intervals.iter().all(|interval| {
-                MinimumGauges::new(intervals).any(|gauge| interval.contains(gauge))
+                gauges[..count]
+                    .iter()
+                    .any(|&gauge| interval.contains(gauge))
             }));
         }
 

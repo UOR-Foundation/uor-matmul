@@ -60,7 +60,12 @@ fn full_product_with_poison(
 
 #[test]
 fn the_full_float_workspace_is_byte_identical_to_the_panel_entry_cd_19() {
-    let (m, k, n) = (16usize, 1024usize, 8usize);
+    // This facade witness exists for ownership and provenance: all dimensions
+    // are non-unit, nonsquare, and include packed tails, while the GEMM crate's
+    // CD-19 corpus separately owns the deep/span/offer quantification.  Keeping
+    // those two obligations separate lets Miri interpret every public borrow
+    // and poison check instead of spending its budget replaying a native clock.
+    let (m, k, n) = (2usize, 3usize, 5usize);
     let shape = Shape { m, k, n };
     let a: Vec<f32> = (0..m * k)
         .map(|i| {
