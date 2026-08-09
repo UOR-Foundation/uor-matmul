@@ -116,25 +116,29 @@ unsafe fn simd128_nibble_products(a: i8, low_index: v128, high_index: v128) -> [
 
 /// Project sixteen octet symbols into their radix-16 coordinates.
 ///
-/// Swizzle supplies two native half-alphabet pages. Removing the low
-/// coordinate makes four rounded averages with zero exact radix quotients at
-/// every refinement level.
+/// For an unsigned byte `x`, `round_half(x, 255) - 128` is exactly
+/// `floor(x / 2)`. Repeating that identity derives the high radix digit; the
+/// low digit is what remains after reconstructing the radix by doubling. This
+/// covers the complete octet alphabet without a mask, shift, product, or a
+/// second coordinate method.
 #[inline]
 #[target_feature(enable = "simd128")]
 fn simd128_nibble_address_vectors_from_codes(codes: v128) -> [v128; 2] {
-    let identity = i8x16(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    let translated = i8x16_add(codes, i8x16_splat(i8::MIN));
-    let low = i8x16_add(
-        i8x16_swizzle(identity, codes),
-        i8x16_swizzle(identity, translated),
-    );
-    let zero = i8x16_splat(0);
-    let mut high = i8x16_sub(codes, low);
+    let maximum = i8x16_splat(-1);
+    let half_radix = i8x16_splat(i8::MIN);
+    let mut high = codes;
     let mut digit = 0u32;
     while digit < crate::lookup::NIBBLE_BITS {
-        high = u8x16_avgr(high, zero);
+        high = i8x16_sub(u8x16_avgr(high, maximum), half_radix);
         digit += 1;
     }
+    let mut reconstructed = high;
+    digit = 0;
+    while digit < crate::lookup::NIBBLE_BITS {
+        reconstructed = i8x16_add(reconstructed, reconstructed);
+        digit += 1;
+    }
+    let low = i8x16_sub(codes, reconstructed);
     [low, high]
 }
 

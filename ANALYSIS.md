@@ -1626,18 +1626,20 @@ rates of `0.0179 +/- 0.0055` / `0.0221 +/- 0.0024` Gproduct/s and reported exact
 bytes plus unchanged integer and tropical controls.
 
 Those intermediate numbers have no retained command artifact and are not the
-authoritative result. The final post-V&V UOR-NAF cleanup sweep does: its source
+authoritative result. The final post-cross-target UOR-NAF cleanup sweep does: its source
 manifest is identical before and after the run, it retains every raw sample,
 and the live harness poisons before and completely checks after each calibrated
 batch, leaving only production calls inside the timer. The current full
-finite-range calls are `219.328 +/- 30.541` / `183.323 +/- 26.491` us for f32
-offered/no offer and `479.374 +/- 59.446` / `485.419 +/- 61.767` us for f64.
-Across the complete corpus there is no clear 95%-interval regression; f32
-one-grade with an offer, both f32 sparse offer states, and f64 one-grade without
-an offer are clear wins. These figures remain `open`; the build claims are
-exact bytes and census correspondence over the complete eligible group-one
-universe, not a host-independent nanosecond rate, an optimum outside that
-universe, or a new selector constant.
+finite-range calls are `580.532 +/- 359.597` / `233.885 +/- 11.166` us for f32
+offered/no offer and `498.762 +/- 91.593` / `416.565 +/- 28.418` us for f64.
+Every selected pure-UOR interval overlaps the preceding source-pinned run
+except the no-offer f32 full-range row. Its exact incumbent simultaneously rose
+from `5327.4 +/- 185.6` to `28527.8 +/- 10116.8` us, while the intervening
+production edits are compiled only on AArch64 and wasm, so the record does not
+attribute that host fluctuation to the x86 implementation. These figures remain
+`open`; the build claims are exact bytes and census correspondence over the
+complete eligible group-one universe, not a host-independent nanosecond rate,
+an optimum outside that universe, or a new selector constant.
 
 ### The float placement (historical, superseded)
 

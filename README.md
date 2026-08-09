@@ -430,14 +430,15 @@ latency, and fitted exponents from `n = 1` to `n = 1024`, beside every oracle.
 `MEASUREMENT-LOG.md` §"Current pure-Atlas CG-16 and CG-21 measurement record"
 records the completed block-one selector experiment: its same-key H01/H02
 holdout rejected the fitted `CG-16` candidate, so the value-blind default still
-declines. The fresh post-V&V `CG-21` sweep records the current one-frame
+declines. The fresh post-cross-target `CG-21` sweep records the current one-frame
 implementation: all exact-byte guards passed; f32 one-grade measured
-`1.350 +/- 0.329` us and full finite range measured `219.3 +/- 30.5` us with an
-offer, while the f64 full finite range measured `485.4 +/- 61.8` us without
-one. The retained prior run has no clear 95%-interval regression and shows
-clear wins for f32 one-grade with an offer, both f32 sparse offer states, and
-f64 one-grade without an offer. All timing figures remain host-scoped `open`
-observations rather than selector thresholds.
+`1.195 +/- 0.434` us and full finite range measured `580.5 +/- 359.6` us with an
+offer, while the f64 full finite range measured `416.6 +/- 28.4` us without
+one. All selected pure-UOR intervals overlap the preceding source-pinned run
+except the no-offer f32 full-range row; the exact incumbent on that row also
+rose by more than fivefold, while no reachable x86 production source changed.
+The retained row is therefore an `open` host observation, not an attributed
+regression or a selector threshold.
 Two classes remain separate, because confusing them is the oldest mistake in
 this repository's
 performance prose: **arbitrary-data results** (dense kernels, exponents,

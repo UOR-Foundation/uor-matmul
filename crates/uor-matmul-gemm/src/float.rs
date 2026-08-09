@@ -3122,7 +3122,7 @@ mod tests {
             .filter(|spec| spec.k_group == 1)
             .map(AtlasRoute::from)
             .collect();
-        let mut saw_auto_tile = false;
+        let mut saw_auto_native_tile = false;
         let mut saw_auto_reduce = false;
         let mut saw_auto_narrow = false;
         for backend in [Backend::Portable, Backend::Auto] {
@@ -3164,7 +3164,9 @@ mod tests {
                     );
                     if backend == Backend::Auto {
                         saw_auto_reduce |= actual_f32.nr == 1 || actual_f64.nr == 1;
-                        saw_auto_tile |= actual_f32.nr > 1 || actual_f64.nr > 1;
+                        saw_auto_native_tile |= (actual_f32.backend != Backend::Portable
+                            && actual_f32.nr > 1)
+                            || (actual_f64.backend != Backend::Portable && actual_f64.nr > 1);
                         saw_auto_narrow |= narrow.contains(&AtlasRoute::from(actual_f32))
                             || narrow.contains(&AtlasRoute::from(actual_f64));
                     }
@@ -3227,7 +3229,7 @@ mod tests {
             .chain(uor_matmul_kernels::available_i8_narrow())
             .any(|spec| spec.k_group == 1 && spec.backend != Backend::Portable);
         assert_eq!(
-            saw_auto_tile, has_native_tile,
+            saw_auto_native_tile, has_native_tile,
             "a native lookup tile must participate in the global minimum"
         );
         assert_eq!(

@@ -163,26 +163,29 @@ unsafe fn neon_nibble_products(
 
 /// Project sixteen octet symbols into their radix-16 coordinates.
 ///
-/// `tbl` supplies the two half-alphabet pages as native permutations. After
-/// subtracting the low coordinate, four rounded halves are exact radix
-/// quotients because every intermediate value is even.
+/// For an unsigned byte `x`, `round_half(x, 255) - 128` is exactly
+/// `floor(x / 2)`. Repeating that identity derives the high radix digit; the
+/// low digit is what remains after reconstructing the radix by doubling. This
+/// covers the complete octet alphabet without a mask, shift, product, or a
+/// second coordinate method.
 #[inline]
 #[target_feature(enable = "neon")]
 fn neon_nibble_address_vectors_from_codes(codes: uint8x16_t) -> [uint8x16_t; 2] {
-    let identity =
-        unsafe { vld1q_u8([0u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].as_ptr()) };
-    let translated = vaddq_u8(codes, vdupq_n_u8(128));
-    let low = vaddq_u8(
-        vqtbl1q_u8(identity, codes),
-        vqtbl1q_u8(identity, translated),
-    );
-    let zero = vdupq_n_u8(0);
-    let mut high = vsubq_u8(codes, low);
+    let maximum = vdupq_n_u8(u8::MAX);
+    let half_radix = vdupq_n_u8(128);
+    let mut high = codes;
     let mut digit = 0u32;
     while digit < crate::lookup::NIBBLE_BITS {
-        high = vrhaddq_u8(high, zero);
+        high = vsubq_u8(vrhaddq_u8(high, maximum), half_radix);
         digit += 1;
     }
+    let mut reconstructed = high;
+    digit = 0;
+    while digit < crate::lookup::NIBBLE_BITS {
+        reconstructed = vaddq_u8(reconstructed, reconstructed);
+        digit += 1;
+    }
+    let low = vsubq_u8(codes, reconstructed);
     [low, high]
 }
 

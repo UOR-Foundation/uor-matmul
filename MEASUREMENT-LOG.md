@@ -1004,19 +1004,19 @@ storage/work refinements of the same contraction, not another numerical route.
 
 The live `CG-21` harness poisons with expected-derived distinct values before
 every calibrated batch and completely checks lengths and bytes after it, so
-only real production calls are timed. The authoritative post-V&V grouped run
-began at 22:26:17 UTC on the EPYC 7763 host with rustc 1.97.1. Its retained
-transcript is:
+only real production calls are timed. The authoritative post-cross-target
+grouped run began at 00:22:09 UTC on 2026-08-09 on the EPYC 7763 host with
+rustc 1.97.1. Its retained transcript is:
 
 ```text
-target/measurements/cg21-uor-naf-final-post-vv-2026-08-08.log
+target/measurements/cg21-uor-naf-cross-target-final-2026-08-09.log
 ```
 
-The artifact is 4,252 lines and 1,199,070 bytes with SHA-256
-`1c4ed9a5bf7e837f04bf57af786247875491084d037ebe5701cc96596217cb3c`.
+The artifact is 4,249 lines and 1,199,061 bytes with SHA-256
+`d6336771f20714d003cd112c76f4934b9f0b9137378439eb954285ceba292dd8`.
 Its complete sorted Rust/TOML/toolchain source manifest is identical before and
 after the commands:
-`0960aef62004bd3a8617dfdf18766306c678c6f9fd6355c46ad0777519119879`.
+`6885c0da531502fe5a6bfe9d6d234791adba84bae83ac80a687e77a5d3c7c5bd`.
 The exact timer/plant test passed, the live audit reached 11 roots, 92 functions,
 and 115 call edges, and both ignored release sweeps passed.
 
@@ -1028,19 +1028,22 @@ current public latencies are:
 
 | corpus | offered | no offer | exact incumbent |
 | --- | ---: | ---: | ---: |
-| f32 one grade, `1x1x1` | `1.350 +/- 0.329` us | `1.115 +/- 0.214` us | `3.954 +/- 0.491` us |
-| f32 few grades, `32^3` | `6526.5 +/- 226.7` us | `5820.2 +/- 175.1` us | `134628.6 +/- 9351.3` us |
-| f32 full finite range, `7x31x5` | `219.3 +/- 30.5` us | `183.3 +/- 26.5` us | `5327.4 +/- 185.6` us |
-| f32 sparse significand, `128x8x128` | `16173.8 +/- 1248.4` us | `19638.6 +/- 3759.4` us | `41527.6 +/- 5204.0` us |
-| f64 few grades, `32^3` | `12201.6 +/- 930.5` us | `11245.8 +/- 196.5` us | `717894.3 +/- 12559.4` us |
-| f64 full finite range, `7x31x5` | `479.4 +/- 59.4` us | `485.4 +/- 61.8` us | `25712.3 +/- 3833.1` us |
+| f32 one grade, `1x1x1` | `1.195 +/- 0.434` us | `1.169 +/- 0.241` us | `5.461 +/- 0.961` us |
+| f32 few grades, `32^3` | `6655.5 +/- 556.8` us | `6376.2 +/- 701.3` us | `142185.8 +/- 6208.1` us |
+| f32 full finite range, `7x31x5` | `580.5 +/- 359.6` us | `233.9 +/- 11.2` us | `28527.8 +/- 10116.8` us |
+| f32 sparse significand, `128x8x128` | `15995.3 +/- 1026.9` us | `15005.8 +/- 1391.1` us | `46333.2 +/- 7043.4` us |
+| f64 few grades, `32^3` | `14168.1 +/- 1814.6` us | `11911.5 +/- 916.0` us | `813502.9 +/- 35057.5` us |
+| f64 full finite range, `7x31x5` | `498.8 +/- 91.6` us | `416.6 +/- 28.4` us | `29575.8 +/- 4331.4` us |
 
-Against the preceding retained run, the 95% intervals show no clear regression.
-They show clear wins for f32 one-grade with an offer, both f32 sparse offer
-states, and f64 one-grade without an offer; the remaining pure-UOR intervals
-overlap. The float oracles remain much faster and generally produce different
-codes because they round intermediate products while this method returns the
-correctly rounded exact sum. These are host-scoped `open` figures, not
+Against the immediately preceding source-pinned run, every selected pure-UOR
+95% interval overlaps except the no-offer f32 full-range interval, which is
+slower here. The exact incumbent on that same case rose by more than fivefold,
+and the intervening implementation change is confined to AArch64/wasm radix
+projection plus a test-only no-native witness; no x86 production route changed.
+The disjoint interval is therefore retained as host-scoped variability rather
+than attributed to the implementation. The float oracles generally produce
+different codes because they round intermediate products while this method
+returns the correctly rounded exact sum. These are `open` figures, not
 acceptance thresholds, selector constants, or an unqualified global-optimality
 claim. The build-level optimum remains exactly the model-derived minimum over
 the complete eligible group-one lookup/add universe named by `CG-22`.
