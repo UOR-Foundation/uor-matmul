@@ -979,8 +979,12 @@ pub fn audit_disassembly(root: &Path) -> Result<(), Fail> {
             }
             for (label, body) in function_bodies(&text, TABULATED_COLUMN_LOOP) {
                 column_loops += 1;
-                for (i, line) in body {
+                for (at, &(i, line)) in body.iter().enumerate() {
                     if let Some(op) = integer_multiply_opcode(line) {
+                        if op == "msub" && at > 0 && is_aarch64_remainder_pair(body[at - 1].1, line)
+                        {
+                            continue;
+                        }
                         violations.push(format!(
                             "CU-06: {name}:{i}: `{op}` in `{label}`\n    {line}"
                         ));
@@ -1192,6 +1196,48 @@ fn integer_multiply_opcode(line: &str) -> Option<&'static str> {
         .find(|op| mnemonic == *op || mnemonic.starts_with(op))
 }
 
+/// Whether two adjacent AArch64 instructions are the compiler's exact
+/// quotient/remainder identity: `q = n / d; r = n - q*d`.
+///
+/// `msub` by itself remains a forbidden value multiply. The exception is
+/// deliberately operand-checked and adjacent, so neither an unrelated divide
+/// nor a product merely spelled as multiply-subtract can satisfy it.
+fn is_aarch64_remainder_pair(divide: &str, remainder: &str) -> bool {
+    fn operands<'a>(line: &'a str, mnemonic: &str) -> Option<Vec<&'a str>> {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        if parts.next()? != mnemonic {
+            return None;
+        }
+        let operands: Vec<_> = parts
+            .next()?
+            .split(',')
+            .map(str::trim)
+            .filter(|operand| !operand.is_empty())
+            .collect();
+        Some(operands)
+    }
+
+    fn register_number(register: &str) -> Option<&str> {
+        let suffix = register
+            .strip_prefix('w')
+            .or_else(|| register.strip_prefix('x'))?;
+        (!suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())).then_some(suffix)
+    }
+
+    let Some(divide) = operands(divide, "udiv") else {
+        return false;
+    };
+    let Some(remainder) = operands(remainder, "msub") else {
+        return false;
+    };
+    if divide.len() != 3 || remainder.len() != 4 {
+        return false;
+    }
+    register_number(divide[0]) == register_number(remainder[1])
+        && register_number(divide[1]) == register_number(remainder[3])
+        && register_number(divide[2]) == register_number(remainder[2])
+}
+
 /// Float arithmetic opcodes, across the ISAs this workspace targets.
 ///
 /// Conversions (`cvtsi2ss`, `scvtf`) and moves (`movss`, `fmov`) are *not*
@@ -1273,6 +1319,27 @@ mod tests {
             scope.arithmetic_on_a_float("planted + planted"),
             Some("planted".to_string())
         );
+    }
+
+    /// `CU-06`: AArch64 may fuse a permitted remainder into `msub`, but only
+    /// the exact adjacent quotient identity is address arithmetic. A bare or
+    /// operand-mismatched `msub` remains a value multiply.
+    #[test]
+    fn aarch64_remainder_lowering_is_not_a_value_product_cu_06() {
+        let clean = ("udiv\tx2, x8, x0", "msub\tw8, w2, w0, w8");
+        assert!(is_aarch64_remainder_pair(clean.0, clean.1));
+        assert_eq!(integer_multiply_opcode(clean.1), Some("msub"));
+
+        for dirty in [
+            ("add\tx2, x8, x0", "msub\tw8, w2, w0, w8"),
+            ("udiv\tx2, x8, x0", "msub\tw8, w3, w0, w8"),
+            ("udiv\tx2, x8, x0", "msub\tw8, w2, w1, w8"),
+        ] {
+            assert!(
+                !is_aarch64_remainder_pair(dirty.0, dirty.1),
+                "a non-remainder multiply must stay visible: {dirty:?}"
+            );
+        }
     }
 
     /// `CU-10`: no tropical sequence issues a multiply.

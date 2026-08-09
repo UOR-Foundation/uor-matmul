@@ -1742,6 +1742,11 @@ where
     );
 }
 
+#[inline(always)]
+fn product_exponent_is_declared<E: FloatElement>(exponent: i64) -> bool {
+    (i64::from(E::MIN_PRODUCT_EXP)..=i64::from(E::MAX_PRODUCT_EXP)).contains(&exponent)
+}
+
 /// `C := epilogue(A * B, C)`, over float operands, computed exactly.
 ///
 /// Returns `()`, for the same reason [`crate::gemm`] does: the requested
@@ -1781,8 +1786,7 @@ pub fn gemm_float<E, O, Ep>(
                 }
                 let exponent = exponent + i64::from(offset);
                 assert!(
-                    (i64::from(E::MIN_PRODUCT_EXP)..=i64::from(E::MAX_PRODUCT_EXP))
-                        .contains(&exponent),
+                    product_exponent_is_declared::<E>(exponent),
                     "a FloatElement must declare its complete finite product exponent range"
                 );
                 acc.accumulate_one(
@@ -1837,7 +1841,7 @@ pub fn gemm_float_packed<E, O, Ep>(
         pb,
         |acc, lane, exponent| {
             assert!(
-                (i64::from(E::MIN_PRODUCT_EXP)..=i64::from(E::MAX_PRODUCT_EXP)).contains(&exponent),
+                product_exponent_is_declared::<E>(exponent),
                 "a FloatElement must declare its complete finite product exponent range"
             );
             acc.place_at(
@@ -2350,6 +2354,11 @@ mod tests {
     /// `CG-22`: an element declaration that excludes a coordinate its own
     /// decoder emits is rejected at the generic public boundary, rather than
     /// saturating that Laurent address into a different product.
+    ///
+    /// WASI release tests abort on panic rather than unwinding, so the public
+    /// panic witness runs where a harness can observe it. The adjacent pure
+    /// range witness runs on every target and pins the same production guard.
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn float_wrapper_rejects_a_dishonest_declared_range_cd_30() {
         let result = std::panic::catch_unwind(|| {
@@ -2373,6 +2382,21 @@ mod tests {
             result.is_err(),
             "a dishonest FloatElement declaration must not alter an address"
         );
+    }
+
+    /// `CD-30`: the production declaration predicate is target-independent and
+    /// rejects both coordinates immediately outside a dishonest singleton.
+    #[test]
+    fn declared_product_range_is_checked_without_unwinding_cd_30() {
+        assert!(product_exponent_is_declared::<DishonestFloat>(0));
+        assert!(!product_exponent_is_declared::<DishonestFloat>(-1));
+        assert!(!product_exponent_is_declared::<DishonestFloat>(1));
+        assert!(product_exponent_is_declared::<BoundaryFloat>(i64::from(
+            <f64 as FloatElement>::MIN_PRODUCT_EXP
+        )));
+        assert!(product_exponent_is_declared::<BoundaryFloat>(i64::from(
+            <f64 as FloatElement>::MAX_PRODUCT_EXP
+        )));
     }
 
     /// `CD-30`, `CK-21`: finite product grades equal to the packed non-finite
