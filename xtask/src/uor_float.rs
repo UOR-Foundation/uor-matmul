@@ -2840,8 +2840,8 @@ fn audit_cd32_total_q_contract(
         .iter()
         .find(|function| function.name == "total_f32_lane_scale_uses_the_exact_q_capacity_cd_32");
     let lane_witnesses = [
-        "scale.per_step,u128::from(q.product_bound)",
-        "<f32asTabulated>::lane_run::<Scaled64>(0,&scale),Some(usize::try_from(q.zero_span_capacity).unwrap())",
+        "scale.per_step,u128::from(f32_q::PRODUCT_BOUND)",
+        "<f32asTabulated>::lane_run::<Scaled64>(0,&scale),Some(usize::try_from(f32_q::ZERO_SPAN_CAPACITY).unwrap())",
         "let(scale,census)=observe(&[1.0],&[0],&[f32::NAN])",
         "<f32asTabulated>::lane_run::<Scaled64>(0,&scale),Some(1)",
         "letextremes=[f32::from_bits(1),f32::MAX]",
@@ -2854,10 +2854,21 @@ fn audit_cd32_total_q_contract(
             .find(|witness| !compact.contains(**witness))
             .copied()
     });
-    if lane.is_none() || missing_lane.is_some() {
+    let runtime_model =
+        lane.is_some_and(|function| function.body.contains("Model::load_from_repo_root"));
+    if lane.is_none() || missing_lane.is_some() || runtime_model {
         violations.push(format!(
             "CD-32 lacks the production-side exact-Q, non-finite, and full-span lane-capacity differential{}",
-            missing_lane.map_or(String::new(), |witness| format!(" `{witness}`"))
+            missing_lane.map_or_else(
+                || {
+                    if runtime_model {
+                        " (the target test reopens the repository model)".to_string()
+                    } else {
+                        String::new()
+                    }
+                },
+                |witness| format!(" `{witness}`"),
+            )
         ));
     }
 
@@ -2923,23 +2934,26 @@ fn audit_cd32_total_q_contract(
         || !raw.contains("constCODE_SPACE:usize=2")
         || fracture.is_none_or(|function| {
             let compact = function.body.split_whitespace().collect::<String>();
-            [
-                "letlow=f32::from_bits(0x3fff_ffff)",
-                "lethigh=f32::from_bits(0x437f_ffff)",
-                "f32_q_lane_capacity",
-                "1<FractureF32::MAX_BLOCK",
-                "is_some_and(|whole|whole>u128::from(q.compact_ceiling))",
-                "Traversal::Tabulated",
-                "forced.table_reads,(m*FractureF32::CODE_SPACE*k)asu64",
-                "assert_eq!(forced.adds,24",
-                "assert_eq!(forced.decodes,44",
-                "assert_eq!(forced.kernel_calls,0",
-                "assert_eq!(forced.multiplies,0",
-                "assert_eq!(finite_signature,special_signature",
-                "assert!(finite_signature.0",
-            ]
-            .iter()
-            .any(|witness| !compact.contains(witness))
+            function.body.contains("Model::load_from_repo_root")
+                || [
+                    "letlow=f32::from_bits(0x3fff_ffff)",
+                    "lethigh=f32::from_bits(0x437f_ffff)",
+                    "letcompact_ceiling=u128::from(f32_q::COMPACT_CEILING)",
+                    "letproduct_bound=u128::from(f32_q::PRODUCT_BOUND)",
+                    "f32_q_lane_capacity",
+                    "1<FractureF32::MAX_BLOCK",
+                    "is_some_and(|whole|whole>compact_ceiling)",
+                    "Traversal::Tabulated",
+                    "forced.table_reads,(m*FractureF32::CODE_SPACE*k)asu64",
+                    "assert_eq!(forced.adds,24",
+                    "assert_eq!(forced.decodes,44",
+                    "assert_eq!(forced.kernel_calls,0",
+                    "assert_eq!(forced.multiplies,0",
+                    "assert_eq!(finite_signature,special_signature",
+                    "assert!(finite_signature.0",
+                ]
+                .iter()
+                .any(|witness| !compact.contains(witness))
         })
     {
         violations.push(
@@ -8478,6 +8492,19 @@ mod tests {
                 .iter()
                 .any(|violation| violation.contains("production-side exact-Q")),
             "the planted missing exact-Q differential was not rejected: {violations:?}"
+        );
+
+        let runtime_model = plant(
+            tabulated,
+            "fn total_f32_lane_scale_uses_the_exact_q_capacity_cd_32() {",
+            "fn total_f32_lane_scale_uses_the_exact_q_capacity_cd_32() {\n        let _ = uor_matmul_model::Model::load_from_repo_root();",
+        );
+        violations = tabulated_float_fixture_violations(&runtime_model, table, float);
+        assert!(
+            violations
+                .iter()
+                .any(|violation| violation.contains("reopens the repository model")),
+            "the planted target-time model reload was not rejected: {violations:?}"
         );
 
         let missing_union = plant(
