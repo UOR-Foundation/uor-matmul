@@ -1602,14 +1602,14 @@ exponent support causes whole-operand reification, allocation, a traditional
 multiply, a scalar support mask, or a reserve arithmetic path (`CK-19`,
 `CK-20`, `CD-31`, `CA-05`, `CU-11`, `CG-22`).
 
-The final post-native 2026-08-08 `CG-16` release instrument fitted a value-blind
+The final current-source 2026-08-09 `CG-16` release instrument fitted a value-blind
 block-one table candidate on 28 unique structural calibration envelopes and
 held out 12 block-one identities plus block-three and block-five scalar-fracture
 controls. The candidate routed 9 of the 12 block-one holdouts to the table and 3
 to the coded Atlas decline. H01 and H02 were deliberately unlike-valued twins
 with exactly the same pre-admission `StructuralWork`, so `CS-10` required the
 candidate to route them alike. Their paired table/decline ratios were instead
-`0.1792 +/- 0.0318` and `3.9968 +/- 1.7006`: the table decisively won one and
+`0.1821 +/- 0.0397` and `2.9348 +/- 0.3215`: the table decisively won one and
 decisively lost the other. The same-key holdout therefore falsified the fitted
 candidate. No value-dependent repair is admissible, no fit coefficient became
 a model constant, and the current value-blind block-one default remains the
@@ -1626,17 +1626,15 @@ rates of `0.0179 +/- 0.0055` / `0.0221 +/- 0.0024` Gproduct/s and reported exact
 bytes plus unchanged integer and tropical controls.
 
 Those intermediate numbers have no retained command artifact and are not the
-authoritative result. The final post-cross-target UOR-NAF cleanup sweep does: its source
+authoritative result. The final current-source UOR-NAF cleanup sweep does: its source
 manifest is identical before and after the run, it retains every raw sample,
 and the live harness poisons before and completely checks after each calibrated
 batch, leaving only production calls inside the timer. The current full
-finite-range calls are `580.532 +/- 359.597` / `233.885 +/- 11.166` us for f32
-offered/no offer and `498.762 +/- 91.593` / `416.565 +/- 28.418` us for f64.
-Every selected pure-UOR interval overlaps the preceding source-pinned run
-except the no-offer f32 full-range row. Its exact incumbent simultaneously rose
-from `5327.4 +/- 185.6` to `28527.8 +/- 10116.8` us, while the intervening
-production edits are compiled only on AArch64 and wasm, so the record does not
-attribute that host fluctuation to the x86 implementation. These figures remain
+finite-range calls are `221.912 +/- 23.949` / `176.396 +/- 16.811` us for f32
+offered/no offer and `481.324 +/- 60.387` / `554.315 +/- 63.761` us for f64.
+The f32 intervals are faster than the preceding source-pinned run despite no
+reachable x86 production change, so the record does not attribute that host
+fluctuation to the implementation. These figures remain
 `open`; the build claims are exact bytes and census correspondence over the
 complete eligible group-one universe, not a host-independent nanosecond rate,
 an optimum outside that universe, or a new selector constant.
@@ -2329,11 +2327,11 @@ the boundary the other way: past seven binades the lane declines by the
 bridge's own declaration and the dense route answers, one span walk (read
 off the census's decode count) poorer. Demand building and the zero-copy
 projection cache change precisely those counts, so this historical clock does
-not establish the live boundary. The 2026-08-08 `CG-16` paired instrument
+not establish the live boundary. The 2026-08-09 `CG-16` paired instrument
 tested a live value-blind candidate and rejected it: H01 and H02 had the same
 structural key and candidate table route, yet their unlike values produced
-decisive table/decline ratios of `0.1792 +/- 0.0318` and
-`3.9968 +/- 1.7006`. Forced tabulation remains available; automatic block-one
+decisive table/decline ratios of `0.1821 +/- 0.0397` and
+`2.9348 +/- 0.3215`. Forced tabulation remains available; automatic block-one
 selection remains the decline.
 
 ## The sub-cubic recursion, on integers

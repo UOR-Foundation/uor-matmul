@@ -993,6 +993,29 @@ changes the disposition above: the fitted value-blind block-one candidate is
 rejected, the automatic default remains decline, and forced exact tabulation
 remains available.
 
+#### Final current-source closure
+
+The final source-frozen rerun began at 03:21:45 UTC on 2026-08-09 and retained
+the complete provenance, both non-release gates, release clock, and all raw
+rows in
+`target/measurements/cg16-uor-naf-current-source-2026-08-09.log`. The artifact
+is 1,258 lines and 132,217 bytes with SHA-256
+`e17813b6fdac249411b42c6a5b0dde4c8b096da524e8bcf7c0afc506785218b6`.
+Its complete sorted Rust/TOML/toolchain source manifest is
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`
+both before and after the commands. All three selected tests passed, and all
+828 `SAMPLE` rows were retained.
+
+The final table fit has five active coordinates and RSS
+`2.420251599492e-6`; the decline fit has three active coordinates and RSS
+`1.158848535650e-5`. It again predicted table for nine holdouts and decline for
+three. The same-key falsifier remains decisive: H01 measured
+`0.1821 +/- 0.0397`, while H02 measured `2.9348 +/- 0.3215`, both under the
+same predicted table route. The B3 and B5 controls measured
+`0.8300 +/- 0.0802` and `0.7784 +/- 0.0555`. Thus the current source supplies
+the same disposition without a stale-source inference: no fitted constant or
+value-dependent repair enters production.
+
 ### CG-21 UOR-NAF cleanup sweep --- completed, open
 
 The frozen implementation uses the direct one-pass diagonal contraction, one
@@ -1004,21 +1027,21 @@ storage/work refinements of the same contraction, not another numerical route.
 
 The live `CG-21` harness poisons with expected-derived distinct values before
 every calibrated batch and completely checks lengths and bytes after it, so
-only real production calls are timed. The authoritative post-cross-target
-grouped run began at 00:22:09 UTC on 2026-08-09 on the EPYC 7763 host with
-rustc 1.97.1. Its retained transcript is:
+only real production calls are timed. The authoritative current-source grouped
+run began at 03:11:45 UTC on 2026-08-09 on the EPYC 7763 host with rustc
+1.97.1. Its retained transcript is:
 
 ```text
-target/measurements/cg21-uor-naf-cross-target-final-2026-08-09.log
+target/measurements/cg21-uor-naf-current-source-2026-08-09.log
 ```
 
-The artifact is 4,249 lines and 1,199,061 bytes with SHA-256
-`d6336771f20714d003cd112c76f4934b9f0b9137378439eb954285ceba292dd8`.
+The artifact is 4,251 lines and 1,199,248 bytes with SHA-256
+`f17aba1c0bbbb280b94130410c1aa8cb7dd420990ae2e4382d332460d8ec92e6`.
 Its complete sorted Rust/TOML/toolchain source manifest is identical before and
 after the commands:
-`6885c0da531502fe5a6bfe9d6d234791adba84bae83ac80a687e77a5d3c7c5bd`.
-The exact timer/plant test passed, the live audit reached 11 roots, 92 functions,
-and 115 call edges, and both ignored release sweeps passed.
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`.
+The exact timer/plant test passed, the live audit reached 11 roots, 93 functions,
+and 116 call edges, and both ignored release sweeps passed.
 
 The public sweep retained 558 `CG21_SAMPLE` rows: 62 width/case/route groups,
 each with rounds 0 through 8 exactly once. The forced-candidate supplement
@@ -1028,20 +1051,18 @@ current public latencies are:
 
 | corpus | offered | no offer | exact incumbent |
 | --- | ---: | ---: | ---: |
-| f32 one grade, `1x1x1` | `1.195 +/- 0.434` us | `1.169 +/- 0.241` us | `5.461 +/- 0.961` us |
-| f32 few grades, `32^3` | `6655.5 +/- 556.8` us | `6376.2 +/- 701.3` us | `142185.8 +/- 6208.1` us |
-| f32 full finite range, `7x31x5` | `580.5 +/- 359.6` us | `233.9 +/- 11.2` us | `28527.8 +/- 10116.8` us |
-| f32 sparse significand, `128x8x128` | `15995.3 +/- 1026.9` us | `15005.8 +/- 1391.1` us | `46333.2 +/- 7043.4` us |
-| f64 few grades, `32^3` | `14168.1 +/- 1814.6` us | `11911.5 +/- 916.0` us | `813502.9 +/- 35057.5` us |
-| f64 full finite range, `7x31x5` | `498.8 +/- 91.6` us | `416.6 +/- 28.4` us | `29575.8 +/- 4331.4` us |
+| f32 one grade, `1x1x1` | `1.089 +/- 0.313` us | `0.954 +/- 0.101` us | `3.369 +/- 0.305` us |
+| f32 few grades, `32^3` | `6545.4 +/- 468.8` us | `6061.5 +/- 257.1` us | `146570.4 +/- 5699.4` us |
+| f32 full finite range, `7x31x5` | `221.9 +/- 23.9` us | `176.4 +/- 16.8` us | `6353.8 +/- 1071.9` us |
+| f32 sparse significand, `128x8x128` | `18650.5 +/- 2220.4` us | `15144.2 +/- 1044.0` us | `49569.0 +/- 6838.4` us |
+| f64 few grades, `32^3` | `13261.5 +/- 2435.1` us | `12069.9 +/- 1018.8` us | `787286.6 +/- 19135.7` us |
+| f64 full finite range, `7x31x5` | `481.3 +/- 60.4` us | `554.3 +/- 63.8` us | `25263.7 +/- 2179.2` us |
 
 Against the immediately preceding source-pinned run, every selected pure-UOR
-95% interval overlaps except the no-offer f32 full-range interval, which is
-slower here. The exact incumbent on that same case rose by more than fivefold,
-and the intervening implementation change is confined to AArch64/wasm radix
-projection plus a test-only no-native witness; no x86 production route changed.
-The disjoint interval is therefore retained as host-scoped variability rather
-than attributed to the implementation. The float oracles generally produce
+95% interval overlaps except both f32 full-range intervals, which are faster in
+this run. No x86 production route changed between those measurements, so the
+disjoint intervals are retained as host-scoped observations rather than used as
+an optimization claim or selector input. The float oracles generally produce
 different codes because they round intermediate products while this method
 returns the correctly rounded exact sum. These are `open` figures, not
 acceptance thresholds, selector constants, or an unqualified global-optimality
@@ -1050,27 +1071,19 @@ the complete eligible group-one lookup/add universe named by `CG-22`.
 
 ## Column dictionary radix recurrence
 
-**Outcome, measured 2026-08-08 on the development host (`open`).** The pure
+**Outcome, remeasured on the final source on 2026-08-09 (`open`).** The pure
 ternary column-dictionary filter passed the pre-registered no-regression rule
 against the immutable pre-refactor comparator at every measured reduction
 depth. The host was Linux 6.8.0-1052-azure x86-64 on an AMD EPYC 7763 64-Core
 Processor. The release compiler was rustc 1.97.1
-(`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, LLVM 22.1.6). The base revision
-was `4896156face89599fe03406bc7f7be1780d3fbcf`. The final current-source
-rerun records SHA-256 identities for `tabulated.rs`
-`b97ff23b206a29db0ce1cbc7051a30c6bfe5d790f1e1a229cc1076d2e24bbc85`,
-model derivation
-`a75b8699d2581cb26b0fbf697e1b3a354c3f572706fa30496d1be68ee41805b8`,
-model constants
-`306d0914490e07c8fe462ce38f7fa6d9588bb9b97937623f12a775f5f488fb76`,
-the governing audit
-`92c9651196441ed13600ac8ab9b1739b4879b5148591b3f54a863dd9cb1b8f2c`,
-and `Cargo.lock`
-`287d7784819bfdaf257aa5435fc92889ee6504228819f2b03e45e2a73aa67bc3`.
-The retained transcript is
-`target/measurements/column-hash-uor-naf-final-2026-08-08.log`: 35 lines,
-2,338 bytes, SHA-256
-`6f8dc798d9c3041bc6931b940b7ef8a89b56da820e7ded3af30156351f1e39f8`.
+(`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, LLVM 22.1.6). The retained
+current-source transcript is
+`target/measurements/column-hash-uor-naf-current-source-2026-08-09.log`:
+308 lines, 30,624 bytes, SHA-256
+`6ea0ded47e84ce359e7360773de857948aba731e522d60d6a610d92c6c4587da`.
+Its full source manifest is
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`
+before and after the clock.
 
 The exact command was:
 
@@ -1102,16 +1115,16 @@ acceptance rule was exact: every upper endpoint must be at most 1.0.
 Two unchanged-source preliminary runs exposed full-arm order drift at depth
 256. Rather than select a favourable rerun, the harness was made symmetric
 inside every sample by alternating fixed 32-call chunks; a mutation that
-removes that alternation is required to fail the audit. The final transcript
-below is the first run of that frozen protocol, with the same corpus, calibrated
-batch rule, complete guards, and exact upper-endpoint criterion.
+removes that alternation is required to fail the audit. The current-source
+transcript below reruns that frozen protocol without changing the corpus,
+calibrated batch rule, complete guards, or exact upper-endpoint criterion.
 
 | depth | common batch | paired ratio | paired 95% interval | verdict |
 | ---: | ---: | ---: | ---: | --- |
-| 1 | 32768 | 0.5327 | [0.5265, 0.5389] | pass |
-| 16 | 8192 | 0.7988 | [0.7954, 0.8023] | pass |
-| 64 | 4096 | 0.8291 | [0.8263, 0.8318] | pass |
-| 256 | 2048 | 0.9095 | [0.8995, 0.9196] | pass |
+| 1 | 16384 | 0.5454 | [0.5341, 0.5568] | pass |
+| 16 | 8192 | 0.7964 | [0.7894, 0.8034] | pass |
+| 64 | 4096 | 0.8366 | [0.8290, 0.8442] | pass |
+| 256 | 2048 | 0.8993 | [0.8885, 0.9102] | pass |
 
 The timing claim is deliberately only host-scoped `open` evidence. Correctness
 does not depend on it: canonical index-stream equality remains the dictionary
@@ -1121,7 +1134,7 @@ derives the widest live unreduced accumulator from a full 64-bit source-length
 coordinate and 16 full 64-bit indices at radix three:
 `1_191_107_759_025_695_718_254_230_815`, exactly 90 bits. The exact model test,
 the CU-11 mutation gate, and the live source audit passed before this clock; the
-live audit reached 11 roots, 92 functions, and 115 edges, including 23 Atlas
+live audit reached 11 roots, 93 functions, and 116 edges, including 23 Atlas
 functions and 57 Atlas edges, so the measurement is not attached to a vacuous
 or stale graph.
 
@@ -1137,27 +1150,30 @@ resolved arms traverse the same safe `KernelSpec` or `TableSpec` wrapper.
 The source/model/scenario protocol test was captured red before the
 classification existed, then passed with mutation plants for a changed-to-
 control relabel and wrapper asymmetry. Model regeneration/check, seven native
-audit/plant tests, the live 11-root/87-function/108-edge audit, and five release
+audit/plant tests, the final live 11-root/93-function/116-edge audit, and five release
 parity tests passed before the clock. The linked x86-64 artifact contained one
 64-byte-aligned, local-hidden 262,144-byte production product alphabet with no
 dynamic relocation; the MR1 reduction used a direct RIP-relative address and
 the normalized 19-instruction recurrence/backedge.
 
-The retained CPU-0 transcript is
-`target/measurements/native-lookup-acceptance-2026-08-08.log`: 17 LF lines,
-41,647 bytes, SHA-256
-`0f7f1c91aaa5d23bec6360abb974c88942fd0ecc6c4a2eaec7e5aaa99854a435`.
+The final current-source CPU-0 transcript is
+`target/measurements/native-lookup-uor-naf-current-source-2026-08-09.log`:
+313 lines, 70,973 bytes, SHA-256
+`dc4f790627d7f17b815df312948155a7d9483d11dc6ee01c63034652392be962`.
+Its full source manifest is
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`
+before and after the clock.
 Every case emitted 256 paired observations:
 
 | class | case | resolved / raw | upper 95% endpoint | disposition |
 | --- | --- | ---: | ---: | --- |
-| changed | tile MR1/NR8/KG1 | 0.976319 | 0.980664 | pass |
-| changed | tile MR6/NR8/KG1 | 0.947196 | 0.950665 | pass |
-| static control | reduce MR1/NR1/KG1 | 0.999832 | 1.001504 | report |
-| changed | reduce MR4/NR1/KG1 | 0.893418 | 0.897898 | pass |
-| changed | table rows16/KG2 | 0.784419 | 0.797142 | pass |
-| static control | tile MR1/NR16/KG1 | 1.001143 | 1.003846 | report |
-| static control | tile MR6/NR16/KG1 | 0.960139 | 0.962730 | report |
+| changed | tile MR1/NR8/KG1 | 0.943490 | 0.948814 | pass |
+| changed | tile MR6/NR8/KG1 | 0.923135 | 0.926702 | pass |
+| static control | reduce MR1/NR1/KG1 | 1.017984 | 1.020605 | report |
+| changed | reduce MR4/NR1/KG1 | 0.872975 | 0.876997 | pass |
+| changed | table rows16/KG2 | 0.819785 | 0.833379 | pass |
+| static control | tile MR1/NR16/KG1 | 0.998818 | 1.001661 | report |
+| static control | tile MR6/NR16/KG1 | 0.953769 | 0.955862 | report |
 
 All four changed factorizations passed their exact rule. The three normalized
 controls remain `open` reports, as required by R4; their clocks are evidence of

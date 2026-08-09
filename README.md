@@ -203,9 +203,9 @@ or output bytes (`CA-05`, `CD-19`, `CD-30`).
 
 The public coded traversal can also force this arithmetic through its
 block-one q table, but automatic selection does not speculate on that route.
-The post-native `CG-16` fit predicted the table for two holdouts with the
+The final current-source `CG-16` fit predicted the table for two holdouts with the
 identical pre-admission structural key; their unlike values produced opposite
-decisive clock outcomes (`0.1792 +/- 0.0318` and `3.9968 +/- 1.7006`
+decisive clock outcomes (`0.1821 +/- 0.0397` and `2.9348 +/- 0.3215`
 table/decline).
 `CS-10` forbids inspecting those values to choose a route, so that candidate is
 rejected and the value-blind block-one default remains the coded Atlas decline.
@@ -430,14 +430,13 @@ latency, and fitted exponents from `n = 1` to `n = 1024`, beside every oracle.
 `MEASUREMENT-LOG.md` §"Current pure-Atlas CG-16 and CG-21 measurement record"
 records the completed block-one selector experiment: its same-key H01/H02
 holdout rejected the fitted `CG-16` candidate, so the value-blind default still
-declines. The fresh post-cross-target `CG-21` sweep records the current one-frame
+declines. The final current-source `CG-21` sweep records the current one-frame
 implementation: all exact-byte guards passed; f32 one-grade measured
-`1.195 +/- 0.434` us and full finite range measured `580.5 +/- 359.6` us with an
-offer, while the f64 full finite range measured `416.6 +/- 28.4` us without
-one. All selected pure-UOR intervals overlap the preceding source-pinned run
-except the no-offer f32 full-range row; the exact incumbent on that row also
-rose by more than fivefold, while no reachable x86 production source changed.
-The retained row is therefore an `open` host observation, not an attributed
+`1.089 +/- 0.313` us and full finite range measured `221.9 +/- 23.9` us with an
+offer, while the f64 full finite range measured `554.3 +/- 63.8` us without
+one. The two f32 full-range intervals are faster than the preceding
+source-pinned run despite no reachable x86 production change. They are retained
+as `open` host observations, not an attributed
 regression or a selector threshold.
 Two classes remain separate, because confusing them is the oldest mistake in
 this repository's

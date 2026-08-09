@@ -331,13 +331,13 @@ long-codeword operation inequality and answers false at block one. Forced
 automatic selector prices larger blocks from the actual table spec: build
 density, gather density, and the row-adjusted dense density remain independent
 declarations in the exact cost inequality. A contextual block-one Atlas build
-is not that product-build model. The 2026-08-08 `CG-16` release fit used 32
+is not that product-build model. The final 2026-08-09 `CG-16` release fit used 32
 calibration identities, collapsed only the four source-pinned value twins to 28
 structural envelopes, and then chose the table for 9 of 12 unseen block-one
 identities. H01 and H02 carried the identical pre-admission structural key, so
 the candidate was required to choose the same route for both. Their held-out
 paired clocks instead put the table/decline ratio on opposite sides of one:
-`0.1792 +/- 0.0318` for H01 and `3.9968 +/- 1.7006` for H02. Because `CS-10`
+`0.1821 +/- 0.0397` for H01 and `2.9348 +/- 0.3215` for H02. Because `CS-10`
 forbids reading the unlike values that distinguish them, this candidate is
 rejected and automatic block-one selection remains the value-blind decline.
 Forced `Tabulated` remains executable and byte-identical. An independently
