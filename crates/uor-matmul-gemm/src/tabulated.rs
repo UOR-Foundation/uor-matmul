@@ -6351,21 +6351,17 @@ mod tests {
             (scale, census)
         }
 
-        let model = uor_matmul_model::Model::load_from_repo_root().expect("the model loads");
-        model.check().expect("the q-carrier derivation checks");
-        let q = &model.widths.f32_q_carrier;
-
         let edge = f32::from_bits(0x3fff_ffff);
         let (scale, census) = observe(&[edge], &[0], &[edge]);
         let scale = scale.expect("a finite zero-span panel is executable");
         assert_eq!(
             scale.per_step,
-            u128::from(q.product_bound),
+            u128::from(f32_q::PRODUCT_BOUND),
             "the one-product bound is exact rather than the next power of two"
         );
         assert_eq!(
             <f32 as Tabulated>::lane_run::<Scaled64>(0, &scale),
-            Some(usize::try_from(q.zero_span_capacity).unwrap())
+            Some(usize::try_from(f32_q::ZERO_SPAN_CAPACITY).unwrap())
         );
         assert_eq!(census.decodes, 2, "one activation and one book symbol");
 
@@ -6709,13 +6705,12 @@ mod tests {
         let activations = [low, high, high, high];
         let codes = [0u8, 1, 0, 1, 0];
 
-        let model = uor_matmul_model::Model::load_from_repo_root().expect("the model loads");
-        model.check().expect("the q-carrier derivation checks");
-        let q = &model.widths.f32_q_carrier;
+        let compact_ceiling = u128::from(f32_q::COMPACT_CEILING);
+        let product_bound = u128::from(f32_q::PRODUCT_BOUND);
         assert_eq!(
             uor_matmul_model::derive::f32_q_lane_capacity(
-                u128::from(q.compact_ceiling),
-                u128::from(q.product_bound),
+                compact_ceiling,
+                product_bound,
                 7,
                 7,
                 false,
@@ -6724,10 +6719,10 @@ mod tests {
         );
         const { assert!(1 < FractureF32::MAX_BLOCK) };
         assert!(
-            u128::from(q.product_bound)
+            product_bound
                 .checked_mul(1u128 << 14)
                 .and_then(|one| one.checked_add(one))
-                .is_some_and(|whole| whole > u128::from(q.compact_ceiling)),
+                .is_some_and(|whole| whole > compact_ceiling),
             "a whole two-position worst-case code cannot be one compact token"
         );
 
