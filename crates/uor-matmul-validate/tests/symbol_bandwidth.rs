@@ -189,9 +189,9 @@ fn symbol_coded_gemv_sits_against_the_bus_cg_14() {
         // nothing, so the traversal walks the codes and decodes per element;
         // and one decoded row, so each weight is decoded once and read from
         // cache by every row of `A`. Both decline the table --- a one-element
-        // block can never pay --- and the census proves the dense route was
-        // not taken either: this is the code stream feeding the same exact
-        // accumulation, and nothing else.
+        // block can never pay --- and use the non-table dense stream. The
+        // latter's family-owned kernel calls are counted as opaque work rather
+        // than guessed at as synthetic multiplies.
         for (label, panel_offer) in [("sym walk", 0usize), ("sym panel", k)] {
             let mut c = vec![0.0f32; m * n];
             let mut panel = vec![Alphabet::<f32, Whole<f32>>::ZERO; panel_offer];
@@ -221,14 +221,14 @@ fn symbol_coded_gemv_sits_against_the_bus_cg_14() {
                 "{label} {m}x{k}x{n}: the symbol run must give the dense driver's bytes"
             );
             assert_eq!(census.table_reads, 0, "{label}: no table fits, so none ran");
-            assert_eq!(
-                census.kernel_calls, 0,
-                "{label}: the symbol path never declines to the dense route here"
+            assert!(
+                census.kernel_calls > 0,
+                "{label}: the non-table dense stream must issue a kernel call"
             );
             assert_eq!(
                 census.multiplies,
-                (m * k * n) as u64,
-                "{label}: the same products, streamed ({census:?})"
+                0,
+                "{label}: opaque dense kernels do not invent a multiply count ({census:?})"
             );
             eprintln!(
                 "# {label} {m}x{k}x{n} census: decodes {} (n*k = {}), multiplies {}",
