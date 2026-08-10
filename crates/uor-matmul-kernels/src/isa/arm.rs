@@ -204,6 +204,7 @@ unsafe fn neon_nibble_address_vectors<const LANES: usize>(
         // `stride`; the final iteration does not form an out-of-range pointer.
         *octet = unsafe { *code_at as u8 };
         if lane + 1 < LANES {
+            // SAFETY: the next promised lane remains at exactly `stride`.
             code_at = unsafe { code_at.add(stride) };
         }
     }
