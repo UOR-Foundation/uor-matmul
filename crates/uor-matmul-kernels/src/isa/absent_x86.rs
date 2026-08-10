@@ -35,6 +35,8 @@ pub const AVX2_I16_MOD: KernelSpec<i16, i32> = portable::I16_MOD;
 pub const AVX512_DPWSSD_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
 /// Unreachable: [`avx512vnni_available`] is `false`.
 pub const AVX512_DPBUSD_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
+/// Unreachable: [`avx512vnni_available`] is `false`.
+pub const AVX512_LOOKUP_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
 
 /// Absent here; the reference reduce sequence carries this family.
 pub const AVX2_R_I8_I32: KernelSpec<i8, i32> = portable::R_I8_I32;
@@ -49,6 +51,10 @@ pub const AVX2_R_I32_MOD: KernelSpec<i32, i32> = portable::R_I32_MOD;
 
 /// Absent here; the reference reduce sequence carries this family.
 pub const AVX2_R_I8_I32_1: KernelSpec<i8, i32> = portable::R1_I8_I32;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_LOOKUP_R_I8_I32: KernelSpec<i8, i32> = portable::R_I8_I32;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_LOOKUP_R_I8_I32_1: KernelSpec<i8, i32> = portable::R1_I8_I32;
 /// Absent here; the reference reduce sequence carries this family.
 pub const AVX2_R_I16_I64_1: KernelSpec<i16, i64> = portable::R1_I16_I64;
 /// Absent here; the reference reduce sequence carries this family.
@@ -66,6 +72,14 @@ pub const AVX2_I8_I32_N8: KernelSpec<i8, i32> = portable::I8_I32;
 
 /// Absent here; the reference stands in its place.
 pub const AVX2_I8_I32_M1_N8: KernelSpec<i8, i32> = portable::I8_I32;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_LOOKUP_I8_I32: KernelSpec<i8, i32> = portable::I8_I32;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_LOOKUP_I8_I32_M1: KernelSpec<i8, i32> = portable::I8_I32;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_LOOKUP_I8_I32_N8: KernelSpec<i8, i32> = portable::I8_I32;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_LOOKUP_I8_I32_M1_N8: KernelSpec<i8, i32> = portable::I8_I32;
 /// Absent here; the reference sequence carries this family.
 pub const AVX2_I16_I64_M1: KernelSpec<i16, i64> = portable::I16_I64;
 /// Absent here; the reference sequence carries this family.
@@ -77,28 +91,29 @@ pub const AVX2_I32_MOD_M1: KernelSpec<i32, i32> = portable::I32_MOD;
 /// Absent here; the reference sequence carries this family.
 pub const AVX2_I16_MOD_M1: KernelSpec<i16, i32> = portable::I16_MOD;
 
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_TROP_I16: KernelSpec<i16, i16> = portable::TROP_I16;
+/// Unreachable: [`avx2_available`] is `false`.
+pub const AVX2_TROP_I16_M1: KernelSpec<i16, i16> = portable::TROP_I16;
+
 // ---------------------------------------------------------------------------
 // The table sequences (§7.3)
 // ---------------------------------------------------------------------------
 
 /// The `i8` table sequence. Absent here; the reference carries this family.
 ///
-/// A table's column loop is integer adds and a masked index, so every SIMD
-/// target has a sequence for it and this absence is unfinished work rather
-/// than a property of the hardware. It is written as `None` rather than as a
-/// slower body so that the reference is the one that runs and `CB-*` compares
-/// against one sequence and not two.
+/// This module is compiled only when x86 is not the target. Returning `None`
+/// records that target fact; the x86 build supplies its SIMD sequence, while
+/// the portable reference remains the complete sequence on this host.
 pub fn avx2_table_i8_i32(_rows: usize, _group: usize) -> Option<TableSpec<i8, i32>> {
     None
 }
 
 /// The `i16` table sequence. Absent here; the reference carries this family.
 ///
-/// A table's column loop is integer adds and a masked index, so every SIMD
-/// target has a sequence for it and this absence is unfinished work rather
-/// than a property of the hardware. It is written as `None` rather than as a
-/// slower body so that the reference is the one that runs and `CB-*` compares
-/// against one sequence and not two.
+/// This module is compiled only when x86 is not the target. Returning `None`
+/// records that target fact; the x86 build supplies its SIMD sequence, while
+/// the portable reference remains the complete sequence on this host.
 pub fn avx2_table_i16_i64(_rows: usize, _group: usize) -> Option<TableSpec<i16, i64>> {
     None
 }

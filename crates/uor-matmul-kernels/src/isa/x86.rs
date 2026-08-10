@@ -16,6 +16,7 @@ crate::tile_fits!(1, 16);
 crate::tile_fits!(1, 8);
 crate::tile_fits!(4, 8);
 crate::tile_fits!(8, 16);
+crate::tile_fits!(4, 16);
 
 /// Is AVX2 available?
 pub fn avx2_available() -> bool {
@@ -713,6 +714,68 @@ pub const AVX512_DPBUSD_I8_I32: KernelSpec<i8, i32> = KernelSpec {
     mac_tile: vnni_dpbusd,
 };
 
+/// AVX-512 family entry using the finite i8 product lookup and adds.
+pub const AVX512_LOOKUP_I8_I32: KernelSpec<i8, i32> =
+    avx512_lookup_spec::<8, 16>(Backend::Avx512Vnni);
+
+const fn avx512_lookup_spec<const MR: usize, const NR: usize>(
+    backend: Backend,
+) -> KernelSpec<i8, i32> {
+    KernelSpec {
+        backend,
+        factorization: Factorization::Exact,
+        mr: MR,
+        nr: NR,
+        lane_layout: LaneLayout::Interleaved,
+        k_group: 1,
+        products_per_step: NR,
+        lane_cap: i32::MAX as u128,
+        max_bound: u128::MAX,
+        mac_tile: avx512_lookup_i8::<MR, NR>,
+    }
+}
+
+/// AVX-512 lookup/add tile: one native gather and add covers sixteen products.
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_lookup_i8<const MR: usize, const NR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    const { assert!(NR == 16) };
+    // SAFETY: the KernelSpec caller guarantees all three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    let product_alphabet = crate::lookup::i8_products_native();
+    let mut tile = [_mm512_setzero_si512(); MR];
+    for p in 0..kc {
+        // SAFETY: this depth owns exactly the sixteen right-panel octets
+        // widened below into their numeric table-column coordinates.
+        let columns =
+            _mm512_cvtepu8_epi32(unsafe { _mm_loadu_si128(pb.as_ptr().add(p * NR).cast()) });
+        for i in 0..MR {
+            let a = pa[p * MR + i];
+            let row_address = crate::lookup::I8_PRODUCT_ROW_ADDRESSES[a as u8 as usize];
+            let index = _mm512_add_epi32(_mm512_set1_epi32(row_address), columns);
+            // SAFETY: every index is an unsigned-octet pair, so it addresses an
+            // in-bounds entry of the complete 256-by-256 product table.
+            let products =
+                unsafe { _mm512_i32gather_epi32(index, product_alphabet.as_ptr().cast(), 4) };
+            tile[i] = _mm512_add_epi32(tile[i], products);
+        }
+    }
+    for (i, value) in tile.iter().enumerate() {
+        // SAFETY: row `i` spans sixteen lanes inside the `MR * NR` output.
+        unsafe { _mm512_storeu_si512(acc.as_mut_ptr().add(i * NR).cast(), *value) };
+    }
+}
+
 /// # Safety
 ///
 /// `pa` must have `8 * kc` readable elements, `pb` `16 * kc`, `acc` 128
@@ -839,6 +902,130 @@ unsafe fn vnni_store(acc: &mut [i32], tile: &[__m512i; V_MR]) {
     for (i, lane) in tile.iter().enumerate() {
         // SAFETY: `i < V_MR`, so this 512-bit store lands inside `MR * NR`.
         unsafe { _mm512_storeu_si512(acc.as_mut_ptr().add(i * V_NR).cast(), *lane) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The (max, +) reduction in a packed i16 lane
+// ---------------------------------------------------------------------------
+
+/// Rows of the tropical tile: four `__m256i` accumulators, which leaves the
+/// other twelve registers for the broadcast and the column load.
+const A2_TROP_MR: usize = 4;
+/// Columns: sixteen `i16`, which is one `__m256i` exactly.
+const A2_TROP_NR: usize = 16;
+
+/// AVX2 `(max, +)`: `_mm256_adds_epi16` is `⊗` and `_mm256_max_epi16` is `⊕`.
+///
+/// Two instructions per sixteen products, against the ring family's widen-and-
+/// `madd`, and the reason is structural rather than a matter of tuning: `⊕` is
+/// a `max`, so nothing carries and nothing grows, so no lane ever has to be
+/// widened. The packed `i16` the operands arrive in is the same `i16` the
+/// answer leaves in.
+///
+/// `adds` and not `add`: the saturation is the absorbing law `-inf ⊗ a = -inf`,
+/// and [`crate::tropical`] derives why a wrap would be wrong at exactly the
+/// input a random sweep never generates --- two masked operands, where
+/// `i16::MIN + i16::MIN` wraps to `0` and becomes the *largest* value in the
+/// reduction instead of the smallest.
+///
+/// Deliberately the AVX2 tropical declaration rather than a VNNI declaration:
+/// this sequence issues no dot product, so VNNI contributes no operation to
+/// it. AVX2 remains admissible on AVX-512 hosts and CB-13 pins these bytes.
+pub const AVX2_TROP_I16: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: A2_TROP_MR,
+    nr: A2_TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // One `k`-step per instruction: the broadcast covers `A` and the load
+    // covers a whole row of `B`, so there is nothing a pair would fold.
+    k_group: 1,
+    products_per_step: A2_TROP_NR,
+    lane_cap: u128::MAX,
+    max_bound: crate::tropical::TROP_I16_MAX_BOUND,
+    mac_tile: avx2_trop_i16,
+};
+
+/// The same sequence at a one-row panel.
+///
+/// The tropical twin of [`AVX2_I8_I32_M1`], and for the same reason: a panel
+/// taller than the output is zero-padded and the kernel does that padding's
+/// arithmetic. Here the padding is the semiring zero, so the padded rows
+/// compute `-inf` --- correct, and still four times the instructions a
+/// single-row product needs.
+pub const AVX2_TROP_I16_M1: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::Avx2,
+    factorization: Factorization::Exact,
+    mr: 1,
+    nr: A2_TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    k_group: 1,
+    products_per_step: A2_TROP_NR,
+    lane_cap: u128::MAX,
+    max_bound: crate::tropical::TROP_I16_MAX_BOUND,
+    mac_tile: avx2_trop_i16_one,
+};
+
+/// # Safety
+///
+/// `pa` must have `4 * kc` readable elements, `pb` `16 * kc`, `acc` 64 writable
+/// lanes, and the host must have `avx2`.
+unsafe fn avx2_trop_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_trop_i16_inner::<A2_TROP_MR>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_trop_i16`], with a one-row panel: `pa` must have `kc` readable
+/// elements and `acc` 16 writable lanes.
+unsafe fn avx2_trop_i16_one(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller established `avx2` and forwarded the lengths.
+    unsafe { avx2_trop_i16_inner::<1>(kc, pa, pb, acc) }
+}
+
+/// # Safety
+///
+/// As [`avx2_trop_i16`], at the panel height `MR` names.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_trop_i16_inner<const MR: usize>(
+    kc: usize,
+    pa: *const i16,
+    pb: *const i16,
+    acc: *mut i16,
+) {
+    const NR: usize = A2_TROP_NR;
+    // SAFETY: the caller guaranteed the three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    // The identity of `max`, which is the semiring zero and not zero. At
+    // `kc == 0` this is the whole answer, and a tile of zeros would have been
+    // the largest finite one instead of the empty reduction.
+    let mut tile = [_mm256_set1_epi16(crate::tropical::TROP_ZERO); MR];
+
+    for p in 0..kc {
+        // The panel is `k`-major at `k_group == 1`, so one 256-bit load is a
+        // whole `k`-step of `B`: sixteen columns, in lane order.
+        //
+        // SAFETY: `pb[p * NR ..][..16]` is in bounds: one 256-bit load.
+        let bv = unsafe { _mm256_loadu_si256(pb.as_ptr().add(p * NR).cast::<__m256i>()) };
+        for (i, cell) in tile.iter_mut().enumerate() {
+            let av = _mm256_set1_epi16(pa[p * MR + i]);
+            *cell = _mm256_max_epi16(*cell, _mm256_adds_epi16(av, bv));
+        }
+    }
+
+    for (i, cell) in tile.iter().enumerate() {
+        // SAFETY: `i < MR`, so this 256-bit store lands inside `MR * NR`.
+        unsafe {
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast::<__m256i>(), *cell);
+        }
     }
 }
 
@@ -1252,6 +1439,242 @@ pub const AVX2_R_I8_I32_1: KernelSpec<i8, i32> = KernelSpec {
     mac_tile: avx2_r_i8_one,
 };
 
+/// AVX2 reduction entry using the finite i8 product lookup and adds.
+pub const AVX2_LOOKUP_R_I8_I32: KernelSpec<i8, i32> = avx2_lookup_reduce_spec::<4>(Backend::Avx2);
+
+/// AVX2 one-row reduction entry using the finite i8 product lookup and adds.
+pub const AVX2_LOOKUP_R_I8_I32_1: KernelSpec<i8, i32> = avx2_lookup_reduce_spec::<1>(Backend::Avx2);
+
+const fn avx2_lookup_reduce_spec<const MR: usize>(backend: Backend) -> KernelSpec<i8, i32> {
+    KernelSpec {
+        backend,
+        factorization: Factorization::Exact,
+        mr: MR,
+        nr: 1,
+        lane_layout: LaneLayout::Contiguous,
+        k_group: 1,
+        products_per_step: MR,
+        lane_cap: i32::MAX as u128,
+        max_bound: u128::MAX,
+        mac_tile: avx2_lookup_reduce_i8::<MR>,
+    }
+}
+
+/// Project the low eight signed-octet products from one left-coordinate row.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_nibble_products_low(a: i8, low_index: __m128i, high_index: __m128i) -> __m128i {
+    let row = crate::lookup::i8_nibble_products(a);
+    let span = crate::lookup::NIBBLE_SPACE;
+    let low_low_at = row.as_ptr();
+    // SAFETY: the projector row is four adjacent `span`-byte alphabets.
+    let (low_high_at, high_low_at, high_high_at) = unsafe {
+        let low_high = low_low_at.add(span);
+        let high_low = low_high.add(span);
+        (low_high, high_low, high_low.add(span))
+    };
+    // SAFETY: every load stays inside the selected complete projector row.
+    let (low_low, low_high, high_low, high_high) = unsafe {
+        (
+            _mm_loadu_si128(low_low_at.cast()),
+            _mm_loadu_si128(low_high_at.cast()),
+            _mm_loadu_si128(high_low_at.cast()),
+            _mm_loadu_si128(high_high_at.cast()),
+        )
+    };
+    let low_bytes = _mm_shuffle_epi8(low_low, low_index);
+    let low_sign = _mm_shuffle_epi8(low_high, low_index);
+    let high_bytes = _mm_shuffle_epi8(high_low, high_index);
+    let high_sign = _mm_shuffle_epi8(high_high, high_index);
+    _mm_add_epi16(
+        _mm_unpacklo_epi8(low_bytes, low_sign),
+        _mm_unpacklo_epi8(high_bytes, high_sign),
+    )
+}
+
+/// One native vector's coordinates in the radix-16 atlas.
+struct Radix16Coordinates {
+    low: __m128i,
+    high: __m128i,
+}
+
+/// Resolve exactly the live panel octets into their radix-16 coordinates.
+///
+/// Every consumption geometry has the same canonical native-vector embedding:
+/// its live alphabet occupies the prefix and the unused suffix is zero. The
+/// fixed object lets the quotient/remainder recurrence remain one native map
+/// even when a consumer observes only its low half.
+#[inline(always)]
+unsafe fn radix16_coordinates<const LANES: usize>(
+    codes: *const i8,
+    stride: usize,
+) -> Radix16Coordinates {
+    const { assert!(LANES > 0 && LANES <= 16) };
+    let mut symbols = [0u8; 16];
+    let mut code_at = codes;
+    let mut lane = 0usize;
+    while lane < LANES {
+        // SAFETY: the caller guarantees `LANES` readable coordinates separated
+        // by `stride`; the final iteration forms no following pointer.
+        symbols[lane] = unsafe { *code_at as u8 };
+        lane += 1;
+        if lane < LANES {
+            // SAFETY: another promised coordinate remains at exactly `stride`.
+            code_at = unsafe { code_at.add(stride) };
+        }
+    }
+
+    let mut low = [0u8; 16];
+    let mut high = [0u8; 16];
+    let radix = crate::lookup::NIBBLE_SPACE as u8;
+    lane = 0;
+    while lane < symbols.len() {
+        let symbol = symbols[lane];
+        low[lane] = symbol % radix;
+        high[lane] = symbol / radix;
+        lane += 1;
+    }
+    // SAFETY: both arrays contain their complete sixteen-byte native vectors;
+    // the unaligned relabel changes representation without changing a symbol.
+    unsafe {
+        Radix16Coordinates {
+            low: _mm_loadu_si128(low.as_ptr().cast()),
+            high: _mm_loadu_si128(high.as_ptr().cast()),
+        }
+    }
+}
+
+/// AVX2 lookup reduction: native byte interleave reifies each pair coordinate,
+/// and one gather reads its complete signed-octet product symbol.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_lookup_reduce_octet<const ENTRIES: usize>(
+    product_alphabet: &[i32; ENTRIES],
+    left_octets: __m128i,
+    right_octets: __m128i,
+) -> __m256i {
+    // Widening only reifies each alphabet symbol in its native gather lane.
+    // The additive recurrence refines the left coordinate through radix 256
+    // before the right coordinate is adjoined.
+    let mut addresses = _mm256_cvtepu8_epi32(left_octets);
+    let right_coordinates = _mm256_cvtepu8_epi32(right_octets);
+    let mut digit = 0u32;
+    while digit < u8::BITS {
+        addresses = _mm256_add_epi32(addresses, addresses);
+        digit += 1;
+    }
+    let indices = _mm256_add_epi32(addresses, right_coordinates);
+    // SAFETY: every index is an unsigned-octet pair, so all eight lanes
+    // address the complete 256-by-256 product alphabet.
+    unsafe { _mm256_i32gather_epi32(product_alphabet.as_ptr(), indices, 4) }
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_lookup_reduce_i8<const MR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    const { assert!(MR == 1 || MR == 4) };
+    // SAFETY: the KernelSpec caller guarantees all three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, kc),
+            core::slice::from_raw_parts_mut(acc, MR),
+        )
+    };
+    if MR == 1 {
+        const NATIVE_LANES: usize = core::mem::size_of::<__m256i>() / core::mem::size_of::<i32>();
+        const PAIRED_DEPTH: usize = 2 * NATIVE_LANES;
+        let product_alphabet = crate::lookup::i8_products_native();
+        let mut sum = _mm256_setzero_si256();
+        let paired_end = kc - kc % PAIRED_DEPTH;
+        let mut p = 0usize;
+        while p != paired_end {
+            // SAFETY: `p + PAIRED_DEPTH <= paired_end <= kc` supplies both
+            // complete native coordinate vectors.
+            let (left_octets0, right_octets0) = unsafe {
+                (
+                    _mm_loadl_epi64(pa.as_ptr().add(p).cast()),
+                    _mm_loadl_epi64(pb.as_ptr().add(p).cast()),
+                )
+            };
+            // SAFETY: this AVX2 body loaded both complete octet vectors above.
+            let products0 =
+                unsafe { avx2_lookup_reduce_octet(product_alphabet, left_octets0, right_octets0) };
+            sum = _mm256_add_epi32(sum, products0);
+
+            // Loading the second complete coordinate discharges every use of
+            // this byte cursor. Advancing it here keeps cursor progress off the
+            // following refinement/gather dependency chain.
+            // SAFETY: the paired-loop bound supplies the second complete vector.
+            let (left_octets1, right_octets1) = unsafe {
+                (
+                    _mm_loadl_epi64(pa.as_ptr().add(p + NATIVE_LANES).cast()),
+                    _mm_loadl_epi64(pb.as_ptr().add(p + NATIVE_LANES).cast()),
+                )
+            };
+            p += PAIRED_DEPTH;
+            // SAFETY: this AVX2 body loaded both complete octet vectors above.
+            let products1 =
+                unsafe { avx2_lookup_reduce_octet(product_alphabet, left_octets1, right_octets1) };
+            sum = _mm256_add_epi32(sum, products1);
+        }
+
+        let vector_end = kc - kc % NATIVE_LANES;
+        if p < vector_end {
+            // The unpaired terminal vector is the same complete coordinate
+            // object and traverses the identical radix/table recurrence.
+            // SAFETY: `p + NATIVE_LANES == vector_end <= kc`.
+            let (left_octets, right_octets) = unsafe {
+                (
+                    _mm_loadl_epi64(pa.as_ptr().add(p).cast()),
+                    _mm_loadl_epi64(pb.as_ptr().add(p).cast()),
+                )
+            };
+            // SAFETY: this AVX2 body loaded both complete octet vectors above.
+            let products =
+                unsafe { avx2_lookup_reduce_octet(product_alphabet, left_octets, right_octets) };
+            sum = _mm256_add_epi32(sum, products);
+        }
+
+        let mut lanes = [0i32; 8];
+        // SAFETY: `lanes` contains exactly the eight lanes stored here.
+        unsafe { _mm256_storeu_si256(lanes.as_mut_ptr().cast(), sum) };
+        let mut total = lanes
+            .into_iter()
+            .fold(0i32, |total, lane| total.wrapping_add(lane));
+        for p in vector_end..kc {
+            total = total.wrapping_add(crate::lookup::i8_product_from(
+                product_alphabet,
+                pa[p],
+                pb[p],
+            ));
+        }
+        acc[0] = total;
+        return;
+    }
+
+    let mut sum = _mm_setzero_si128();
+    let row0 = pa.as_ptr();
+    for (p, &right) in pb.iter().enumerate() {
+        // SAFETY: the four rows are separated by exactly `kc`, and `p` is in
+        // their common reduction extent.
+        let coordinates = unsafe { radix16_coordinates::<4>(row0.add(p), kc) };
+        // Multiplication is commutative, so the shared B coordinate selects
+        // one row while the four A coordinates address it in parallel.
+        // SAFETY: the selected projector row is complete for every octet.
+        let products =
+            unsafe { avx2_nibble_products_low(right, coordinates.low, coordinates.high) };
+        sum = _mm_add_epi32(sum, _mm_cvtepi16_epi32(products));
+    }
+    // SAFETY: this arm is the four-row instantiation, so `acc` has exactly the
+    // four writable lanes stored here.
+    unsafe { _mm_storeu_si128(acc.as_mut_ptr().cast(), sum) };
+}
+
 /// # Safety
 ///
 /// As [`avx2_r_i8`], with a one-row panel.
@@ -1433,6 +1856,169 @@ pub const AVX2_I8_I32_M1_N8: KernelSpec<i8, i32> = KernelSpec {
     mac_tile: avx2_i8_one_half,
 };
 
+/// AVX2 six-row, sixteen-column lookup/add entry.
+pub const AVX2_LOOKUP_I8_I32: KernelSpec<i8, i32> = avx2_lookup_spec::<6, 16>(Backend::Avx2);
+
+/// AVX2 one-row, sixteen-column lookup/add entry.
+pub const AVX2_LOOKUP_I8_I32_M1: KernelSpec<i8, i32> = avx2_lookup_spec::<1, 16>(Backend::Avx2);
+
+/// AVX2 six-row, eight-column lookup/add entry.
+pub const AVX2_LOOKUP_I8_I32_N8: KernelSpec<i8, i32> = avx2_lookup_spec::<6, 8>(Backend::Avx2);
+
+/// AVX2 one-row, eight-column lookup/add entry.
+pub const AVX2_LOOKUP_I8_I32_M1_N8: KernelSpec<i8, i32> = avx2_lookup_spec::<1, 8>(Backend::Avx2);
+
+const fn avx2_lookup_spec<const MR: usize, const NR: usize>(
+    backend: Backend,
+) -> KernelSpec<i8, i32> {
+    KernelSpec {
+        backend,
+        factorization: Factorization::Exact,
+        mr: MR,
+        nr: NR,
+        lane_layout: LaneLayout::Interleaved,
+        k_group: 1,
+        products_per_step: NR,
+        lane_cap: i32::MAX as u128,
+        max_bound: u128::MAX,
+        mac_tile: avx2_lookup_i8::<MR, NR>,
+    }
+}
+
+/// Accumulate one depth coordinate from the native radix-16 projector.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_lookup_i8_depth<const MR: usize, const NR: usize>(
+    tile: &mut [[__m256i; 2]; MR],
+    left_at: *const i8,
+    low_index: __m128i,
+    high_index: __m128i,
+) {
+    const { assert!(NR == 8 || NR == 16) };
+    for (row_index, accumulator) in tile.iter_mut().enumerate() {
+        // SAFETY: the caller supplies the beginning of one complete `MR`-row
+        // depth, and this loop visits each row exactly once.
+        let left = unsafe { *left_at.add(row_index) };
+        let row = crate::lookup::i8_nibble_products(left);
+        let span = crate::lookup::NIBBLE_SPACE;
+        let low_low_at = row.as_ptr();
+        // SAFETY: the row is four adjacent `span`-byte alphabets.
+        let (low_high_at, high_low_at, high_high_at) = unsafe {
+            let low_high = low_low_at.add(span);
+            let high_low = low_high.add(span);
+            (low_high, high_low, high_low.add(span))
+        };
+        // SAFETY: every load stays inside the selected complete row.
+        let (low_low, low_high, high_low, high_high) = unsafe {
+            (
+                _mm_loadu_si128(low_low_at.cast()),
+                _mm_loadu_si128(low_high_at.cast()),
+                _mm_loadu_si128(high_low_at.cast()),
+                _mm_loadu_si128(high_high_at.cast()),
+            )
+        };
+        let low_bytes = _mm_shuffle_epi8(low_low, low_index);
+        let low_sign = _mm_shuffle_epi8(low_high, low_index);
+        let high_bytes = _mm_shuffle_epi8(high_low, high_index);
+        let high_sign = _mm_shuffle_epi8(high_high, high_index);
+        let products0 = _mm_add_epi16(
+            _mm_unpacklo_epi8(low_bytes, low_sign),
+            _mm_unpacklo_epi8(high_bytes, high_sign),
+        );
+        accumulator[0] = _mm256_add_epi32(accumulator[0], _mm256_cvtepi16_epi32(products0));
+        if NR == 16 {
+            let products1 = _mm_add_epi16(
+                _mm_unpackhi_epi8(low_bytes, low_sign),
+                _mm_unpackhi_epi8(high_bytes, high_sign),
+            );
+            accumulator[1] = _mm256_add_epi32(accumulator[1], _mm256_cvtepi16_epi32(products1));
+        }
+    }
+}
+
+/// AVX2 lookup/add tile: one native radix map serves every live half.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_lookup_i8<const MR: usize, const NR: usize>(
+    kc: usize,
+    pa: *const i8,
+    pb: *const i8,
+    acc: *mut i32,
+) {
+    const { assert!(NR == 8 || NR == 16) };
+    // SAFETY: the KernelSpec caller guarantees all three extents.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, MR * kc),
+            core::slice::from_raw_parts(pb, NR * kc),
+            core::slice::from_raw_parts_mut(acc, MR * NR),
+        )
+    };
+    let mut tile = [[_mm256_setzero_si256(); 2]; MR];
+    let depths_per_map = 16 / NR;
+    let grouped_end = kc - kc % depths_per_map;
+    let mut p = 0usize;
+    while p < grouped_end {
+        // `depths_per_map * NR == 16`: every map consumes exactly one complete
+        // native coordinate vector, independent of the panel factorization.
+        // SAFETY: the grouped bound leaves exactly 16 readable panel symbols.
+        let coordinates = unsafe { radix16_coordinates::<16>(pb.as_ptr().add(p * NR), 1) };
+        let mut depth = 0usize;
+        while depth < depths_per_map {
+            // The second narrow depth is the upper native half. A fixed lane
+            // permutation exposes it as the low projector half; no symbol is
+            // recomputed and no second coordinate map exists.
+            let (low_index, high_index) = if depth == 0 {
+                (coordinates.low, coordinates.high)
+            } else {
+                (
+                    _mm_unpackhi_epi64(coordinates.low, coordinates.low),
+                    _mm_unpackhi_epi64(coordinates.high, coordinates.high),
+                )
+            };
+            // SAFETY: `p + depth < grouped_end <= kc`; this points at exactly
+            // one interleaved `MR`-row left-panel depth.
+            unsafe {
+                avx2_lookup_i8_depth::<MR, NR>(
+                    &mut tile,
+                    pa.as_ptr().add((p + depth) * MR),
+                    low_index,
+                    high_index,
+                )
+            };
+            depth += 1;
+        }
+        p += depths_per_map;
+    }
+
+    // A narrow odd terminal depth is the exact prefix embedding of the same
+    // coordinate object. It changes neither the projector nor the arithmetic;
+    // it merely totalizes a panel whose final native vector is half occupied.
+    while p < kc {
+        // SAFETY: the terminal depth owns exactly `NR` readable coordinates.
+        let coordinates = unsafe { radix16_coordinates::<NR>(pb.as_ptr().add(p * NR), 1) };
+        // SAFETY: `p < kc`, so this points at one complete left-panel depth.
+        unsafe {
+            avx2_lookup_i8_depth::<MR, NR>(
+                &mut tile,
+                pa.as_ptr().add(p * MR),
+                coordinates.low,
+                coordinates.high,
+            )
+        };
+        p += 1;
+    }
+    for (i, row) in tile.iter().enumerate() {
+        // SAFETY: row `i` spans `NR` lanes inside the `MR * NR` output; the
+        // second store is reached only for the sixteen-lane form.
+        unsafe {
+            _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast(), row[0]);
+            if NR == 16 {
+                _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR + 8).cast(), row[1]);
+            }
+        }
+    }
+}
+
 /// # Safety
 ///
 /// As [`avx2_i8`], with a one-row eight-column panel.
@@ -1613,25 +2199,25 @@ pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
     );
     let (build, gather, gather_codes, gather_codes_u8): Quartet = match (rows, group) {
         (16, 1) => (
-            avx2_table_build_i8_v2,
+            avx2_table_build_lookup_i8_v2,
             avx2_table_gather_i32_v2_u1,
             avx2_codes_v2_u1,
             avx2_codes_v2_u1_u8,
         ),
         (16, 2) => (
-            avx2_table_build_i8_v2,
+            avx2_table_build_lookup_i8_v2,
             avx2_table_gather_i32_v2_u2,
             avx2_codes_v2_u2,
             avx2_codes_v2_u2_u8,
         ),
         (8, 1) => (
-            avx2_table_build_i8_v1,
+            avx2_table_build_lookup_i8_v1,
             avx2_table_gather_i32_v1_u1,
             avx2_codes_v1_u1,
             avx2_codes_v1_u1_u8,
         ),
         (8, 2) => (
-            avx2_table_build_i8_v1,
+            avx2_table_build_lookup_i8_v1,
             avx2_table_gather_i32_v1_u2,
             avx2_codes_v1_u2,
             avx2_codes_v1_u2_u8,
@@ -1648,13 +2234,13 @@ pub fn avx2_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i32>
         k_group: 2,
         lanes_per_add: A2_TABLE_LANES,
         // One `madd` and one add per eight lanes and two block steps.
-        build_products_per_step: A2_TABLE_LANES,
+        build_products_per_step: 1,
         lane_cap: i32::MAX as u128,
         // `madd`'s pair sum is `2 * bound^2`; an `i8` alphabet cannot reach the
         // bound where that leaves an `i32`, so this is stated rather than
         // binding.
         max_bound: 32767,
-        build_multiplies: true,
+        build_multiplies: false,
         build_adds: crate::table::product_build_adds,
         build,
         gather,
@@ -1795,12 +2381,7 @@ pub fn avx2_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, i6
 /// One slot of the table in the 64-bit lane, at `V` registers.
 ///
 /// `madd` folds a pair of block steps into an `i32`, and each pair is widened
-/// to the lane before it is accumulated --- so the only width the sequence holds
-/// below its lane is `madd`'s own, which [`avx2_table_i16_i64`] declares.
-///
-/// # Safety
-///
-/// [`TableBuild`]'s contract, with `rows == V * 4`, `V` even, and `block` even.
+/// to the lane before it is accumulated.
 #[target_feature(enable = "avx2")]
 unsafe fn avx2_build16<const V: usize>(
     rows: usize,
@@ -1818,12 +2399,10 @@ unsafe fn avx2_build16<const V: usize>(
             let d = book.add(c * block);
             let mut entry = [_mm256_setzero_si256(); V];
             for pair in 0..block / 2 {
-                // The pair of block steps, as one 32-bit pattern in every lane.
                 let w =
                     (*d.add(pair * 2) as u16 as u32) | ((*d.add(pair * 2 + 1) as u16 as u32) << 16);
                 let wv = _mm256_set1_epi32(w as i32);
                 let a = acts.add(pair * rows * 2);
-                // Eight lanes per `madd`, which is two registers of the lane.
                 for half in 0..V / 2 {
                     let x = _mm256_loadu_si256(a.add(half * 16) as *const __m256i);
                     let p = _mm256_madd_epi16(x, wv);
@@ -2125,52 +2704,6 @@ unsafe fn avx2_table_gather<const V: usize, const U: usize>(
     }
 }
 
-/// One slot of the table, at `V` registers of `i32`.
-///
-/// `T[c][i] = sum_t acts[t][i] * book[c][t]`, with the block's steps taken in
-/// pairs: `madd` on the widened activations is this family's whole arithmetic
-/// in one instruction, exactly as it is for the dense tile.
-///
-/// # Safety
-///
-/// [`TableBuild`]'s contract, with `rows == V * 8` and `block` even.
-#[target_feature(enable = "avx2")]
-unsafe fn avx2_table_build<const V: usize>(
-    rows: usize,
-    space: usize,
-    block: usize,
-    book: *const i8,
-    acts: *const i8,
-    out: *mut i32,
-) {
-    debug_assert_eq!(rows, V * A2_TABLE_LANES);
-    debug_assert!(block.is_multiple_of(2));
-    // SAFETY: the caller established every extent.
-    unsafe {
-        for c in 0..space {
-            let d = book.add(c * block);
-            let mut entry = [_mm256_setzero_si256(); V];
-            for pair in 0..block / 2 {
-                // The pair of block steps, as one 32-bit pattern in every lane.
-                let w =
-                    (*d.add(pair * 2) as u16 as u32) | ((*d.add(pair * 2 + 1) as u16 as u32) << 16);
-                let wv = _mm256_set1_epi32(w as i32);
-                let a = acts.add(pair * rows * 2);
-                for (v, cell) in entry.iter_mut().enumerate() {
-                    let x = _mm256_cvtepi8_epi16(_mm_loadu_si128(
-                        a.add(v * A2_TABLE_LANES * 2) as *const __m128i
-                    ));
-                    *cell = _mm256_add_epi32(*cell, _mm256_madd_epi16(x, wv));
-                }
-            }
-            let o = out.add(c * rows);
-            for (v, cell) in entry.iter().enumerate() {
-                _mm256_storeu_si256(o.add(v * A2_TABLE_LANES) as *mut __m256i, *cell);
-            }
-        }
-    }
-}
-
 /// # Safety
 ///
 /// [`TableGather`]'s contract at `rows == 16`, `group == 1`.
@@ -2235,10 +2768,17 @@ unsafe fn avx2_table_gather_i32_v1_u2(
     unsafe { avx2_table_gather::<1, 2>(rows, group, depth, slab, stack, off, lane) }
 }
 
+/// One lookup-built table slot at `V` AVX2 registers.
+///
+/// The activation panel is already in the table sequence's pair-interleaved
+/// layout. Each gather therefore looks up eight products at once, and the
+/// only arithmetic in the build is the native vector add into the slot.
+///
 /// # Safety
 ///
-/// [`TableBuild`]'s contract at `rows == 16`.
-unsafe fn avx2_table_build_i8_v2(
+/// [`TableBuild`]'s contract, with `rows == V * 8` and `block` even.
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_table_build_lookup<const V: usize>(
     rows: usize,
     space: usize,
     block: usize,
@@ -2246,14 +2786,57 @@ unsafe fn avx2_table_build_i8_v2(
     acts: *const i8,
     out: *mut i32,
 ) {
-    // SAFETY: the caller established `avx2` and forwarded every extent.
-    unsafe { avx2_table_build::<2>(rows, space, block, book, acts, out) }
+    debug_assert_eq!(rows, V * A2_TABLE_LANES);
+    debug_assert!(block.is_multiple_of(2));
+    let product_alphabet = crate::lookup::i8_products_native();
+    // SAFETY: the TableBuild caller guarantees all three extents.
+    unsafe {
+        for c in 0..space {
+            let mut entry = [_mm256_setzero_si256(); V];
+            for t in 0..block {
+                let weight = *book.add(c * block + t);
+                for (v, cell) in entry.iter_mut().enumerate() {
+                    let mut indices = [0i32; A2_TABLE_LANES];
+                    for (lane, index) in indices.iter_mut().enumerate() {
+                        let row = v * A2_TABLE_LANES + lane;
+                        let activation = *acts.add(crate::spec::packed_slot(t, row, rows, 2));
+                        *index = crate::lookup::i8_product_address(activation, weight);
+                    }
+                    let products = _mm256_i32gather_epi32(
+                        product_alphabet.as_ptr(),
+                        _mm256_loadu_si256(indices.as_ptr().cast()),
+                        4,
+                    );
+                    *cell = _mm256_add_epi32(*cell, products);
+                }
+            }
+            let o = out.add(c * rows);
+            for (v, cell) in entry.iter().enumerate() {
+                _mm256_storeu_si256(o.add(v * A2_TABLE_LANES).cast(), *cell);
+            }
+        }
+    }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`.
+unsafe fn avx2_table_build_lookup_i8_v2(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller established AVX2 and forwarded the extents.
+    unsafe { avx2_table_build_lookup::<2>(rows, space, block, book, acts, out) }
 }
 
 /// # Safety
 ///
 /// [`TableBuild`]'s contract at `rows == 8`.
-unsafe fn avx2_table_build_i8_v1(
+unsafe fn avx2_table_build_lookup_i8_v1(
     rows: usize,
     space: usize,
     block: usize,
@@ -2261,8 +2844,8 @@ unsafe fn avx2_table_build_i8_v1(
     acts: *const i8,
     out: *mut i32,
 ) {
-    // SAFETY: the caller established `avx2` and forwarded every extent.
-    unsafe { avx2_table_build::<1>(rows, space, block, book, acts, out) }
+    // SAFETY: the caller established AVX2 and forwarded the extents.
+    unsafe { avx2_table_build_lookup::<1>(rows, space, block, book, acts, out) }
 }
 
 /// One slot of the table at bound 1, at `V` registers: no multiply.
@@ -2867,8 +3450,8 @@ pub fn avx512_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i3
         TableGatherCodes<i32>,
         TableGatherCodesU8<i32>,
     ) = match (rows, group) {
-        (16, 1) => (a5_build8, a5_gather_u1, a5_codes_u1, a5_codes_u1_u8),
-        (16, 2) => (a5_build8, a5_gather_u2, a5_codes_u2, a5_codes_u2_u8),
+        (16, 1) => (a5_build_lookup8, a5_gather_u1, a5_codes_u1, a5_codes_u1_u8),
+        (16, 2) => (a5_build_lookup8, a5_gather_u2, a5_codes_u2, a5_codes_u2_u8),
         _ => return None,
     };
     Some(TableSpec {
@@ -2877,13 +3460,13 @@ pub fn avx512_table_i8_i32(rows: usize, group: usize) -> Option<TableSpec<i8, i3
         group,
         k_group: 2,
         lanes_per_add: A5_TABLE_LANES,
-        build_products_per_step: A5_TABLE_LANES,
+        build_products_per_step: 1,
         lane_cap: i32::MAX as u128,
         // `madd`'s pair sum is `2 * bound^2`; an `i8` alphabet cannot reach the
         // bound where that leaves an `i32`, so this is stated rather than
         // binding.
         max_bound: 32767,
-        build_multiplies: true,
+        build_multiplies: false,
         build_adds: crate::table::product_build_adds,
         build,
         gather,
@@ -2922,13 +3505,18 @@ pub fn avx512_table_i16_i64(rows: usize, group: usize) -> Option<TableSpec<i16, 
     })
 }
 
-/// One slot of the `i8` table, `rows == 16` in one register.
+/// One lookup-built `i8` table slot at sixteen rows.
+///
+/// AVX-512's native gather supplies the lookup and the vector add supplies the
+/// reduction. The activation panel is read through the same pair-interleaved
+/// slot function as the packer, so this is a second factorization of the same
+/// table identity, not a second data layout.
 ///
 /// # Safety
 ///
-/// [`TableBuild`]'s contract at `rows == 16`, with `block` even.
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn a5_build8_inner(
+/// [`TableBuild`]'s contract at `rows == 16` and even `block`.
+#[target_feature(enable = "avx512f")]
+unsafe fn a5_build_lookup8(
     rows: usize,
     space: usize,
     block: usize,
@@ -2938,32 +3526,31 @@ unsafe fn a5_build8_inner(
 ) {
     debug_assert_eq!(rows, A5_TABLE_LANES);
     debug_assert!(block.is_multiple_of(2));
-    // SAFETY: the caller established every extent.
+    let product_alphabet = crate::lookup::i8_products_native();
+    // SAFETY: the TableBuild caller guarantees all three extents.
     unsafe {
         for c in 0..space {
-            let d = book.add(c * block);
             let mut entry = _mm512_setzero_si512();
-            for pair in 0..block / 2 {
-                let w =
-                    (*d.add(pair * 2) as u16 as u32) | ((*d.add(pair * 2 + 1) as u16 as u32) << 16);
-                let wv = _mm512_set1_epi32(w as i32);
-                // Sixteen lanes by two block steps is thirty-two `i8`, widened
-                // in one instruction.
-                let x = _mm512_cvtepi8_epi16(_mm256_loadu_si256(
-                    acts.add(pair * rows * 2) as *const __m256i
-                ));
-                entry = _mm512_add_epi32(entry, _mm512_madd_epi16(x, wv));
+            for t in 0..block {
+                let weight = *book.add(c * block + t);
+                let mut indices = [0i32; A5_TABLE_LANES];
+                for (row, index) in indices.iter_mut().enumerate() {
+                    let activation = *acts.add(crate::spec::packed_slot(t, row, rows, 2));
+                    *index = crate::lookup::i8_product_address(activation, weight);
+                }
+                let products = _mm512_i32gather_epi32(
+                    _mm512_loadu_si512(indices.as_ptr().cast()),
+                    product_alphabet.as_ptr().cast(),
+                    4,
+                );
+                entry = _mm512_add_epi32(entry, products);
             }
-            _mm512_storeu_si512(out.add(c * rows) as *mut __m512i, entry);
+            _mm512_storeu_si512(out.add(c * rows).cast(), entry);
         }
     }
 }
 
 /// One slot of the `i16` table, `rows == 16` in two registers of `i64`.
-///
-/// # Safety
-///
-/// [`TableBuild`]'s contract at `rows == 16`, with `block` even.
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn a5_build16_inner(
     rows: usize,
@@ -2994,6 +3581,21 @@ unsafe fn a5_build16_inner(
             _mm512_storeu_si512(o.add(A5_TABLE_LANES / 2) as *mut __m512i, hi);
         }
     }
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract at `rows == 16`, in the 64-bit lane.
+unsafe fn a5_build16(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i16,
+    acts: *const i16,
+    out: *mut i64,
+) {
+    // SAFETY: the caller established `avx512f,avx512bw` and forwarded the extents.
+    unsafe { a5_build16_inner(rows, space, block, book, acts, out) }
 }
 
 /// Generate the 512-bit gather entry points for one lane width.
@@ -3177,34 +3779,4 @@ avx512_gathers! {
     i64, _mm512_setzero_si512, _mm512_add_epi64, { A5_TABLE_LANES / 2 },
     a5_gather64_u1, a5_codes64_u1, a5_codes64_u1_u8, 1;
     a5_gather64_u2, a5_codes64_u2, a5_codes64_u2_u8, 2;
-}
-
-/// # Safety
-///
-/// [`TableBuild`]'s contract at `rows == 16`.
-unsafe fn a5_build8(
-    rows: usize,
-    space: usize,
-    block: usize,
-    book: *const i8,
-    acts: *const i8,
-    out: *mut i32,
-) {
-    // SAFETY: the caller established `avx512f,avx512bw` and forwarded the extents.
-    unsafe { a5_build8_inner(rows, space, block, book, acts, out) }
-}
-
-/// # Safety
-///
-/// [`TableBuild`]'s contract at `rows == 16`, in the 64-bit lane.
-unsafe fn a5_build16(
-    rows: usize,
-    space: usize,
-    block: usize,
-    book: *const i16,
-    acts: *const i16,
-    out: *mut i64,
-) {
-    // SAFETY: the caller established `avx512f,avx512bw` and forwarded the extents.
-    unsafe { a5_build16_inner(rows, space, block, book, acts, out) }
 }

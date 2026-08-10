@@ -24,7 +24,7 @@ change of tier is a change of *artifact* rather than a change of *result*.
 ## Why exactness is the cheap choice
 
 An exact accumulation sounds expensive and in one sense it is: a complete
-accumulator for `f64` is 536 bytes per output element. What it buys is that a
+accumulator for `f64` is 544 bytes per output element. What it buys is that a
 long list of things stop being questions.
 
 Is the result the same on two backends? Yes, necessarily, because both compute
@@ -58,8 +58,17 @@ difference to explain away.
 An IEEE 754 value is a bit pattern naming an exact dyadic rational. That is
 exactly the shape of a codebook entry, so the float path is not a second method
 --- it is the same three steps at a different instantiation. Decode the pattern,
-accumulate the exact products in a fixed-point register wide enough for the
-whole exponent range, round once.
+project its finite coefficient by the self-similar balanced-octet recurrence,
+contract equal Laurent grades by lookup and addition, accumulate the resolved
+products in a fixed-point register wide enough for the whole exponent range,
+and round once.
+
+Precision changes only how many repetitions of that projection are occupied.
+It does not select another representation or arithmetic family. Offered panel
+words hold the ready projection in place, and one exact frame owns every live
+output of a tile through the complete reduction; an empty offer changes reuse,
+not the operation. Thus neither `f64`, a wide exponent span, nor a deep
+reduction invokes a replay window or a reserve computation.
 
 The result is the correctly-rounded value of the exact sum, which is
 schedule-independent by construction. It is therefore *not* bit-identical to any

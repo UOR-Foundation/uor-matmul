@@ -61,7 +61,8 @@ use uor_matmul_core::{
 use uor_matmul_gemm::epilogue::{AbsorbPrior, PlaceAt, ScaleExact};
 use uor_matmul_gemm::float::SignedPlace;
 use uor_matmul_gemm::{
-    gemm_auto as view_gemm, gemm_float_packed, GemmOptions, Kernelized, Linear, Scratch,
+    gemm_auto as view_gemm, gemm_float_bridged, gemm_float_packed, GemmOptions, Kernelized, Linear,
+    Scratch,
 };
 
 /// Which operand a message is about.
@@ -285,14 +286,16 @@ where
 /// end. That is why this is *not* bit-identical to a classical `sgemm` (N1) --- it
 /// is the correctly-rounded value of the exact sum.
 ///
-/// `pa` and `pb` are decode panels, the float analogue of `scratch`, and the
-/// offer decides which factorization of the one identity runs --- never what
-/// the bytes are (`CD-19`). `&mut []` runs the streaming traversal. `k` and
-/// `k * n` elements let each operand be decoded once instead of once per row.
-/// [`uor_matmul_gemm::suggested_float_panels`] names the offer that also
-/// admits the float placement bridge, which hands the reduction to the
-/// integer kernel table; it is the fast path a caller who follows the
-/// suggestion gets.
+/// `pa` and `pb` are caller-owned caches of decoded codes, the float analogue
+/// of `scratch`. The offer changes only how often source codes are decoded;
+/// every size, including `&mut []`, streams bounded pages through the same
+/// Atlas-octet contraction (`CD-19`, `CA-05`). The established full-reuse
+/// query offers one complete A row in `pa` and every B column in `pb`. Kernel
+/// selection prices exactly that geometry: it uses the cached row across all
+/// columns and does not choose a multi-row tile that would repeat an uncached
+/// A projection. [`uor_matmul_gemm::suggested_float_panels`] derives that
+/// unchanged offer. Initial cache bytes are never operand data, and cache
+/// contents after return are unspecified.
 ///
 /// # Errors and panics
 ///
@@ -336,6 +339,64 @@ where
     Ok(())
 }
 
+/// `C := alpha * A * B + beta * C` over float operands, exactly, with the
+/// complete caller-owned workspace.
+///
+/// Every workspace slice is an in/out offer. Its initial bytes cannot affect
+/// the product, and its contents after return are unspecified: callers may
+/// retain and reuse the allocation, but must not interpret its residue. The
+/// `scaled`, `panels`, and `accumulators` parameters remain in the established
+/// public API without requiring the pure-UOR implementation to reify either
+/// operand into them. Atlas execution storage is bounded by the selected
+/// kernel tile, so arbitrary `k` is streamed without an operand-sized carrier.
+///
+/// The result is byte-identical to [`gemm_float_ex`] at every offer, including
+/// empty offers (`CD-19`), and neither spelling changes the backing addresses
+/// of caller storage (`CA-05`).
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_float_ex_full<E, O>(
+    m: usize,
+    k: usize,
+    n: usize,
+    alpha: i64,
+    a: &[E],
+    lda: usize,
+    b: &[E],
+    ldb: usize,
+    beta: i64,
+    c: &mut [O],
+    ldc: usize,
+    pa: &mut [PackedCode],
+    pb: &mut [PackedCode],
+    scaled: &mut [i32],
+    panels: &mut [i32],
+    accumulators: &mut [i128],
+) -> Result<(), NotAProduct>
+where
+    E: FloatElement,
+    O: Element + EncodeFrom<AccOf<E>> + EncodeFrom<i128> + Copy,
+    AccOf<E>: SignedPlace + PlaceAt + ScaleExact + AbsorbPrior<O>,
+{
+    let (a_len, b_len, c_len) = (a.len(), b.len(), c.len());
+    let av = MatView::new(a, m, k, ld(lda))
+        .unwrap_or_else(|| does_not_fit(Operand::A, m, k, lda, a_len));
+    let bv = MatView::new(b, k, n, ld(ldb))
+        .unwrap_or_else(|| does_not_fit(Operand::B, k, n, ldb, b_len));
+    let cv = MatViewMut::new(c, m, n, ld(ldc))
+        .unwrap_or_else(|| does_not_fit(Operand::C, m, n, ldc, c_len));
+    let mut triple = Triple::new(av, bv, cv)?;
+    gemm_float_bridged(
+        &mut triple,
+        &Linear { alpha, beta },
+        GemmOptions::default(),
+        pa,
+        pb,
+        scaled,
+        &mut Scratch::with_accumulators(as_alphabet_full_mut(panels), accumulators),
+    );
+    Ok(())
+}
+
 /// `C := A * B` over contiguous row-major float operands, exactly.
 ///
 /// [`gemm_float_ex`] at `alpha = 1`, `beta = 0`, and the implied leading
@@ -357,4 +418,48 @@ where
     AccOf<E>: SignedPlace + PlaceAt + ScaleExact + AbsorbPrior<O>,
 {
     gemm_float_ex(m, k, n, 1, a, k, b, n, 0, c, n, pa, pb)
+}
+
+/// `C := A * B` over contiguous row-major float operands, exactly, with the
+/// complete caller-owned workspace.
+///
+/// [`gemm_float_ex_full`] at `alpha = 1`, `beta = 0`, and the implied leading
+/// dimensions.
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_float_full<E, O>(
+    m: usize,
+    k: usize,
+    n: usize,
+    a: &[E],
+    b: &[E],
+    c: &mut [O],
+    pa: &mut [PackedCode],
+    pb: &mut [PackedCode],
+    scaled: &mut [i32],
+    panels: &mut [i32],
+    accumulators: &mut [i128],
+) -> Result<(), NotAProduct>
+where
+    E: FloatElement,
+    O: Element + EncodeFrom<AccOf<E>> + EncodeFrom<i128> + Copy,
+    AccOf<E>: SignedPlace + PlaceAt + ScaleExact + AbsorbPrior<O>,
+{
+    gemm_float_ex_full(
+        m,
+        k,
+        n,
+        1,
+        a,
+        k,
+        b,
+        n,
+        0,
+        c,
+        n,
+        pa,
+        pb,
+        scaled,
+        panels,
+        accumulators,
+    )
 }

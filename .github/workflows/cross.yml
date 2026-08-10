@@ -83,8 +83,8 @@ jobs:
     # skip-guard below exists against. Intel's SDE executes AVX512VNNI
     # (its Icelake model), so the parity suite runs the sequences it skips
     # on every current runner. This is a correctness leg, never a timing
-    # one: an emulator's clock is not silicon's, and the VNNI break-even
-    # rows stay Unmeasured until a real host exists.
+    # one: an emulator's clock is not silicon's. The VNNI boundary rows are
+    # declaration-derived `build` claims and require no host clock.
     name: CB-02, AVX-512 VNNI parity under Intel SDE Icelake
     runs-on: ubuntu-latest
     steps:
@@ -163,3 +163,80 @@ jobs:
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
           RUSTFLAGS: -C target-feature=+simd128
+
+  tropical:
+    # The census's second product, on every off-host axis this repository
+    # already names --- five targets, and the leg is what each of them can
+    # actually hold.
+    #
+    # Three have a test runner, so the claims are *run* there: the accumulator
+    # is an `i128` and the witness is a `usize`, which is where a big-endian
+    # host and a 32-bit `usize` are not the same machine this was written on.
+    # Two have no runner at all, because they are the no-allocator targets, and
+    # there the leg is the build --- which is all `CA-03` can ask of new code
+    # and exactly what it asks.
+    #
+    # `uor-matmul-core` and `uor-matmul-gemm` are the two crates the selection
+    # half lives in: the element family and the gauge in the first, the driver,
+    # the `(max, +)` epilogue and the witness in the second.
+    name: "CT-08, CD-24, CD-25, the selection half: ${{ matrix.target }}"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            how: native
+          - target: s390x-unknown-linux-gnu
+            runner: ubuntu-latest
+            how: cross
+          - target: wasm32-wasip1
+            runner: ubuntu-latest
+            how: wasmtime
+          - target: thumbv7em-none-eabihf
+            runner: ubuntu-latest
+            how: build
+          - target: wasm32-unknown-unknown
+            runner: ubuntu-latest
+            how: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Explicit `tool:` for the reason this file records twice above: the
+      # tool-name tag form can be rewritten to a version tag, after which the
+      # action installs nothing and only warns.
+      - if: matrix.how == 'cross'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - if: matrix.how == 'wasmtime'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+      - if: matrix.how == 'wasmtime' || matrix.how == 'build'
+        run: rustup target add ${{ matrix.target }}
+      # Natively, so the host is the architecture rather than an emulation of
+      # it.
+      - if: matrix.how == 'native'
+        run: cargo test -p uor-matmul-core -p uor-matmul-gemm
+      # s390x is big-endian: the one target that would catch an accumulator or
+      # a witness serialized in native order.
+      - if: matrix.how == 'cross'
+        run: cross test -p uor-matmul-core -p uor-matmul-gemm --target ${{ matrix.target }}
+      # `usize` is 32 bits here and 64 everywhere else, and the witness is a
+      # `usize`. `--release` because a debug build under an interpreter takes
+      # minutes to prove the same thing.
+      - if: matrix.how == 'wasmtime'
+        run: >-
+          cargo test --release --target ${{ matrix.target }}
+          -p uor-matmul-core -p uor-matmul-gemm
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      # No test runner exists for these, so the claim they can carry is that
+      # the selection half links where there is no allocator at all.
+      - if: matrix.how == 'build'
+        run: >-
+          cargo build -p uor-matmul --no-default-features
+          --target ${{ matrix.target }}

@@ -3,8 +3,7 @@
 //!
 //! The question the queue puts to this harness is whether the library's win
 //! repertoire is bounded by quantized or structured data. The operands here are
-//! arbitrary random dense `i32` at a declared 24-bit bound --- the alphabet the
-//! float placement bridge's scaled panels already are --- and the recursion
+//! arbitrary random dense `i32` at a declared 24-bit bound, and the recursion
 //! does the same products, regrouped: `(7/8)^L` of them at `L` levels. If the
 //! nominal rate (`m*k*n` per second) crosses the fastest sustained product
 //! rate this library reaches on this host, the silicon performed fewer than
@@ -14,10 +13,9 @@
 //! Two baselines, because the library has two cubic walks a caller can mean.
 //! The *default* is the modular lane, which a wrapping `i32 -> i32` call
 //! selects; the recursion does not serve that call. The *exact lane* is what
-//! the recursion factorizes: it is what a saturating call, a wider output, or
-//! the float placement bridge runs. Both are drawn, and the recursion's
-//! columns are measured under `EncodeMode::Saturating` so the comparison is
-//! within one lane.
+//! the recursion factorizes: it is what a saturating call or a wider output
+//! runs. Both are drawn, and the recursion's columns are measured under
+//! `EncodeMode::Saturating` so the comparison is within one lane.
 //!
 //! Every figure is `open`: printed, never asserted. What *is* asserted,
 //! inside each timed run, is byte-identity with the cubic walk at the same
@@ -36,7 +34,7 @@ use uor_matmul_validate::scaling::{fit, Observation};
 /// The recorded seed; the operands are generated at runtime from it.
 const SEED: u64 = 20_260_730;
 
-/// The declared bound: 24-bit random dense data, the bridge's alphabet.
+/// The declared bound: 24-bit random dense data.
 const BOUND: u128 = 1 << 24;
 
 /// Deterministic dense fill, uniform in `[-2^23, 2^23)`, the same recorded
@@ -54,7 +52,7 @@ fn fill(len: usize, salt: u64) -> Vec<i32> {
 }
 
 /// Best of as many repetitions as fit a fixed budget, in seconds per call ---
-/// the same discipline `oracle_sweep` and `bridge_sweep` use.
+/// the same discipline the other retained scaling sweeps use.
 fn best(mut run: impl FnMut()) -> f64 {
     const BUDGET: f64 = 0.35;
     let mut best = f64::INFINITY;

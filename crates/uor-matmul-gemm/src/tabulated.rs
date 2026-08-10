@@ -48,7 +48,7 @@
 //! and it is the orientation in which a code names `Bk` consecutive *outputs*.
 //! Tabulation simply has nothing to sum there.
 
-use uor_matmul_codec::{CodedMatrix, Enumerable};
+use uor_matmul_codec::{Addressing, Codec, CodedMatrix, Enumerable, TierId};
 use uor_matmul_core::generated::blocking;
 use uor_matmul_core::{
     AccOf, Accumulator, Alphabet, Bound, Element, EncodeFrom, EncodeMode, FloatElement, MatView,
@@ -64,7 +64,7 @@ use uor_matmul_kernels::{
 use crate::collapse::{compact, distinct_rows, expand, Collapse};
 use crate::driver::GemmOptions;
 use crate::epilogue::Epilogue;
-use crate::float::{admits_bridge, gemm_float, scaled_f32, Span};
+use crate::float::{accumulate_atlas_dot, f32_q, gemm_float, PanelFacts, Span};
 use crate::kernel::{gemm_packed, Kernelized};
 use crate::scratch::Scratch;
 
@@ -76,9 +76,13 @@ use crate::scratch::Scratch;
 ///
 /// A wall-clock comparison measures the machine as much as the library, and a
 /// fitted scaling exponent measures the traversal but not the arithmetic. A
-/// census measures the claim directly: it turns "tabulation is faster" into "the
-/// tabulated column loop issues zero multiplies and `m*k*n/Bk` adds", which is
-/// machine-independent, reproducible, and assertable rather than reportable.
+/// census measures the transparent traversal bodies directly: it turns
+/// "tabulation is faster" into "the tabulated column loop issues zero
+/// multiplies and `m*k*n/Bk` adds", which is machine-independent, reproducible,
+/// and assertable rather than reportable. A family-owned `dense_gemm` is an
+/// opaque public extension point; this ledger records each presentation as a
+/// [`Census::kernel_calls`] event and does not invent an internal operation count
+/// from the matrix shape.
 ///
 /// The authority for the shape is `uor-r4-core`'s `OpKernel`, which declares its
 /// arithmetic interface as a census with no multiplication field. r4's census
@@ -87,20 +91,37 @@ use crate::scratch::Scratch;
 /// claim about a mechanism that is not present.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Census {
-    /// Widening multiply-accumulates. Zero in the column loop, by construction.
+    /// Widening multiply-accumulates issued by the transparent table build or
+    /// `StreamLane` body. Zero in the column loop, by construction. Operations
+    /// inside a family-owned dense call are represented by `kernel_calls`, not
+    /// by a synthetic `m*k*n` charge.
     pub multiplies: u64,
-    /// Accumulator combines: exact adds at the accumulator's full width, and
-    /// the bound-1 build's adds --- every product issued as a signed add for
-    /// the per-codeword build (`CB-10`), and the walk's own count for the Gray
-    /// sign build, which the spec's `build_adds` names so the census counts
-    /// what ran rather than what the per-codeword build would have run.
+    /// Transparent accumulator combines and table-build contraction charges.
+    /// A spec whose body exposes a fixed expansion reports its actual adds (the
+    /// bound-one/Gray builds). A call through the generic `Element::mac`
+    /// boundary, including the variable occupied-extent q contraction, reports
+    /// one contraction presentation per product; data-dependent additions
+    /// inside that opaque algebra are verified by the element family's own
+    /// observer/purity/differential gates and are not guessed from the shape.
     pub adds: u64,
     /// Reads of a tabulated partial sum.
     pub table_reads: u64,
-    /// Calls into the codec's decode.
+    /// Calls into the codec's decode or into a contextual panel projection.
+    ///
+    /// Ordinary element panels are copied as their own values and contribute
+    /// only the codec call. A contextual producer/consumer lane, such as the
+    /// compact `f32` Atlas lane, first observes the source symbol to derive the
+    /// call's finite grade gauge and exact envelope, then projects it into the
+    /// in-place q cell after that gauge is known. Non-finite observations become
+    /// singleton tags rather than a refusal. Both presentations are real,
+    /// counted work; an offer-resident projection cache makes the second occur
+    /// once per cached activation rather than once per column block.
     pub decodes: u64,
-    /// Calls into the dense factorization over a decoded operand --- the tile
-    /// kernels for an integer family, the exact float traversal for a float.
+    /// Calls into a non-table kernel factorization: one for each decoded-operand
+    /// driver call and one for each nonempty source page presented to the
+    /// persistent dense stream. A declining presentation is still a call and
+    /// is counted; an empty reduction stays in the public `StreamLane`, issues
+    /// no product, and therefore calls no kernel.
     ///
     /// The three factorizations are told apart by this and by `table_reads`, so
     /// "which one ran" is something a harness reads rather than something it
@@ -115,15 +136,15 @@ pub struct Census {
 /// `Census` counts. There is no second loop nest and no `cfg`, which is what
 /// keeps the counted run and the shipped run the same function (R13).
 pub trait Ledger {
-    /// Record `n` widening multiply-accumulates.
+    /// Record `n` observable widening multiply-accumulates.
     fn multiplied(&mut self, n: u64);
-    /// Record `n` exact accumulator combines.
+    /// Record `n` transparent combines or declared contraction presentations.
     fn added(&mut self, n: u64);
     /// Record `n` reads of a tabulated partial sum.
     fn read(&mut self, n: u64);
     /// Record `n` codec decodes.
     fn decoded(&mut self, n: u64);
-    /// Record a call into the dense tile kernels.
+    /// Record a call into a non-table kernel factorization.
     fn kernelled(&mut self);
 }
 
@@ -151,6 +172,29 @@ impl Ledger for Census {
     fn kernelled(&mut self) {
         self.kernel_calls = self.kernel_calls.saturating_add(1); // R3-ok: a counter
     }
+}
+
+/// A census is bounded storage even when the operation it observes has more
+/// than `u64::MAX` events. Convert each address-sized factor before combining
+/// it so the query saturates instead of overflowing in `usize` first.
+const fn count_factor(n: usize) -> u64 {
+    if n as u128 > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        n as u64
+    }
+}
+
+const fn count_product2(a: usize, b: usize) -> u64 {
+    count_factor(a).saturating_mul(count_factor(b)) // R3-ok: a bounded diagnostic counter
+}
+
+const fn count_product3(a: usize, b: usize, c: usize) -> u64 {
+    count_product2(a, b).saturating_mul(count_factor(c)) // R3-ok: a bounded diagnostic counter
+}
+
+const fn count_sum2(a: u64, b: u64) -> u64 {
+    a.saturating_add(b) // R3-ok: a bounded diagnostic counter
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +236,10 @@ pub use uor_matmul_kernels::{
 ///
 /// `run` is that capacity. The reduction is cut into runs of it and each run is
 /// placed into the exact accumulator once, which is the same chunking
-/// [`uor_matmul_core::fits_narrow`] already licenses for the tile kernels.
+/// [`uor_matmul_core::fits_narrow`] already licenses for the tile kernels. A
+/// downstream lane may honestly answer `Some(0)` when even one product exceeds
+/// it; that declaration routes the same products directly into the exact
+/// accumulator and the lane is never invoked.
 #[inline]
 fn dot_lane<E, Bd, L>(a: &[Alphabet<E, Bd>], w: &[Alphabet<E, Bd>], run: usize) -> AccOf<E>
 where
@@ -201,12 +248,54 @@ where
     L: Lane<E>,
 {
     let mut acc = <AccOf<E> as Accumulator>::ZERO;
+    if run == 0 {
+        for (&x, &y) in a.iter().zip(w) {
+            E::mac(&mut acc, x.get(), y.get());
+        }
+        return acc;
+    }
     for (ra, rw) in a.chunks(run).zip(w.chunks(run)) {
         let mut lane = L::ZERO;
         for (&x, &y) in ra.iter().zip(rw) {
             lane = lane.mac(x.get(), y.get());
         }
         acc = lane.place(acc);
+    }
+    acc
+}
+
+/// One dot over views whose cells cannot be borrowed as two contiguous runs.
+///
+/// `StreamLane` is still the arithmetic whenever it admits a product: only the
+/// source of each pair changes. Cutting at the lane's declared capacity is
+/// identical to [`dot_lane`]. At the public declaration `Some(0)`, the exact
+/// accumulator is the only carrier that exists, as in `dot_lane`; no zero-sized
+/// run or lane call is constructed.
+#[inline]
+fn dot_walk<E, L, F>(depth: usize, run: usize, mut pair: F) -> AccOf<E>
+where
+    E: Element,
+    L: Lane<E>,
+    F: FnMut(usize) -> (E, E),
+{
+    let mut acc = <AccOf<E> as Accumulator>::ZERO;
+    if run == 0 {
+        for p in 0..depth {
+            let (a, w) = pair(p);
+            E::mac(&mut acc, a, w);
+        }
+        return acc;
+    }
+    let mut start = 0usize;
+    while start < depth {
+        let end = start + run.min(depth - start);
+        let mut lane = L::ZERO;
+        for p in start..end {
+            let (a, w) = pair(p);
+            lane = lane.mac(a, w);
+        }
+        acc = lane.place(acc);
+        start = end;
     }
     acc
 }
@@ -252,13 +341,24 @@ pub struct Table<'s, L> {
 }
 
 /// Codes one slab addresses: [`Enumerable::CODE_SPACE`] rounded up to a power of
-/// two, so the index needs a mask and never a comparison.
+/// two, so the index needs a mask and never a comparison. Zero means no
+/// address-sized power of two contains the requested space (or the space itself
+/// is empty), and therefore no masked slab exists.
 ///
 /// A free function, not an associated one, because it is a fact about the
 /// enumeration and not about the lane it is tabulated in --- naming a lane to
 /// ask it would be naming something the answer does not depend on.
 pub const fn slab_codes(code_space: usize) -> usize {
-    code_space.next_power_of_two()
+    if code_space == 0 {
+        return 0;
+    }
+    // Zero is the total answer when no address-sized power of two can contain
+    // the enumeration. Such a slab does not exist, and `Table::new` declines
+    // it before either sizing arithmetic or a masked read can be reached.
+    match code_space.checked_next_power_of_two() {
+        Some(codes) => codes,
+        None => 0,
+    }
 }
 
 /// How many lane words a stack of `depth` tables over `rows` rows of a
@@ -267,7 +367,11 @@ pub const fn slab_codes(code_space: usize) -> usize {
 /// A query, so an embedded caller can size a static and know the answer before
 /// it calls anything.
 pub const fn table_words(code_space: usize, rows: usize, depth: usize) -> usize {
-    slab_codes(code_space)
+    let codes = slab_codes(code_space);
+    if code_space != 0 && rows != 0 && depth != 0 && codes == 0 {
+        return usize::MAX;
+    }
+    codes
         .saturating_mul(rows) // R3-ok: a size query, not an accumulation
         .saturating_mul(depth) // R3-ok: a size query, not an accumulation
 }
@@ -280,11 +384,45 @@ impl<'s, L: LaneWord> Table<'s, L> {
     /// arithmetic, and answered by the caller taking the streaming traversal
     /// instead --- not by an error reaching anyone (C6).
     pub fn new(words: &'s mut [L], code_space: usize, rows: usize, depth: usize) -> Option<Self> {
-        let want = table_words(code_space, rows, depth);
-        if code_space == 0 || rows == 0 || depth == 0 || words.len() < want {
+        let table = Self::borrow(words, code_space, rows, depth)?;
+        let slab = table.slab();
+        let live = code_space.checked_mul(rows)?;
+        // Public construction promises readable zero padding, including to a
+        // caller inspecting `stack()` or using a masked safe gather offset.
+        for slot in 0..depth {
+            table.words[slot * slab + live..slot * slab + slab].fill(L::ZERO);
+        }
+        Some(table)
+    }
+
+    /// Reborrow a stack whose padding was zeroed by [`Self::new`] at this exact
+    /// geometry and whose intervening builds wrote only its live entries.
+    ///
+    /// Private because the proof is the enclosing row walk: consecutive full
+    /// row tiles reuse the same `(code_space, rows, depth)`. A narrower edge
+    /// tile has different slab boundaries and therefore returns to `new`.
+    fn reuse_zeroed(
+        words: &'s mut [L],
+        code_space: usize,
+        rows: usize,
+        depth: usize,
+    ) -> Option<Self> {
+        Self::borrow(words, code_space, rows, depth)
+    }
+
+    fn borrow(words: &'s mut [L], code_space: usize, rows: usize, depth: usize) -> Option<Self> {
+        if code_space == 0 || rows == 0 || depth == 0 {
             return None;
         }
         let codes = slab_codes(code_space);
+        if codes == 0 {
+            return None;
+        }
+        let slab = codes.checked_mul(rows)?;
+        let want = slab.checked_mul(depth)?;
+        if words.len() < want {
+            return None;
+        }
         let table = Self {
             words: &mut words[..want],
             code_space,
@@ -292,13 +430,6 @@ impl<'s, L: LaneWord> Table<'s, L> {
             rows,
             depth,
         };
-        // The padding, once. The build writes `code_space * rows` of every slab
-        // and never the rest, so zeroing here is zeroing for the whole call.
-        let slab = codes * rows;
-        let live = code_space * rows;
-        for slot in 0..depth {
-            table.words[slot * slab + live..slot * slab + slab].fill(L::ZERO);
-        }
         Some(table)
     }
 
@@ -363,15 +494,97 @@ impl<'s, L: LaneWord> Table<'s, L> {
             acts,
             &mut self.words[start..start + live],
         );
-        let products = (self.code_space * block * self.rows) as u64;
+        Self::charge_build(spec, self.code_space, block, self.rows, ledger);
+    }
+
+    /// Build one addressed entry directly in its resident slab cell.
+    ///
+    /// `TableBuild` is pointwise by contract: a one-entry book and one-entry
+    /// output describe the same `T[c]` after the book pointer is advanced to
+    /// `c`. The sign Gray walk has an additional whole-enumeration precondition
+    /// and is excluded by its codec declaration at the call site.
+    #[allow(clippy::too_many_arguments)] // one pointwise presentation of the public TableBuild protocol
+    fn build_entry<E, Lg>(
+        &mut self,
+        spec: &TableSpec<E, L>,
+        block: usize,
+        book: &[E],
+        acts: &[E],
+        slot: usize,
+        index: usize,
+        ledger: &mut Lg,
+    ) where
+        E: Element,
+        L: Lane<E>,
+        Lg: Ledger,
+    {
+        debug_assert!(index < self.code_space);
+        let slab = self.slab();
+        let book_start = index * block;
+        let entry_start = slot * slab + index * self.rows;
+        spec.build(
+            1,
+            block,
+            &book[book_start..book_start + block],
+            acts,
+            &mut self.words[entry_start..entry_start + self.rows],
+        );
+        Self::charge_build(spec, 1, block, self.rows, ledger);
+    }
+
+    /// Build one scalar coordinate of one addressed codec entry.
+    ///
+    /// The resident slab keeps the original enumeration coordinate, while the
+    /// scalar spec sees a one-cell book and a block of one. This is the private
+    /// fracture of the same pointwise `TableBuild` identity, not a second table
+    /// representation.
+    #[allow(clippy::too_many_arguments)] // one scalar presentation of the locked TableBuild protocol
+    fn build_cell<E, Lg>(
+        &mut self,
+        spec: &TableSpec<E, L>,
+        source_block: usize,
+        coordinate: usize,
+        book: &[E],
+        acts: &[E],
+        index: usize,
+        ledger: &mut Lg,
+    ) where
+        E: Element,
+        L: Lane<E>,
+        Lg: Ledger,
+    {
+        debug_assert!(index < self.code_space);
+        let source = index * source_block + coordinate;
+        let entry = index * self.rows;
+        spec.build(
+            1,
+            1,
+            &book[source..source + 1],
+            acts,
+            &mut self.words[entry..entry + self.rows],
+        );
+        Self::charge_build(spec, 1, 1, self.rows, ledger);
+    }
+
+    fn charge_build<E, Lg>(
+        spec: &TableSpec<E, L>,
+        space: usize,
+        block: usize,
+        rows: usize,
+        ledger: &mut Lg,
+    ) where
+        E: Element,
+        L: Lane<E>,
+        Lg: Ledger,
+    {
+        let products = count_product3(space, block, rows);
         if spec.build_multiplies {
             ledger.multiplied(products);
         } else {
-            // The census counts what was issued. The per-codeword bound-1
-            // build issues the products as adds and subtracts (`CB-10`); the
-            // Gray sign build issues the walk's own count, and the spec says
-            // which it is.
-            ledger.added((spec.build_adds)(self.code_space, block, self.rows));
+            // The spec owns the observable-boundary charge: transparent fixed
+            // expansions name every add, while a generic `Element::mac` body
+            // names one opaque contraction presentation per product.
+            ledger.added((spec.build_adds)(space, block, rows));
         }
     }
 
@@ -401,6 +614,13 @@ impl<'a, 'w, 'c, E: Element, Bd: Bound, C: Enumerable<E, Bd>, O>
     TabulatedTriple<'a, 'w, 'c, E, Bd, C, O>
 {
     /// Report non-existence once, before any arithmetic is named.
+    ///
+    /// This is where the coded operand's *orientation* is decided, and it is
+    /// decided from `w.rows()` and `w.cols()` --- the two the canonical manifest
+    /// records as `rows` and `cols`. A caller holding a manifest and no operand
+    /// gets the same answer in advance from
+    /// `uor_matmul_codec::Manifest::reduces_along_the_block`, and `CS-10`
+    /// asserts that the two agree at every shape.
     pub fn new(
         a: MatView<'a, Alphabet<E, Bd>>,
         w: CodedMatrix<'w, E, Bd, C>,
@@ -513,11 +733,12 @@ impl<'s> Tabulation<'s> {
 /// A *query*. Offering none gives the same bytes from the uncollapsed traversal,
 /// which is the rule every other offer in this library follows (`CD-13`).
 pub fn suggested_tabulation_index(shape: Shape) -> usize {
-    let doubled = shape
+    let dictionary = shape
         .n
         .saturating_mul(2) // R3-ok: a size query, not an accumulation
-        .next_power_of_two()
-        .saturating_mul(2); // R3-ok: a size query, not an accumulation
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX);
+    let doubled = dictionary.saturating_mul(2); // R3-ok: a size query, not an accumulation
     shape.n.saturating_add(doubled) // R3-ok: a size query, not an accumulation
 }
 
@@ -571,20 +792,38 @@ pub fn suggested_tabulation<E: Tabulated, Bd: Bound>(
     code_space: usize,
     block: usize,
 ) -> usize {
-    let Some(plan) = Plan::choose(
-        code_space,
-        shape,
-        E::LANE_BYTES,
-        usize::MAX,
-        usize::MAX,
-        block,
-        E::probe_capacity::<E::Lane>(Bd::VALUE),
-    ) else {
+    let lane_capacity = E::probe_capacity::<E::Lane>(Bd::VALUE);
+    let lanes_per_exact = core::mem::size_of::<AccOf<E>>()
+        .checked_div(E::LANE_BYTES)
+        .unwrap_or(0);
+    let plan = if E::LANE_IS_EXACT {
+        Plan::choose_shared_exact(
+            code_space,
+            shape,
+            E::LANE_BYTES,
+            usize::MAX,
+            lanes_per_exact,
+            block,
+            lane_capacity,
+        )
+    } else {
+        Plan::choose(
+            code_space,
+            shape,
+            E::LANE_BYTES,
+            usize::MAX,
+            usize::MAX,
+            block,
+            lane_capacity,
+        )
+    };
+    let Some(plan) = plan else {
         return 0;
     };
     let tile = plan.rows.saturating_mul(plan.cols); // R3-ok: a size query, not an accumulation
     if E::LANE_IS_EXACT {
-        tile.saturating_add(plan.lane_words(code_space)) // R3-ok: a size query, not an accumulation
+        plan.shared_exact_charge(code_space, lanes_per_exact)
+            .unwrap_or(usize::MAX)
     } else {
         tile
     }
@@ -607,13 +846,20 @@ pub const fn tabulation_fits(
     l1_bytes: usize,
     lane_bytes: usize,
 ) -> bool {
-    code_space > 0
-        && rows > 0
-        && code_space
-            .saturating_mul(rows) // R3-ok: a cache or tile question, not an accumulation
-            .saturating_mul(lane_bytes) // R3-ok: a cache or tile question, not an accumulation
-            .saturating_mul(2) // R3-ok: a cache or tile question, not an accumulation
-            <= l1_bytes
+    let codes = slab_codes(code_space);
+    if codes == 0 || rows == 0 || lane_bytes == 0 {
+        return false;
+    }
+    let Some(words) = codes.checked_mul(rows) else {
+        return false;
+    };
+    let Some(bytes) = words.checked_mul(lane_bytes) else {
+        return false;
+    };
+    let Some(bytes) = bytes.checked_mul(2) else {
+        return false;
+    };
+    bytes <= l1_bytes
 }
 
 /// What one issued instruction of each traversal covers.
@@ -653,6 +899,65 @@ pub struct Steps {
     pub dense_rows: usize,
 }
 
+/// An exact product of three address-sized cost factors.
+///
+/// Each factor occupies at most one 64-bit radix coordinate on every target
+/// this workspace supports, so three coordinates are the derived complete
+/// width. Quotient/remainder carry keeps the comparison total without a
+/// saturating estimate changing which traversal is selected at `usize::MAX`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct CostProduct([u64; 3]);
+
+impl CostProduct {
+    const RADIX: u128 = u64::MAX as u128 + 1;
+
+    const fn of(a: usize, b: usize, c: usize) -> Self {
+        let factors = [a as u64, b as u64, c as u64];
+        let mut limbs = [1u64, 0, 0];
+        let mut factor = 0usize;
+        while factor < factors.len() {
+            let mut carry = 0u128;
+            let mut limb = 0usize;
+            while limb < limbs.len() {
+                let wide = limbs[limb] as u128 * factors[factor] as u128 + carry;
+                limbs[limb] = (wide % Self::RADIX) as u64;
+                carry = wide / Self::RADIX;
+                limb += 1;
+            }
+            // Three address-sized factors are strictly below radix^3, so the
+            // third multiplication cannot carry beyond the derived width.
+            debug_assert!(carry == 0);
+            factor += 1;
+        }
+        Self(limbs)
+    }
+
+    const fn greater_than(self, other: Self) -> bool {
+        if self.0[2] != other.0[2] {
+            self.0[2] > other.0[2]
+        } else if self.0[1] != other.0[1] {
+            self.0[1] > other.0[1]
+        } else {
+            self.0[0] > other.0[0]
+        }
+    }
+}
+
+/// Dense products per issued step after charging an unfilled row tile.
+const fn effective_dense_step(rows: usize, steps: Steps) -> usize {
+    if steps.dense_rows == 0 {
+        return 0;
+    }
+    let present = if rows < steps.dense_rows {
+        rows
+    } else {
+        steps.dense_rows
+    };
+    // Two address-sized factors fit `u128`; division by at least the second
+    // factor leaves a result no larger than `steps.dense`, hence `usize`.
+    (steps.dense as u128 * present as u128 / steps.dense_rows as u128) as usize
+}
+
 /// Does tabulation issue fewer instructions than the dense tile, and does its
 /// table fit?
 ///
@@ -661,8 +966,11 @@ pub struct Steps {
 /// per column block, so it is the block and not the shape that the count turns
 /// on.
 ///
+/// In this reference case `q = lanes_per_add = steps.table / block`, so the
+/// build denominator is `q` and clearing it contributes the explicit `block`:
+///
 /// ```text
-/// tabulated = m*k*S/steps.table + m*n*k/steps.table
+/// tabulated = m*k*S*block/steps.table + m*n*k/steps.table
 /// dense     = m*k*n/steps.dense
 /// ```
 ///
@@ -670,10 +978,13 @@ pub struct Steps {
 /// `cols * (steps.table - effective) > code_space * effective * block`, where
 /// `effective` is the dense step scaled by the rows actually present.
 ///
-/// Two cases have no such `cols` and are refused outright: `block == 1`, where
-/// one code names one element; and `steps.table <= effective`, where one table
-/// instruction does not even cover what one dense instruction does, so nothing
-/// repays the build.
+/// This locked public query has no [`TableSpec`] argument, so its build term is
+/// the reference case `build_products_per_step == lanes_per_add`. A block-one
+/// Atlas lookup replaces a much larger contraction and needs measured
+/// build-kind evidence this signature cannot observe; the private driver
+/// predicate below applies that evidence to the exact built-in declaration.
+/// `block == 1` therefore remains false here rather than being overgeneralized
+/// to arbitrary downstream builders.
 pub const fn tabulation_pays(
     code_space: usize,
     block: usize,
@@ -683,21 +994,56 @@ pub const fn tabulation_pays(
     l1_bytes: usize,
     lane_bytes: usize,
 ) -> bool {
-    if steps.dense_rows == 0 {
+    if block <= 1 || steps.table == 0 {
         return false;
     }
-    let present = if rows < steps.dense_rows {
-        rows
-    } else {
-        steps.dense_rows
-    };
-    let effective = steps.dense.saturating_mul(present) / steps.dense_rows; // R3-ok: a cost estimate, not an accumulation
-    block > 1
-        && effective > 0
+    let effective = effective_dense_step(rows, steps);
+    effective > 0
         && steps.table > effective
-        && cols.saturating_mul(steps.table - effective) // R3-ok: a cost estimate, not an accumulation
-            > code_space.saturating_mul(effective).saturating_mul(block) // R3-ok: a cost estimate, not an accumulation
+        && CostProduct::of(cols, steps.table - effective, 1)
+            .greater_than(CostProduct::of(code_space, effective, block))
         && tabulation_fits(code_space, rows, l1_bytes, lane_bytes)
+}
+
+/// The actual automatic selector, with the build declaration the public
+/// operation-count query cannot observe.
+///
+/// For a block longer than one, `q = build_products_per_step`,
+/// `t = block * lanes_per_add`, and `e` is the row-adjusted dense step. The
+/// exact costs are `r*k*S/q + r*c*k/t` and `r*c*k/e`; clearing denominators
+/// gives `c*q*(t-e) > S*e*t`. A block-one contextual Atlas contraction is not
+/// this product-build comparison: CG-16 found no geometry-invariant scalar
+/// crossover, so it cannot be assigned one by this shape-only predicate.
+/// Forced [`Traversal::Tabulated`] never consults the cost predicate.
+#[allow(clippy::too_many_arguments)] // the locked public cost query plus the private build declaration
+fn tabulation_pays_for_spec<E, L>(
+    code_space: usize,
+    block: usize,
+    cols: usize,
+    rows: usize,
+    steps: Steps,
+    l1_bytes: usize,
+    lane_bytes: usize,
+    table: &TableSpec<E, L>,
+) -> bool {
+    if block == 0 || !tabulation_fits(code_space, rows, l1_bytes, lane_bytes) {
+        return false;
+    }
+    if block == 1 {
+        return false;
+    }
+
+    let Some(table_step) = block.checked_mul(table.lanes_per_add) else {
+        return false;
+    };
+    let build_step = table.build_products_per_step;
+    let effective = effective_dense_step(rows, steps);
+    build_step > 0
+        && effective > 0
+        && steps.table == table_step
+        && table_step > effective
+        && CostProduct::of(cols, build_step, table_step - effective)
+            .greater_than(CostProduct::of(code_space, effective, table_step))
 }
 
 /// The most rows of `A` one table can cover and still sit in L1.
@@ -706,10 +1052,17 @@ pub const fn tabulation_pays(
 /// the blocked traversal uses --- not by a number chosen for this traversal (R8).
 /// Zero means no table fits at all, which selects the streaming traversal.
 pub const fn tabulation_rows(code_space: usize, l1_bytes: usize, lane_bytes: usize) -> usize {
-    if code_space == 0 || lane_bytes == 0 {
+    let codes = slab_codes(code_space);
+    if codes == 0 || lane_bytes == 0 {
         return 0;
     }
-    let room = l1_bytes / (2 * code_space * lane_bytes);
+    let Some(words) = codes.checked_mul(lane_bytes) else {
+        return 0;
+    };
+    let Some(bytes) = words.checked_mul(2) else {
+        return 0;
+    };
+    let room = l1_bytes / bytes;
     if room < blocking::MC {
         room
     } else {
@@ -736,17 +1089,26 @@ pub const fn tabulation_depth(
     l2_bytes: usize,
     lane_bytes: usize,
 ) -> usize {
-    if code_space == 0 || rows == 0 || lane_bytes == 0 || block == 0 {
+    let codes = slab_codes(code_space);
+    if codes == 0 || rows == 0 || lane_bytes == 0 || block == 0 {
         return 0;
     }
-    let per_slot = code_space * rows * lane_bytes;
+    let Some(words) = codes.checked_mul(rows) else {
+        return 0;
+    };
+    let Some(per_slot) = words.checked_mul(lane_bytes) else {
+        return 0;
+    };
     // Half of L2. The other half is the code stream and the exact accumulator
     // tile, which pass through the same cache. Measured, a quarter was better
     // while the column loop had one load in flight and half is better now that it
     // has `COLUMN_GROUP` of them: the stack stops needing to be resident once the
     // latency is overlapped, and what is left to minimise is placement traffic,
     // which falls as `1/depth`.
-    let mut depth = l2_bytes / (2 * per_slot);
+    let Some(cache_charge) = per_slot.checked_mul(2) else {
+        return 0;
+    };
+    let mut depth = l2_bytes / cache_charge;
     if depth == 0 {
         depth = 1;
     }
@@ -764,29 +1126,24 @@ pub const fn tabulation_depth(
     }
 }
 
-/// What one call's panels declare for the lane: the scale its inputs are
-/// pre-scaled by, and the worst one-product magnitude its depth is derived
-/// from.
+/// What one call's panels declare for the lane: the grade gauge used to label
+/// its contextual cells, and the nonnegative product envelope from which its
+/// local source schedule is derived.
 ///
 /// A fact of the call, not the family --- but for an integer family it is
 /// the family's own declaration: bases of zero and the square of the declared
 /// bound, with no walk to answer it, because an integer element carries no
-/// exponent. The float symbol lane's is the span walk's answer, asked once
-/// per call and only when the table was selected (`CD-20`).
+/// exponent. The float symbol lane observes the complete addressed extent once
+/// per selected table call and remains total for every answer (`CD-32`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LaneScale {
-    /// `A`'s elements are pre-scaled by `2^-base_a`: the panel's lowest
-    /// decoded exponent.
+    /// The lowest finite grade observed in `A`, used as its contextual q gauge.
     pub base_a: i32,
-    /// The codebook's, likewise.
+    /// The codebook's lowest finite grade, likewise.
     pub base_b: i32,
-    /// The worst one-product magnitude the lane must hold: the scaled
-    /// panels' per-side bounds multiplied, `2^(2p + wa + wb)` --- per side,
-    /// because the lane holds a product of one element of each panel and the
-    /// panels' spans differ. The kernel table's single declared bound,
-    /// squared, is the same answer at a symmetric span and the conservative
-    /// one at an asymmetric one; the lane is not the kernel table and is not
-    /// bound by its one-alphabet interface.
+    /// The exact nonnegative certificate for one source atom, or the global
+    /// envelope whose source-local refinement is required before contraction.
+    /// `Q+1` identifies a singleton boundary/tag atom; no value is declined.
     pub per_step: u128,
 }
 
@@ -816,8 +1173,8 @@ impl LaneScale {
 /// Not a quality ordering, and not a fallback chain. Every lane computes the same
 /// integer; a narrower one moves fewer bytes per product, and `CD-13` asserts the
 /// bytes across all of them. An element family with no narrow register at all
-/// tabulates in the exact accumulator, which is not a placeholder there but the
-/// whole of what the hardware offers --- the same status
+/// tabulates in the exact accumulator, which is the complete sequence the
+/// hardware offers --- the same status
 /// [`uor_matmul_kernels::available_i64_exact`] has for the dense tile.
 ///
 /// The supertrait is [`Element`], not [`Kernelized`]: the tabulated traversal
@@ -849,10 +1206,14 @@ pub trait Tabulated: Element {
     /// The family's own lane for an integer --- a plain dot product is a
     /// table of one entry that nobody shares, so the stream and the table
     /// hold their runs in the same register. A family whose table lane holds
-    /// *scaled* products cannot stream in it: the stream walks raw elements
-    /// with no span walk ahead of them, so its lane is the one that holds a
-    /// raw product exactly --- the complete accumulator, which was the float
-    /// families' table lane too before the scaled lane existed.
+    /// contextual products cannot stream in it: the stream walks raw elements
+    /// with no q extent observation ahead of them, so its lane is the one that
+    /// holds a raw product exactly --- the complete accumulator, which was the
+    /// float families' table lane too before the q lane existed. Its concrete
+    /// identity remains part of this public extension point. The optimized
+    /// coded-float decline reaches the same complete word through the family's
+    /// empty-rest dense capability; it does not replace this associated type
+    /// with a private carrier.
     type StreamLane: Lane<Self>;
 
     /// Bytes one lane word occupies. The column loop's traffic is this divided
@@ -935,8 +1296,19 @@ pub trait Tabulated: Element {
 
     /// The dense factorization, over the decoded operand: `a` against `b`,
     /// which is `W^T` read through swapped strides, into `c`, with `rest` as
-    /// panel room. `false` when the dense triple cannot be built, which the
-    /// caller answers by streaming --- the same bytes by another walk (S13).
+    /// panel room. `false` when the dense triple or its required panel cannot
+    /// be built, which the caller answers by streaming --- the same bytes by
+    /// another walk (S13). A `false` answer writes no output.
+    ///
+    /// Acceptance with an empty `rest` is value-independent: the dense
+    /// factorization can contract a borrowed dot without caller panel storage.
+    /// The coded decline presents its first real bounded source chunk to that
+    /// factorization and retains the exact partial when it accepts; there is no
+    /// separate capability call and no recomputed product. Shipped float
+    /// families accept; packed integer families require
+    /// `rest.len() >= b.rows()` and decline before writing. An implementation
+    /// cannot answer from operand values or change its answer between conformant
+    /// subviews (`CD-20`).
     ///
     /// One method per family, because the dense driver is one per family: the
     /// tile kernels for an integer, the exact float traversal for a float.
@@ -968,26 +1340,28 @@ pub trait Tabulated: Element {
     /// walked.
     ///
     /// The lane's own answer at the declared bound, for every family whose
-    /// capacity is a function of the alphabet alone. A family whose real
-    /// capacity is a fact of the *data* --- the float symbol lane's is the
-    /// span walk's --- plans against the caches instead, and the walk's
-    /// answer shrinks the depth once it is in: planning at the data-free
-    /// answer, one product at an unbounded alphabet, would pin the stack at
-    /// one block for every call, admitted or not.
+    /// capacity is a function of the alphabet alone. The q lane's capacity is
+    /// a fact of its observed source extents, so it plans against the caches
+    /// and derives source-ordered local boundaries after observation. Planning
+    /// at a data-free one-product bound would pin every call to one block even
+    /// though scalar fracture is total.
     fn probe_capacity<L: Lane<Self>>(declared: u128) -> Option<usize> {
         L::capacity(declared)
     }
 
-    /// The scale one call's panels declare for the lane, from a walk of the
-    /// activations and the codebook --- or `None`, declining the table, when
-    /// the panels are not the lane's alphabet.
+    /// The contextual gauge and product envelope one call's panels declare,
+    /// from an observation of the activations and codebook.
     ///
     /// The default answers the integral scale without walking: an integer
     /// element carries no exponent and there is nothing to measure. The float
-    /// symbol lane's answer is the placement bridge's span walk (`CD-19`),
-    /// over `A` and over the codebook --- not the coded stream: the alphabet
-    /// of `W` is the codebook, already materialized, so the walk costs
-    /// `m * k + code_space * block` decodes rather than `(m + n) * k`.
+    /// symbol lane's answer is the total q extent observation (`CD-32`), over
+    /// `A` and the codebook. Ordinarily that costs `m * k + code_space *
+    /// block` decodes rather than `(m + n) * k`; a pointwise block-one call
+    /// whose offered dictionary can name its addressed symbols walks each
+    /// addressed index once, because unused symbols cannot constrain its
+    /// scale. Without that storage the ordinary raw-stream or enumeration
+    /// factorization remains total. Non-finite symbols and an envelope above Q
+    /// are retained for singleton/local fracture rather than ending the walk.
     ///
     /// Asked only after the traversal has selected the table, so a call the
     /// predicate declines never pays for it; the decodes it issues are
@@ -1017,14 +1391,16 @@ pub trait Tabulated: Element {
         L::capacity(declared)
     }
 
-    /// Scale one element by `2^-base`, exactly, on its way into the table's
-    /// inputs.
+    /// Spell one element at `2^-base`, exactly, in the element-sized cell the
+    /// table lane consumes.
     ///
     /// Identity for every family the default `lane_scale` serves: their
-    /// elements carry no exponent and the base is zero. The float symbol
-    /// lane's is a power-of-two rescaling of the code --- bit surgery, not
-    /// float arithmetic --- exact by the same arithmetic the bridge's
-    /// `rescale` states.
+    /// elements carry no exponent and the base is zero. The f32 symbol lane
+    /// uses the same four-byte cell contextually as a q carrier;
+    /// [`Scaled64::mac`] is its paired consumer. That intermediate is panel
+    /// storage, not a standalone IEEE result. Their composition and final
+    /// placement are the exact power-of-two rescaling this protocol declares
+    /// (`CD-20`).
     fn prescale(x: Self, base: i32) -> Self {
         let _ = base;
         x
@@ -1085,6 +1461,12 @@ where
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
 {
+    // The packed factorization exists only with one reduction panel.  The
+    // outer dense route establishes this before decoding; repeating the fact
+    // here makes a first real empty-rest decline occur before any output.
+    if rest.len() < b.rows() {
+        return false;
+    }
     let Ok(mut dense) = Triple::new(a, b, c) else {
         // The shapes conformed when the `TabulatedTriple` was built and the output
         // was checked for aliasing there, so neither failure can arise a second
@@ -1453,22 +1835,90 @@ impl Tabulated for i64 {
     }
 }
 
-/// `f32`: the lane is the scaled integer word, [`Scaled64`]. A float has no
-/// magnitude for a bound to measure, so the lane's alphabet is not the
-/// element type's but the *call's*: the panels' significands pre-scaled to
-/// their measured base exponents, which are exact integers below `2^31` ---
-/// the placement bridge's alphabet, one level up (`CD-19`). Over it the table
-/// is integer tabulation: the build decodes each codebook entry and each
-/// activation into that alphabet once, the gather accumulates eight-byte lane
-/// words, and the exact sum is placed at `2^(base_a + base_b)`. At a 256-entry
-/// codebook and a four-row tile the slab is 8 KiB where the complete
-/// accumulator's was 80, and the table fits L1 --- which is the whole of why
-/// this lane exists.
+/// `f32`: the table panel stores one contextual q carrier in each existing
+/// four-byte cell. Its fraction is the exact IEEE significand residue and its
+/// q field is the finite factor's grade relative to the call's common base;
+/// q=255 retains all non-finite boundary symbols. [`Scaled64`] contracts those
+/// cells through the signed-octet Atlas lookup and holds either the unchanged
+/// compact coefficient or a self-describing finite/boundary tag. The result is
+/// placed once at `base_a + base_b`.
 ///
-/// What the lane cannot hold, the walk declines by declaration: a non-finite
-/// code, or a span past the seven binades `24 + w <= 31` admits. Those calls
-/// take the dense float factorization at the same bytes, and the census says
-/// which ran (`CD-20`).
+/// The compact interval is not a data limit. When a whole codec block cannot
+/// fit, the driver derives least per-scalar envelopes from the already chosen
+/// factorization and fractures only the unsafe aggregate at its source-ordered
+/// boundary. Every IEEE value therefore remains table-executable (`CD-32`).
+const fn f32_q_build_presentations(space: usize, block: usize, rows: usize) -> u64 {
+    // The q contraction has data-dependent Atlas work. The generic TableBuild
+    // boundary can observe exactly one contraction presentation per product,
+    // while CU/CD purity gates inspect the private recurrence itself.
+    count_product3(space, block, rows)
+}
+
+#[inline(always)]
+fn atlas_power_of_two_u32(bits: u32) -> u32 {
+    let mut value = 1u32;
+    for _ in 0..bits {
+        value = value.wrapping_add(value);
+    }
+    value
+}
+
+#[inline(always)]
+fn atlas_double_u32(mut value: u32, times: u32) -> u32 {
+    for _ in 0..times {
+        value = value.wrapping_add(value);
+    }
+    value
+}
+
+/// Relabel one IEEE symbol as its contextual q cell without floating-point
+/// arithmetic. Sign and fraction stay in their source positions; only the
+/// exponent field becomes the exact grade relative to `base`.
+#[inline(always)]
+fn project_f32_q(x: f32, base: i32) -> f32 {
+    let raw: u32 = bytemuck::cast::<f32, u32>(x);
+    let sign_place = atlas_power_of_two_u32(u32::BITS - 1);
+    let fraction_place = atlas_power_of_two_u32(f32_q::SIGNIFICAND_BITS - 1);
+    let negative = raw >= sign_place;
+    let unsigned = if negative { raw - sign_place } else { raw };
+    let source_q = unsigned / fraction_place;
+    let fraction = unsigned % fraction_place;
+    let maximum_relative = u32::try_from(f32_q::MAX_FACTOR_EXP - f32_q::MIN_FACTOR_EXP)
+        .expect("the model-derived f32 grade range is nonnegative");
+    let special_q = maximum_relative + 2;
+    let q: u32 = if source_q == 0 || source_q == special_q {
+        source_q
+    } else {
+        let relative = x
+            .pack()
+            .exp
+            .checked_sub(base)
+            .expect("the observed common base is no greater than a finite factor grade");
+        u32::try_from(relative)
+            .expect("the f32 factor-grade interval fits the model-derived q field")
+            + 1
+    };
+    let sign = if negative { sign_place } else { 0 };
+    let q_field = atlas_double_u32(q, f32_q::SIGNIFICAND_BITS - 1);
+    bytemuck::cast::<u32, f32>(sign + q_field + fraction)
+}
+
+/// `P * 2^width`, clipped only after it has crossed the compact ceiling. The
+/// sentinel `Q+1` says that this source atom must be placed by itself.
+#[inline]
+fn f32_q_step_bound(width: u32) -> u128 {
+    let ceiling = u128::from(f32_q::COMPACT_CEILING);
+    let singleton = ceiling + 1;
+    let mut bound = u128::from(f32_q::PRODUCT_BOUND);
+    for _ in 0..width {
+        if bound > ceiling - bound.min(ceiling) {
+            return singleton;
+        }
+        bound += bound;
+    }
+    bound
+}
+
 impl Tabulated for f32 {
     type Lane = Scaled64;
     type ModLane = Scaled64;
@@ -1476,9 +1926,9 @@ impl Tabulated for f32 {
     const LANE_IS_EXACT: bool = false;
 
     fn modular_table_admitted(_: u32) -> bool {
-        // There is no quotient a float wraps into, as before --- and the
-        // scaled lane is not one: it is exact at the declared scale, not
-        // congruent modulo a width.
+        // There is no quotient a float wraps into, as before --- and the q lane
+        // is not one: it is exact at its contextual gauge, not congruent modulo
+        // a width.
         false
     }
 
@@ -1495,7 +1945,14 @@ impl Tabulated for f32 {
         // divides every block. The walk's bound is not a selection input:
         // there is no narrower-`max_bound` sequence to admit or decline.
         let _ = (backend, bound, block);
-        portable_table::<f32, Scaled64>(rows, group)
+        let mut spec = portable_table::<f32, Scaled64>(rows, group);
+        // `Scaled64::mac` contracts two q cells through their occupied
+        // centered-octet extents and adds the resulting Laurent coefficient.
+        // The mathematical product therefore issues no widening multiply.
+        spec.build_multiplies = false;
+        spec.build_adds = f32_q_build_presentations;
+        spec.lane_cap = u128::from(f32_q::COMPACT_CEILING);
+        spec
     }
 
     fn table_spec_modular(
@@ -1529,9 +1986,9 @@ impl Tabulated for f32 {
     }
 
     fn probe_capacity<L: Lane<Self>>(_: u128) -> Option<usize> {
-        // The lane's capacity is a fact of the panels' spans, which the plan
-        // is made before: plan against the caches and let `lane_run` shrink
-        // the depth once the walk has answered.
+        // The lane's capacity is a fact of the observed q extents, which the
+        // plan precedes: plan against the caches, then let the source-local
+        // scheduler partition the envelope without refusing a value.
         None
     }
 
@@ -1545,58 +2002,124 @@ impl Tabulated for f32 {
         C: Enumerable<Self, Bd>,
         Lg: Ledger,
     {
-        // The bridge's walk and the bridge's declaration (`CD-19`), over `A`
-        // and over the codebook. The alphabet of `W` is the codebook, already
-        // materialized, so the coded stream itself is never read here.
+        // The q lane's walk and declaration (`CD-32`), over every addressed
+        // activation and book presentation. Non-finite symbols are retained as
+        // boundary tags and do not end the walk: later finite symbols still
+        // determine the gauge used by the paired q projection.
         let (m, k) = (a.rows(), a.cols());
         let peeled = a.peeled();
-        let mut finite = true;
+        let mut visits = 0u64;
+        let mut nonfinite = false;
+        let sign_place = atlas_power_of_two_u32(u32::BITS - 1);
+        let mut max_a = (0u32, 0.0f32);
         let mut a_span = Span::EMPTY;
         for i in 0..m {
             for v in peeled.row_walk(i, 0, k) {
-                let code = v.pack();
-                finite &= code.is_finite();
-                a_span.see(code);
+                let value = *v;
+                let code = value.pack();
+                visits = count_sum2(visits, 1);
+                if code.is_finite() {
+                    a_span.see(code);
+                    let magnitude = bytemuck::cast::<f32, u32>(value) % sign_place;
+                    if magnitude > max_a.0 {
+                        max_a = (magnitude, value);
+                    }
+                } else {
+                    nonfinite = true;
+                }
             }
         }
         let mut b_span = Span::EMPTY;
         let codec = w.codec();
         let block = <C as uor_matmul_codec::Codec<Self, Bd>>::MAX_BLOCK;
-        for index in 0..C::CODE_SPACE {
-            for t in 0..block {
-                let code = codec.decode_element(C::code_at(index), t).get().pack();
-                finite &= code.is_finite();
-                b_span.see(code);
+        let mut max_b = (0u32, 0.0f32);
+        let sparse_book = block == 1 && !C::SIGN_BIT_BOOK && w.codes().len() < C::CODE_SPACE;
+        if sparse_book {
+            // The private addressed-codec presentation makes this one visit per
+            // distinct address when the caller offered the dictionary. Without
+            // it, raw visits are still fewer than a complete enumeration and
+            // require no hidden allocation or arbitrary cap.
+            for &stored in w.codes() {
+                let index = C::index_of(stored);
+                let value = codec.decode_element(C::code_at(index), 0).get();
+                let code = value.pack();
+                visits = count_sum2(visits, 1);
+                if code.is_finite() {
+                    b_span.see(code);
+                    let magnitude = bytemuck::cast::<f32, u32>(value) % sign_place;
+                    if magnitude > max_b.0 {
+                        max_b = (magnitude, value);
+                    }
+                } else {
+                    nonfinite = true;
+                }
+            }
+        } else {
+            for index in 0..C::CODE_SPACE {
+                for t in 0..block {
+                    let value = codec.decode_element(C::code_at(index), t).get();
+                    let code = value.pack();
+                    visits = count_sum2(visits, 1);
+                    if code.is_finite() {
+                        b_span.see(code);
+                        let magnitude = bytemuck::cast::<f32, u32>(value) % sign_place;
+                        if magnitude > max_b.0 {
+                            max_b = (magnitude, value);
+                        }
+                    } else {
+                        nonfinite = true;
+                    }
+                }
             }
         }
-        ledger.decoded((m * k + C::CODE_SPACE * block) as u64); // R3-ok: a size or cost query, not an accumulation
+        ledger.decoded(visits);
         let (wa, wb) = (a_span.width(), b_span.width());
-        let bridge = finite
-            .then(|| admits_bridge::<Self>(a_span, b_span))
-            .flatten()?;
-        // The worst one-product magnitude, per side: `2^(p + wa)` of an
-        // activation against `2^(p + wb)` of a codebook entry.
-        let per_step = 1u128 << (2 * Self::SIGNIFICAND_BITS + wa + wb);
+        // A boundary tag is a singleton. Otherwise P is the largest exact
+        // significand product and the two relative spans regrade it. Crossing
+        // Q is represented by Q+1; the local scheduler refines that global
+        // envelope before building rather than declining the table.
+        let per_step = if nonfinite {
+            u128::from(f32_q::COMPACT_CEILING) + 1
+        } else if k == 1 && block == 1 {
+            // On a scalar source presentation the largest magnitude on each
+            // side is the exact L-infinity certificate for every output lane.
+            // Binary32's unsigned symbol order is magnitude order on finite
+            // values, so selecting the extrema is address arithmetic. Their
+            // one product is then contracted by the same q/Atlas operation the
+            // table build uses; a tag is the singleton certificate Q+1.
+            let product = <Scaled64 as Lane<f32>>::mac(
+                Scaled64(0),
+                project_f32_q(max_a.1, a_span.base()),
+                project_f32_q(max_b.1, b_span.base()),
+            );
+            ledger.added(1);
+            if product.0 >= i64::try_from(f32_q::TAG_BASE).expect("the q tag base fits i64") {
+                u128::from(f32_q::COMPACT_CEILING) + 1
+            } else {
+                u128::from(product.0.unsigned_abs())
+            }
+        } else {
+            f32_q_step_bound(wa + wb)
+        };
         Some(LaneScale {
-            base_a: bridge.base_a,
-            base_b: bridge.base_b,
+            base_a: a_span.base(),
+            base_b: b_span.base(),
             per_step,
         })
     }
 
     fn lane_run<L: Lane<Self>>(_: u128, scale: &LaneScale) -> Option<usize> {
-        // The lane word is an `i64` and the family declares no other scaled
-        // lane, so the cap is `i64`'s own; the depth is the walk's per-side
-        // bound, exactly as `capacity` derives it from a single one.
-        Some(
-            usize::try_from((i64::MAX as u128) / scale.per_step) // R3-ok: a lane-width question, not an accumulation
-                .unwrap_or(usize::MAX)
-                .max(1),
-        )
+        // The paired lane owns Q. Passing the exact observed product envelope
+        // through its declaration keeps the query and the executed carrier in
+        // one model-derived capacity law.
+        L::capacity(scale.per_step)
     }
 
     fn prescale(x: Self, base: i32) -> Self {
-        scaled_f32(x.pack(), base)
+        // This contextual protocol cell goes directly to `Scaled64::mac`.
+        // Only its address field is relabelled; no semantic float arithmetic or
+        // parallel carrier buffer exists.
+        project_f32_q(x, base)
     }
 
     fn dense_steps(_backend: Backend, _bound: u128, _rows: usize, table: usize) -> Steps {
@@ -1631,6 +2154,24 @@ impl Tabulated for f32 {
         let Ok(mut dense) = Triple::new(a.peeled(), b.peeled(), c) else {
             return false;
         };
+        if dense.shape().m == 1 && dense.shape().n == 1 {
+            let mut acc = <AccOf<Self> as Accumulator>::ZERO;
+            accumulate_atlas_dot(
+                &mut acc,
+                dense.shape().k,
+                PanelFacts::UNKNOWN,
+                options.backend,
+                |p| dense.a().at(0, p).pack(),
+                |p| dense.b().at(p, 0).pack(),
+            );
+            let prior = if epilogue.reads_c() {
+                Some(*dense.c_mut().at(0, 0))
+            } else {
+                None
+            };
+            *dense.c_mut().at_mut(0, 0) = epilogue.finish(acc, prior, options.encode);
+            return true;
+        }
         gemm_float(&mut dense, epilogue, options);
         true
     }
@@ -1645,12 +2186,13 @@ impl Tabulated for f32 {
     }
 }
 
-/// `f64`: no scaled lane. A 53-bit significand is not an `i32` at any span ---
-/// the bridge's admission arithmetic answers for the type, not a branch on it
-/// --- so the lane is the complete accumulator, with the same status `i32`'s
-/// has, and a 256-entry table over 536-byte words fits no L1 tile at any
-/// tile height. The dense float factorization is what runs, at the same
-/// bytes (`CD-20`).
+/// `f64`: the lane is the complete accumulator. Every product and table-entry
+/// combine remains the Atlas lookup/add contraction; only its residency is
+/// wider than `f32`'s compact q lane. The measured one-element Arena
+/// codec does not repay that traffic in the automatic selector, while a
+/// downstream enumerable codec with a longer block is priced from its own
+/// declaration and may amortize the same pure table build. There is no
+/// categorical codec assumption in the family (`CD-20`).
 impl Tabulated for f64 {
     type Lane = Wide<AccOf<f64>>;
     type ModLane = Wide<AccOf<f64>>;
@@ -1673,7 +2215,15 @@ impl Tabulated for f64 {
         // The reference is the only sequence for this family, and its `k_group`
         // is one, which divides every block.
         let _ = (backend, bound, block);
-        portable_table::<f64, Wide<AccOf<f64>>>(rows, group)
+        let mut spec = portable_table::<f64, Wide<AccOf<f64>>>(rows, group);
+        // `Wide<f64>` delegates each product to the exact Atlas accumulator;
+        // its lookup/add body issues no widening multiply instruction. The
+        // internal NAF atom count depends on the values and is opaque at this
+        // shape-only TableSpec boundary, so the inherited one-per-product add
+        // charge is explicitly the contraction presentation, not a fabricated
+        // claim about the number of internal Atlas additions.
+        spec.build_multiplies = false;
+        spec
     }
 
     fn table_spec_modular(
@@ -1733,6 +2283,24 @@ impl Tabulated for f64 {
         let Ok(mut dense) = Triple::new(a.peeled(), b.peeled(), c) else {
             return false;
         };
+        if dense.shape().m == 1 && dense.shape().n == 1 {
+            let mut acc = <AccOf<Self> as Accumulator>::ZERO;
+            accumulate_atlas_dot(
+                &mut acc,
+                dense.shape().k,
+                PanelFacts::UNKNOWN,
+                options.backend,
+                |p| dense.a().at(0, p).pack(),
+                |p| dense.b().at(p, 0).pack(),
+            );
+            let prior = if epilogue.reads_c() {
+                Some(*dense.c_mut().at(0, 0))
+            } else {
+                None
+            };
+            *dense.c_mut().at_mut(0, 0) = epilogue.finish(acc, prior, options.encode);
+            return true;
+        }
         gemm_float(&mut dense, epilogue, options);
         true
     }
@@ -1779,6 +2347,114 @@ impl Plan {
             .saturating_add(table_words(code_space, self.rows, self.depth)) // R3-ok: a size query, not an accumulation
     }
 
+    /// Exact-accumulator words jointly occupied by the output tile and by a
+    /// lane/table plan relabelled into that same offer.
+    fn shared_exact_charge(&self, code_space: usize, lanes_per_exact: usize) -> Option<usize> {
+        if lanes_per_exact == 0 {
+            return None;
+        }
+        let tile = self.rows.checked_mul(self.cols)?;
+        let lanes = tile.checked_add(table_words(code_space, self.rows, self.depth))?;
+        tile.checked_add(lanes.div_ceil(lanes_per_exact))
+    }
+
+    /// Widest plan when exact cells and table lanes inhabit one caller offer.
+    ///
+    /// The ordinary planner receives two independent capacities. An exact lane
+    /// has one: charging the tile against it and then independently spending
+    /// the same cells on the lane stack produced an over-wide plan which the
+    /// driver declined after planning. This search walks the existing derived
+    /// row ladder, then solves the monotone column boundary exactly and spends
+    /// the remainder on depth. No candidate width or iteration cap is chosen.
+    fn choose_shared_exact(
+        code_space: usize,
+        shape: Shape,
+        lane_bytes: usize,
+        exact_offer: usize,
+        lanes_per_exact: usize,
+        block: usize,
+        lane_capacity: Option<usize>,
+    ) -> Option<Self> {
+        if code_space == 0
+            || block == 0
+            || shape.m == 0
+            || shape.n == 0
+            || lanes_per_exact == 0
+            || lane_capacity.is_some_and(|capacity| capacity < block)
+        {
+            return None;
+        }
+        let slab = slab_codes(code_space);
+        if slab == 0 {
+            return None;
+        }
+        let row_cap = tabulation_rows(code_space, blocking::L1_BYTES, lane_bytes).min(shape.m);
+        for rows in ROW_TILES {
+            if rows > row_cap {
+                continue;
+            }
+            let one = Self {
+                rows,
+                cols: 1,
+                depth: 1,
+            };
+            if one
+                .shared_exact_charge(code_space, lanes_per_exact)
+                .is_none_or(|charge| charge > exact_offer)
+            {
+                continue;
+            }
+
+            // Fit is monotone in the column count. Binary search reaches the
+            // exact widest block in logarithmic address-width steps.
+            let mut low = 1usize;
+            let mut high = shape.n;
+            while low < high {
+                let mid = low + (high - low).div_ceil(2);
+                let candidate = Self {
+                    rows,
+                    cols: mid,
+                    depth: 1,
+                };
+                if candidate
+                    .shared_exact_charge(code_space, lanes_per_exact)
+                    .is_some_and(|charge| charge <= exact_offer)
+                {
+                    low = mid;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            let cols = low;
+            let tile = rows.checked_mul(cols)?;
+            let column_lanes = tile;
+            let available_exact = exact_offer.checked_sub(tile)?;
+            let available_lanes = available_exact.saturating_mul(lanes_per_exact); // R3-ok: an offer-size capacity
+            let for_stack = available_lanes.checked_sub(column_lanes)?;
+            let slab_rows = slab.checked_mul(rows)?;
+            let by_offer = for_stack / slab_rows;
+            let by_cache = tabulation_depth(
+                code_space,
+                rows,
+                block,
+                lane_capacity,
+                blocking::L2_BYTES,
+                lane_bytes,
+            );
+            let blocks = shape.k / block;
+            let depth = by_cache.min(by_offer).min(blocks.max(1));
+            let depth = if depth == 0 { 1 } else { depth };
+            let plan = Self { rows, cols, depth };
+            if plan
+                .shared_exact_charge(code_space, lanes_per_exact)
+                .is_some_and(|charge| charge <= exact_offer)
+            {
+                return Some(plan);
+            }
+        }
+        None
+    }
+
     /// The largest plan the two offers support.
     ///
     /// Rows first, from the cache budget: a wider row tile shares each decode
@@ -1798,10 +2474,20 @@ impl Plan {
         if code_space == 0 || block == 0 || shape.m == 0 || shape.n == 0 {
             return None;
         }
+        // A lane that holds fewer than one codec block has no table entry it
+        // can build exactly. Its public declaration selects the exact stream;
+        // rounding the capacity up would invoke arithmetic the lane explicitly
+        // said it cannot hold.
+        if lane_capacity.is_some_and(|capacity| capacity < block) {
+            return None;
+        }
         let row_cap = tabulation_rows(code_space, blocking::L1_BYTES, lane_bytes)
             .min(shape.m)
             .min(exact_offer);
         let slab = slab_codes(code_space);
+        if slab == 0 {
+            return None;
+        }
         let rows = ROW_TILES
             .into_iter()
             .find(|&r| r <= row_cap && slab.saturating_mul(r) < lane_offer)?; // R3-ok: a cache or tile question, not an accumulation
@@ -1929,6 +2615,14 @@ fn run<E, Bd, C, O, Ep, Lg>(
         // thing, and saying so costs one comparison.
         return;
     }
+    if shape.k == 0 {
+        // There is no real partial with which an empty-rest dense family can
+        // establish acceptance, and no table entry can be read without a
+        // product. Every named traversal is therefore the public StreamLane's
+        // exact zero, followed by the caller's one epilogue per output.
+        stream(triple, epilogue, options, scratch.take(0), ledger);
+        return;
+    }
 
     // The row collapse, before any traversal choice: two equal rows of `A`
     // name the same sum against every column of `W`, so the product is
@@ -1976,29 +2670,34 @@ fn run<E, Bd, C, O, Ep, Lg>(
 
     let space = C::CODE_SPACE;
     let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
+    // What the operand's *declaration* says about addressing it, read from the
+    // three facts `Manifest::of` mints this artifact's address from --- the
+    // tier, the block and the bound --- and from nothing the operand holds. The
+    // manifest's other value-bearing fields are its two digests, and no term
+    // here reads one, so no run of this traversal can have probed a code to
+    // decide which factorization to take (`CS-10`). The orientation half of the
+    // same claim was settled at `TabulatedTriple::new`, which is where `W` was
+    // declared `n x k`.
+    let addressing = Addressing::of(
+        <C as uor_matmul_codec::Codec<E, Bd>>::TIER,
+        block,
+        Bd::VALUE,
+    );
     // A code stream whose blocks are not a fixed width has no `p`-th block to
-    // index, so there is nothing for a table to be built per block of. The one
-    // such tier does not implement `Enumerable`, so this is unreachable through
-    // the shipped codecs; it is here because the trait does not forbid it.
-    let addressable =
-        <C as uor_matmul_codec::Codec<E, Bd>>::IS_FIXED_WIDTH && block >= 1 && space > 0;
+    // index, so there is nothing for a table to be built per block of. Asked of
+    // the *type* and not of the tier, because a composing tier reports its own
+    // token while inheriting its inner codec's width. The one variable-length
+    // tier does not implement `Enumerable`, so this is unreachable through the
+    // shipped codecs; it is here because the trait does not forbid it.
+    let addressable = <C as uor_matmul_codec::Codec<E, Bd>>::IS_FIXED_WIDTH
+        && addressing.addresses_an_element()
+        && space > 0;
     if !addressable || options.traversal == Traversal::OutputMajor {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     }
 
-    // Which output columns carry a distinct meaning. One pass over the code
-    // stream, before any arithmetic, and the answer is used by every row tile ---
-    // so a weight matrix with repeated columns is charged for the ones it has
-    // rather than the ones it is written with. `CG-10` reports both the
-    // degeneracy and what the question cost when there was none.
     let (words, index) = (&mut *lanes.lanes, &mut *lanes.index);
-    let distinct =
-        distinct_columns::<E, Bd, C>(triple.w.codes(), triple.w.codes_per_row(), shape.n, index);
-    // Only when it saves work. An operand with no repeated column has paid one
-    // pass over its code stream for the question and must not also pay for a
-    // traversal shaped around an answer of "none".
-    let repeated = matches!(distinct, Some(d) if d < shape.n);
 
     // The modular lane is admissible exactly when the caller asked to wrap into
     // an output no wider than it: a question about two declarations --- the
@@ -2015,7 +2714,6 @@ fn run<E, Bd, C, O, Ep, Lg>(
             scratch,
             words,
             index,
-            repeated,
             |backend, bound, _sign_book, rows, group, block| {
                 E::table_spec_modular(backend, bound, rows, group, block)
             },
@@ -2030,7 +2728,6 @@ fn run<E, Bd, C, O, Ep, Lg>(
             scratch,
             words,
             index,
-            repeated,
             E::table_spec,
             E::lanes,
             ledger,
@@ -2062,7 +2759,6 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
     scratch: &mut Scratch<'_, E, Bd>,
     words: &mut [i64],
     index: &mut [usize],
-    repeated: bool,
     spec_of: SpecOf<E, L>,
     lanes_of: LanesOf<E, L>,
     ledger: &mut Lg,
@@ -2080,6 +2776,10 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
     let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
     let lane_bytes = core::mem::size_of::<L>();
     let exact_offer = scratch.accumulators();
+    if lane_bytes == 0 {
+        decline(triple, epilogue, options, scratch, ledger);
+        return;
+    }
     // Where the lane lives. A family whose lane *is* the exact accumulator
     // reads that offer, because that is where a word so wide already lives ---
     // and its modular lane reads the same words, relabelled, so a narrower
@@ -2092,29 +2792,32 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
     } else {
         core::mem::size_of_val(&*words) / lane_bytes
     };
-    let Some(plan) = Plan::choose(
-        space,
-        shape,
-        lane_bytes,
-        exact_offer,
-        offered,
-        block,
-        E::probe_capacity::<L>(Bd::VALUE),
-    ) else {
+    let lane_capacity = E::probe_capacity::<L>(Bd::VALUE);
+    let plan = if E::LANE_IS_EXACT {
+        let lanes_per_exact = core::mem::size_of::<AccOf<E>>() / lane_bytes;
+        Plan::choose_shared_exact(
+            space,
+            shape,
+            lane_bytes,
+            exact_offer,
+            lanes_per_exact,
+            block,
+            lane_capacity,
+        )
+    } else {
+        Plan::choose(
+            space,
+            shape,
+            lane_bytes,
+            exact_offer,
+            offered,
+            block,
+            lane_capacity,
+        )
+    };
+    let Some(plan) = plan else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
-    };
-    // The classes `distinct_columns` found are global, and a global first
-    // occurrence is no use to a column block narrower than the output: the
-    // class's representative may sit in an earlier block whose accumulator was
-    // encoded and `exact` reused before this block began. The map is rewritten
-    // block-relative here, once per call, where the block width is known ---
-    // and into the dictionary region `distinct_columns` is finished with, so
-    // the offer's size and layout are unchanged.
-    let collapse = if repeated {
-        ColumnMap::derive(index, shape.n, plan.cols)
-    } else {
-        None
     };
     // Both declarations come from the sequences that will run, at the tile the
     // plan resolved to --- never from a constant standing in for them.
@@ -2132,16 +2835,52 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
         plan.rows,
         block.saturating_mul(table.lanes_per_add), // R3-ok: a size or cost query, not an accumulation
     );
-    if !admits(options.traversal, space, block, plan, steps, lane_bytes) {
+    if !admits(
+        options.traversal,
+        space,
+        block,
+        plan,
+        steps,
+        lane_bytes,
+        &table,
+    ) {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     }
+
+    // The column question and its dictionary are table work, so they begin
+    // only after admission. Once the global classes are known, the same dead
+    // dictionary is the exact addressed-index set for the scale, decoded book,
+    // and pointwise builds; no parallel bitmap or code-space-sized allocation
+    // exists.
+    let distinct =
+        distinct_columns::<E, Bd, C>(triple.w.codes(), triple.w.codes_per_row(), shape.n, index);
+    let repeated = matches!(distinct, Some(d) if d < shape.n);
+    // A one-entry enumeration already has the smallest possible scale/book and
+    // build presentation. Its dictionary can still collapse equal columns, but
+    // an addressed-entry set cannot remove another operation. Wider pointwise
+    // books reuse the dead dictionary to name exactly the entries they need.
+    let need_entries = block == 1 && !C::SIGN_BIT_BOOK && space > 1;
+    let (collapse, mut entries) = if distinct.is_some() {
+        column_workspace(index, shape.n, plan.cols, repeated, need_entries)
+    } else {
+        (None, None)
+    };
+    let addressed_count = if need_entries {
+        entries
+            .as_mut()
+            .and_then(|set| set.collect::<E, Bd, C>(triple.w.codes()))
+    } else {
+        None
+    };
 
     // The panels' own declaration, asked only now that the table is selected:
     // a call the predicate declines never pays the walk. `None` declines the
     // table --- the panels are not the lane's alphabet --- and the dense
     // route answers at the same bytes, with the census saying which ran.
-    let Some(scale) = E::lane_scale(&triple.a, &triple.w, ledger) else {
+    let addressed =
+        addressed_count.and_then(|count| entries.as_ref().map(|set| set.collected(count)));
+    let Some(scale) = addressed_lane_scale(&triple.a, &triple.w, addressed, ledger) else {
         decline(triple, epilogue, options, scratch, ledger);
         return;
     };
@@ -2151,9 +2890,27 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
     // alphabet this is the value `Plan::choose` already used, and the minimum
     // is the identity.
     let mut plan = plan;
-    if let Some(run) = E::lane_run::<L>(Bd::VALUE, &scale) {
-        plan.depth = (run / block).min(plan.depth).max(1); // R3-ok: a lane-width question, not an accumulation
+    let observed_run = E::lane_run::<L>(Bd::VALUE, &scale);
+    let data_dependent_lane = lane_capacity.is_none() && observed_run.is_some();
+    // A global certificate is already optimal only when it carries the entire
+    // reduction in one placement. Otherwise the q lane derives source-local
+    // envelopes: a call-wide span is a totality bound, not an optimal schedule.
+    let local_envelopes = data_dependent_lane && observed_run.is_some_and(|run| run < shape.k);
+    if let Some(run) = observed_run {
+        if run < block && !data_dependent_lane {
+            decline(triple, epilogue, options, scratch, ledger);
+            return;
+        }
+        if run >= block && !local_envelopes {
+            plan.depth = (run / block).min(plan.depth); // R3-ok: a lane-width question, not an accumulation
+        }
     }
+    // `probe=None` followed by a real post-walk capacity is the public nominal
+    // declaration of a contextual panel protocol. It is parametric (no type or
+    // callback-value identity) and counts every in-place projection that the
+    // paired table builder consumes. An exact lane such as f64 answers None at
+    // both points and retains the ordinary element panel.
+    let projection_decodes = data_dependent_lane;
 
     let want = plan.lane_words(space);
     let tile = plan.rows * plan.cols;
@@ -2168,10 +2925,27 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
         decline(triple, epilogue, options, scratch, ledger);
         return;
     }
-    let (panel, accumulators) = scratch.split(suggested_tabulation_panel(space, block), take);
-    if !decode_book(triple.w.codec(), panel, scale.base_b, ledger) {
+    // Keep the whole panel offer. The fixed head remains the decoded book and
+    // activation tile promised by `suggested_tabulation_panel`; complete rows
+    // of projected `A` occupy only the caller-offered tail. No new storage is
+    // required, and an exact-sized offer continues to have an empty cache.
+    let panel_offer = scratch.len();
+    let (panel, accumulators) = scratch.split(panel_offer, take);
+    let addressed =
+        addressed_count.and_then(|count| entries.as_ref().map(|set| set.collected(count)));
+    if !decode_book(
+        &triple.w,
+        panel,
+        scale.base_b,
+        addressed,
+        projection_decodes,
+        ledger,
+    ) {
         decline(triple, epilogue, options, scratch, ledger);
         return;
+    }
+    if let Some(set) = entries.as_mut() {
+        set.release_collected();
     }
     let (exact, rest) = accumulators.split_at_mut(tile);
     let Some(lanes) = lanes_of(words, rest, want) else {
@@ -2179,7 +2953,20 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
         return;
     };
     tabulate::<E, Bd, C, O, Ep, Lg, L>(
-        triple, epilogue, options, exact, lanes, panel, collapse, plan, scale, spec_of, ledger,
+        triple,
+        epilogue,
+        options,
+        exact,
+        lanes,
+        panel,
+        collapse,
+        entries,
+        plan,
+        scale,
+        spec_of,
+        projection_decodes,
+        local_envelopes,
+        ledger,
     );
 }
 
@@ -2190,17 +2977,18 @@ fn run_lane<E, Bd, C, O, Ep, Lg, L>(
 /// whether or not the op count says it wins: `CD-13` needs that to compare bytes
 /// on both sides of the predicate, and a caller measuring its own shapes needs it
 /// for the same reason.
-fn admits(
+fn admits<E, L>(
     traversal: Traversal,
     code_space: usize,
     block: usize,
     plan: Plan,
     steps: Steps,
     lane_bytes: usize,
+    table: &TableSpec<E, L>,
 ) -> bool {
     match traversal {
         Traversal::OutputMajor => false,
-        Traversal::Blocked => tabulation_pays(
+        Traversal::Blocked => tabulation_pays_for_spec(
             code_space,
             block,
             plan.cols,
@@ -2208,6 +2996,7 @@ fn admits(
             steps,
             blocking::L1_BYTES,
             lane_bytes,
+            table,
         ),
         Traversal::Tabulated => {
             tabulation_fits(code_space, plan.rows, blocking::L1_BYTES, lane_bytes)
@@ -2235,26 +3024,159 @@ fn admits(
 /// rather than restating it.
 pub const ROW_TILES: [usize; 5] = [16, 8, 4, 2, 1];
 
-/// Decode the whole codebook once, transposed, into the caller's panel offer.
+/// A private one-element view of the indices the caller's coded operand
+/// actually addresses.
+///
+/// This does not copy or reinterpret a code. `usize` is the enumeration's
+/// existing coordinate, and the original codec remains the only decoder. It
+/// lets the locked `Tabulated::lane_scale` protocol inspect an exact distinct
+/// sub-book through the same `CodedMatrix` abstraction, without a type test or
+/// a second float-specific scale operation.
+#[derive(Clone, Copy)]
+struct AddressedCodec<C>(C);
+
+impl<E, Bd, C> Codec<E, Bd> for AddressedCodec<C>
+where
+    E: Element,
+    Bd: Bound,
+    C: Enumerable<E, Bd> + Copy,
+{
+    type Code = usize;
+
+    const MAX_BLOCK: usize = 1;
+    const TIER: TierId = C::TIER;
+
+    fn decode_element(&self, code: usize, i: usize) -> Alphabet<E, Bd> {
+        self.0.decode_element(C::code_at(code), i)
+    }
+}
+
+impl<E, Bd, C> Enumerable<E, Bd> for AddressedCodec<C>
+where
+    E: Element,
+    Bd: Bound,
+    C: Enumerable<E, Bd> + Copy,
+{
+    const CODE_SPACE: usize = C::CODE_SPACE;
+
+    fn code_at(index: usize) -> usize {
+        index
+    }
+
+    fn index_of(code: usize) -> usize {
+        if C::CODE_SPACE == 0 {
+            0
+        } else {
+            code % C::CODE_SPACE
+        }
+    }
+}
+
+/// One scalar coordinate of an existing fixed-width codec block.
+///
+/// The stored code and its canonical index are unchanged; only the decoded
+/// coordinate is selected. This lets a data-dependent lane ask its locked
+/// scale protocol about one source atom and build that atom through the same
+/// `TableBuild` abstraction, without copying a code stream or adding a public
+/// scalar-codec type.
+struct ScalarCodec<'a, C> {
+    codec: &'a C,
+    coordinate: usize,
+}
+
+impl<C> Copy for ScalarCodec<'_, C> {}
+
+impl<C> Clone for ScalarCodec<'_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<E, Bd, C> Codec<E, Bd> for ScalarCodec<'_, C>
+where
+    E: Element,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+{
+    type Code = C::Code;
+
+    const MAX_BLOCK: usize = 1;
+    const TIER: TierId = C::TIER;
+
+    fn decode_element(&self, code: Self::Code, _: usize) -> Alphabet<E, Bd> {
+        self.codec.decode_element(code, self.coordinate)
+    }
+}
+
+impl<E, Bd, C> Enumerable<E, Bd> for ScalarCodec<'_, C>
+where
+    E: Element,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+{
+    const CODE_SPACE: usize = C::CODE_SPACE;
+
+    fn code_at(index: usize) -> Self::Code {
+        C::code_at(index)
+    }
+
+    fn index_of(code: Self::Code) -> usize {
+        C::index_of(code)
+    }
+}
+
+fn addressed_lane_scale<E, Bd, C, Lg>(
+    a: &MatView<'_, Alphabet<E, Bd>>,
+    w: &CodedMatrix<'_, E, Bd, C>,
+    addressed: Option<&[usize]>,
+    ledger: &mut Lg,
+) -> Option<LaneScale>
+where
+    E: Tabulated,
+    Bd: Bound,
+    C: Enumerable<E, Bd> + Copy,
+    Lg: Ledger,
+{
+    let Some(addressed) = addressed else {
+        return E::lane_scale(a, w, ledger);
+    };
+    let codec = AddressedCodec(*w.codec());
+    let distinct = CodedMatrix::new(codec, addressed.len(), 1, addressed)
+        .expect("a nonempty block-one index set is a fixed-width coded matrix");
+    E::lane_scale(a, &distinct, ledger)
+}
+
+/// Decode the codebook cells this call can address into the caller's panel
+/// offer.
 ///
 /// `book[index * block + t]` is element `t` of the `index`-th codeword, so one
 /// codeword is a contiguous run and the build walks it against the activation
 /// tile without a stride. The codec is consulted `code_space * block` times for
 /// the *whole call* rather than once per row tile and per block of the reduction
 /// --- measured, re-deriving it per tile was half the build.
+/// A pointwise block-one table uses the reclaimed column dictionary to fill each
+/// distinct addressed canonical slot once. If that generic set cannot name the
+/// call's whole support, the total raw-short/full-book factorization remains;
+/// neither case allocates a bitmap or side carrier. The Gray sign walk keeps the
+/// full book because its declaration is a whole-enumeration recurrence rather
+/// than independent entries.
 ///
-/// Each entry is pre-scaled by `2^-base` on the way in: the zero scale leaves
-/// every element itself, and the float symbol lane's scale shifts each exponent
-/// to the codebook's measured base, so the build's multiply reads integers
-/// either way (`CD-20`).
+/// Every integral entry is unchanged because its contextual base is zero. The
+/// `f32` entry is not numerically pre-scaled: the same four bytes are relabelled
+/// in place with the grade relative to the codebook's observed base, then the
+/// paired [`Scaled64`] consumer contracts that q address by lookup and addition.
+/// No standalone float value, integer reification, or multiply is introduced
+/// between the projection and that consumer (`CD-20`, `CD-32`).
 ///
 /// This is the only reason the tabulated traversal wants a panel offer at all.
 /// Without one there is nowhere to put the decoded book, and the traversal
 /// streams --- the same rule every other offer in this library follows.
 fn decode_book<E, Bd, C, Lg>(
-    codec: &C,
+    w: &CodedMatrix<'_, E, Bd, C>,
     panel: &mut [Alphabet<E, Bd>],
     base: i32,
+    addressed: Option<&[usize]>,
+    projection_decodes: bool,
     ledger: &mut Lg,
 ) -> bool
 where
@@ -2265,20 +3187,49 @@ where
 {
     let space = C::CODE_SPACE;
     let block = C::MAX_BLOCK;
+    let codec = w.codec();
     // The book *and* the widest activation tile a row tile can pack, because the
     // build walks both and a panel that held only the book would leave the tile
     // with nowhere to go.
     if panel.len() < suggested_tabulation_panel(space, block) {
         return false;
     }
-    for index in 0..space {
-        for t in 0..block {
-            let entry = codec.decode_element(C::code_at(index), t);
-            panel[index * block + t] =
-                bytemuck::TransparentWrapper::wrap(E::prescale(entry.get(), base));
+    let sparse_book = block == 1 && !C::SIGN_BIT_BOOK && w.codes().len() < space;
+    if let Some(addressed) = addressed {
+        for &index in addressed {
+            let entry = codec.decode_element(C::code_at(index), 0);
+            panel[index] = bytemuck::TransparentWrapper::wrap(E::prescale(entry.get(), base));
+        }
+        let decoded = count_factor(addressed.len());
+        ledger.decoded(decoded);
+        if projection_decodes {
+            ledger.decoded(decoded);
+        }
+    } else if sparse_book {
+        for &stored in w.codes() {
+            let index = C::index_of(stored);
+            let entry = codec.decode_element(C::code_at(index), 0);
+            panel[index] = bytemuck::TransparentWrapper::wrap(E::prescale(entry.get(), base));
+        }
+        let decoded = count_factor(w.codes().len());
+        ledger.decoded(decoded);
+        if projection_decodes {
+            ledger.decoded(decoded);
+        }
+    } else {
+        for index in 0..space {
+            for t in 0..block {
+                let entry = codec.decode_element(C::code_at(index), t);
+                panel[index * block + t] =
+                    bytemuck::TransparentWrapper::wrap(E::prescale(entry.get(), base));
+            }
+        }
+        let decoded = count_product2(space, block);
+        ledger.decoded(decoded);
+        if projection_decodes {
+            ledger.decoded(decoded);
         }
     }
-    ledger.decoded((space * block) as u64);
     true
 }
 
@@ -2329,7 +3280,9 @@ const MAX_GROUP: usize = COLUMN_LANES;
 ///
 /// `pub` so a measurement harness groups the way the sweep does.
 pub const fn column_group(rows: usize) -> usize {
-    if rows >= COLUMN_LANES {
+    if rows == 0 {
+        0
+    } else if rows >= COLUMN_LANES {
         1
     } else {
         COLUMN_LANES / rows
@@ -2368,7 +3321,7 @@ where
         return None;
     }
     // Half full at worst, so an empty slot always exists and a probe terminates.
-    let table = n.checked_mul(2)?.next_power_of_two();
+    let table = n.checked_mul(2)?.checked_next_power_of_two()?;
     if index.len() < n.checked_add(table.checked_mul(2)?)? {
         return None;
     }
@@ -2376,13 +3329,11 @@ where
     let (slot, key) = rest.split_at_mut(table);
     // Zero is "empty"; a slot holds one more than the column it names.
     slot[..table].fill(0);
-    let mask = table - 1;
-
     let mut distinct = 0usize;
     for (j, position) in position.iter_mut().enumerate() {
         let run = &codes[j * codes_per_row..(j + 1) * codes_per_row];
-        let hash = column_hash::<E, Bd, C>(run);
-        let mut probe = hash & mask;
+        let hash = column_hash::<E, Bd, C>(run, table);
+        let mut probe = hash;
         loop {
             match slot[probe] {
                 0 => {
@@ -2399,7 +3350,10 @@ where
                         *position = seen;
                         break;
                     }
-                    probe = (probe + 1) & mask;
+                    probe += 1;
+                    if probe == table {
+                        probe = 0;
+                    }
                 }
             }
         }
@@ -2420,65 +3374,36 @@ where
             .all(|(&x, &y)| C::index_of(x) == C::index_of(y))
 }
 
-/// How much of a column the hash reads.
+/// Radix recurrence over one column's canonical index stream.
 ///
-/// The hash is a *filter*: [`columns_equal`] verifies in full on every hit, so a
-/// short read costs only a false positive and never a wrong answer. Reading the
-/// whole column made the pass half the cost of a traversal pass, which at `m = 1`
-/// --- where there is only one such pass --- was a third of the throughput. Two
-/// hundred and fifty-six bits of a column separate any two of them that differ in
-/// their first sixteen codes, and the ones that do not are separated by the
-/// comparison.
-const HASH_PREFIX: usize = 16;
-
-/// FNV over the head of one column's index stream, mixed in eight lanes.
-///
-/// Eight because the mix is a five-cycle multiply and the multiplier retires one
-/// a cycle, so eight chains is where the latency stops being what bounds it ---
-/// the same reason and the same shape as [`crate::collapse`]'s row hash.
-fn column_hash<E, Bd, C>(run: &[C::Code]) -> usize
+/// The hash is only a filter: [`columns_equal`] remains the authority on every
+/// hit. Its odd radix is the model-derived Atlas modality: double the prior
+/// coordinate, add it once, then add the source coordinate. Its modulus is the
+/// already-derived dictionary extent. The model-owned measured prefix bounds
+/// filter work only; coordinates beyond it remain governed by exact stream
+/// equality. Keeping the complete length and sampled recurrence unreduced and
+/// taking one final remainder removes every intermediate modular branch. This
+/// preserves the exact dictionary address because reducing the initial
+/// coordinate before a radix polynomial cannot change its final residue. The
+/// model proves the widest 16-coordinate value still needs only 90 of the
+/// carrier's 128 bits. No seed, multiply, rotate, shift, or packed mask
+/// participates in float traversal selection. The length is the initial
+/// coordinate, so unequal stream extents do not acquire the same empty-word
+/// spelling by construction.
+fn column_hash<E, Bd, C>(run: &[C::Code], modulus: usize) -> usize
 where
     E: Element,
     Bd: Bound,
     C: Enumerable<E, Bd>,
 {
-    const SEED: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut h = [
-        SEED,
-        SEED ^ 1,
-        SEED ^ 2,
-        SEED ^ 3,
-        SEED ^ 4,
-        SEED ^ 5,
-        SEED ^ 6,
-        SEED ^ 7,
-    ];
-    // The length goes in first: two columns of different lengths cannot be equal,
-    // and this is the only place the tail beyond the prefix is represented.
-    let mut seeded = SEED ^ run.len() as u64;
-    seeded = seeded.wrapping_mul(PRIME);
-    h[0] ^= seeded;
-    let run = &run[..run.len().min(HASH_PREFIX)];
-    let mut chunks = run.chunks_exact(8);
-    for c in &mut chunks {
-        for (lane, &code) in h.iter_mut().zip(c) {
-            *lane = (*lane ^ C::index_of(code) as u64).wrapping_mul(PRIME);
-        }
+    debug_assert!(modulus != 0);
+    let mut hash = run.len() as u128;
+    let measured = run.len().min(crate::float::COLUMN_HASH_PREFIX);
+    for &code in &run[..measured] {
+        let doubled = hash + hash;
+        hash = doubled + hash + C::index_of(code) as u128;
     }
-    for (i, &code) in chunks.remainder().iter().enumerate() {
-        h[i] = (h[i] ^ C::index_of(code) as u64).wrapping_mul(PRIME);
-    }
-    let mut x = 0u64;
-    for (i, lane) in h.into_iter().enumerate() {
-        x ^= lane.rotate_left((i * 8) as u32);
-    }
-    // splitmix's finisher: the FNV lanes carry their entropy high and an
-    // open-addressed probe reads the low bits.
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x ^= x >> 27;
-    (x ^ (x >> 31)) as usize
+    (hash % modulus as u128) as usize
 }
 
 /// The column collapse, made block-local.
@@ -2500,47 +3425,424 @@ struct ColumnMap<'a> {
     identity: &'a [usize],
 }
 
-impl<'a> ColumnMap<'a> {
-    /// Rewrite the global classes in `index[..n]` block-relative, one pass,
-    /// into the dictionary region `distinct_columns` is finished with.
-    ///
-    /// The region-reuse invariant: `distinct_columns` laid the offer out as
-    /// `position[n] | slot[table] | key[table]` with
-    /// `table = next_power_of_two(2n) >= 2n`, so past `position` there are at
-    /// least `4n` dead words and this derivation needs `3n + ceil(n / cols)`.
-    /// The offer's size and layout are unchanged. `mark` is zeroed rather than
-    /// trusted: the region's prior contents are dictionary probes, which read
-    /// as plausible first occurrences.
-    fn derive(index: &'a mut [usize], n: usize, cols: usize) -> Option<Self> {
-        let blocks = n.div_ceil(cols);
-        // Unreachable from `run` --- `distinct_columns` returned only with the
-        // region behind it --- but a short offer means the uncollapsed
-        // traversal at the same bytes, not a report (C6).
-        if index.len() < n.checked_mul(3)?.checked_add(blocks)? {
-            return None;
+/// The dead column dictionary, reused as a set of addressed table indices.
+///
+/// `seen` is an open-addressed table containing `index + 1`; an admitted slab
+/// cannot contain `usize::MAX` codes, so the addition is exact. `occupied`
+/// records probe slots, which clears only the entries one reduction position
+/// inserted rather than the whole dictionary. No storage scales with the code
+/// space: the table is the caller's existing `with_index` offer and is at least
+/// twice the output width.
+struct EntrySet<'a> {
+    seen: &'a mut [usize],
+    occupied: &'a mut [usize],
+    used: usize,
+}
+
+enum EntryInsert {
+    New,
+    Present,
+    Full,
+}
+
+impl EntrySet<'_> {
+    fn insert(&mut self, index: usize) -> EntryInsert {
+        let Some(key) = index.checked_add(1) else {
+            return EntryInsert::Full;
+        };
+        if self.seen.is_empty() {
+            return EntryInsert::Full;
         }
-        let (position, rest) = index.split_at_mut(n);
-        let (first, rest) = rest.split_at_mut(n);
-        let (mark, rest) = rest.split_at_mut(n);
-        let (identity, _) = rest.split_at_mut(blocks);
-        mark.fill(0);
-        identity.fill(1);
-        for (j, &rep) in position.iter().enumerate() {
-            let start = j / cols * cols;
-            let seen = mark[rep];
-            // `seen` is a global first occurrence plus one, and `j` rises, so
-            // it names this block exactly when it does not predate the block.
-            first[j] = if seen > start {
-                seen - 1 - start
+        let extent = self.seen.len();
+        let mut probe = if index < extent {
+            index
+        } else {
+            index % extent
+        };
+        for _ in 0..self.seen.len() {
+            match self.seen[probe] {
+                0 if self.used < self.occupied.len() => {
+                    self.seen[probe] = key;
+                    self.occupied[self.used] = probe;
+                    self.used += 1;
+                    return EntryInsert::New;
+                }
+                0 => return EntryInsert::Full,
+                present if present == key => return EntryInsert::Present,
+                _ => {
+                    probe += 1;
+                    if probe == extent {
+                        probe = 0;
+                    }
+                }
+            }
+        }
+        EntryInsert::Full
+    }
+
+    fn len(&self) -> usize {
+        self.used
+    }
+
+    fn index(&self, at: usize) -> usize {
+        self.seen[self.occupied[at]] - 1
+    }
+
+    fn clear(&mut self) {
+        for &probe in &self.occupied[..self.used] {
+            self.seen[probe] = 0;
+        }
+        self.used = 0;
+    }
+
+    /// Collect a call-wide addressed book when this offer can name every
+    /// distinct index. The contiguous result temporarily reuses `occupied`;
+    /// each probe slot is cleared as its index is transferred. A larger set
+    /// returns `None` before any decode or build is issued, so the ordinary
+    /// complete-book presentation remains truthful.
+    fn collect<E, Bd, C>(&mut self, codes: &[C::Code]) -> Option<usize>
+    where
+        E: Element,
+        Bd: Bound,
+        C: Enumerable<E, Bd>,
+    {
+        debug_assert_eq!(self.used, 0);
+        for &code in codes {
+            if matches!(self.insert(C::index_of(code)), EntryInsert::Full) {
+                self.clear();
+                return None;
+            }
+        }
+        let count = self.used;
+        for at in 0..count {
+            let slot = self.occupied[at];
+            self.occupied[at] = self.seen[slot] - 1;
+            self.seen[slot] = 0;
+        }
+        Some(count)
+    }
+
+    fn collected(&self, count: usize) -> &[usize] {
+        &self.occupied[..count]
+    }
+
+    fn release_collected(&mut self) {
+        self.used = 0;
+    }
+}
+
+/// Rewrite the global column classes block-relative and partition their dead
+/// dictionary as an addressed-entry set.
+///
+/// `distinct_columns` laid the offer out as
+/// `position[n] | slot[table] | key[table]`, with `table >= 2n`. When columns
+/// repeat, `position` becomes the block-local first map and `key[..blocks]` the
+/// identity flags. Only a pointwise book with more than one coordinate needs an
+/// addressed-entry set; then `slot` and the rest of `key` are disjoint storage,
+/// or the whole dictionary is reclaimed when no columns repeat. Other books do
+/// not pay its clear. A short/absent offer has no place to remember an unbounded
+/// set of generic codec indices, so it keeps the same total table factorization
+/// and truthfully issues duplicate builds.
+fn column_workspace(
+    index: &mut [usize],
+    n: usize,
+    cols: usize,
+    repeated: bool,
+    need_entries: bool,
+) -> (Option<ColumnMap<'_>>, Option<EntrySet<'_>>) {
+    let Some(table) = n.checked_mul(2).and_then(usize::checked_next_power_of_two) else {
+        return (None, None);
+    };
+    let Some(dictionary_words) = table.checked_mul(2) else {
+        return (None, None);
+    };
+    let Some(want) = n.checked_add(dictionary_words) else {
+        return (None, None);
+    };
+    if index.len() < want || table == 0 {
+        return (None, None);
+    }
+
+    if !repeated {
+        if !need_entries {
+            return (None, None);
+        }
+        let (seen, occupied) = index.split_at_mut(table);
+        seen.fill(0);
+        return (
+            None,
+            Some(EntrySet {
+                seen,
+                occupied,
+                used: 0,
+            }),
+        );
+    }
+
+    let blocks = n.div_ceil(cols);
+    let (first, rest) = index.split_at_mut(n);
+    let (seen, keys) = rest.split_at_mut(table);
+    let (identity, occupied) = keys.split_at_mut(blocks);
+    identity.fill(1);
+    for start in (0..n).step_by(cols) {
+        let end = (start + cols).min(n);
+        // The dictionary still contains hash probes. Zero exactly the direct
+        // representative cells this block will consult before reading them.
+        for &representative in &first[start..end] {
+            seen[representative] = 0;
+        }
+        for j in start..end {
+            let representative = first[j];
+            let prior = seen[representative];
+            first[j] = if prior > start {
+                prior - 1 - start
             } else {
-                mark[rep] = j + 1;
+                seen[representative] = j + 1;
                 j - start
             };
             if first[j] != j - start {
                 identity[j / cols] = 0;
             }
         }
-        Some(Self { first, identity })
+    }
+    let collapse = Some(ColumnMap { first, identity });
+    if !need_entries {
+        return (collapse, None);
+    }
+    seen.fill(0);
+    (
+        collapse,
+        Some(EntrySet {
+            seen,
+            occupied,
+            used: 0,
+        }),
+    )
+}
+
+/// Regrade one subset's product certificate to the call's already-projected
+/// bases. Values beyond `cap` share the single `cap + 1` singleton marker; no
+/// wider arithmetic value is needed by the scheduler.
+fn regrade_envelope(local: LaneScale, call: LaneScale, cap: u128) -> u128 {
+    let singleton = cap + 1;
+    if local.per_step > cap {
+        return singleton;
+    }
+    let Some(a) = local.base_a.checked_sub(call.base_a) else {
+        return singleton;
+    };
+    let Some(b) = local.base_b.checked_sub(call.base_b) else {
+        return singleton;
+    };
+    let Ok(a) = u32::try_from(a) else {
+        return singleton;
+    };
+    let Ok(b) = u32::try_from(b) else {
+        return singleton;
+    };
+    let Some(distance) = a.checked_add(b) else {
+        return singleton;
+    };
+    let mut bound = local.per_step;
+    for _ in 0..distance {
+        if bound > cap || bound > cap - bound {
+            return singleton;
+        }
+        bound += bound;
+    }
+    bound
+}
+
+/// Least declaration available through the locked lane protocol for one scalar
+/// source coordinate, common to every row/column lane that will share its
+/// placement boundary.
+///
+/// `A` is presented as the current row tile's one source column. Each distinct
+/// output column presents its one stored code through [`ScalarCodec`]; taking
+/// the maximum makes the resulting nonnegative envelope safe for every lane in
+/// the carried tile. The returned certificate is expressed at the call's bases
+/// so certificates add directly in the source-ordered recurrence.
+#[allow(clippy::too_many_arguments)]
+fn scalar_envelope<E, Bd, C, O, Lg>(
+    triple: &TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    row0: usize,
+    rows: usize,
+    col0: usize,
+    cols: usize,
+    p: usize,
+    coordinate: usize,
+    collapsed: Option<&[usize]>,
+    call_scale: LaneScale,
+    cap: u128,
+    ledger: &mut Lg,
+) -> u128
+where
+    E: Tabulated,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    Lg: Ledger,
+{
+    let block = C::MAX_BLOCK;
+    let source = p * block + coordinate;
+    let a = triple
+        .a
+        .subview(row0, source, rows, 1)
+        .expect("the scalar coordinate lies in the conformant reduction");
+    let codes = triple.w.codes();
+    let codes_per_row = triple.w.codes_per_row();
+    let scalar = ScalarCodec {
+        codec: triple.w.codec(),
+        coordinate,
+    };
+    let mut envelope = 0u128;
+    for j in 0..cols {
+        if collapsed.is_some_and(|first| first[j] != j) {
+            continue;
+        }
+        let code = &codes[(col0 + j) * codes_per_row + p];
+        let one = CodedMatrix::new(scalar, 1, 1, core::slice::from_ref(code))
+            .expect("one scalar code is a conformant fixed-width matrix");
+        let local = E::lane_scale(&a, &one, ledger)
+            .expect("an admitted lane scale remains admitted on a source subset");
+        envelope = envelope.max(regrade_envelope(local, call_scale, cap));
+    }
+    envelope
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_source_block<E, Bd, C, L, Lg>(
+    table: &mut Table<'_, L>,
+    spec: &TableSpec<E, L>,
+    block: usize,
+    book: &[E],
+    acts: &[E],
+    slot: usize,
+    p: usize,
+    col0: usize,
+    cols: usize,
+    codes_per_row: usize,
+    codes: &[C::Code],
+    collapsed: Option<&[usize]>,
+    addressed: usize,
+    mut entries: Option<&mut EntrySet<'_>>,
+    ledger: &mut Lg,
+) where
+    E: Element,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    L: Lane<E>,
+    Lg: Ledger,
+{
+    if block != 1 || C::SIGN_BIT_BOOK {
+        table.build(spec, block, book, acts, slot, ledger);
+        return;
+    }
+    if let Some(set) = entries.as_mut() {
+        let mut complete = true;
+        for j in 0..cols {
+            if collapsed.is_some_and(|first| first[j] != j) {
+                continue;
+            }
+            let code = codes[(col0 + j) * codes_per_row + p];
+            if matches!(set.insert(C::index_of(code)), EntryInsert::Full) {
+                complete = false;
+                break;
+            }
+        }
+        if complete && set.len() < table.code_space() {
+            for at in 0..set.len() {
+                table.build_entry(spec, block, book, acts, slot, set.index(at), ledger);
+            }
+            set.clear();
+        } else {
+            set.clear();
+            table.build(spec, block, book, acts, slot, ledger);
+        }
+    } else if addressed < table.code_space() {
+        for j in 0..cols {
+            if collapsed.is_some_and(|first| first[j] != j) {
+                continue;
+            }
+            let code = codes[(col0 + j) * codes_per_row + p];
+            table.build_entry(spec, block, book, acts, slot, C::index_of(code), ledger);
+        }
+    } else {
+        table.build(spec, block, book, acts, slot, ledger);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_source_scalar<E, Bd, C, L, Lg>(
+    table: &mut Table<'_, L>,
+    spec: &TableSpec<E, L>,
+    source_block: usize,
+    coordinate: usize,
+    book: &[E],
+    acts: &[E],
+    p: usize,
+    col0: usize,
+    cols: usize,
+    codes_per_row: usize,
+    codes: &[C::Code],
+    collapsed: Option<&[usize]>,
+    addressed: usize,
+    mut entries: Option<&mut EntrySet<'_>>,
+    ledger: &mut Lg,
+) where
+    E: Element,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    L: Lane<E>,
+    Lg: Ledger,
+{
+    if let Some(set) = entries.as_mut() {
+        let mut complete = true;
+        for j in 0..cols {
+            if collapsed.is_some_and(|first| first[j] != j) {
+                continue;
+            }
+            let code = codes[(col0 + j) * codes_per_row + p];
+            if matches!(set.insert(C::index_of(code)), EntryInsert::Full) {
+                complete = false;
+                break;
+            }
+        }
+        if complete && set.len() < table.code_space() {
+            for at in 0..set.len() {
+                table.build_cell(
+                    spec,
+                    source_block,
+                    coordinate,
+                    book,
+                    acts,
+                    set.index(at),
+                    ledger,
+                );
+            }
+            set.clear();
+            return;
+        }
+        set.clear();
+    } else if addressed < table.code_space() {
+        for j in 0..cols {
+            if collapsed.is_some_and(|first| first[j] != j) {
+                continue;
+            }
+            let code = codes[(col0 + j) * codes_per_row + p];
+            table.build_cell(
+                spec,
+                source_block,
+                coordinate,
+                book,
+                acts,
+                C::index_of(code),
+                ledger,
+            );
+        }
+        return;
+    }
+    for index in 0..table.code_space() {
+        table.build_cell(spec, source_block, coordinate, book, acts, index, ledger);
     }
 }
 
@@ -2573,9 +3875,12 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     spec_of: SpecOf<E, L>,
     book: &[E],
     acts: &mut [E],
+    projected: &[E],
     collapse: Option<ColumnMap<'_>>,
+    mut entries: Option<&mut EntrySet<'_>>,
     plan: Plan,
     scale: LaneScale,
+    local_envelopes: bool,
     rows: usize,
     group: usize,
     row0: usize,
@@ -2596,6 +3901,7 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     let codes_per_row = triple.w.codes_per_row();
     let codes = triple.w.codes();
     let slab = table.slab();
+    let projected_rows = projected.len() / shape.k;
     // Blocks one lane word holds before it must be placed. A question about a
     // register, never a limit on `k`: a deeper reduction takes more runs, and the
     // runs combine exactly (§5.1). The walk's answer for a family whose capacity
@@ -2606,7 +3912,7 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
     // The two widths this tile reduces at, resolved once. `wide` is the group
     // the tile height asks for; `single` is the one column an operand's repeats
     // or a shape that does not divide leaves over.
-    let mut arg = Sweep {
+    let mut arg: Sweep<'_, E, Bd, C, L> = Sweep {
         wide: *spec,
         // The same sequence when the group is one, which is every widest tile.
         // Looking it up twice would be asking a question whose answer is in the
@@ -2656,58 +3962,245 @@ fn row_tile<E, Bd, C, O, Ep, L, Lg>(
         // One decision, read in both places. `sweep` consults this to skip a
         // repeat; the expansion below consults it to fill one.
         arg.index = collapsed;
+        let addressed = collapsed.map_or(cols, |first| {
+            first
+                .iter()
+                .enumerate()
+                .filter(|&(j, &representative)| representative == j)
+                .count()
+        });
 
-        let mut p0 = 0usize;
-        let mut in_run = 0usize;
-        while p0 < blocks {
-            let depth = plan.depth.min(blocks - p0);
-            for slot in 0..depth {
-                // The activation tile for this block, packed once into the layout
-                // the sequence declared: `k`-major in groups of `k_group`,
-                // lane-major within a group. That is [`packed_slot`], the same
-                // function the dense packer uses, so a sequence that folds a pair
-                // of block steps into one instruction finds the pair adjacent and
-                // needs no shuffle and no tail.
-                let base = (p0 + slot) * block;
+        let tail_pending = if local_envelopes {
+            let cap = spec.lane_cap;
+            let scalar_wide = spec_of(options.backend, Bd::VALUE, false, rows, group, 1);
+            let scalar_single = if group == 1 {
+                scalar_wide
+            } else {
+                spec_of(options.backend, Bd::VALUE, false, rows, 1, 1)
+            };
+            debug_assert_eq!(scalar_wide.lane_cap, cap);
+            let scalar_arg: Sweep<'_, E, Bd, C, L> = Sweep {
+                wide: scalar_wide,
+                single: scalar_single,
+                codes,
+                stream: C::as_index_stream(codes),
+                codes_per_row,
+                index: collapsed,
+                rows,
+                slab,
+            };
+            let mut height = 0u128;
+            let mut pending = false;
+
+            for p in 0..blocks {
+                // First ask whether the codec's original aggregate is a safe
+                // source atom. No bound array is retained: if it is unsafe the
+                // scalar certificates are replayed, which is the storage-free
+                // cost of an arbitrary codec block width.
+                let mut block_bound = 0u128;
                 for t in 0..block {
+                    let bound = scalar_envelope(
+                        triple, row0, rows, col0, cols, p, t, collapsed, scale, cap, ledger,
+                    );
+                    if bound > cap || block_bound > cap - bound {
+                        block_bound = cap + 1;
+                        break;
+                    }
+                    block_bound += bound;
+                }
+
+                if block_bound <= cap {
+                    if pending && block_bound > cap - height {
+                        place(carried, acc, placed, scale.exponent());
+                        placed = true;
+                        height = 0;
+                    }
+                    let base = p * block;
+                    for t in 0..block {
+                        for i in 0..rows {
+                            acts[packed_slot(t, i, rows, spec.k_group)] =
+                                if row0 + i < projected_rows {
+                                    projected[(row0 + i) * shape.k + base + t]
+                                } else {
+                                    E::prescale(triple.a.at(row0 + i, base + t).get(), scale.base_a)
+                                };
+                        }
+                    }
+                    build_source_block::<E, Bd, C, L, Lg>(
+                        table,
+                        spec,
+                        block,
+                        book,
+                        &acts[..block * rows],
+                        0,
+                        p,
+                        col0,
+                        cols,
+                        codes_per_row,
+                        codes,
+                        collapsed,
+                        addressed,
+                        entries.as_deref_mut(),
+                        ledger,
+                    );
+                    let computed = sweep_group(
+                        group,
+                        &arg,
+                        &table.stack()[..slab],
+                        carried,
+                        col0,
+                        cols,
+                        p,
+                        1,
+                    );
+                    let gathered = count_product2(computed, rows);
+                    ledger.read(gathered);
+                    ledger.added(gathered);
+                    height += block_bound;
+                    pending = true;
+                    continue;
+                }
+
+                for t in 0..block {
+                    let bound = scalar_envelope(
+                        triple, row0, rows, col0, cols, p, t, collapsed, scale, cap, ledger,
+                    );
+                    let singleton = bound > cap;
+                    if pending && (singleton || bound > cap - height) {
+                        place(carried, acc, placed, scale.exponent());
+                        placed = true;
+                        height = 0;
+                    }
+
+                    let source = p * block + t;
                     for i in 0..rows {
-                        // Pre-scaled by the walk's base, as the book is: the
-                        // zero scale is the identity, and the float symbol
-                        // lane's shifts each exponent to the panel's base, so
-                        // the build's multiply reads integers either way.
-                        acts[packed_slot(t, i, rows, spec.k_group)] =
-                            E::prescale(triple.a.at(row0 + i, base + t).get(), scale.base_a);
+                        acts[packed_slot(0, i, rows, scalar_wide.k_group)] =
+                            if row0 + i < projected_rows {
+                                projected[(row0 + i) * shape.k + source]
+                            } else {
+                                E::prescale(triple.a.at(row0 + i, source).get(), scale.base_a)
+                            };
+                    }
+                    let scalar_cells = rows * scalar_wide.k_group;
+                    build_source_scalar::<E, Bd, C, L, Lg>(
+                        table,
+                        &scalar_wide,
+                        block,
+                        t,
+                        book,
+                        &acts[..scalar_cells],
+                        p,
+                        col0,
+                        cols,
+                        codes_per_row,
+                        codes,
+                        collapsed,
+                        addressed,
+                        entries.as_deref_mut(),
+                        ledger,
+                    );
+                    let computed = sweep_group(
+                        group,
+                        &scalar_arg,
+                        &table.stack()[..slab],
+                        carried,
+                        col0,
+                        cols,
+                        p,
+                        1,
+                    );
+                    let gathered = count_product2(computed, rows);
+                    ledger.read(gathered);
+                    ledger.added(gathered);
+
+                    if singleton {
+                        // Boundary/tag words are semantic singletons. Combining
+                        // one with any finite residue would let the sticky tag
+                        // erase that residue inside the compact lane, so place
+                        // it immediately on both sides of the source boundary.
+                        place(carried, acc, placed, scale.exponent());
+                        placed = true;
+                        pending = false;
+                        height = 0;
+                    } else {
+                        height += bound;
+                        pending = true;
                     }
                 }
-                table.build(spec, block, book, &acts[..block * rows], slot, ledger);
             }
+            pending
+        } else {
+            let mut p0 = 0usize;
+            let mut in_run = 0usize;
+            while p0 < blocks {
+                let depth = plan.depth.min(blocks - p0);
+                // Ask about the chunk that will actually run. Pricing a full
+                // `plan.depth` here split a final short chunk out of a run it fit,
+                // and placing after the final chunk then placed a cleared zero word
+                // a second time. The subtraction form is total at `usize::MAX`.
+                if run_requires_place(in_run, depth, run_blocks) {
+                    place(carried, acc, placed, scale.exponent());
+                    placed = true;
+                    in_run = 0;
+                }
+                for slot in 0..depth {
+                    // The activation tile for this block, packed once into the layout
+                    // the sequence declared: `k`-major in groups of `k_group`,
+                    // lane-major within a group. That is [`packed_slot`], the same
+                    // function the dense packer uses, so a sequence that folds a pair
+                    // of block steps into one instruction finds the pair adjacent and
+                    // needs no shuffle and no tail.
+                    let base = (p0 + slot) * block;
+                    for t in 0..block {
+                        for i in 0..rows {
+                            // The integer families retain the source value at
+                            // their zero base. The float symbol family relabels
+                            // this same cell with its contextual q grade; the
+                            // paired lane contracts it by lookup and addition.
+                            acts[packed_slot(t, i, rows, spec.k_group)] =
+                                if row0 + i < projected_rows {
+                                    projected[(row0 + i) * shape.k + base + t]
+                                } else {
+                                    E::prescale(triple.a.at(row0 + i, base + t).get(), scale.base_a)
+                                };
+                        }
+                    }
+                    build_source_block::<E, Bd, C, L, Lg>(
+                        table,
+                        spec,
+                        block,
+                        book,
+                        &acts[..block * rows],
+                        slot,
+                        p0 + slot,
+                        col0,
+                        cols,
+                        codes_per_row,
+                        codes,
+                        collapsed,
+                        addressed,
+                        entries.as_deref_mut(),
+                        ledger,
+                    );
+                }
 
-            // No multiply below this line, and no exact accumulator either: the
-            // whole chunk reduces into the lane words the previous chunk left,
-            // and the placement happens once for the whole run.
-            let stack = &table.stack()[..depth * slab];
-            let computed = match group {
-                16 => sweep::<16, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
-                8 => sweep::<8, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
-                4 => sweep::<4, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
-                2 => sweep::<2, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
-                _ => sweep::<1, E, Bd, C, L>(&arg, stack, carried, col0, cols, p0, depth),
-            };
-            ledger.read((computed * depth * rows) as u64);
-            ledger.added((computed * depth * rows) as u64);
+                // No multiply below this line, and no exact accumulator either: the
+                // whole chunk reduces into the lane words the previous chunk left,
+                // and the placement happens once for the whole run.
+                let stack = &table.stack()[..depth * slab];
+                let computed = sweep_group(group, &arg, stack, carried, col0, cols, p0, depth);
+                let gathered = count_product3(computed, depth, rows);
+                ledger.read(gathered);
+                ledger.added(gathered);
 
-            p0 += depth;
-            in_run += depth;
-            // The run is full: place it and start the next one. Unreachable for
-            // every `k` a narrow lane covers whole, which is every `k` under
-            // 133144 at `(i8, 128)`.
-            if in_run + plan.depth > run_blocks {
-                place(carried, acc, placed, scale.exponent());
-                placed = true;
-                in_run = 0;
+                p0 += depth;
+                in_run += depth;
             }
+            true
+        };
+        if tail_pending {
+            place(carried, acc, placed, scale.exponent());
         }
-        place(carried, acc, placed, scale.exponent());
 
         // The expansion: every repeated column takes the accumulation of the one
         // it repeats. Ascending, and a repeat always names an earlier column, so
@@ -2857,6 +4350,33 @@ where
     computed
 }
 
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn sweep_group<E, Bd, C, L>(
+    group: usize,
+    arg: &Sweep<'_, E, Bd, C, L>,
+    stack: &[L],
+    carried: &mut [L],
+    col0: usize,
+    cols: usize,
+    p0: usize,
+    depth: usize,
+) -> usize
+where
+    E: Element,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    L: Lane<E>,
+{
+    match group {
+        16 => sweep::<16, E, Bd, C, L>(arg, stack, carried, col0, cols, p0, depth),
+        8 => sweep::<8, E, Bd, C, L>(arg, stack, carried, col0, cols, p0, depth),
+        4 => sweep::<4, E, Bd, C, L>(arg, stack, carried, col0, cols, p0, depth),
+        2 => sweep::<2, E, Bd, C, L>(arg, stack, carried, col0, cols, p0, depth),
+        _ => sweep::<1, E, Bd, C, L>(arg, stack, carried, col0, cols, p0, depth),
+    }
+}
+
 /// Place a completed run of lane words into the exact accumulator and clear it.
 ///
 /// The only place the exact accumulator appears in the reduction, and for a
@@ -2878,6 +4398,15 @@ fn place<E: Element, L: Lane<E>>(lane: &mut [L], acc: &mut [E::Acc], onto: bool,
     }
 }
 
+/// Must the carried run be placed before the next real chunk is added?
+///
+/// The next chunk is the remaining-depth-clamped chunk, not the plan's nominal
+/// depth. Written with subtraction so the capacity question is total at the
+/// address-space boundary.
+const fn run_requires_place(in_run: usize, next_depth: usize, capacity: usize) -> bool {
+    in_run != 0 && (in_run > capacity || next_depth > capacity - in_run)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tabulate<E, Bd, C, O, Ep, Lg, L>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
@@ -2887,9 +4416,12 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
     lanes: &mut [L],
     panel: &mut [Alphabet<E, Bd>],
     collapse: Option<ColumnMap<'_>>,
+    mut entries: Option<EntrySet<'_>>,
     plan: Plan,
     scale: LaneScale,
     spec_of: SpecOf<E, L>,
+    projection_decodes: bool,
+    local_envelopes: bool,
     ledger: &mut Lg,
 ) where
     E: Tabulated,
@@ -2905,7 +4437,48 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
     let block = <C as uor_matmul_codec::Codec<E, Bd>>::MAX_BLOCK;
     let (columns, stack) = lanes.split_at_mut(plan.rows * plan.cols);
 
+    // The fixed panel is exactly the public query's decoded book plus widest
+    // activation tile. Any caller-offered tail is a zero-copy cache of complete
+    // projected activation rows. Partial rows are not admitted: deriving their
+    // shape would require a side index, while a complete row is addressed by
+    // the matrix's own `(row, p)` coordinates.
+    let book_cells = space * block;
+    let acts_cells = ROW_TILES[0] * block;
+    let (book_panel, rest) = panel.split_at_mut(book_cells);
+    let (acts_panel, cache_offer) = rest.split_at_mut(acts_cells);
+    let cache_rows = if shape.n > plan.cols {
+        (cache_offer.len() / shape.k).min(shape.m)
+    } else {
+        0
+    };
+    // `cache_rows <= cache_offer.len() / shape.k`, so this product is both
+    // addressable and contained in the offered tail.
+    let cache_cells = cache_rows * shape.k;
+    let projected_panel = &mut cache_offer[..cache_cells];
+    let projected: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(projected_panel);
+    for i in 0..cache_rows {
+        for p in 0..shape.k {
+            projected[i * shape.k + p] = E::prescale(triple.a.at(i, p).get(), scale.base_a);
+        }
+    }
+
+    if projection_decodes {
+        // Cached rows are projected once for the call. Every uncached row is
+        // projected once per column block because its fixed activation tile is
+        // overwritten when that block completes. This is the exact protocol
+        // presentation count, including an exact-sized offer's empty cache.
+        let column_blocks = shape.n.div_ceil(plan.cols);
+        ledger.decoded(count_sum2(
+            count_product2(cache_rows, shape.k),
+            count_product3(shape.m - cache_rows, shape.k, column_blocks),
+        ));
+    }
+
+    let book: &[E] = bytemuck::TransparentWrapper::peel_slice(book_panel);
+    let acts: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(acts_panel);
+
     let mut row0 = 0usize;
+    let mut zeroed_rows = None;
     while row0 < shape.m {
         // The widest tile the plan and the remaining rows admit. A shape that
         // does not divide walks down the list; it does not take a different path,
@@ -2929,7 +4502,16 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
             group,
             block,
         );
-        let Some(mut table) = Table::new(stack, space, rows, plan.depth) else {
+        let table = if zeroed_rows == Some(rows) {
+            Table::reuse_zeroed(stack, space, rows, plan.depth)
+        } else {
+            let table = Table::new(stack, space, rows, plan.depth);
+            if table.is_some() {
+                zeroed_rows = Some(rows);
+            }
+            table
+        };
+        let Some(mut table) = table else {
             // `Plan::choose` sized the offer for the widest tile it admits and
             // `rows` is never wider, so this cannot be reached. It is written as
             // the streaming traversal rather than as an assertion because an
@@ -2938,15 +4520,27 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
             stream(triple, epilogue, options, panel, ledger);
             return;
         };
-        // The panel is `Alphabet<E, Bd>`, a transparent wrapper, so the
-        // sequences read the caller's elements themselves and no copy stands
-        // between them.
-        let (book, acts) = panel.split_at_mut(space * block);
-        let book: &[E] = bytemuck::TransparentWrapper::peel_slice(book);
-        let acts: &mut [E] = bytemuck::TransparentWrapper::peel_slice_mut(acts);
         row_tile::<E, Bd, C, O, Ep, L, Lg>(
-            triple, epilogue, options, exact, columns, &mut table, &spec, spec_of, book, acts,
-            collapse, plan, scale, rows, group, row0, ledger,
+            triple,
+            epilogue,
+            options,
+            exact,
+            columns,
+            &mut table,
+            &spec,
+            spec_of,
+            book,
+            acts,
+            projected,
+            collapse,
+            entries.as_mut(),
+            plan,
+            scale,
+            local_envelopes,
+            rows,
+            group,
+            row0,
+            ledger,
         );
         row0 += rows;
     }
@@ -2954,10 +4548,11 @@ fn tabulate<E, Bd, C, O, Ep, Lg, L>(
 
 /// What to do when the table is not the answer.
 ///
-/// The tile kernels if the caller's offer holds the decoded operand, and the
-/// streaming traversal otherwise. Three factorizations of one identity, ordered by
-/// what the offer admits and by which is fastest at the shape --- not by quality,
-/// because all three produce the same bytes and `CD-13` says so.
+/// The decoded dense factorization runs when the offer holds it. Otherwise, if
+/// a family's first real empty-rest dense partial accepts, that partial starts
+/// its persistent stream; a declining family uses its ordinary stream. These
+/// are factorizations of one identity, ordered by capability and measured cost
+/// --- not by quality, because they produce the same bytes and `CD-13` says so.
 fn decline<E, Bd, C, O, Ep, Lg>(
     triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
     epilogue: &Ep,
@@ -2978,7 +4573,250 @@ fn decline<E, Bd, C, O, Ep, Lg>(
         return;
     }
     let k = triple.shape().k;
-    stream(triple, epilogue, options, scratch.take(k), ledger);
+    let panel = scratch.take(k);
+    if atlas_stream_route(triple, epilogue, options, panel, ledger) {
+        return;
+    }
+    stream(triple, epilogue, options, panel, ledger);
+}
+
+/// Capture one exact dense partial without encoding it.
+///
+/// `dense_gemm` is generic in its output epilogue, so the coded adapter can
+/// borrow that factorization without inventing a second float operation or a
+/// private replacement for [`Tabulated::StreamLane`]. The sink value is never
+/// observed; the complete accumulator is the object this epilogue transfers.
+struct DenseCapture<'a, A>(&'a core::cell::Cell<A>);
+
+impl<E: Element, O: Element> Epilogue<E, O> for DenseCapture<'_, AccOf<E>> {
+    fn finish(&self, acc: AccOf<E>, _: Option<O>, _: EncodeMode) -> O {
+        self.0.set(acc);
+        O::ZERO
+    }
+
+    fn reads_c(&self) -> bool {
+        false
+    }
+}
+
+/// One decoded `1 x k` by `k x 1` partial through the family's dense engine.
+///
+/// `None` is the family's value-independent empty-rest decline. The caller
+/// asks with the first real partial before touching caller `C`; after one
+/// acceptance, a later refusal of a conformant subview violates
+/// [`Tabulated::dense_gemm`]'s law and is asserted by the caller rather than
+/// silently changing the arithmetic.
+fn dense_stream_dot<E, Bd, O, Lg>(
+    a: MatView<'_, Alphabet<E, Bd>>,
+    b: &[Alphabet<E, Bd>],
+    options: GemmOptions,
+    ledger: &mut Lg,
+) -> Option<AccOf<E>>
+where
+    E: Tabulated,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Lg: Ledger,
+{
+    if b.is_empty() {
+        return Some(<AccOf<E> as Accumulator>::ZERO);
+    }
+    let right = MatView::row_major(b, b.len(), 1).expect("one column has the declared extent");
+    let mut sink = [O::ZERO];
+    let output = MatViewMut::row_major(&mut sink, 1, 1).expect("one output cell exists");
+    let captured = core::cell::Cell::new(<AccOf<E> as Accumulator>::ZERO);
+    ledger.kernelled();
+    let ran = E::dense_gemm(a, right, output, &DenseCapture(&captured), options, &mut []);
+    ran.then(|| captured.into_inner())
+}
+
+/// Stream a coded float dot through bounded decoded source pages.
+///
+/// A nonempty caller offer is the page, at every size; only no offer uses the
+/// model's measured `blocking::KC` frame. Neither is an admission limit: an
+/// arbitrary reduction repeats the page and combines its complete partials.
+/// The first partial transfers directly, so every dot of at most one page
+/// retains one Complete accumulator with no join. A caller offer holding a
+/// whole coded row removes even the page boundary and shares that decode across
+/// all rows of `A`.
+fn dense_stream<E, Bd, C, O, Ep, Lg>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    panel: &mut [Alphabet<E, Bd>],
+    ledger: &mut Lg,
+) -> bool
+where
+    E: Tabulated,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: Ledger,
+{
+    if !panel.is_empty() {
+        return dense_stream_with_page(triple, epilogue, options, panel, ledger);
+    }
+
+    // An empty offer is still bounded execution. This model-derived frame is
+    // reused for every page; it is a storage factorization, never a limit on
+    // the reduction's depth.
+    let mut page = [Alphabet::<E, Bd>::ZERO; blocking::KC];
+    dense_stream_with_page(triple, epilogue, options, &mut page, ledger)
+}
+
+/// Run the persistent dense stream in the page storage selected at the offer
+/// boundary.
+///
+/// Every nonempty caller offer is used directly, including a partial row. The
+/// private bounded frame above exists only for an empty offer, so a useful
+/// caller byte is never ignored or copied into another page first.
+fn dense_stream_with_page<E, Bd, C, O, Ep, Lg>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    page: &mut [Alphabet<E, Bd>],
+    ledger: &mut Lg,
+) -> bool
+where
+    E: Tabulated,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: Ledger,
+{
+    let shape = triple.shape();
+    let reads_c = epilogue.reads_c();
+    debug_assert!(shape.k == 0 || !page.is_empty());
+    let borrowed = page.len() >= shape.k;
+    let mut accepted = false;
+
+    for j in 0..shape.n {
+        if borrowed {
+            triple.w.decode_row_into(j, &mut page[..shape.k]);
+            ledger.decoded(count_factor(shape.k));
+            let right = MatView::row_major(&page[..shape.k], shape.k, 1)
+                .expect("one decoded column has the declared extent");
+            let mut output = [O::ZERO; ROW_TILES[0]];
+            let mut row0 = 0usize;
+            while row0 < shape.m {
+                let rows = (shape.m - row0).min(ROW_TILES[0]);
+                let left = triple
+                    .a
+                    .subview(row0, 0, rows, shape.k)
+                    .expect("the row tile is inside the conformant activation view");
+                if reads_c {
+                    for (i, cell) in output[..rows].iter_mut().enumerate() {
+                        *cell = *triple.c.at(row0 + i, j);
+                    }
+                }
+                let sink = MatViewMut::row_major(&mut output[..rows], rows, 1)
+                    .expect("the bounded row tile is one output column");
+                ledger.kernelled();
+                let ran = E::dense_gemm(left, right, sink, epilogue, options, &mut []);
+                match ran {
+                    true => accepted = true,
+                    false if accepted => {
+                        panic!("Tabulated::dense_gemm changed its empty-rest acceptance")
+                    }
+                    false => return false,
+                }
+                for (i, &cell) in output[..rows].iter().enumerate() {
+                    *triple.c.at_mut(row0 + i, j) = cell;
+                }
+                row0 += rows;
+            }
+            continue;
+        }
+
+        for i in 0..shape.m {
+            let acc = {
+                let mut acc = <AccOf<E> as Accumulator>::ZERO;
+                let mut first = true;
+                let mut start = 0usize;
+                while start < shape.k {
+                    let depth = (shape.k - start).min(page.len());
+                    for (p, cell) in page[..depth].iter_mut().enumerate() {
+                        *cell = triple.w.at(j, start + p);
+                    }
+                    ledger.decoded(count_factor(depth));
+                    let left = triple
+                        .a
+                        .subview(i, start, 1, depth)
+                        .expect("the page is inside the conformant activation view");
+                    let partial = match dense_stream_dot::<E, Bd, O, Lg>(
+                        left,
+                        &page[..depth],
+                        options,
+                        ledger,
+                    ) {
+                        Some(partial) => {
+                            accepted = true;
+                            partial
+                        }
+                        None if accepted => {
+                            panic!("Tabulated::dense_gemm changed its empty-rest acceptance")
+                        }
+                        None => return false,
+                    };
+                    if first {
+                        acc = partial;
+                        first = false;
+                    } else {
+                        ledger.added(1);
+                        acc = acc.combine(partial);
+                    }
+                    start += depth;
+                }
+                acc
+            };
+            let prior = if reads_c {
+                Some(*triple.c.at(i, j))
+            } else {
+                None
+            };
+            *triple.c.at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
+        }
+    }
+    true
+}
+
+/// Enter the bounded dense stream when the family's first real partial accepts.
+///
+/// The first decoded source chunk is useful work, not a capability object: its
+/// complete partial is retained and becomes the beginning of output `(0, 0)`.
+/// Caller `C` remains untouched until that acceptance. A zero-depth product
+/// has no real partial with which to establish acceptance, so it remains in
+/// the public stream lane and issues no product. In both cases the public
+/// stream-lane identity remains unchanged and the census records no scalar
+/// multiply.
+fn atlas_stream_route<E, Bd, C, O, Ep, Lg>(
+    triple: &mut TabulatedTriple<'_, '_, '_, E, Bd, C, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    panel: &mut [Alphabet<E, Bd>],
+    ledger: &mut Lg,
+) -> bool
+where
+    E: Tabulated,
+    Bd: Bound,
+    C: Enumerable<E, Bd>,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: Ledger,
+{
+    // `Whole<E>` is the float alphabet's declaration that there is no finite
+    // magnitude bound. Every shipped integer alphabet is finite, so its
+    // monomorphization returns before decoding or calling the dense engine. An
+    // exotic integer bound spelling `MAX` still presents the first real
+    // partial and can decline before caller output; this is an alphabet fact,
+    // never a branch on an operand or an element identity.
+    if Bd::VALUE != u128::MAX || triple.shape().k == 0 {
+        return false;
+    }
+
+    dense_stream(triple, epilogue, options, panel, ledger)
 }
 
 /// The third factorization: decode the whole operand once and hand it to the tile
@@ -3029,8 +4867,7 @@ where
             .w
             .decode_row_into(j, &mut panel[j * shape.k..(j + 1) * shape.k]);
     }
-    ledger.decoded(want as u64);
-    ledger.multiplied((shape.m * shape.k * shape.n) as u64);
+    ledger.decoded(count_factor(want));
 
     // `panel` holds `W` row-major, which is `W^T` read with the strides swapped.
     let Some(b) = MatView::new(
@@ -3046,10 +4883,10 @@ where
     };
     // The family's own dense driver over the decoded operand: the tile kernels
     // for an integer, the exact float traversal for a float.
+    ledger.kernelled();
     if !E::dense_gemm(triple.a, b, triple.c.reborrow(), epilogue, options, rest) {
         return false;
     }
-    ledger.kernelled();
     true
 }
 
@@ -3080,15 +4917,16 @@ fn stream<E, Bd, C, O, Ep, Lg>(
     // it --- which decodes each weight once instead of once per row of `A`, and
     // leaves two contiguous runs for the lane dot product below.
     let borrowed = panel.len() >= shape.k;
-    // The lane that holds a *raw* product, at a block of one: the family's own
-    // for an integer --- a plain dot product is a table of one entry that
-    // nobody shares --- and the complete accumulator for a family whose table
-    // lane holds scaled products, because the stream walks raw elements.
+    // The lane that holds a *raw* product, at a block of one. This is the
+    // ordinary decline for a family whose first empty-rest dense partial
+    // answered false. Shipped integers use the same narrow/exact lane their
+    // alphabet declares; shipped floats have already entered `dense_stream`
+    // above.
     let run = <E::StreamLane as Lane<E>>::capacity(Bd::VALUE).unwrap_or(usize::MAX);
     for j in 0..shape.n {
         if borrowed {
             triple.w.decode_row_into(j, panel);
-            ledger.decoded(shape.k as u64);
+            ledger.decoded(count_factor(shape.k));
         }
         for i in 0..shape.m {
             let row = if borrowed {
@@ -3101,24 +4939,24 @@ fn stream<E, Bd, C, O, Ep, Lg>(
                 // contiguous slices in the lane that holds raw products.
                 Some(a) => dot_lane::<E, Bd, E::StreamLane>(a, &panel[..shape.k], run),
                 // `A`'s row is not a run, or nothing was offered to decode into.
-                // The same accumulation, walked: this is what makes the traversal
-                // runnable on a target whose RAM cannot hold one row (S13).
+                // The same lane accumulation, walked: this is what makes the
+                // traversal runnable on a target whose RAM cannot hold one row
+                // (S13), without changing its product operation.
                 None => {
-                    let mut acc = <AccOf<E> as Accumulator>::ZERO;
                     if borrowed {
-                        for (p, w) in panel[..shape.k].iter().enumerate() {
-                            E::mac(&mut acc, triple.a.at(i, p).get(), w.get());
-                        }
+                        dot_walk::<E, E::StreamLane, _>(shape.k, run, |p| {
+                            (triple.a.at(i, p).get(), panel[p].get())
+                        })
                     } else {
-                        for p in 0..shape.k {
-                            E::mac(&mut acc, triple.a.at(i, p).get(), triple.w.at(j, p).get());
-                        }
-                        ledger.decoded(shape.k as u64);
+                        let acc = dot_walk::<E, E::StreamLane, _>(shape.k, run, |p| {
+                            (triple.a.at(i, p).get(), triple.w.at(j, p).get())
+                        });
+                        ledger.decoded(count_factor(shape.k));
+                        acc
                     }
-                    acc
                 }
             };
-            ledger.multiplied(shape.k as u64);
+            ledger.multiplied(count_factor(shape.k));
             let prior = if reads_c {
                 Some(*triple.c.at(i, j))
             } else {
@@ -3136,22 +4974,341 @@ fn stream<E, Bd, C, O, Ep, Lg>(
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use crate::coded::CodedTriple;
     use crate::collapse::suggested_collapse_index;
     use crate::driver::gemm;
-    use crate::epilogue::Linear;
+    use crate::epilogue::{Linear, MaxPlus};
+    use crate::partition::Partition;
     use std::format;
+    use std::string::String;
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_codec::{
-        canonicalize, e8_codec, e8_codec_u8, e8_table, Arena, Book, Grid, Packed, Sign, SymbolCode,
-        Ternary,
+        canonicalize, e8_codec, e8_codec_u8, e8_table, Arena, Book, Codec, Grid, Manifest, Packed,
+        Sign, SymbolCode, Ternary, TierId,
     };
     use uor_matmul_core::{
-        as_alphabet, as_alphabet_full, as_alphabet_whole, Bnd, EncodeMode, FloatElement, Full,
-        Triple, Whole,
+        as_alphabet, as_alphabet_full, as_alphabet_tropical, as_alphabet_whole, Bnd, EncodeMode,
+        FloatElement, Full, IntegerElement, Triple, Trop, Whole,
     };
 
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     type A8 = Alphabet<i8, Full<i8>>;
+
+    /// A downstream family whose empty-rest dense operation can accept or
+    /// decline. It witnesses that the Atlas route retains an accepted first
+    /// partial and that a decline touches no caller output before the ordinary
+    /// stream.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct DenseDecline(i8);
+
+    /// A truthful downstream lane that cannot hold even one product at its
+    /// declared alphabet. Its arithmetic methods panic so the totality test
+    /// proves the traversal never invokes a zero-capacity lane by accident.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct ZeroLane;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct MaxBound;
+
+    /// A downstream enumerable f64 codec whose code names two reduction
+    /// elements. It prevents the in-tree Arena's block of one from becoming a
+    /// categorical assumption in the f64 family.
+    #[derive(Clone, Copy, Debug)]
+    struct PairF64;
+
+    /// A binary32 codec block wider than the q-carrier's one-product boundary.
+    /// Its two positions independently span seven grades, so the exact CD-32
+    /// capacity is one and executing it requires scalar fracture rather than a
+    /// whole-code decline.
+    #[derive(Clone, Copy, Debug)]
+    struct FractureF32;
+
+    /// The same scalar-fracture law at independently chosen, non-power block
+    /// and code-space extents. Const parameters keep the test on the generic
+    /// codec surface instead of adding another hand-specialized fixture.
+    #[derive(Clone, Copy, Debug)]
+    struct ParametricFractureF32<const B: usize, const D: usize>;
+
+    /// A downstream enumeration whose canonical coordinate is deliberately not
+    /// its stored code. It witnesses that the private addressed view remains a
+    /// relabeling through `code_at/index_of`, not an identity-code assumption.
+    #[derive(Clone, Copy, Debug)]
+    struct PermutedF32<'a>(&'a [Alphabet<f32, Whole<f32>>; 4]);
+
+    impl Codec<f32, Whole<f32>> for PermutedF32<'_> {
+        type Code = u8;
+        const MAX_BLOCK: usize = 1;
+        const TIER: TierId = TierId::Book;
+
+        fn decode_element(&self, code: Self::Code, _: usize) -> Alphabet<f32, Whole<f32>> {
+            self.0[usize::from(code) % 4]
+        }
+    }
+
+    impl Enumerable<f32, Whole<f32>> for PermutedF32<'_> {
+        const CODE_SPACE: usize = 4;
+
+        fn code_at(index: usize) -> Self::Code {
+            [2, 0, 3, 1][index % 4]
+        }
+
+        fn index_of(code: Self::Code) -> usize {
+            [1, 3, 0, 2][usize::from(code) % 4]
+        }
+    }
+
+    impl Codec<f64, Whole<f64>> for PairF64 {
+        type Code = u8;
+        const MAX_BLOCK: usize = 2;
+        const TIER: TierId = TierId::Book;
+
+        fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<f64, Whole<f64>> {
+            let pair = if code % 2 == 0 {
+                [0.5, -1.0]
+            } else {
+                [1.5, 0.25]
+            };
+            bytemuck::TransparentWrapper::wrap(pair[i % 2])
+        }
+    }
+
+    impl Enumerable<f64, Whole<f64>> for PairF64 {
+        const CODE_SPACE: usize = 2;
+
+        fn code_at(index: usize) -> Self::Code {
+            (index % 2) as u8
+        }
+
+        fn index_of(code: Self::Code) -> usize {
+            usize::from(code % 2)
+        }
+    }
+
+    impl Codec<f32, Whole<f32>> for FractureF32 {
+        type Code = u8;
+        const MAX_BLOCK: usize = 2;
+        const TIER: TierId = TierId::Book;
+
+        fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<f32, Whole<f32>> {
+            let low = f32::from_bits(0x3fff_ffff);
+            let high = f32::from_bits(0x437f_ffff);
+            let pair = if code % 2 == 0 {
+                [high, high]
+            } else {
+                [low, high]
+            };
+            bytemuck::TransparentWrapper::wrap(pair[i % Self::MAX_BLOCK])
+        }
+    }
+
+    impl Enumerable<f32, Whole<f32>> for FractureF32 {
+        const CODE_SPACE: usize = 2;
+
+        fn code_at(index: usize) -> Self::Code {
+            (index % Self::CODE_SPACE) as u8
+        }
+
+        fn index_of(code: Self::Code) -> usize {
+            usize::from(code % Self::CODE_SPACE as u8)
+        }
+    }
+
+    impl<const B: usize, const D: usize> Codec<f32, Whole<f32>> for ParametricFractureF32<B, D> {
+        type Code = u8;
+        const MAX_BLOCK: usize = B;
+        const TIER: TierId = TierId::Book;
+
+        fn decode_element(&self, code: Self::Code, i: usize) -> Alphabet<f32, Whole<f32>> {
+            let low = f32::from_bits(0x3fff_ffff);
+            let high = f32::from_bits(0x437f_ffff);
+            let value = if (usize::from(code) + i).is_multiple_of(2) {
+                low
+            } else {
+                high
+            };
+            bytemuck::TransparentWrapper::wrap(value)
+        }
+    }
+
+    impl<const B: usize, const D: usize> Enumerable<f32, Whole<f32>> for ParametricFractureF32<B, D> {
+        const CODE_SPACE: usize = D;
+
+        fn code_at(index: usize) -> Self::Code {
+            u8::try_from(index % D).expect("the test code spaces fit u8")
+        }
+
+        fn index_of(code: Self::Code) -> usize {
+            usize::from(code) % D
+        }
+    }
+
+    impl Bound for MaxBound {
+        const VALUE: u128 = u128::MAX;
+    }
+
+    static DENSE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DENSE_ACCEPTS: AtomicBool = AtomicBool::new(false);
+    static DENSE_DECLINE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl Element for DenseDecline {
+        type Acc = i128;
+        const BITS: u32 = i8::BITS;
+        const ZERO: Self = Self(0);
+        const HAS_NARROW: bool = true;
+        const HAS_NARROW32: bool = true;
+
+        fn mac(acc: &mut Self::Acc, a: Self, w: Self) {
+            *acc += i128::from(a.0) * i128::from(w.0);
+        }
+
+        fn mac_narrow(acc: i64, a: Self, w: Self) -> i64 {
+            acc + i64::from(a.0) * i64::from(w.0)
+        }
+
+        fn mac_narrow32(acc: i32, a: Self, w: Self) -> i32 {
+            acc + i32::from(a.0) * i32::from(w.0)
+        }
+
+        fn combine_narrow(acc: Self::Acc, narrow: i64) -> Self::Acc {
+            acc + i128::from(narrow)
+        }
+    }
+
+    impl IntegerElement for DenseDecline {
+        const FULL: u128 = 1u128 << (i8::BITS - 1);
+        const ONE: Self = Self(1);
+
+        fn magnitude(self) -> u128 {
+            u128::from(self.0.unsigned_abs())
+        }
+
+        fn sub(self, other: Self) -> Self {
+            Self(self.0.wrapping_sub(other.0))
+        }
+
+        fn add(self, other: Self) -> Self {
+            Self(self.0.wrapping_add(other.0))
+        }
+    }
+
+    impl LaneWord for ZeroLane {
+        const ZERO: Self = Self;
+
+        fn add(self, _: Self) -> Self {
+            panic!("a zero-capacity lane has no valid addition")
+        }
+    }
+
+    impl Lane<DenseDecline> for ZeroLane {
+        fn capacity(_: u128) -> Option<usize> {
+            Some(0)
+        }
+
+        fn mac(self, _: DenseDecline, _: DenseDecline) -> Self {
+            panic!("a zero-capacity lane has no valid product")
+        }
+
+        fn place(self, _: AccOf<DenseDecline>) -> AccOf<DenseDecline> {
+            panic!("a zero-capacity lane has no valid placement")
+        }
+    }
+
+    impl Tabulated for DenseDecline {
+        type Lane = i32;
+        type ModLane = i32;
+        type StreamLane = ZeroLane;
+        const LANE_IS_EXACT: bool = false;
+
+        fn modular_table_admitted(_: u32) -> bool {
+            false
+        }
+
+        fn table_spec(
+            _: Backend,
+            _: u128,
+            _: bool,
+            rows: usize,
+            group: usize,
+            _: usize,
+        ) -> TableSpec<Self, Self::Lane> {
+            portable_table::<Self, i32>(rows, group)
+        }
+
+        fn table_spec_modular(
+            backend: Backend,
+            bound: u128,
+            rows: usize,
+            group: usize,
+            block: usize,
+        ) -> TableSpec<Self, Self::ModLane> {
+            Self::table_spec(backend, bound, false, rows, group, block)
+        }
+
+        fn lanes<'s>(
+            narrow: &'s mut [i64],
+            _: &'s mut [AccOf<Self>],
+            want: usize,
+        ) -> Option<&'s mut [Self::Lane]> {
+            bytemuck::cast_slice_mut::<i64, i32>(narrow).get_mut(..want)
+        }
+
+        fn lanes_modular<'s>(
+            narrow: &'s mut [i64],
+            exact: &'s mut [AccOf<Self>],
+            want: usize,
+        ) -> Option<&'s mut [Self::ModLane]> {
+            Self::lanes(narrow, exact, want)
+        }
+
+        fn dense_steps(_: Backend, _: u128, _: usize, table: usize) -> Steps {
+            Steps {
+                table,
+                dense: 1,
+                dense_rows: 1,
+            }
+        }
+
+        fn dense_gemm<Bd, O, Ep>(
+            a: MatView<'_, Alphabet<Self, Bd>>,
+            b: MatView<'_, Alphabet<Self, Bd>>,
+            c: MatViewMut<'_, O>,
+            epilogue: &Ep,
+            options: GemmOptions,
+            _: &mut [Alphabet<Self, Bd>],
+        ) -> bool
+        where
+            Bd: Bound,
+            O: Element + EncodeFrom<AccOf<Self>>,
+            Ep: Epilogue<Self, O>,
+        {
+            DENSE_CALLS.fetch_add(1, Ordering::Relaxed);
+            if !DENSE_ACCEPTS.load(Ordering::Relaxed) {
+                return false;
+            }
+            let Ok(mut dense) = Triple::new(a, b, c) else {
+                return false;
+            };
+            let shape = dense.shape();
+            let reads_c = epilogue.reads_c();
+            for i in 0..shape.m {
+                for j in 0..shape.n {
+                    let mut acc = <AccOf<Self> as Accumulator>::ZERO;
+                    for p in 0..shape.k {
+                        Self::mac(&mut acc, dense.a().at(i, p).get(), dense.b().at(p, j).get());
+                    }
+                    let prior = if reads_c {
+                        Some(*dense.c_mut().at(i, j))
+                    } else {
+                        None
+                    };
+                    *dense.c_mut().at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
+                }
+            }
+            true
+        }
+    }
 
     /// A recorded generator, so any failure reproduces from the seed alone.
     fn fill<T, F: Fn(u64) -> T>(len: usize, salt: u64, map: F) -> Vec<T> {
@@ -3164,6 +5321,208 @@ mod tests {
                 map(s >> 33)
             })
             .collect()
+    }
+
+    /// Retained test-only clock/control for the removed FNV/prefix spelling.
+    /// Production purity audits mask this module; its only role is to keep the
+    /// radix replacement accountable to the exact pre-refactor work.
+    fn legacy_column_hash<E, Bd, C>(run: &[C::Code]) -> usize
+    where
+        E: Element,
+        Bd: Bound,
+        C: Enumerable<E, Bd>,
+    {
+        // Retained byte-for-byte as the immutable pre-refactor clock arm. It
+        // is a measurement oracle only; production purity masks this module.
+        const HASH_PREFIX: usize = 16;
+        const SEED: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut h = [
+            SEED,
+            SEED ^ 1,
+            SEED ^ 2,
+            SEED ^ 3,
+            SEED ^ 4,
+            SEED ^ 5,
+            SEED ^ 6,
+            SEED ^ 7,
+        ];
+        let seeded = (SEED ^ run.len() as u64).wrapping_mul(PRIME);
+        h[0] ^= seeded;
+        let run = &run[..run.len().min(HASH_PREFIX)];
+        let mut chunks = run.chunks_exact(8);
+        for chunk in &mut chunks {
+            for (lane, &code) in h.iter_mut().zip(chunk) {
+                *lane = (*lane ^ C::index_of(code) as u64).wrapping_mul(PRIME);
+            }
+        }
+        for (i, &code) in chunks.remainder().iter().enumerate() {
+            h[i] = (h[i] ^ C::index_of(code) as u64).wrapping_mul(PRIME);
+        }
+        let mut x = 0u64;
+        for (i, lane) in h.into_iter().enumerate() {
+            x ^= lane.rotate_left((i * 8) as u32);
+        }
+        x ^= x >> 30;
+        x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x ^= x >> 27;
+        (x ^ (x >> 31)) as usize
+    }
+
+    fn legacy_distinct_columns<E, Bd, C>(
+        codes: &[C::Code],
+        codes_per_row: usize,
+        n: usize,
+        index: &mut [usize],
+    ) -> Option<usize>
+    where
+        E: Element,
+        Bd: Bound,
+        C: Enumerable<E, Bd>,
+    {
+        if n == 0 || codes_per_row == 0 || codes.len() < n.checked_mul(codes_per_row)? {
+            return None;
+        }
+        let table = n.checked_mul(2)?.checked_next_power_of_two()?;
+        if index.len() < n.checked_add(table.checked_mul(2)?)? {
+            return None;
+        }
+        let (position, rest) = index.split_at_mut(n);
+        let (slot, key) = rest.split_at_mut(table);
+        slot.fill(0);
+        let mask = table - 1;
+        let mut distinct = 0usize;
+        for (j, position) in position.iter_mut().enumerate() {
+            let run = &codes[j * codes_per_row..(j + 1) * codes_per_row];
+            let hash = legacy_column_hash::<E, Bd, C>(run);
+            let mut probe = hash & mask;
+            loop {
+                match slot[probe] {
+                    0 => {
+                        slot[probe] = j + 1;
+                        key[probe] = hash;
+                        *position = j;
+                        distinct += 1;
+                        break;
+                    }
+                    seen => {
+                        let seen = seen - 1;
+                        let other = &codes[seen * codes_per_row..(seen + 1) * codes_per_row];
+                        if key[probe] == hash && columns_equal::<E, Bd, C>(run, other) {
+                            *position = seen;
+                            break;
+                        }
+                        probe = (probe + 1) & mask;
+                    }
+                }
+            }
+        }
+        Some(distinct)
+    }
+
+    /// `CT-01`: rounding an enumeration up to a mask slab is total at the
+    /// address-space boundary. The largest representable power of two remains
+    /// itself; every larger code space has no representable mask slab and
+    /// declines before sizing, construction, or planning can overflow.
+    #[test]
+    fn slab_rounding_is_total_for_every_representable_code_space_ct_01() {
+        let largest_power = usize::MAX / 2 + 1;
+        assert_eq!(slab_codes(0), 0);
+        assert_eq!(slab_codes(largest_power), largest_power);
+        assert_eq!(slab_codes(largest_power + 1), 0);
+        assert_eq!(slab_codes(usize::MAX), 0);
+        assert_eq!(table_words(usize::MAX, 1, 1), usize::MAX);
+        assert_eq!(
+            suggested_tabulation_index(Shape {
+                m: 1,
+                k: 1,
+                n: usize::MAX,
+            }),
+            usize::MAX
+        );
+
+        let mut no_words: [i32; 0] = [];
+        assert!(Table::new(&mut no_words, usize::MAX, 1, 1).is_none());
+        assert_eq!(
+            tabulation_rows(usize::MAX, blocking::L1_BYTES, core::mem::size_of::<i32>()),
+            0
+        );
+        assert!(Plan::choose(
+            usize::MAX,
+            Shape { m: 1, k: 1, n: 1 },
+            core::mem::size_of::<i32>(),
+            usize::MAX,
+            usize::MAX,
+            1,
+            None,
+        )
+        .is_none());
+
+        // Residency is charged for the padded mask slab, not merely its live
+        // entries. Three codes occupy four addressable entries: six bytes is
+        // enough for the old unpadded calculation and not for the real table.
+        assert!(!tabulation_fits(3, 1, 6, 1));
+        assert!(tabulation_fits(3, 1, 8, 1));
+        assert_eq!(tabulation_rows(3, 24, 1), 3);
+        assert_eq!(tabulation_depth(3, 1, 1, None, 24, 1), 3);
+        assert!(!tabulation_fits(largest_power, 2, usize::MAX, 2));
+
+        // A query at the empty tile is total and asks for no gather group.
+        assert_eq!(column_group(0), 0);
+    }
+
+    /// `CD-13`: public construction retains its zero-padding contract, while
+    /// the private same-geometry row-tile reborrow leaves that established
+    /// padding resident instead of clearing it again. Live cells deliberately
+    /// remain nonzero across the reborrow, so a whole-stack clear cannot pass.
+    #[test]
+    fn table_padding_is_zeroed_once_and_reused_at_the_same_geometry_cd_13() {
+        let (space, rows, depth) = (3usize, 2usize, 2usize);
+        let slab = slab_codes(space) * rows;
+        let live = space * rows;
+        let mut words = vec![-1i32; slab * depth];
+        {
+            let table = Table::new(&mut words, space, rows, depth).expect("the stack fits");
+            for slot in 0..depth {
+                assert!(table.stack()[slot * slab..slot * slab + live]
+                    .iter()
+                    .all(|&word| word == -1));
+                assert!(table.stack()[slot * slab + live..(slot + 1) * slab]
+                    .iter()
+                    .all(|&word| word == 0));
+            }
+        }
+        for slot in 0..depth {
+            for (at, word) in words[slot * slab..slot * slab + live]
+                .iter_mut()
+                .enumerate()
+            {
+                *word = (slot * live + at + 1) as i32;
+            }
+        }
+        let table = Table::reuse_zeroed(&mut words, space, rows, depth)
+            .expect("the same resident geometry reborrows");
+        for slot in 0..depth {
+            assert!(table.stack()[slot * slab..slot * slab + live]
+                .iter()
+                .all(|&word| word != 0));
+            assert!(table.stack()[slot * slab + live..(slot + 1) * slab]
+                .iter()
+                .all(|&word| word == 0));
+        }
+    }
+
+    /// `CD-20`: capacity is tested against the next chunk that really exists.
+    /// A three-block chunk followed by a two-block tail is one five-block run;
+    /// a second full three-block chunk is not. The boundary arithmetic remains
+    /// total at the largest address-sized capacity.
+    #[test]
+    fn a_short_final_chunk_is_not_split_or_placed_twice_cd_20() {
+        assert!(!run_requires_place(0, 3, 5));
+        assert!(!run_requires_place(3, 2, 5));
+        assert!(run_requires_place(3, 3, 5));
+        assert!(!run_requires_place(usize::MAX - 1, 1, usize::MAX));
+        assert!(run_requires_place(usize::MAX - 1, 2, usize::MAX));
     }
 
     fn options(traversal: Traversal) -> GemmOptions {
@@ -3489,15 +5848,14 @@ mod tests {
     /// accumulator and index offers together so the extremes --- nothing, one
     /// word, exactly the suggested amount, and a multiple --- are all reachable.
     /// The lane offer moves with the same knob: `f32`'s table lane is the
-    /// scaled integer word (`CD-20`), which lives in the narrow offer; `f64`
-    /// has no narrow lane and its suggested lane count is zero, so the knob
-    /// scales an empty buffer there exactly as it did before the lane existed.
+    /// compact Atlas word (`CD-20`), which lives in the narrow offer; `f64`
+    /// has no executable table and its API-locked lane needs no narrow words.
     ///
     /// Generic over the code width (`CK-14`): the `u8` and `u16` spellings of
     /// one codebook are the same tier at two residencies, and both are asserted
     /// against the same dense bytes.
     #[allow(clippy::too_many_arguments)]
-    fn arena_tabulated<E, const D: usize, K: SymbolCode>(
+    fn arena_tabulated<E, const D: usize, K: SymbolCode, Ep>(
         table: &[Alphabet<E, Whole<E>>; D],
         codes: &[K],
         a: &[E],
@@ -3507,13 +5865,13 @@ mod tests {
         traversal: Traversal,
         offer: usize,
         collapse_offer: usize,
-        epilogue: &Linear,
+        epilogue: &Ep,
         c0: &[E],
     ) -> (Vec<E>, Census)
     where
         E: FloatElement + EncodeFrom<AccOf<E>> + Tabulated,
         AccOf<E>: crate::SignedPlace,
-        Linear: Epilogue<E, E>,
+        Ep: Epilogue<E, E>,
     {
         let shape = Shape { m, k, n };
         let space = <Arena<'_, E, D, K> as Enumerable<E, Whole<E>>>::CODE_SPACE;
@@ -3600,20 +5958,20 @@ mod tests {
     /// off-by-one in the tier's decode passed every arena test until this
     /// reference read the table itself.
     #[allow(clippy::too_many_arguments)]
-    fn arena_reference<E, const D: usize, K: SymbolCode + Into<usize>>(
+    fn arena_reference<E, const D: usize, K: SymbolCode + Into<usize>, Ep>(
         table: &[Alphabet<E, Whole<E>>; D],
         codes: &[K],
         a: &[E],
         m: usize,
         k: usize,
         n: usize,
-        epilogue: &Linear,
+        epilogue: &Ep,
         c0: &[E],
     ) -> Vec<E>
     where
         E: FloatElement + EncodeFrom<AccOf<E>>,
         AccOf<E>: crate::SignedPlace,
-        Linear: Epilogue<E, E>,
+        Ep: Epilogue<E, E>,
     {
         let mut b = vec![E::ZERO; k * n];
         for p in 0..k {
@@ -3633,17 +5991,98 @@ mod tests {
         c
     }
 
+    /// Independent route expectation for the compact f32 lane.
+    ///
+    /// The full index offer presents each distinct addressed coordinate once
+    /// when its reclaimed dictionary can hold the set, and otherwise retains
+    /// the raw-short/full-book factorization. This independent oracle spells
+    /// that storage law directly. Symbol values do not participate: the total
+    /// q carrier makes both finite and non-finite addressed coordinates table-
+    /// executable once the resident table is demanded.
+    fn f32_demand_book_indices<const D: usize, K: SymbolCode + Into<usize>>(
+        codes: &[K],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<usize> {
+        let fallback = || {
+            if codes.len() < D {
+                codes.iter().map(|&code| code.into() % D).collect()
+            } else {
+                (0..D).collect()
+            }
+        };
+        if D <= 1 || n == 0 || k == 0 || codes.len() < n * k {
+            return fallback();
+        }
+        let shape = Shape { m, k, n };
+        let exact = suggested_tabulation::<f32, Whole<f32>>(shape, D, 1);
+        let lanes = suggested_tabulation_lanes::<f32, Whole<f32>>(shape, D, 1);
+        let lane_words = core::mem::size_of::<i64>() * lanes / <f32 as Tabulated>::LANE_BYTES;
+        let Some(plan) = Plan::choose(
+            D,
+            shape,
+            <f32 as Tabulated>::LANE_BYTES,
+            exact,
+            lane_words,
+            1,
+            <f32 as Tabulated>::probe_capacity::<<f32 as Tabulated>::Lane>(
+                <Whole<f32> as Bound>::VALUE,
+            ),
+        ) else {
+            return fallback();
+        };
+        let dictionary = (2 * n).next_power_of_two();
+        let repeated_columns = (0..n).any(|column| {
+            let run = &codes[column * k..(column + 1) * k];
+            (0..column).any(|prior| {
+                run.iter()
+                    .zip(&codes[prior * k..(prior + 1) * k])
+                    .all(|(&left, &right)| left.into() % D == right.into() % D)
+            })
+        });
+        let occupied = if repeated_columns {
+            dictionary - n.div_ceil(plan.cols)
+        } else {
+            dictionary
+        };
+        let mut distinct = Vec::new();
+        for &code in codes {
+            let index = code.into() % D;
+            if !distinct.contains(&index) {
+                distinct.push(index);
+            }
+        }
+        if distinct.len() <= occupied {
+            distinct
+        } else {
+            fallback()
+        }
+    }
+
+    fn f32_demand_table_expected<const D: usize, K: SymbolCode + Into<usize>>(
+        table: &[Alphabet<f32, Whole<f32>>; D],
+        codes: &[K],
+        a: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> bool {
+        // CD-32's q carrier is total over every binary32 symbol and exponent
+        // span. This oracle remains at the call sites to state the forced-route
+        // expectation independently of the production scale walk: once the
+        // caller supplies the resident table offer, values cannot decline it.
+        let _ = (table, codes, a, m, k, n);
+        true
+    }
+
     /// Every traversal at every offer, against the dense float driver's bytes.
     ///
     /// `table_expected` is what the census must show for the forced traversal
-    /// at a full offer: `true` when a table both fits and is admitted ---
-    /// `f64`, whose lane is the exact accumulator, at a code space whose slab
-    /// holds in L1; `f32` at a finite codebook whose exponent span the scaled
-    /// lane's alphabet holds. A codebook past either boundary is not a defect:
-    /// the lane declines by the same declaration the placement bridge makes
-    /// (`CD-19`), the dense route computes the same bytes, and the census's
-    /// `table_reads == 0` is the decline witnessed rather than the predicate
-    /// trusted twice.
+    /// at a full offer: every binary32 support is executable through the total
+    /// q carrier, and `f64` uses its executable complete lane. A false value is
+    /// therefore a family/geometry expectation, witnessed by `table_reads == 0`
+    /// plus `kernel_calls > 0`, rather than a value-based f32 refusal.
     #[allow(clippy::too_many_arguments)]
     fn every_arena_traversal_agrees<E, const D: usize, K: SymbolCode + Into<usize>>(
         label: &str,
@@ -3689,9 +6128,10 @@ mod tests {
 
         // And the comparison is not vacuous: the forced traversal read a table
         // exactly when one was expected to run, the costed one really declined
-        // to the dense route --- a one-element block can never pay --- and an
-        // offer of nothing reached neither. The census says which ran rather
-        // than the predicate being asked to say it again.
+        // the contextual block-one case that CG-16 found has no universal
+        // scalar boundary, and an offer of nothing reached the persistent Atlas
+        // StreamLane. The census says which ran rather than the predicate being
+        // asked to say it again.
         let (_, tabled) = arena_tabulated(
             table,
             codes,
@@ -3713,12 +6153,12 @@ mod tests {
         } else {
             assert_eq!(
                 tabled.table_reads, 0,
-                "{label} {m}x{k}x{n}: the lane does not hold these panels, so no table ran \
+                "{label} {m}x{k}x{n}: no table is executable for these panels \
                  ({tabled:?})"
             );
             assert!(
                 tabled.kernel_calls > 0,
-                "{label} {m}x{k}x{n}: a declined table at a full offer takes the dense route \
+                "{label} {m}x{k}x{n}: a full offer reaches the dense Atlas engine \
                  ({tabled:?})"
             );
         }
@@ -3737,8 +6177,8 @@ mod tests {
         );
         assert!(
             declined.kernel_calls > 0,
-            "{label} {m}x{k}x{n}: `Blocked` must decline a one-element block to the \
-             dense route ({declined:?})"
+            "{label} {m}x{k}x{n}: `Blocked` must decline below the measured \
+             block-one boundary ({declined:?})"
         );
         let (_, without) = arena_tabulated(
             table,
@@ -3757,11 +6197,21 @@ mod tests {
             without.table_reads, 0,
             "{label} {m}x{k}x{n}: an offer of nothing cannot read a table"
         );
+        assert!(
+            without.kernel_calls > 0,
+            "{label} {m}x{k}x{n}: an empty offer must declare the Atlas StreamLane \
+             ({without:?})"
+        );
+        assert_eq!(
+            without.multiplies, 0,
+            "{label} {m}x{k}x{n}: the empty-offer float route must issue no Element::mac \
+             ({without:?})"
+        );
     }
 
     /// `CD-14`: an arena-coded float weight matrix gives the dense float
-    /// driver's bytes at every shape, with the table forced and declined alike,
-    /// and with no offer at all.
+    /// driver's bytes at every shape, through every named traversal and with
+    /// every offer including none.
     ///
     /// The reference is `gemm_float` over the decoded weights, not another
     /// tabulated run: an agreement between two tabulations would say nothing
@@ -3769,7 +6219,7 @@ mod tests {
     #[test]
     fn an_arena_coded_float_matrix_matches_the_dense_driver_cd_14() {
         // The distinct symbols one artifact's weights can hold. `-0.0` and
-        // `+0.0` are distinct symbols with equal decodes, and an infinity and a
+        // `+0.0` are distinct symbols with equal dyadic values, and an infinity and a
         // NaN are codes like any other (`CT-03`): the exact accumulator carries
         // them as flags and the encode step writes them once. `canonicalize`
         // orders by unsigned bit pattern, so the small tables hold the low
@@ -3810,12 +6260,7 @@ mod tests {
                         n,
                         &Linear::OVERWRITE,
                         &vec![0.0f32; m * n],
-                        // The scaled lane's alphabet holds this codebook
-                        // exactly while every symbol is finite and its span
-                        // fits `24 + w <= 31`: the pool's canonical order puts
-                        // the infinity at `d = 4` and the NaN at `d = 5`, and a
-                        // non-finite symbol is not an integer, scaled or not.
-                        $d <= 3,
+                        f32_demand_table_expected(t32, &codes, &a32, m, k, n),
                     );
                     every_arena_traversal_agrees(
                         concat!("Arena<", $d, "> f64"),
@@ -3827,10 +6272,8 @@ mod tests {
                         n,
                         &Linear::OVERWRITE,
                         &vec![0.0f64; m * n],
-                        // `f64` declares no scaled lane --- a 53-bit
-                        // significand is not an `i32` at any span --- and its
-                        // table lane is the exact accumulator, which holds
-                        // every one of these code spaces.
+                        // The API-locked complete lane is resident and
+                        // executable under the forced traversal.
                         true,
                     );
                 }
@@ -3847,6 +6290,543 @@ mod tests {
         sweep!(6);
         sweep!(7);
         sweep!(8);
+    }
+
+    /// `CD-20`/`CD-32`: demand decoding remains a property of the symbols this
+    /// call addresses, while neither an addressed nor an unused non-finite
+    /// symbol can decline the total q table. The two calls share the same live
+    /// route and differ only in the boundary token the table contracts.
+    #[test]
+    fn unused_nonfinite_symbols_do_not_widen_a_demand_table_cd_20() {
+        let symbols = [0.5f32, f32::INFINITY, -0.75, 1.25];
+        let table: &[Alphabet<f32, Whole<f32>>; 4] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let activation = [0.875f32];
+        let zeros = [0.0f32];
+
+        for code in [0u8, 1] {
+            assert!(
+                f32_demand_table_expected(table, &[code], &activation, 1, 1, 1),
+                "the total q route oracle"
+            );
+            let (_, census) = arena_tabulated(
+                table,
+                &[code],
+                &activation,
+                1,
+                1,
+                1,
+                Traversal::Tabulated,
+                OFFER_STEPS,
+                0,
+                &Linear::OVERWRITE,
+                &zeros,
+            );
+            assert!(census.table_reads > 0, "{census:?}");
+            assert_eq!(census.kernel_calls, 0, "{census:?}");
+        }
+    }
+
+    /// `CD-32`: lane capacity uses the exact compact ceiling and exact maximum
+    /// coefficient product. A non-finite witness and an exponent span that
+    /// exhausts binary32 are executable one-product lanes rather than failed
+    /// scale queries. This is the production-side differential for the model
+    /// pins: a model-only arithmetic assertion cannot catch a driver that still
+    /// divides `i64::MAX` by the conservative power-of-two bound.
+    #[test]
+    fn total_f32_lane_scale_uses_the_exact_q_capacity_cd_32() {
+        fn observe<const D: usize>(
+            symbols: &[f32; D],
+            codes: &[u8],
+            activations: &[f32],
+        ) -> (Option<LaneScale>, Census) {
+            let table: &[Alphabet<f32, Whole<f32>>; D] =
+                as_alphabet_whole(symbols).try_into().unwrap();
+            let k = activations.len();
+            let a = MatView::row_major(as_alphabet_whole(activations), 1, k).unwrap();
+            let w = CodedMatrix::new(Arena::new(table), 1, k, codes)
+                .expect("the codes describe the one-column reduction");
+            let mut census = Census::default();
+            let scale = <f32 as Tabulated>::lane_scale(&a, &w, &mut census);
+            (scale, census)
+        }
+
+        let edge = f32::from_bits(0x3fff_ffff);
+        let (scale, census) = observe(&[edge], &[0], &[edge]);
+        let scale = scale.expect("a finite zero-span panel is executable");
+        assert_eq!(
+            scale.per_step,
+            u128::from(f32_q::PRODUCT_BOUND),
+            "the one-product bound is exact rather than the next power of two"
+        );
+        assert_eq!(
+            <f32 as Tabulated>::lane_run::<Scaled64>(0, &scale),
+            Some(usize::try_from(f32_q::ZERO_SPAN_CAPACITY).unwrap())
+        );
+        assert_eq!(census.decodes, 2, "one activation and one book symbol");
+
+        let (scale, census) = observe(&[1.0], &[0], &[f32::NAN]);
+        let scale = scale.expect("a non-finite witness is a total one-product token");
+        assert_eq!(<f32 as Tabulated>::lane_run::<Scaled64>(0, &scale), Some(1));
+        assert_eq!(
+            census.decodes, 2,
+            "the non-finite witness fixes run one without hiding the book base"
+        );
+
+        let extremes = [f32::from_bits(1), f32::MAX];
+        let (scale, census) = observe(&extremes, &[0, 1], &extremes);
+        let scale = scale.expect("the complete binary32 exponent span is executable");
+        assert_eq!(<f32 as Tabulated>::lane_run::<Scaled64>(0, &scale), Some(1));
+        assert_eq!(census.decodes, 4, "both complete finite spans are observed");
+    }
+
+    /// `CD-32`: the resident forced table is total over the complete binary32
+    /// exponent range and all seven sticky non-finite unions. The exponent
+    /// sweep alternates extremes, so a global compact span is only a totality
+    /// bound; it cannot be used as a reason to enter the dense route.
+    #[test]
+    fn total_f32_q_carrier_executes_every_ieee_boundary_cd_32() {
+        #[allow(clippy::too_many_arguments)]
+        fn forced<const D: usize>(
+            label: &str,
+            table: &[Alphabet<f32, Whole<f32>>; D],
+            codes: &[u8],
+            activations: &[f32],
+            m: usize,
+            k: usize,
+            n: usize,
+        ) {
+            let zeros = vec![0.0f32; m * n];
+            let want = arena_reference(
+                table,
+                codes,
+                activations,
+                m,
+                k,
+                n,
+                &Linear::OVERWRITE,
+                &zeros,
+            );
+            let (got, census) = arena_tabulated(
+                table,
+                codes,
+                activations,
+                m,
+                k,
+                n,
+                Traversal::Tabulated,
+                OFFER_STEPS,
+                0,
+                &Linear::OVERWRITE,
+                &zeros,
+            );
+            assert_eq!(
+                got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                want.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "{label}: complete reference bytes ({census:?})"
+            );
+            assert!(
+                census.table_reads > 0,
+                "{label}: the resident forced table executed ({census:?})"
+            );
+            assert_eq!(
+                census.kernel_calls, 0,
+                "{label}: no dense decline ({census:?})"
+            );
+            assert_eq!(
+                census.multiplies, 0,
+                "{label}: lookup/add UOR only ({census:?})"
+            );
+        }
+
+        // One representative of every exponent field. The stored fraction is
+        // nonzero and signs alternate, so the sweep covers both directions of
+        // the full finite range before reaching the infinity field.
+        let exponent_symbols: [f32; 256] = core::array::from_fn(|biased| match biased {
+            0 => f32::from_bits(1),
+            255 => f32::from_bits(0x7f80_0001),
+            _ => {
+                let sign = if biased % 2 == 0 { 0 } else { 1u32 << 31 };
+                f32::from_bits(sign | ((biased as u32) << 23) | biased as u32)
+            }
+        });
+        let exponent_table: &[Alphabet<f32, Whole<f32>>; 256] =
+            as_alphabet_whole(&exponent_symbols).try_into().unwrap();
+        let exponent_codes: Vec<u8> = (0u8..=u8::MAX).collect();
+        forced(
+            "every binary32 exponent field",
+            exponent_table,
+            &exponent_codes,
+            &[1.0],
+            1,
+            1,
+            exponent_codes.len(),
+        );
+
+        // Columns are the seven nonempty subsets of {+Inf,-Inf,NaN}. The three
+        // source positions independently set the sticky Complete states; the
+        // zero is the absent member of each subset.
+        let union_symbols = [f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 0.0];
+        let union_table: &[Alphabet<f32, Whole<f32>>; 4] =
+            as_alphabet_whole(&union_symbols).try_into().unwrap();
+        let union_codes = [
+            0u8, 3, 3, // +Inf
+            3, 1, 3, // -Inf
+            3, 3, 2, // NaN
+            0, 1, 3, // +Inf | -Inf
+            0, 3, 2, // +Inf | NaN
+            3, 1, 2, // -Inf | NaN
+            0, 1, 2, // +Inf | -Inf | NaN
+        ];
+        forced(
+            "all seven Complete non-finite unions",
+            union_table,
+            &union_codes,
+            &[1.0, 1.0, 1.0],
+            1,
+            3,
+            7,
+        );
+    }
+
+    /// `CD-32`: zero depth is the additive identity before any q scale, book,
+    /// table, fracture, or kernel work exists. The exact all-zero Census makes
+    /// the boundary independent of an inferred route label.
+    #[test]
+    fn empty_f32_q_reduction_has_zero_work_cd_32() {
+        let shape = Shape { m: 3, k: 0, n: 5 };
+        let symbols = [0.5f32];
+        let table: &[Alphabet<f32, Whole<f32>>; 1] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let (got, census) = arena_tabulated(
+            table,
+            &[] as &[u8],
+            &[],
+            shape.m,
+            shape.k,
+            shape.n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            0,
+            &Linear::OVERWRITE,
+            &[7.0; 15],
+        );
+        assert_eq!(census, Census::default());
+        assert_eq!(got, vec![0.0; 15]);
+    }
+
+    /// `CD-32`: scalar fracture is parametric in both codec dimensions. Odd
+    /// block/code-space extents, a row-strided activation, row/column tails,
+    /// repeated codes, and absent/short/full offers all retain the dense bytes;
+    /// the full offer remains a multiply-free resident q table.
+    #[test]
+    fn parametric_nonpower_q_blocks_preserve_bytes_strides_offers_and_census_cd_32() {
+        fn exercise<const B: usize, const D: usize>() {
+            let codec = ParametricFractureF32::<B, D>;
+            let shape = Shape {
+                m: 3,
+                k: 2 * B,
+                n: 7,
+            };
+            let row_stride = shape.k + 1;
+            let mut activation_storage = vec![0.0f32; shape.m * row_stride];
+            for i in 0..shape.m {
+                for p in 0..shape.k {
+                    activation_storage[i * row_stride + p] = if (i + p).is_multiple_of(2) {
+                        f32::from_bits(0x3fff_ffff)
+                    } else {
+                        f32::from_bits(0x437f_ffff)
+                    };
+                }
+            }
+            let activation_view = MatView::new(
+                as_alphabet_whole(&activation_storage),
+                shape.m,
+                shape.k,
+                Strides {
+                    rs: row_stride as isize,
+                    cs: 1,
+                },
+            )
+            .unwrap();
+            let activation_dense = MatView::new(
+                &activation_storage,
+                shape.m,
+                shape.k,
+                Strides {
+                    rs: row_stride as isize,
+                    cs: 1,
+                },
+            )
+            .unwrap();
+            let blocks = shape.k / B;
+            let codes: Vec<u8> = (0..shape.n)
+                .flat_map(|j| {
+                    (0..blocks).map(move |p| {
+                        u8::try_from((j + p) % D).expect("the test code space fits u8")
+                    })
+                })
+                .collect();
+            let mut decoded = vec![0.0f32; shape.k * shape.n];
+            for p in 0..shape.k {
+                for j in 0..shape.n {
+                    decoded[p * shape.n + j] =
+                        codec.decode_element(codes[j * blocks + p / B], p % B).get();
+                }
+            }
+            let mut want = vec![0.0f32; shape.m * shape.n];
+            {
+                let b = MatView::row_major(&decoded, shape.k, shape.n).unwrap();
+                let c = MatViewMut::row_major(&mut want, shape.m, shape.n).unwrap();
+                let mut dense = Triple::new(activation_dense, b, c).unwrap();
+                gemm_float(&mut dense, &Linear::OVERWRITE, GemmOptions::default());
+            }
+
+            for offer in [0, 1, usize::MAX] {
+                let offered = |want: usize| want.min(offer);
+                let mut exact = vec![
+                    <AccOf<f32> as Accumulator>::ZERO;
+                    offered(suggested_tabulation::<f32, Whole<f32>>(shape, D, B))
+                ];
+                let mut lanes =
+                    vec![0i64; offered(suggested_tabulation_lanes::<f32, Whole<f32>>(shape, D, B))];
+                let mut panel = vec![
+                    Alphabet::<f32, Whole<f32>>::ZERO;
+                    offered(suggested_tabulation_panel(D, B))
+                ];
+                let mut index = vec![0usize; offered(suggested_tabulation_index(shape))];
+                let mut got = vec![0.0f32; shape.m * shape.n];
+                let mut census = Census::default();
+                {
+                    let c = MatViewMut::row_major(&mut got, shape.m, shape.n).unwrap();
+                    let w = CodedMatrix::new(codec, shape.n, shape.k, &codes).unwrap();
+                    let mut triple = TabulatedTriple::new(activation_view, w, c).unwrap();
+                    gemm_tabulated_counted(
+                        &mut triple,
+                        &Linear::OVERWRITE,
+                        GemmOptions {
+                            traversal: Traversal::Tabulated,
+                            ..Default::default()
+                        },
+                        &mut Scratch::with_accumulators(&mut panel, &mut exact),
+                        &mut Tabulation::with_index(&mut lanes, &mut index),
+                        &mut Collapse::none(),
+                        &mut census,
+                    );
+                }
+                assert_eq!(
+                    got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    want.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    "B={B}, D={D}, offer={offer}: exact dense bytes ({census:?})"
+                );
+                assert_eq!(census.multiplies, 0, "B={B}, D={D}, offer={offer}");
+                if offer == usize::MAX {
+                    assert!(census.table_reads > 0, "resident q table ({census:?})");
+                    assert_eq!(census.kernel_calls, 0, "no dense fallback ({census:?})");
+                }
+            }
+        }
+
+        exercise::<3, 3>();
+        exercise::<5, 5>();
+    }
+
+    /// `CD-32`: special q atoms are placed at their source boundaries, not
+    /// combined with a compact finite residue. The final IEEE symbol alone
+    /// cannot expose a lost low residue once infinity is sticky, so this test
+    /// captures the complete accumulator and compares every limb/state byte to
+    /// the independent element contraction in source order.
+    #[test]
+    fn f32_q_special_atoms_are_immediate_source_order_singletons_cd_32() {
+        struct Capture<'a>(&'a core::cell::Cell<AccOf<f32>>);
+
+        impl Epilogue<f32, f32> for Capture<'_> {
+            fn finish(&self, acc: AccOf<f32>, _: Option<f32>, _: EncodeMode) -> f32 {
+                self.0.set(acc);
+                0.0
+            }
+
+            fn reads_c(&self) -> bool {
+                false
+            }
+        }
+
+        let symbols = [0.5f32, f32::INFINITY, -0.25, f32::NEG_INFINITY];
+        let table: &[Alphabet<f32, Whole<f32>>; 4] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        // Finite residue precedes and follows +Inf, then -Inf, then another
+        // finite atom. The global run is one and k is five, so this necessarily
+        // executes the local source-ordered scheduler.
+        let codes = [0u8, 1, 2, 3, 0];
+        let activations = [1.0f32; 5];
+        let mut expected = <AccOf<f32> as Accumulator>::ZERO;
+        for (&activation, &code) in activations.iter().zip(&codes) {
+            f32::mac(&mut expected, activation, symbols[usize::from(code)]);
+        }
+
+        let captured = core::cell::Cell::new(<AccOf<f32> as Accumulator>::ZERO);
+        let (_, census) = arena_tabulated(
+            table,
+            &codes,
+            &activations,
+            1,
+            5,
+            1,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            0,
+            &Capture(&captured),
+            &[0.0],
+        );
+        assert_eq!(
+            captured.get(),
+            expected,
+            "singleton placement preserves finite residue and every sticky boundary state"
+        );
+        assert_eq!(census.table_reads, 5, "one gather per source atom");
+        assert_eq!(census.kernel_calls, 0, "the total q table never declined");
+        assert_eq!(
+            census.multiplies, 0,
+            "every contraction is Atlas lookup/add"
+        );
+    }
+
+    /// `CD-32`: a capacity shorter than a codec word is still executable. The
+    /// two seven-grade panels have capacity one, while each stored code names
+    /// two source positions. Their unsafe whole-block aggregate crosses the
+    /// compact ceiling, so exact bytes plus a live table route are a semantic
+    /// witness for scalar fracture with the codec's original stride.
+    #[test]
+    fn f32_q_lane_scalar_fractures_a_wider_codec_block_cd_32() {
+        let (m, k, n) = (2usize, 2usize, 5usize);
+        let shape = Shape { m, k, n };
+        let low = f32::from_bits(0x3fff_ffff);
+        let high = f32::from_bits(0x437f_ffff);
+        let activations = [low, high, high, high];
+        let codes = [0u8, 1, 0, 1, 0];
+
+        let compact_ceiling = u128::from(f32_q::COMPACT_CEILING);
+        let product_bound = u128::from(f32_q::PRODUCT_BOUND);
+        assert_eq!(
+            uor_matmul_model::derive::f32_q_lane_capacity(
+                compact_ceiling,
+                product_bound,
+                7,
+                7,
+                false,
+            ),
+            1
+        );
+        const { assert!(1 < FractureF32::MAX_BLOCK) };
+        assert!(
+            product_bound
+                .checked_mul(1u128 << 14)
+                .and_then(|one| one.checked_add(one))
+                .is_some_and(|whole| whole > compact_ceiling),
+            "a whole two-position worst-case code cannot be one compact token"
+        );
+
+        let mut decoded = vec![0.0f32; k * n];
+        for p in 0..k {
+            for j in 0..n {
+                decoded[p * n + j] = FractureF32
+                    .decode_element(codes[j], p % FractureF32::MAX_BLOCK)
+                    .get();
+            }
+        }
+        let mut want = vec![0.0f32; m * n];
+        {
+            let a = MatView::row_major(&activations, m, k).unwrap();
+            let b = MatView::row_major(&decoded, k, n).unwrap();
+            let c = MatViewMut::row_major(&mut want, m, n).unwrap();
+            let mut dense = Triple::new(a, b, c).unwrap();
+            gemm_float(&mut dense, &Linear::OVERWRITE, GemmOptions::default());
+        }
+
+        fn run(
+            shape: Shape,
+            activations: &[f32],
+            codes: &[u8],
+            traversal: Traversal,
+        ) -> (Vec<f32>, Census) {
+            let exact_words = suggested_tabulation::<f32, Whole<f32>>(
+                shape,
+                FractureF32::CODE_SPACE,
+                FractureF32::MAX_BLOCK,
+            );
+            let lane_words = suggested_tabulation_lanes::<f32, Whole<f32>>(
+                shape,
+                FractureF32::CODE_SPACE,
+                FractureF32::MAX_BLOCK,
+            );
+            let mut exact = vec![<AccOf<f32> as Accumulator>::ZERO; exact_words];
+            let mut lanes = vec![0i64; lane_words];
+            let mut panel =
+                vec![
+                    Alphabet::<f32, Whole<f32>>::ZERO;
+                    suggested_tabulation_panel(FractureF32::CODE_SPACE, FractureF32::MAX_BLOCK,)
+                ];
+            let mut index = vec![0usize; suggested_tabulation_index(shape)];
+            let mut got = vec![0.0f32; shape.m * shape.n];
+            let mut census = Census::default();
+            {
+                let a =
+                    MatView::row_major(as_alphabet_whole(activations), shape.m, shape.k).unwrap();
+                let w = CodedMatrix::new(FractureF32, shape.n, shape.k, codes).unwrap();
+                let c = MatViewMut::row_major(&mut got, shape.m, shape.n).unwrap();
+                let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+                gemm_tabulated_counted(
+                    &mut triple,
+                    &Linear::OVERWRITE,
+                    GemmOptions {
+                        traversal,
+                        ..Default::default()
+                    },
+                    &mut Scratch::with_accumulators(&mut panel, &mut exact),
+                    &mut Tabulation::with_index(&mut lanes, &mut index),
+                    &mut Collapse::none(),
+                    &mut census,
+                );
+            }
+            (got, census)
+        }
+
+        let (got, forced) = run(shape, &activations, &codes, Traversal::Tabulated);
+        assert_eq!(
+            got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            forced.table_reads,
+            (m * FractureF32::CODE_SPACE * k) as u64,
+            "every fractured scalar of each distinct coded column is gathered; repeated columns are expanded after reduction ({forced:?})"
+        );
+        assert_eq!(
+            forced.adds, 24,
+            "eight scalar q contractions, eight gather combines, and eight exact scalar-envelope contractions ({forced:?})"
+        );
+        assert_eq!(
+            forced.decodes, 44,
+            "call span, contextual projections, and replayed least scalar certificates are all charged ({forced:?})"
+        );
+        assert_eq!(forced.kernel_calls, 0, "no dense decline ({forced:?})");
+        assert_eq!(forced.multiplies, 0, "lookup/add UOR only ({forced:?})");
+
+        let (_, finite_route) = run(shape, &activations, &codes, Traversal::Blocked);
+        let mut nonfinite = activations;
+        nonfinite[0] = f32::NAN;
+        let (_, special_route) = run(shape, &nonfinite, &codes, Traversal::Blocked);
+        let finite_signature = (finite_route.table_reads > 0, finite_route.kernel_calls);
+        let special_signature = (special_route.table_reads > 0, special_route.kernel_calls);
+        assert_eq!(
+            finite_signature, special_signature,
+            "selection is value-blind"
+        );
+        assert!(
+            finite_signature.0,
+            "the shared automatic route is nonvacuously tabulated"
+        );
+        assert_eq!(finite_signature.1, 0);
     }
 
     /// `CK-14`, the traversal half: the `u8` and `u16` spellings of one
@@ -3923,7 +6903,7 @@ mod tests {
     #[test]
     fn a_u8_symbol_coded_float_matrix_matches_the_dense_driver_cd_18() {
         // The same pool as `CD-14`: an infinity and a NaN are codes like any
-        // other, and the two zeros are distinct symbols with equal decodes.
+        // other, and the two zeros are distinct symbols with equal dyadic values.
         let mut pool32 = [0.5f32, 1.0, f32::INFINITY, f32::NAN, -0.0, -1.5, -2.5, 0.0];
         assert_eq!(canonicalize(&mut pool32), 8, "eight distinct bit patterns");
         let mut pool64 = [0.5f64, 1.0, f64::INFINITY, f64::NAN, -0.0, -1.5, -2.5, 0.0];
@@ -3958,10 +6938,7 @@ mod tests {
                         n,
                         &Linear::OVERWRITE,
                         &vec![0.0f32; m * n],
-                        // As `CD-14`: finite and in-span through `d = 3`; the
-                        // infinity and the NaN are not the scaled lane's
-                        // alphabet and the dense route answers for them.
-                        $d <= 3,
+                        f32_demand_table_expected(t32, &codes, &a32, m, k, n),
                     );
                     every_arena_traversal_agrees(
                         concat!("Arena<", $d, ", u8> f64"),
@@ -3973,8 +6950,8 @@ mod tests {
                         n,
                         &Linear::OVERWRITE,
                         &vec![0.0f64; m * n],
-                        // `f64` declares no scaled lane; its table lane is the
-                        // exact accumulator, which holds these code spaces.
+                        // The complete lane is resident and executable under
+                        // the forced traversal at either code width.
                         true,
                     );
                 }
@@ -4009,31 +6986,26 @@ mod tests {
                 n,
                 &Linear::ACCUMULATE,
                 &c0,
-                // The pool of eight holds the infinity and the NaN, which the
-                // scaled lane declines; the dense route reads `C` and answers.
-                false,
+                f32_demand_table_expected(t32, &codes, &a, m, k, n),
             );
         }
 
         // The tier's design point: a codebook that fills the byte. The
         // codebook's symbols are an exact dequantization grid, so every
         // pattern is distinct by construction --- and `canonicalize` is asked
-        // rather than told. The grid spans seven binades, which is exactly the
-        // widest span the scaled lane's alphabet holds at `f32` (`24 + 7 <=
-        // 31`): the design point is the admission boundary, not an interior
-        // point of it.
+        // rather than told. Its seven-binade extent exercises nontrivial q
+        // grades without assigning an admission limit to their range.
         let mut pool256: Vec<f32> = (0..256).map(|q| (q as f32 - 127.5) * 0.015_625).collect();
         assert_eq!(canonicalize(&mut pool256), 256, "256 distinct bit patterns");
         let t256: &[Alphabet<f32, Whole<f32>>; 256] =
             as_alphabet_whole(&pool256).try_into().unwrap();
 
-        // Over the 80-byte complete accumulator a 256-entry table holds no L1
+        // Over the 88-byte complete accumulator a 256-entry table holds no L1
         // slab at any tile --- `tabulation_fits` says so at a single row ---
-        // and that was once the end of the story: the forced traversal
-        // declined and the tier's claim was identity and residency. The scaled
-        // lane (`CD-20`) is the answer to the lane question that paragraph
-        // deferred: at eight bytes a lane word the slab is 2 KiB a row and the
-        // table fits, so the forced traversal *tabulates* now, and it is again
+        // and that was once the end of the story. The compact lane (`CD-20`)
+        // resolves the lane question: at eight bytes a word the slab is 2 KiB
+        // a row and the table fits, so the forced traversal *tabulates*, and it is
+        // again
         // the census that says so, not the predicate trusted twice.
         let wide = core::mem::size_of::<AccOf<f32>>();
         let narrow = core::mem::size_of::<i64>();
@@ -4084,11 +7056,10 @@ mod tests {
                     );
                 }
             }
-            // The forced traversal now tabulates: the narrow lane fits the
-            // slab and the grid's span is exactly the alphabet's edge. The
-            // decodes are the span walk (`m * k` of `A`, plus the codebook)
-            // and the one book decode, counted so the walk's price is read
-            // off the census and not re-derived.
+            // The forced traversal tabulates because the narrow q slab fits.
+            // The decodes are the extent observation (`m * k` of `A`, plus
+            // the addressed book), projection, and codec presentations,
+            // counted so their price is read off the census and not re-derived.
             let (_, tabled) = arena_tabulated(
                 t256,
                 &codes,
@@ -4106,15 +7077,17 @@ mod tests {
                 tabled.table_reads > 0,
                 "the narrow lane fits, so the forced traversal reads a table ({tabled:?})"
             );
+            let addressed_book = f32_demand_book_indices::<256, _>(&codes, m, k, n).len();
             assert_eq!(
                 tabled.decodes,
-                (m * k + 2 * 256) as u64,
-                "the span walk and the book decode are the decodes ({tabled:?})"
+                (2 * m * k + 3 * addressed_book) as u64,
+                "the activation extent/projection plus the addressed-symbol extent, codec decode, \
+                 and contextual projection are the decodes ({tabled:?})"
             );
-            // Under the costed traversal the one-element block still declines:
-            // the op-count predicate prices a table read against one dense
-            // product and finds no win, which `CG-16` measures against the
-            // clock. At no offer it is the stream.
+            // CG-16 found no geometry-invariant scalar crossover for this
+            // contextual block-one body, so the shape-only cost predicate does
+            // not promote one from timing. At no offer the decoded walk feeds
+            // the same persistent Atlas StreamLane.
             let (_, declined) = arena_tabulated(
                 t256,
                 &codes,
@@ -4128,7 +7101,10 @@ mod tests {
                 &Linear::OVERWRITE,
                 &zeros,
             );
-            assert_eq!(declined.table_reads, 0, "a one-element block never pays");
+            assert_eq!(
+                declined.table_reads, 0,
+                "no universal block-one clock boundary may select this shape"
+            );
             assert!(
                 declined.kernel_calls > 0,
                 "a full offer declines to the dense route ({declined:?})"
@@ -4147,37 +7123,881 @@ mod tests {
                 &zeros,
             );
             assert_eq!(streamed.table_reads, 0);
-            assert_eq!(streamed.kernel_calls, 0);
+            assert!(streamed.kernel_calls > 0);
             assert_eq!(
-                streamed.multiplies,
-                (m * k * n) as u64,
-                "an offer of nothing streams ({streamed:?})"
+                streamed.multiplies, 0,
+                "an offer of nothing remains lookup/add Atlas ({streamed:?})"
             );
         }
     }
 
+    /// `CD-20`: the compact f32 protocol is contextual but compositional.
+    /// `prescale` writes one q cell into the existing panel word and
+    /// `Scaled64::mac` consumes precisely that spelling; placing the lane at
+    /// the two gauges' sum is the same complete Laurent product as the element
+    /// reference. The q contraction's variable occupied work is verified by
+    /// its dedicated observer, while this generic boundary reports one
+    /// contraction presentation for every table product.
+    #[test]
+    fn f32_q_projection_and_scaled64_compose_as_one_atlas_protocol_cd_20() {
+        assert_eq!(
+            f32_q_build_presentations(1, 1, 1),
+            1,
+            "one table product declares one opaque q contraction presentation"
+        );
+        assert_eq!(
+            f32_q_build_presentations(3, 5, 7),
+            105,
+            "the declaration is parametric in every table-product axis"
+        );
+        let values = [
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            f32::from_bits(0x3fff_ffff),
+            f32::from_bits(0xbfff_ffff),
+        ];
+
+        for &a in &values {
+            for &w in &values {
+                let a_code = a.pack();
+                let w_code = w.pack();
+                let base_a = if a_code.mantissa == 0 {
+                    0
+                } else {
+                    a_code.exp - 7
+                };
+                let base_b = if w_code.mantissa == 0 {
+                    0
+                } else {
+                    w_code.exp - 7
+                };
+                let projected_a = <f32 as Tabulated>::prescale(a, base_a);
+                let projected_w = <f32 as Tabulated>::prescale(w, base_b);
+                let lane = <Scaled64 as Lane<f32>>::mac(Scaled64(0), projected_a, projected_w);
+                let got = <Scaled64 as Lane<f32>>::place_scaled(
+                    lane,
+                    <AccOf<f32> as Accumulator>::ZERO,
+                    base_a + base_b,
+                );
+                let mut want = <AccOf<f32> as Accumulator>::ZERO;
+                <f32 as Element>::mac(&mut want, a, w);
+                assert_eq!(got, want, "contextual carrier pair ({a:?}, {w:?})");
+            }
+        }
+
+        let symbols = [-1.0f32, -0.75, -0.5, -0.25, 0.25, 0.5, 0.75, 1.0];
+        let table: &[Alphabet<f32, Whole<f32>>; 8] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let (m, k, n) = (2usize, 3usize, 5usize);
+        let codes: Vec<u8> = (0..n * k).map(|at| (at % symbols.len()) as u8).collect();
+        let activations = [0.5f32, -1.25, 2.0, -0.75, 1.5, 0.25];
+        let (_, census) = arena_tabulated(
+            table,
+            &codes,
+            &activations,
+            m,
+            k,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            0,
+            &Linear::OVERWRITE,
+            &vec![0.0; m * n],
+        );
+        let build_products = n * m * k;
+        let gathers = m * k * n;
+        assert_eq!(census.multiplies, 0);
+        assert_eq!(census.table_reads, gathers as u64);
+        assert_eq!(
+            census.decodes,
+            (2 * m * k + 3 * symbols.len()) as u64,
+            "the span observation and contextual projection are each counted; the stored stream \
+             is longer than the enumeration, so each book walk remains full"
+        );
+        assert_eq!(
+            census.adds,
+            (build_products * f32_q_build_presentations(1, 1, 1) as usize + gathers) as u64,
+            "the block-one build charges only the entries this column block addresses, plus \
+             the gather"
+        );
+    }
+
+    /// `CG-16`: sparse block-one work is proportional to symbols the call
+    /// addresses, not to an unused enumeration. The one stored code drives the
+    /// scale walk, panel projection, in-place entry build, and gather exactly
+    /// once; no bitmap, copied carrier, or full 256-entry pass remains.
+    #[test]
+    fn block_one_builds_only_the_addressed_atlas_entries_cg_16() {
+        let symbols: [f32; 256] = core::array::from_fn(|index| 0.5 + index as f32 / 1024.0);
+        let table: &[Alphabet<f32, Whole<f32>>; 256] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let codes = [231u8];
+        let activations = [0.75f32];
+        let zeros = [0.0f32];
+        let (got, census) = arena_tabulated(
+            table,
+            &codes,
+            &activations,
+            1,
+            1,
+            1,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            0,
+            &Linear::OVERWRITE,
+            &zeros,
+        );
+        let want = arena_reference(
+            table,
+            &codes,
+            &activations,
+            1,
+            1,
+            1,
+            &Linear::OVERWRITE,
+            &zeros,
+        );
+        assert_eq!(got[0].symbol_bits(), want[0].symbol_bits());
+        assert_eq!(census.kernel_calls, 0);
+        assert_eq!(census.multiplies, 0);
+        assert_eq!(census.table_reads, 1);
+        assert_eq!(census.decodes, 5, "one span observation and one contextual projection for each activation and addressed symbol, plus the symbol's codec decode");
+        assert_eq!(
+            census.adds,
+            1 + f32_q_build_presentations(1, 1, 1) + 1,
+            "one call-wide scale certificate, one fixed Atlas entry contraction, and one \
+             gather combine"
+        );
+    }
+
+    /// `CG-16`: an offered index dictionary makes demand a function of
+    /// distinct addressed indices, never of the raw stream length. The same
+    /// one symbol is stored just below, at, and above the eight-entry book
+    /// extent, and every shape spans several two-column blocks. Scale, decoded
+    /// book, table construction, and gathers therefore remain one presentation
+    /// per semantic use when crossing the old `codes.len() < CODE_SPACE`
+    /// boundary.
+    #[test]
+    fn repeated_block_one_symbols_are_built_once_per_addressed_index_cg_16() {
+        const D: usize = 8;
+        let symbols: [f32; D] = core::array::from_fn(|index| 0.5 + index as f32 / 32.0);
+        let table: &[Alphabet<f32, Whole<f32>>; D] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let activations = [0.75f32];
+
+        for n in [D - 1, D, D + 1] {
+            let shape = Shape { m: 1, k: 1, n };
+            let codes = vec![3u8; n];
+            let mut output = vec![0.0f32; n];
+            let mut exact = vec![<AccOf<f32> as Accumulator>::ZERO; 2];
+            let mut lanes = vec![0i64; suggested_tabulation_lanes::<f32, Whole<f32>>(shape, D, 1)];
+            let mut index = vec![0usize; suggested_tabulation_index(shape)];
+            let mut panel =
+                vec![Alphabet::<f32, Whole<f32>>::ZERO; suggested_tabulation_panel(D, 1)];
+            let mut census = Census::default();
+            let a = MatView::row_major(as_alphabet_whole(&activations), 1, 1).unwrap();
+            let c = MatViewMut::row_major(&mut output, 1, n).unwrap();
+            let w = CodedMatrix::new(Arena::new(table), n, 1, &codes).unwrap();
+            let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut exact),
+                &mut Tabulation::with_index(&mut lanes, &mut index),
+                &mut Collapse::none(),
+                &mut census,
+            );
+
+            let want = arena_reference(
+                table,
+                &codes,
+                &activations,
+                1,
+                1,
+                n,
+                &Linear::OVERWRITE,
+                &vec![0.0; n],
+            );
+            assert_eq!(
+                output
+                    .iter()
+                    .map(|value| value.symbol_bits())
+                    .collect::<Vec<_>>(),
+                want.iter()
+                    .map(|value| value.symbol_bits())
+                    .collect::<Vec<_>>()
+            );
+            let column_blocks = n.div_ceil(2);
+            let contractions = column_blocks as u64;
+            assert_eq!(census.kernel_calls, 0);
+            assert_eq!(census.multiplies, 0);
+            assert_eq!(census.table_reads, contractions);
+            assert_eq!(
+                census.adds,
+                1 + contractions * (f32_q_build_presentations(1, 1, 1) + 1),
+                "n={n}: one call-wide scale certificate, then one build and gather per column \
+                 block"
+            );
+            assert_eq!(
+                census.decodes,
+                column_blocks as u64 + 4,
+                "n={n}: one A/span observation, one addressed-book span, one codec decode, one \
+                 book projection, and one A projection per column block"
+            );
+        }
+    }
+
+    /// `CG-16`: entry deduplication is independent of whole-column collapse.
+    /// Every column below is globally distinct (`[3, j]`), while reduction
+    /// position zero addresses index three five times. The table builds that
+    /// slot once, builds the five distinct indices at position one, and still
+    /// gathers both positions for all five columns.
+    #[test]
+    fn shared_slot_indices_are_deduplicated_without_collapsing_columns_cg_16() {
+        const D: usize = 8;
+        let symbols: [f32; D] = core::array::from_fn(|index| 0.5 + index as f32 / 32.0);
+        let table: &[Alphabet<f32, Whole<f32>>; D] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let (m, k, n) = (1usize, 2usize, 5usize);
+        let codes: Vec<u8> = (0..n).flat_map(|column| [3u8, column as u8]).collect();
+        let activations = [0.75f32, -0.5];
+        let shape = Shape { m, k, n };
+        let mut output = vec![0.0f32; n];
+        let mut exact = vec![<AccOf<f32> as Accumulator>::ZERO; n];
+        let mut lanes = vec![0i64; suggested_tabulation_lanes::<f32, Whole<f32>>(shape, D, 1)];
+        let mut index = vec![0usize; suggested_tabulation_index(shape)];
+        let mut panel = vec![Alphabet::<f32, Whole<f32>>::ZERO; suggested_tabulation_panel(D, 1)];
+        let mut census = Census::default();
+        let a = MatView::row_major(as_alphabet_whole(&activations), m, k).unwrap();
+        let c = MatViewMut::row_major(&mut output, m, n).unwrap();
+        let w = CodedMatrix::new(Arena::new(table), n, k, &codes).unwrap();
+        let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+        gemm_tabulated_counted(
+            &mut triple,
+            &Linear::OVERWRITE,
+            GemmOptions {
+                traversal: Traversal::Tabulated,
+                ..Default::default()
+            },
+            &mut Scratch::with_accumulators(&mut panel, &mut exact),
+            &mut Tabulation::with_index(&mut lanes, &mut index),
+            &mut Collapse::none(),
+            &mut census,
+        );
+
+        let want = arena_reference(
+            table,
+            &codes,
+            &activations,
+            m,
+            k,
+            n,
+            &Linear::OVERWRITE,
+            &vec![0.0; n],
+        );
+        assert_eq!(
+            output
+                .iter()
+                .map(|value| value.symbol_bits())
+                .collect::<Vec<_>>(),
+            want.iter()
+                .map(|value| value.symbol_bits())
+                .collect::<Vec<_>>()
+        );
+        let builds = 1 + n as u64;
+        let gathers = (k * n) as u64;
+        assert_eq!(census.kernel_calls, 0);
+        assert_eq!(census.multiplies, 0);
+        assert_eq!(census.table_reads, gathers);
+        assert_eq!(
+            census.adds,
+            builds * f32_q_build_presentations(1, 1, 1) + gathers
+        );
+        assert_eq!(
+            census.decodes, 19,
+            "two A and five distinct-book span observations, five codec decodes, five book \
+             projections, and two activation projections"
+        );
+    }
+
+    /// `CG-16`: the reclaimed dictionary is cleared for an addressed-entry set
+    /// only when that set can remove work. A block wider than one, a sign-book,
+    /// and the one-coordinate enumeration all pass `need_entries = false`; the
+    /// column map may still be derived, but untouched dictionary cells must not
+    /// pay a table-wide clear.
+    #[test]
+    fn non_pointwise_books_do_not_construct_an_unused_entry_set_cg_16() {
+        let (n, cols) = (3usize, 2usize);
+        let table = (2 * n).next_power_of_two();
+        let words = n + 2 * table;
+        let marker = usize::MAX - 7;
+
+        let mut distinct = vec![marker; words];
+        let snapshot = distinct.clone();
+        let (map, entries) = column_workspace(&mut distinct, n, cols, false, false);
+        assert!(map.is_none() && entries.is_none());
+        assert_eq!(
+            distinct, snapshot,
+            "no-repeat/non-entry work touches no dictionary word"
+        );
+
+        let mut repeated = vec![marker; words];
+        repeated[..n].copy_from_slice(&[0, 0, 2]);
+        let untouched_probe = n + table - 1;
+        let (map, entries) = column_workspace(&mut repeated, n, cols, true, false);
+        assert!(map.is_some() && entries.is_none());
+        assert_eq!(
+            repeated[untouched_probe], marker,
+            "column-map derivation must not end with the unused EntrySet clear"
+        );
+    }
+
+    /// `CU-11`: the odd Atlas-modality radix is invertible modulo every
+    /// power-of-two dictionary extent. An earliest-site unit difference
+    /// therefore survives arbitrarily many following zero coordinates, unlike
+    /// the discarded even recurrence. Equality remains the authority on a
+    /// deliberately colliding canonical pair and on repeated columns.
+    #[test]
+    fn ternary_radix_hash_retains_early_sites_and_collisions_are_exact_cu_11() {
+        type A32 = Arena<'static, f32, 32, u8>;
+        let formerly_reduced = |run: &[u8], modulus: usize| {
+            let mut hash = (run.len() % modulus) as u128;
+            for &code in &run[..run.len().min(crate::float::COLUMN_HASH_PREFIX)] {
+                let doubled = hash + hash;
+                hash =
+                    doubled + hash + <A32 as Enumerable<f32, Whole<f32>>>::index_of(code) as u128;
+            }
+            (hash % modulus as u128) as usize
+        };
+        for length in [0usize, 1, 15, 16, 17, 64, 256] {
+            let run = (0..length)
+                .map(|at| u8::try_from((at * 17 + length * 29) % 32).unwrap())
+                .collect::<Vec<_>>();
+            for table in [2usize, 4, 8, 16, 1024] {
+                assert_eq!(
+                    column_hash::<f32, Whole<f32>, A32>(&run, table),
+                    formerly_reduced(&run, table),
+                    "removing the initial remainder changed length {length} modulo {table}"
+                );
+            }
+        }
+        for table in [2usize, 4, 8, 16] {
+            let left = [0u8; 17];
+            let mut right = left;
+            right[0] = 1;
+            assert_ne!(
+                column_hash::<f32, Whole<f32>, A32>(&left, table),
+                column_hash::<f32, Whole<f32>, A32>(&right, table),
+                "the earliest unit coordinate survives modulo {table}"
+            );
+        }
+
+        // Indices 0 and 8 have the same one-coordinate residue modulo the
+        // eight-slot dictionary, so only the independent equality authority
+        // can keep them distinct while collapsing their repeats.
+        let codes = [0u8, 0, 8, 8];
+        let n = codes.len();
+        let table = (2 * n).next_power_of_two();
+        let mut index = vec![0usize; n + 2 * table];
+        assert_eq!(
+            distinct_columns::<f32, Whole<f32>, A32>(&codes, 1, n, &mut index),
+            Some(2)
+        );
+        assert_eq!(&index[..n], &[0, 0, 2, 2]);
+
+        // The measured prefix deliberately does not inspect coordinate 16.
+        // That is a work boundary, never an equality boundary: a tail-only
+        // difference collides in the filter and is still separated exactly,
+        // while repeats of both columns collapse to their own first source.
+        let head = [0u8; 17];
+        let mut tail = head;
+        tail[16] = 1;
+        assert_eq!(
+            column_hash::<f32, Whole<f32>, A32>(&head, 8),
+            column_hash::<f32, Whole<f32>, A32>(&tail, 8)
+        );
+        let mut codes = Vec::new();
+        for column in [&head, &head, &tail, &tail] {
+            codes.extend_from_slice(column);
+        }
+        let n = 4usize;
+        let table = (2 * n).next_power_of_two();
+        let mut index = vec![0usize; n + 2 * table];
+        assert_eq!(
+            distinct_columns::<f32, Whole<f32>, A32>(&codes, head.len(), n, &mut index),
+            Some(2)
+        );
+        assert_eq!(&index[..n], &[0, 0, 2, 2]);
+    }
+
+    /// Release-only retained clock for the hash and the complete collapse pass.
+    /// It compares the exact same corpus and verifies the first-occurrence map
+    /// before looking at time. This is intentionally not CG-16 calibration: it
+    /// is a regression control for removing legacy bitwise address work.
+    #[test]
+    #[ignore = "release-only radix/legacy collapse clock"]
+    fn ternary_radix_column_collapse_does_not_regress_the_retained_legacy_clock_cu_11() {
+        type A251 = Arena<'static, f32, 251, u8>;
+        let n = 257usize;
+        for depth in [1usize, 16, 64, 256] {
+            let mut codes = vec![0u8; n * depth];
+            for j in 0..n {
+                let representative = if j % 5 == 1 { j - 1 } else { j };
+                for p in 0..depth {
+                    codes[j * depth + p] =
+                        u8::try_from((representative * 29 + p * 17) % 251).unwrap();
+                }
+            }
+            let table = (2 * n).next_power_of_two();
+            let mut radix_index = vec![0usize; n + 2 * table];
+            let mut legacy_index = vec![0usize; n + 2 * table];
+            let radix =
+                distinct_columns::<f32, Whole<f32>, A251>(&codes, depth, n, &mut radix_index);
+            let legacy = legacy_distinct_columns::<f32, Whole<f32>, A251>(
+                &codes,
+                depth,
+                n,
+                &mut legacy_index,
+            );
+            assert_eq!(radix, legacy);
+            assert_eq!(&radix_index[..n], &legacy_index[..n]);
+
+            // Each pair sees the same immutable corpus and one common batch.
+            // Short alternating chunks keep frequency and interrupt drift common
+            // to both arms even when equality work makes a full batch long. The
+            // batch still doubles until even its faster arm occupies at least
+            // twenty milliseconds, keeping timer quantization below the work
+            // being compared. Poisoning and complete map validation surround
+            // every paired sample rather than entering either timer. The guard
+            // is the upper endpoint of a conservative paired 95% interval, not
+            // two aggregate clocks.
+            const PAIRED_SAMPLES: usize = 64;
+            const PAIRED_CHUNK_CALLS: usize = 32;
+            const MIN_BATCH_TIME: std::time::Duration = std::time::Duration::from_millis(20);
+            let poison = usize::MAX - 13;
+            let expected_distinct = radix;
+            let expected_map = radix_index[..n].to_vec();
+            let mut radix_samples = Vec::with_capacity(PAIRED_SAMPLES);
+            let mut legacy_samples = Vec::with_capacity(PAIRED_SAMPLES);
+            let measure_radix = |index: &mut [usize], batch: usize| {
+                index.fill(poison);
+                let mut observed = expected_distinct;
+                let start = std::time::Instant::now();
+                for _ in 0..batch {
+                    observed = std::hint::black_box(distinct_columns::<f32, Whole<f32>, A251>(
+                        std::hint::black_box(&codes),
+                        depth,
+                        n,
+                        std::hint::black_box(&mut *index),
+                    ));
+                }
+                let elapsed = start.elapsed();
+                assert_eq!(observed, expected_distinct);
+                assert_eq!(&index[..n], expected_map.as_slice());
+                elapsed
+            };
+            let measure_legacy = |index: &mut [usize], batch: usize| {
+                index.fill(poison);
+                let mut observed = expected_distinct;
+                let start = std::time::Instant::now();
+                for _ in 0..batch {
+                    observed =
+                        std::hint::black_box(legacy_distinct_columns::<f32, Whole<f32>, A251>(
+                            std::hint::black_box(&codes),
+                            depth,
+                            n,
+                            std::hint::black_box(&mut *index),
+                        ));
+                }
+                let elapsed = start.elapsed();
+                assert_eq!(observed, expected_distinct);
+                assert_eq!(&index[..n], expected_map.as_slice());
+                elapsed
+            };
+            let run_radix = |index: &mut [usize], calls: usize| {
+                let mut observed = expected_distinct;
+                let start = std::time::Instant::now();
+                for _ in 0..calls {
+                    observed = std::hint::black_box(distinct_columns::<f32, Whole<f32>, A251>(
+                        std::hint::black_box(&codes),
+                        depth,
+                        n,
+                        std::hint::black_box(&mut *index),
+                    ));
+                }
+                (observed, start.elapsed())
+            };
+            let run_legacy = |index: &mut [usize], calls: usize| {
+                let mut observed = expected_distinct;
+                let start = std::time::Instant::now();
+                for _ in 0..calls {
+                    observed =
+                        std::hint::black_box(legacy_distinct_columns::<f32, Whole<f32>, A251>(
+                            std::hint::black_box(&codes),
+                            depth,
+                            n,
+                            std::hint::black_box(&mut *index),
+                        ));
+                }
+                (observed, start.elapsed())
+            };
+
+            let mut batch = 1usize;
+            loop {
+                let radix_batch = measure_radix(&mut radix_index, batch);
+                let legacy_batch = measure_legacy(&mut legacy_index, batch);
+                if radix_batch.min(legacy_batch) >= MIN_BATCH_TIME {
+                    break;
+                }
+                batch = batch
+                    .checked_mul(2)
+                    .expect("an address-sized batch reaches a twenty-millisecond clock interval");
+            }
+            for sample in 0..PAIRED_SAMPLES {
+                radix_index.fill(poison);
+                legacy_index.fill(poison);
+                let mut radix_observed = expected_distinct;
+                let mut legacy_observed = expected_distinct;
+                let mut radix_elapsed = std::time::Duration::default();
+                let mut legacy_elapsed = std::time::Duration::default();
+                let mut completed = 0usize;
+                let mut chunk = 0usize;
+                while completed < batch {
+                    let calls = (batch - completed).min(PAIRED_CHUNK_CALLS);
+                    let radix_first = (sample + chunk).is_multiple_of(2);
+                    if radix_first {
+                        let (observed, elapsed) = run_radix(&mut radix_index, calls);
+                        radix_observed = observed;
+                        radix_elapsed += elapsed;
+                        let (observed, elapsed) = run_legacy(&mut legacy_index, calls);
+                        legacy_observed = observed;
+                        legacy_elapsed += elapsed;
+                    } else {
+                        let (observed, elapsed) = run_legacy(&mut legacy_index, calls);
+                        legacy_observed = observed;
+                        legacy_elapsed += elapsed;
+                        let (observed, elapsed) = run_radix(&mut radix_index, calls);
+                        radix_observed = observed;
+                        radix_elapsed += elapsed;
+                    }
+                    completed += calls;
+                    chunk += 1;
+                }
+                assert_eq!(radix_observed, expected_distinct);
+                assert_eq!(legacy_observed, expected_distinct);
+                assert_eq!(&radix_index[..n], expected_map.as_slice());
+                assert_eq!(&legacy_index[..n], expected_map.as_slice());
+                radix_samples.push(radix_elapsed);
+                legacy_samples.push(legacy_elapsed);
+            }
+
+            let log_ratios = radix_samples
+                .iter()
+                .zip(&legacy_samples)
+                .map(|(radix, legacy)| {
+                    let radix = radix.as_nanos().max(1) as f64;
+                    let legacy = legacy.as_nanos().max(1) as f64;
+                    (radix / legacy).ln()
+                })
+                .collect::<Vec<_>>();
+            let count = log_ratios.len() as f64;
+            let mean_log = log_ratios.iter().sum::<f64>() / count;
+            let variance = log_ratios
+                .iter()
+                .map(|ratio| {
+                    let distance = ratio - mean_log;
+                    distance * distance
+                })
+                .sum::<f64>()
+                / (count - 1.0);
+            // With 63 degrees of freedom, two standard errors is a
+            // conservative 95% Student interval (t_0.975,63 < 2).
+            let margin = 2.0 * (variance / count).sqrt();
+            let ratio = mean_log.exp();
+            let lower_95 = (mean_log - margin).exp();
+            let upper_95 = (mean_log + margin).exp();
+            std::eprintln!(
+                "column-collapse depth={depth}: paired_ratio={ratio:.4}, 95% CI=[{lower_95:.4}, {upper_95:.4}], samples={PAIRED_SAMPLES}, batch={batch}"
+            );
+            assert!(
+                upper_95 <= 1.0,
+                "pure radix collapse regressed at depth {depth}: paired ratio={ratio:.4}, 95% CI=[{lower_95:.4}, {upper_95:.4}]"
+            );
+        }
+    }
+
+    /// `CG-16`: a failed call-wide collection clears every occupied probe and
+    /// leaves the same offered words reusable by the per-slot set. Canonical
+    /// indices that share low address bits must probe onward, be recognized on
+    /// a second insertion, and all clear again without a bitmap or allocation.
+    #[test]
+    fn addressed_entry_set_overflow_collision_and_reuse_are_exact_cg_16() {
+        let mut seen = [0usize; 4];
+        let mut occupied = [0usize; 2];
+        let mut set = EntrySet {
+            seen: &mut seen,
+            occupied: &mut occupied,
+            used: 0,
+        };
+        assert!(
+            set.collect::<f32, Whole<f32>, Arena<'static, f32, 8, u8>>(&[0, 1, 2])
+                .is_none(),
+            "the third distinct coordinate exceeds the offered occupied run"
+        );
+        assert!(set.seen.iter().all(|&entry| entry == 0));
+        let count = set
+            .collect::<f32, Whole<f32>, Arena<'static, f32, 8, u8>>(&[3, 3])
+            .expect("the cleared set is immediately reusable");
+        assert_eq!(set.collected(count), &[3]);
+        set.release_collected();
+
+        let mut colliding_seen = [0usize; 8];
+        let mut colliding_occupied = [0usize; 4];
+        let mut colliding = EntrySet {
+            seen: &mut colliding_seen,
+            occupied: &mut colliding_occupied,
+            used: 0,
+        };
+        assert!(matches!(colliding.insert(1), EntryInsert::New));
+        assert!(matches!(colliding.insert(9), EntryInsert::New));
+        assert!(matches!(colliding.insert(17), EntryInsert::New));
+        assert!(matches!(colliding.insert(9), EntryInsert::Present));
+        assert_eq!(
+            (0..colliding.len())
+                .map(|at| colliding.index(at))
+                .collect::<Vec<_>>(),
+            [1, 9, 17]
+        );
+        colliding.clear();
+        assert!(colliding.seen.iter().all(|&entry| entry == 0));
+    }
+
+    /// `CG-16`: without enough index storage, generic duplicate coordinates
+    /// remain issued presentations rather than becoming a guessed type-specific
+    /// set. The absent and one-word offers therefore build/read four entries;
+    /// the complete offer names the one semantic column/address once. All three
+    /// are byte-identical to the dense product.
+    #[test]
+    fn short_index_offers_keep_duplicate_entry_work_truthful_cg_16() {
+        const D: usize = 8;
+        let symbols: [f32; D] = core::array::from_fn(|index| 0.5 + index as f32 / 32.0);
+        let table: &[Alphabet<f32, Whole<f32>>; D] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let (m, k, n) = (1usize, 1usize, 4usize);
+        let shape = Shape { m, k, n };
+        let codes = [3u8; 4];
+        let activations = [0.75f32];
+
+        let run = |index_offer: Option<usize>| {
+            let mut output = vec![0.0f32; n];
+            let mut exact = vec![
+                <AccOf<f32> as Accumulator>::ZERO;
+                suggested_tabulation::<f32, Whole<f32>>(shape, D, 1)
+            ];
+            let mut lanes = vec![0i64; suggested_tabulation_lanes::<f32, Whole<f32>>(shape, D, 1)];
+            let mut index = vec![0usize; index_offer.unwrap_or(0)];
+            let mut panel =
+                vec![Alphabet::<f32, Whole<f32>>::ZERO; suggested_tabulation_panel(D, 1)];
+            let mut census = Census::default();
+            let a = MatView::row_major(as_alphabet_whole(&activations), m, k).unwrap();
+            let c = MatViewMut::row_major(&mut output, m, n).unwrap();
+            let w = CodedMatrix::new(Arena::new(table), n, k, &codes).unwrap();
+            let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+            let mut tabulation = match index_offer {
+                Some(_) => Tabulation::with_index(&mut lanes, &mut index),
+                None => Tabulation::new(&mut lanes),
+            };
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut exact),
+                &mut tabulation,
+                &mut Collapse::none(),
+                &mut census,
+            );
+            (output, census)
+        };
+
+        let (absent, absent_census) = run(None);
+        let (short, short_census) = run(Some(1));
+        let (complete, complete_census) = run(Some(suggested_tabulation_index(shape)));
+        let want = arena_reference(
+            table,
+            &codes,
+            &activations,
+            m,
+            k,
+            n,
+            &Linear::OVERWRITE,
+            &[0.0; 4],
+        );
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.symbol_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&absent), bits(&want));
+        assert_eq!(bits(&short), bits(&want));
+        assert_eq!(bits(&complete), bits(&want));
+        for census in [absent_census, short_census] {
+            assert_eq!(census.table_reads, 4);
+            assert_eq!(
+                census.adds,
+                1 + 4 * (f32_q_build_presentations(1, 1, 1) + 1)
+            );
+            assert_eq!(census.decodes, 14);
+        }
+        assert_eq!(complete_census.table_reads, 1);
+        assert_eq!(
+            complete_census.adds,
+            1 + f32_q_build_presentations(1, 1, 1) + 1
+        );
+        assert_eq!(complete_census.decodes, 5);
+    }
+
+    /// `CG-16`: addressed coordinates are interpreted through the downstream
+    /// enumeration's `code_at/index_of` pair. The canonical coordinates 0 and 1
+    /// below decode stored codes 2 and 0, an admitted one-binade book; treating
+    /// them as identity codes would instead include stored code 1 and falsely
+    /// reject its sixteen-binade span.
+    #[test]
+    fn addressed_codec_preserves_a_nonidentity_enumeration_cg_16() {
+        let symbols = [1.0f32, 65536.0, 2.0, 4.0];
+        let table: &[Alphabet<f32, Whole<f32>>; 4] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let codes = [2u8, 0u8];
+        let activations = [1.0f32, 1.0];
+        let a = MatView::row_major(as_alphabet_whole(&activations), 1, 2).unwrap();
+        let w = CodedMatrix::new(PermutedF32(table), 1, 2, &codes).unwrap();
+        let mut census = Census::default();
+        let scale = addressed_lane_scale(&a, &w, Some(&[0, 1]), &mut census)
+            .expect("the canonical addressed book spans one binade");
+        assert_eq!(
+            scale.base_b,
+            symbols[0].pack().exp.min(symbols[2].pack().exp)
+        );
+        assert_eq!(
+            census.decodes, 4,
+            "two activations and two canonical book coordinates"
+        );
+    }
+
+    /// `CG-16`: caller-offered panel tail is resident projected-activation
+    /// storage, not discarded capacity. A one-cell exact offer deliberately
+    /// makes four column blocks; the fixed-sized panel therefore projects each
+    /// activation four times, while a tail of exactly two complete rows projects
+    /// it once. Both are the same forced Atlas table and produce the same bytes.
+    #[test]
+    fn offered_projected_a_rows_are_reused_across_column_blocks_cg_16() {
+        const D: usize = 16;
+        let symbols: [f32; D] = core::array::from_fn(|index| 0.5 + index as f32 / 32.0);
+        let table: &[Alphabet<f32, Whole<f32>>; D] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let (m, k, n) = (2usize, 3usize, 4usize);
+        let codes: Vec<u8> = (0..n * k).map(|at| at as u8).collect();
+        let activations = [0.75f32, -0.5, 1.25, -1.0, 0.625, 1.5];
+        let fixed_panel = suggested_tabulation_panel(D, 1);
+
+        let run = |cache_cells: usize| {
+            let mut output = vec![0.0f32; m * n];
+            // One exact cell derives a one-row, one-column plan. The lane offer
+            // holds that column plus every one-row slab of the reduction.
+            let mut exact = [<AccOf<f32> as Accumulator>::ZERO; 1];
+            let mut lanes = vec![0i64; 1 + table_words(D, 1, k)];
+            let mut panel = vec![Alphabet::<f32, Whole<f32>>::ZERO; fixed_panel + cache_cells];
+            let mut census = Census::default();
+            let a = MatView::row_major(as_alphabet_whole(&activations), m, k).unwrap();
+            let c = MatViewMut::row_major(&mut output, m, n).unwrap();
+            let w = CodedMatrix::new(Arena::new(table), n, k, &codes).unwrap();
+            let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut exact),
+                &mut Tabulation::new(&mut lanes),
+                &mut Collapse::none(),
+                &mut census,
+            );
+            (output, census)
+        };
+
+        let (uncached, uncached_census) = run(0);
+        let (cached, cached_census) = run(m * k);
+        let reference = arena_reference(
+            table,
+            &codes,
+            &activations,
+            m,
+            k,
+            n,
+            &Linear::OVERWRITE,
+            &vec![0.0; m * n],
+        );
+        assert_eq!(
+            cached
+                .iter()
+                .map(|value| value.symbol_bits())
+                .collect::<Vec<_>>(),
+            reference
+                .iter()
+                .map(|value| value.symbol_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            uncached
+                .iter()
+                .map(|value| value.symbol_bits())
+                .collect::<Vec<_>>(),
+            cached
+                .iter()
+                .map(|value| value.symbol_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(uncached_census.table_reads, (m * k * n) as u64);
+        assert_eq!(cached_census.table_reads, uncached_census.table_reads);
+        assert_eq!(
+            uncached_census.decodes - cached_census.decodes,
+            (m * k * (n - 1)) as u64,
+            "the cache removes exactly the three repeated projections of every activation"
+        );
+        assert_eq!(cached_census.decodes, (2 * m * k + 3 * n * k) as u64);
+    }
+
     /// `CD-20`: a `u8`-symbol-coded float weight matrix tabulated in the
-    /// scaled integer lane gives the dense float driver's bytes at every shape
-    /// and every offer, including none, with the span walk admitted and
-    /// declined alike, and a reduction deeper than the lane's run chunked
-    /// exactly.
+    /// compact Atlas lane gives the dense Atlas driver's bytes at every shape
+    /// and offer. Every finite extent and non-finite union remains table-
+    /// executable; a source-ordered local schedule fractures an aggregate that
+    /// exceeds Q, places singleton tags immediately, and contracts every
+    /// resulting occupied q extent exactly.
     ///
-    /// The lane is the placement bridge's identity one level up (`CD-19`):
-    /// the codebook and the activation tile are pre-scaled to the panels'
-    /// measured base exponents, the table is built over the scaled integer
-    /// alphabet the bridge defines, the gather accumulates `i64` lane words,
-    /// and the exact sum is placed at `2^(base_a + base_b)`. The reference is
-    /// `gemm_float` over the decoded weights, as `CD-18`'s: an agreement
-    /// between two coded traversals would say nothing about whether either
-    /// computes the product.
+    /// The codebook and activation tile receive their paired contextual bases.
+    /// `Scaled64` contracts their q cells through the occupied centered-octet
+    /// extents. Each maximal source-ordered group is gathered exactly, resolved,
+    /// and placed at `2^(base_a + base_b)` before the next group. The reference is
+    /// `gemm_float` over decoded weights, as in `CD-18`; agreement between two
+    /// coded traversals alone would not establish the product.
     #[test]
     fn the_scaled_lane_tabulation_matches_the_dense_driver_cd_20() {
         // A codebook of 256 distinct finite symbols whose values span exactly
         // `span` binades: significands in `[2^22, 2^23)`, so every value's
-        // exponent is `22 + e` and no two collapse, and `e` cycling through
-        // `span + 1` values. Seven binades is the widest span the lane's
-        // alphabet holds (`24 + 7 <= 31`), so the sweep stands on the
-        // admission boundary rather than inside it.
+        // exponent is `22 + e` and no two collapse, and `e` cycles through
+        // `span + 1` values. The sweep exercises progressively wider q extents;
+        // none is an alphabet or admission boundary.
         let codebook = |span: u64| {
             let mut pool: Vec<f32> = (0..256u64)
                 .map(|q| {
@@ -4200,11 +8020,9 @@ mod tests {
             (5, 17, 7),
             (13, 11, 3),
             (7, 40, 9),
-            // Deeper than the lane's run at the widest admitted span --- 127
-            // products at seven binades against the one-binade `A` below ---
-            // so the reduction is cut into runs and placed more than once: a
-            // lane that dropped a carry between runs would write different
-            // bytes here.
+            // Deep enough to require multiple source-ordered local groups at
+            // the widest sampled extent. A lane that dropped a carry between
+            // group placements would write different bytes here.
             (3, 300, 5),
         ];
         for span in [0u64, 3, 7] {
@@ -4213,7 +8031,7 @@ mod tests {
                 as_alphabet_whole(&pool).try_into().unwrap();
             for &(m, k, n) in shapes {
                 // Every byte value is a live code (`CT-07`); `A` spans one
-                // binade, so the walk admits at every `span` above.
+                // binade, and every combined extent remains table-executable.
                 let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| x as u8);
                 let a: Vec<f32> = fill(m * k, 0xac7, |x| (x % 7) as f32 * 0.5 - 1.5);
                 every_arena_traversal_agrees(
@@ -4226,16 +8044,15 @@ mod tests {
                     n,
                     &Linear::OVERWRITE,
                     &vec![0.0f32; m * n],
-                    // Finite and in span: the table runs.
-                    true,
+                    f32_demand_table_expected(table, &codes, &a, m, k, n),
                 );
             }
         }
 
-        // Nine binades is past the alphabet (`24 + 9 > 31`): the lane declines
-        // by the bridge's own declaration and the dense route answers, at the
-        // same bytes. A non-finite symbol is not an integer at any scale, and
-        // a non-finite activation is not either: likewise.
+        // A nine-binade extent and non-finite symbols exercise the cases the
+        // former compact carrier refused. The q carrier retains the former as
+        // locally scheduled finite grades and the latter as singleton tags;
+        // all remain table-executable at the dense driver's bytes.
         let wide = codebook(9);
         let wide_t: &[Alphabet<f32, Whole<f32>>; 256] =
             as_alphabet_whole(&wide).try_into().unwrap();
@@ -4266,7 +8083,7 @@ mod tests {
                 n,
                 &Linear::OVERWRITE,
                 &zeros,
-                false,
+                f32_demand_table_expected(wide_t, &codes, &a, m, k, n),
             );
             every_arena_traversal_agrees(
                 "Arena<256, u8> f32 non-finite book",
@@ -4278,9 +8095,9 @@ mod tests {
                 n,
                 &Linear::OVERWRITE,
                 &zeros,
-                false,
+                f32_demand_table_expected(nonfinite_t, &codes, &a, m, k, n),
             );
-            // One NaN in `A` declines the lane however admissible the book is.
+            // One NaN in `A` becomes a singleton tag without declining the lane.
             let mut a_nan = a.clone();
             a_nan[0] = f32::NAN;
             every_arena_traversal_agrees(
@@ -4293,14 +8110,14 @@ mod tests {
                 n,
                 &Linear::OVERWRITE,
                 &zeros,
-                false,
+                f32_demand_table_expected(grid3_t, &codes, &a_nan, m, k, n),
             );
         }
 
-        // `f64` declines by declaration: a 53-bit significand is not an `i32`
-        // at any span, so the family has no scaled lane --- its table lane is
-        // the exact accumulator, over which a 256-entry table fits no L1 tile.
-        // The dense route answers, at the same bytes.
+        // The complete f64 spelling is executable when explicitly offered.
+        // These small automatic shapes remain below its derived cost boundary;
+        // the forced and downstream block-two witnesses below exercise the
+        // resident table itself.
         let mut pool64: Vec<f64> = (0..256).map(|q| (q as f64 - 127.5) * 0.015_625).collect();
         assert_eq!(canonicalize(&mut pool64), 256, "256 distinct bit patterns");
         let t64: &[Alphabet<f64, Whole<f64>>; 256] = as_alphabet_whole(&pool64).try_into().unwrap();
@@ -4323,14 +8140,14 @@ mod tests {
 
         // The row collapse composes with the lane: repeated rows of `A` are
         // numbered, the compacted product is walked and tabulated, and the
-        // expansion copies the sums. A span that fits admits the same table on
-        // the compacted rows, and the bytes are the dense driver's.
+        // expansion copies the sums. The same total q table executes on the
+        // compacted rows, and the bytes are the dense driver's.
         let pool = codebook(3);
         let table: &[Alphabet<f32, Whole<f32>>; 256] = as_alphabet_whole(&pool).try_into().unwrap();
         let (m, k, n) = (7usize, 40usize, 9usize);
         let codes: Vec<u8> = fill(n * k, 0xa4ea, |x| x as u8);
         // Rows in threes: two repeats of every row, so the collapse has work
-        // to do and the recursion's own span walk is exercised.
+        // to do and the recursion's own q extent observation is exercised.
         let a: Vec<f32> = (0..m * k)
             .map(|at| {
                 let row = at / k % 3;
@@ -4398,8 +8215,786 @@ mod tests {
             n,
             &Linear::OVERWRITE,
             &zeros,
-            true,
+            f32_demand_table_expected(edge_t, &codes, &a, m, k, n),
         );
+    }
+
+    /// `CD-20`: the API-locked complete f64 lane is an executable pure Atlas
+    /// table when the caller explicitly offers its residency. The shape-only
+    /// automatic predicate does not assign contextual block one a scalar
+    /// timing rule, but that cannot become a categorical family refusal:
+    /// longer downstream codec blocks use this same declaration.
+    #[test]
+    fn forced_f64_symbol_traversal_uses_the_complete_atlas_table_cd_20() {
+        let symbols = [0.5f64, 0.75, 1.0, 1.25, -0.5, -0.75, -1.0, -1.25];
+        let table: &[Alphabet<f64, Whole<f64>>; 8] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let (m, k, n) = (3usize, 19usize, 11usize);
+        let shape = Shape { m, k, n };
+        let suggested = suggested_tabulation::<f64, Whole<f64>>(shape, 8, 1);
+        assert!(
+            suggested > 0,
+            "an executable complete-word table must advertise its exact residency"
+        );
+        assert_eq!(
+            suggested_tabulation_lanes::<f64, Whole<f64>>(shape, 8, 1),
+            0,
+            "the same declaration needs no narrow lane offer"
+        );
+        let codes: Vec<u8> = fill(n * k, 0xf64a, |x| (x % 8) as u8);
+        let activations: Vec<f64> = fill(m * k, 0xf64b, |x| ((x % 17) as f64 - 8.0) * 0.125);
+        let zeros = vec![0.0f64; m * n];
+        let want: Vec<u64> = arena_reference(
+            table,
+            &codes,
+            &activations,
+            m,
+            k,
+            n,
+            &Linear::OVERWRITE,
+            &zeros,
+        )
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+
+        let (got, census) = arena_tabulated(
+            table,
+            &codes,
+            &activations,
+            m,
+            k,
+            n,
+            Traversal::Tabulated,
+            OFFER_STEPS,
+            0,
+            &Linear::OVERWRITE,
+            &zeros,
+        );
+        assert_eq!(
+            got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            want,
+            "the named traversal must preserve the direct codebook product's bytes ({census:?})"
+        );
+        assert_eq!(
+            census.kernel_calls, 0,
+            "the forced table must not present a dense operand ({census:?})"
+        );
+        assert!(
+            census.table_reads > 0,
+            "the complete-word f64 table must execute ({census:?})"
+        );
+        assert_eq!(
+            census.multiplies, 0,
+            "the complete table build and gather are Atlas lookup/add only ({census:?})"
+        );
+        let demanded_entries = (0..k)
+            .map(|p| {
+                let mut seen = [false; 8];
+                for column in codes.chunks_exact(k) {
+                    seen[usize::from(column[p]) % symbols.len()] = true;
+                }
+                seen.into_iter().filter(|present| *present).count()
+            })
+            .sum::<usize>();
+        assert_eq!(
+            census.adds,
+            (demanded_entries * m + m * n * k) as u64,
+            "the complete-Atlas build reports one presentation per distinct addressed entry, \
+             plus one transparent gather combine ({census:?})"
+        );
+
+        // The exact lane and the output tile share one accumulator offer. One
+        // word below the full-width suggestion must replan a narrower
+        // column/depth block, not construct the full plan and decline it after
+        // double-booking those cells.
+        for exact_offer in [suggested - 1, suggested] {
+            let mut exact = vec![<AccOf<f64> as Accumulator>::ZERO; exact_offer];
+            let mut panel =
+                vec![Alphabet::<f64, Whole<f64>>::ZERO; suggested_tabulation_panel(8, 1)];
+            let mut lanes: [i64; 0] = [];
+            let mut index = vec![0usize; suggested_tabulation_index(shape)];
+            let mut output = vec![0.0f64; m * n];
+            let mut boundary_census = Census::default();
+            {
+                let a = MatView::row_major(as_alphabet_whole(&activations), m, k).unwrap();
+                let w = CodedMatrix::new(Arena::new(table), n, k, &codes).unwrap();
+                let c = MatViewMut::row_major(&mut output, m, n).unwrap();
+                let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+                gemm_tabulated_counted(
+                    &mut triple,
+                    &Linear::OVERWRITE,
+                    GemmOptions {
+                        traversal: Traversal::Tabulated,
+                        ..Default::default()
+                    },
+                    &mut Scratch::with_accumulators(&mut panel, &mut exact),
+                    &mut Tabulation::with_index(&mut lanes, &mut index),
+                    &mut Collapse::none(),
+                    &mut boundary_census,
+                );
+            }
+            assert_eq!(
+                output
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                want,
+                "shared exact offer {exact_offer}"
+            );
+            assert!(
+                boundary_census.table_reads > 0 && boundary_census.kernel_calls == 0,
+                "offer {exact_offer} must execute its replanned table: {boundary_census:?}"
+            );
+        }
+    }
+
+    /// `CD-20`: f64 planning is parametric in the codec declaration. Arena's
+    /// block of one cannot disable a downstream two-element code whose table
+    /// fits and amortizes its build; the automatic traversal executes the same
+    /// complete Atlas lane and the public workspace query supplies it.
+    #[test]
+    fn downstream_block_two_f64_codec_is_not_categorically_declined_cd_20() {
+        let (m, k, n) = (1usize, 6usize, 8usize);
+        let shape = Shape { m, k, n };
+        let blocks = k / PairF64::MAX_BLOCK;
+        let codes: Vec<u8> = (0..n * blocks)
+            .map(|at| {
+                let (column, block) = (at / blocks, at % blocks);
+                ((column / (0..block).fold(1usize, |scale, _| scale + scale)) % 2) as u8
+            })
+            .collect();
+        let activations = [0.5f64, -1.25, 2.0, 0.75, -0.5, 1.5];
+
+        let mut decoded = vec![0.0f64; k * n];
+        for p in 0..k {
+            for j in 0..n {
+                decoded[p * n + j] = PairF64
+                    .decode_element(
+                        codes[j * blocks + p / PairF64::MAX_BLOCK],
+                        p % PairF64::MAX_BLOCK,
+                    )
+                    .get();
+            }
+        }
+        let mut want = vec![0.0f64; m * n];
+        {
+            let a = MatView::row_major(&activations, m, k).unwrap();
+            let b = MatView::row_major(&decoded, k, n).unwrap();
+            let c = MatViewMut::row_major(&mut want, m, n).unwrap();
+            let mut dense = Triple::new(a, b, c).unwrap();
+            gemm_float(&mut dense, &Linear::OVERWRITE, GemmOptions::default());
+        }
+
+        let exact_words = suggested_tabulation::<f64, Whole<f64>>(shape, 2, 2);
+        assert!(
+            exact_words > 0,
+            "the complete lane advertises its residency"
+        );
+        let mut exact = vec![<AccOf<f64> as Accumulator>::ZERO; exact_words];
+        let mut panel = vec![Alphabet::<f64, Whole<f64>>::ZERO; suggested_tabulation_panel(2, 2)];
+        let mut lanes: [i64; 0] = [];
+        let mut index = vec![0usize; suggested_tabulation_index(shape)];
+        let mut got = vec![0.0f64; m * n];
+        let mut census = Census::default();
+        {
+            let a = MatView::row_major(as_alphabet_whole(&activations), m, k).unwrap();
+            let w = CodedMatrix::new(PairF64, n, k, &codes).unwrap();
+            let c = MatViewMut::row_major(&mut got, m, n).unwrap();
+            let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::Blocked,
+                    ..Default::default()
+                },
+                &mut Scratch::with_accumulators(&mut panel, &mut exact),
+                &mut Tabulation::with_index(&mut lanes, &mut index),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+        assert_eq!(
+            got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|value| value.to_bits()).collect::<Vec<_>>()
+        );
+        assert!(
+            census.table_reads > 0,
+            "the paying block-two table ran: {census:?}"
+        );
+        assert_eq!(census.kernel_calls, 0, "no dense decline: {census:?}");
+        assert_eq!(
+            census.multiplies, 0,
+            "the complete build is pure Atlas: {census:?}"
+        );
+    }
+
+    /// Exercise the exact panel lengths at the boundary the scaled-table tests
+    /// intentionally abstract into fractions.  In particular, zero and one
+    /// element are real offers rather than aliases for a generic stream, and a
+    /// reversed or broadcast activation view cannot make the Atlas capability
+    /// disappear.
+    fn every_float_panel_offer_is_atlas<E, const D: usize>(
+        table: &[Alphabet<E, Whole<E>>; D],
+        codes: &[u8],
+        a: MatView<'_, Alphabet<E, Whole<E>>>,
+        m: usize,
+        k: usize,
+        n: usize,
+        c0: &[E],
+    ) where
+        E: FloatElement + EncodeFrom<AccOf<E>> + Tabulated,
+        AccOf<E>: crate::SignedPlace,
+        Linear: Epilogue<E, E>,
+    {
+        let mut decoded = vec![E::ZERO; k * n];
+        for p in 0..k {
+            for j in 0..n {
+                decoded[p * n + j] = table[codes[j * k + p] as usize % D].get();
+            }
+        }
+        let mut want = c0.to_vec();
+        {
+            let b = MatView::row_major(&decoded, k, n).unwrap();
+            let c = MatViewMut::row_major(&mut want, m, n).unwrap();
+            let mut dense = Triple::new(a.peeled(), b, c).unwrap();
+            gemm_float(&mut dense, &Linear::ACCUMULATE, GemmOptions::default());
+        }
+        let want: Vec<u64> = want.iter().map(|value| value.symbol_bits()).collect();
+
+        for traversal in [
+            Traversal::Tabulated,
+            Traversal::Blocked,
+            Traversal::OutputMajor,
+        ] {
+            // `k` is one decoded row; `n*k + k` is the whole transposed
+            // operand plus the dense driver's own panel. The values between
+            // cross every source-residency boundary while retaining the same
+            // StreamLane contraction.
+            for offer in [0usize, 1, k - 1, k, n * k + k] {
+                let mut panel = vec![Alphabet::<E, Whole<E>>::ZERO; offer];
+                let mut got = c0.to_vec();
+                let mut census = Census::default();
+                {
+                    let c = MatViewMut::row_major(&mut got, m, n).unwrap();
+                    let w = CodedMatrix::new(Arena::new(table), n, k, codes)
+                        .expect("the codes describe n x k");
+                    let mut triple = TabulatedTriple::new(a, w, c).unwrap();
+                    gemm_tabulated_counted(
+                        &mut triple,
+                        &Linear::ACCUMULATE,
+                        GemmOptions {
+                            traversal,
+                            ..Default::default()
+                        },
+                        &mut Scratch::new(&mut panel),
+                        &mut Tabulation::none(),
+                        &mut Collapse::none(),
+                        &mut census,
+                    );
+                }
+                let got: Vec<u64> = got.iter().map(|value| value.symbol_bits()).collect();
+                assert_eq!(
+                    got, want,
+                    "{m}x{k}x{n} {traversal:?}, panel {offer}: the persistent lane must finish \
+                     before the caller epilogue ({census:?})"
+                );
+                assert_eq!(
+                    census.table_reads, 0,
+                    "no table offer exists at panel {offer} ({census:?})"
+                );
+                let packed = traversal != Traversal::OutputMajor && offer == n * k + k;
+                let source_page = if offer == 0 { blocking::KC } else { offer };
+                let expected_calls = if packed {
+                    1
+                } else if source_page >= k {
+                    n * m.div_ceil(ROW_TILES[0])
+                } else {
+                    m * n * k.div_ceil(source_page)
+                };
+                assert_eq!(
+                    census.kernel_calls, expected_calls as u64,
+                    "panel {offer} must count each page actually presented to the dense engine \
+                     ({census:?})"
+                );
+                let expected_decodes = if packed || source_page >= k {
+                    n * k
+                } else {
+                    m * n * k
+                };
+                assert_eq!(
+                    census.decodes, expected_decodes as u64,
+                    "panel {offer} must be the source page itself, with whole rows shared \
+                     and partial rows repeated per dot ({census:?})"
+                );
+                if offer <= k {
+                    assert_eq!(
+                        census.multiplies, 0,
+                        "empty and short offers must remain in the dense Atlas stream and issue no Element::mac \
+                         ({census:?})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `CD-20`: every float panel length, including none and one cell, enters
+    /// the dense Atlas factorization.  Negative and zero input strides are
+    /// views of the same operation and do not recover the generic stream.
+    #[test]
+    fn every_float_offer_and_stride_reaches_atlas_cd_20() {
+        macro_rules! family {
+            ($t:ty) => {{
+                let symbols: [$t; 8] = [0.5, -0.75, 1.0, -1.25, 1.5, -1.75, 2.0, -2.25];
+                let table: &[Alphabet<$t, Whole<$t>>; 8] =
+                    as_alphabet_whole(&symbols).try_into().unwrap();
+                // One row past the bounded dense-stream tile proves a full
+                // decoded column is presented in exactly two family calls,
+                // rather than once per output cell.
+                let (m, k, n) = (ROW_TILES[0] + 1, 7usize, 3usize);
+                let codes: Vec<u8> = fill(n * k, 0xcd20, |x| (x % 8) as u8);
+                let activations: Vec<$t> = (0..m * k)
+                    .map(|at| (at as i32 % 11 - 5) as $t * 0.125)
+                    .collect();
+                let c0: Vec<$t> = (0..m * n).map(|at| (at as $t + 1.0) * 0.25).collect();
+                let alphabet = as_alphabet_whole(&activations);
+
+                let ordinary = MatView::row_major(alphabet, m, k).unwrap();
+                every_float_panel_offer_is_atlas(table, &codes, ordinary, m, k, n, &c0);
+
+                // Each row is read right-to-left. `MatView::new` places the
+                // origin at the high end of the same borrowed buffer.
+                let reversed = MatView::new(
+                    alphabet,
+                    m,
+                    k,
+                    Strides {
+                        rs: k as isize,
+                        cs: -1,
+                    },
+                )
+                .unwrap();
+                every_float_panel_offer_is_atlas(table, &codes, reversed, m, k, n, &c0);
+
+                // Both rows broadcast one reduction run.  Zero is a stride,
+                // not a special arithmetic mode.
+                let broadcast =
+                    MatView::new(&alphabet[..k], m, k, Strides { rs: 0, cs: 1 }).unwrap();
+                every_float_panel_offer_is_atlas(table, &codes, broadcast, m, k, n, &c0);
+            }};
+        }
+        family!(f32);
+        family!(f64);
+    }
+
+    /// `CD-20`: a downstream family that declines its first real empty-rest
+    /// partial reaches its unchanged multiplying stream with caller `C`
+    /// intact. The attempted partial uses a private capture cell, so the
+    /// caller's accumulating epilogue still runs exactly once.
+    #[test]
+    fn a_declined_first_partial_preserves_the_ordinary_stream_cd_20() {
+        let _guard = DENSE_DECLINE_LOCK.lock().unwrap();
+        DENSE_ACCEPTS.store(false, Ordering::Relaxed);
+        DENSE_CALLS.store(0, Ordering::Relaxed);
+        let alphabet = [
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(-3)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(2)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(5)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(-7)).unwrap(),
+        ];
+        let codec = Grid::<DenseDecline, MaxBound, 4>::new(&alphabet);
+        let (m, k, n) = (1usize, 3usize, 2usize);
+        let codes = [0u16, 1, 2, 3, 0, 1];
+        let weights = CodedMatrix::new(codec, n, k, &codes).unwrap();
+        let activations = [
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(4)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(-2)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(3)).unwrap(),
+        ];
+        let mut c = [11i32, -13];
+        let mut one = [Alphabet::<DenseDecline, MaxBound>::ZERO; 1];
+        let mut census = Census::default();
+        {
+            let a = MatView::row_major(&activations, m, k).unwrap();
+            let out = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut triple = TabulatedTriple::new(a, weights, out).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::ACCUMULATE,
+                GemmOptions {
+                    traversal: Traversal::Tabulated,
+                    ..Default::default()
+                },
+                &mut Scratch::new(&mut one),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+        assert_eq!(
+            c,
+            [11 + 4 * -3 + -2 * 2 + 3 * 5, -13 + 4 * -7 + -2 * -3 + 3 * 2]
+        );
+        assert_eq!(
+            DENSE_CALLS.load(Ordering::Relaxed),
+            1,
+            "the first real partial is the only dense call before the decline"
+        );
+        assert_eq!(
+            census.kernel_calls, 1,
+            "the census counts the real dense call that declared the decline"
+        );
+        assert_eq!(census.multiplies, (m * k * n) as u64);
+    }
+
+    /// `CD-20`: acceptance retains the first real partial. At one cell beyond
+    /// the model's page depth, each output needs exactly two dense calls; a
+    /// discarded acceptance call or a recomputed first page makes the counter
+    /// larger while producing the same bytes, so the count is the witness.
+    #[test]
+    fn an_accepted_first_partial_is_not_recomputed_cd_20() {
+        let _guard = DENSE_DECLINE_LOCK.lock().unwrap();
+        DENSE_ACCEPTS.store(true, Ordering::Relaxed);
+        DENSE_CALLS.store(0, Ordering::Relaxed);
+
+        let alphabet = [
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(-3)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(2)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(5)).unwrap(),
+            Alphabet::<DenseDecline, MaxBound>::new(DenseDecline(-7)).unwrap(),
+        ];
+        let codec = Grid::<DenseDecline, MaxBound, 4>::new(&alphabet);
+        let (m, k, n) = (1usize, blocking::KC + 1, 2usize);
+        let codes: Vec<u16> = (0..n * k).map(|at| (at % alphabet.len()) as u16).collect();
+        let weights = CodedMatrix::new(codec, n, k, &codes).unwrap();
+        let activations: Vec<Alphabet<DenseDecline, MaxBound>> = (0..k)
+            .map(|at| {
+                Alphabet::new(DenseDecline(match at % 3 {
+                    0 => 4,
+                    1 => -2,
+                    _ => 3,
+                }))
+                .unwrap()
+            })
+            .collect();
+        let mut c = [0i32; 2];
+        let mut census = Census::default();
+        {
+            let a = MatView::row_major(&activations, m, k).unwrap();
+            let out = MatViewMut::row_major(&mut c, m, n).unwrap();
+            let mut triple = TabulatedTriple::new(a, weights, out).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::OutputMajor,
+                    ..Default::default()
+                },
+                &mut Scratch::none(),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+
+        let mut want = [0i128; 2];
+        for j in 0..n {
+            for p in 0..k {
+                want[j] += i128::from(activations[p].get().0)
+                    * i128::from(alphabet[codes[j * k + p] as usize].get().0);
+            }
+        }
+        assert_eq!(c, [want[0] as i32, want[1] as i32]);
+        assert_eq!(
+            DENSE_CALLS.load(Ordering::Relaxed),
+            m * n * k.div_ceil(blocking::KC),
+            "every real page runs once and no separate acceptance call exists"
+        );
+        assert_eq!(
+            census.kernel_calls,
+            (m * n * k.div_ceil(blocking::KC)) as u64
+        );
+        assert_eq!(
+            census.adds,
+            (m * n * (k.div_ceil(blocking::KC) - 1)) as u64,
+            "every complete page after the first is transparently combined once"
+        );
+        assert_eq!(census.multiplies, 0);
+        assert_eq!(census.decodes, (m * n * k) as u64);
+        DENSE_ACCEPTS.store(false, Ordering::Relaxed);
+    }
+
+    /// `CD-20`: a finite integer alphabet returns before decoding or calling
+    /// the empty-rest dense engine. Its existing stream census and product are
+    /// exactly unchanged; only a bound with no finite magnitude presents a
+    /// real partial.
+    #[test]
+    fn a_finite_integer_bound_does_not_pay_dense_acceptance_cd_20() {
+        let _guard = DENSE_DECLINE_LOCK.lock().unwrap();
+        DENSE_ACCEPTS.store(false, Ordering::Relaxed);
+        DENSE_CALLS.store(0, Ordering::Relaxed);
+        let alphabet = [
+            Alphabet::of(DenseDecline(-3)),
+            Alphabet::of(DenseDecline(2)),
+            Alphabet::of(DenseDecline(5)),
+            Alphabet::of(DenseDecline(-7)),
+        ];
+        let weights = CodedMatrix::new(
+            Grid::<DenseDecline, Full<DenseDecline>, 4>::new(&alphabet),
+            1,
+            3,
+            &[0u16, 1, 2],
+        )
+        .unwrap();
+        let activations = [DenseDecline(4), DenseDecline(-2), DenseDecline(3)];
+        let mut c = [11i32];
+        let mut census = Census::default();
+        {
+            let a = MatView::row_major(as_alphabet_full(&activations), 1, 3).unwrap();
+            let out = MatViewMut::row_major(&mut c, 1, 1).unwrap();
+            let mut triple = TabulatedTriple::new(a, weights, out).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::ACCUMULATE,
+                GemmOptions {
+                    traversal: Traversal::OutputMajor,
+                    ..Default::default()
+                },
+                &mut Scratch::none(),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+
+        assert_eq!(c, [11 + 4 * -3 + -2 * 2 + 3 * 5]);
+        assert_eq!(DENSE_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(census.kernel_calls, 0);
+        assert_eq!(census.multiplies, 3);
+    }
+
+    /// `CT-01`: `Lane::capacity` is a public declaration and may truthfully
+    /// answer `Some(0)`. Such a lane cannot be rounded up to one product: the
+    /// ordinary stream contracts directly in the exact accumulator, remains
+    /// total at a nonempty reduction, and never invokes the lane's deliberately
+    /// failing arithmetic methods.
+    #[test]
+    fn a_zero_capacity_public_stream_lane_is_total_ct_01() {
+        assert_eq!(<ZeroLane as Lane<DenseDecline>>::capacity(1), Some(0));
+
+        let alphabet = [
+            Alphabet::of(DenseDecline(-3)),
+            Alphabet::of(DenseDecline(2)),
+            Alphabet::of(DenseDecline(5)),
+            Alphabet::of(DenseDecline(-7)),
+        ];
+        let weights = CodedMatrix::new(
+            Grid::<DenseDecline, Full<DenseDecline>, 4>::new(&alphabet),
+            1,
+            3,
+            &[0u16, 1, 2],
+        )
+        .unwrap();
+        let activations = [DenseDecline(4), DenseDecline(-2), DenseDecline(3)];
+        let mut c = [0i32];
+        let mut census = Census::default();
+        {
+            let a = MatView::row_major(as_alphabet_full(&activations), 1, 3).unwrap();
+            let output = MatViewMut::row_major(&mut c, 1, 1).unwrap();
+            let mut triple = TabulatedTriple::new(a, weights, output).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal: Traversal::OutputMajor,
+                    ..Default::default()
+                },
+                &mut Scratch::none(),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut census,
+            );
+        }
+
+        assert_eq!(c, [4 * -3 + -2 * 2 + 3 * 5]);
+        assert_eq!(census.multiplies, 3);
+        assert_eq!(census.kernel_calls, 0);
+
+        let empty_weights = CodedMatrix::new(
+            Grid::<DenseDecline, Full<DenseDecline>, 4>::new(&alphabet),
+            1,
+            0,
+            &[] as &[u16],
+        )
+        .unwrap();
+        let mut empty = [17i32];
+        let mut empty_census = Census::default();
+        {
+            let a = MatView::row_major(&[] as &[Alphabet<DenseDecline, Full<DenseDecline>>], 1, 0)
+                .unwrap();
+            let output = MatViewMut::row_major(&mut empty, 1, 1).unwrap();
+            let mut triple = TabulatedTriple::new(a, empty_weights, output).unwrap();
+            gemm_tabulated_counted(
+                &mut triple,
+                &Linear::ACCUMULATE,
+                GemmOptions {
+                    traversal: Traversal::OutputMajor,
+                    ..Default::default()
+                },
+                &mut Scratch::none(),
+                &mut Tabulation::none(),
+                &mut Collapse::none(),
+                &mut empty_census,
+            );
+        }
+        assert_eq!(empty, [17]);
+        assert_eq!(empty_census.multiplies, 0);
+        assert_eq!(empty_census.kernel_calls, 0);
+    }
+
+    /// `CD-20`: empty-rest acceptance is exercised by a real one-product dot.
+    /// The float Atlas writes that product; an integer family requiring a
+    /// reduction panel declines before touching its output.
+    #[test]
+    fn empty_rest_acceptance_uses_real_work_and_decline_writes_nothing_cd_20() {
+        let a32_value = [2.0f32];
+        let b32_value = [3.0f32];
+        let a32 = as_alphabet_whole(&a32_value);
+        let b32 = as_alphabet_whole(&b32_value);
+        let mut c32 = [-7.0f32];
+        assert!(<f32 as Tabulated>::dense_gemm(
+            MatView::row_major(a32, 1, 1).unwrap(),
+            MatView::row_major(b32, 1, 1).unwrap(),
+            MatViewMut::row_major(&mut c32, 1, 1).unwrap(),
+            &Linear::OVERWRITE,
+            GemmOptions::default(),
+            &mut [],
+        ));
+        assert_eq!(c32, [6.0]);
+
+        let a8 = [Alphabet::of(2i8)];
+        let b8 = [Alphabet::of(3i8)];
+        let mut c8 = [41i32];
+        assert!(!<i8 as Tabulated>::dense_gemm(
+            MatView::row_major(&a8, 1, 1).unwrap(),
+            MatView::row_major(&b8, 1, 1).unwrap(),
+            MatViewMut::row_major(&mut c8, 1, 1).unwrap(),
+            &Linear::OVERWRITE,
+            GemmOptions::default(),
+            &mut [],
+        ));
+        assert_eq!(c8, [41]);
+    }
+
+    /// `CD-20`: the public stream-lane identity remains the transparent Wide
+    /// complete accumulator, while an empty coded offer contracts through the
+    /// dense Atlas on both sides of the model's page depth. With runtime
+    /// backend discovery enabled, every real page remains one census call but
+    /// the Atlas kernel family is resolved only once for that backend.
+    #[test]
+    fn atlas_stream_retains_wide_and_crosses_pages_exactly_cd_20() {
+        fn is_public_wide<E>()
+        where
+            E: Tabulated<StreamLane = Wide<AccOf<E>>>,
+        {
+        }
+        is_public_wide::<f32>();
+        is_public_wide::<f64>();
+
+        macro_rules! family {
+            ($element:ty) => {{
+                let symbols: [$element; 2] = [0.5, -0.75];
+                let table: &[Alphabet<$element, Whole<$element>>; 2] =
+                    as_alphabet_whole(&symbols).try_into().unwrap();
+                let k = blocking::KC + 1;
+                let codes: Vec<u8> = (0..k).map(|p| (p & 1) as u8).collect();
+                let a: Vec<$element> = (0..k)
+                    .map(|p| if p & 1 == 0 { 1.25 } else { -1.5 })
+                    .collect();
+                let (got, census) = arena_tabulated(
+                    table,
+                    &codes,
+                    &a,
+                    1,
+                    k,
+                    1,
+                    Traversal::OutputMajor,
+                    0,
+                    0,
+                    &Linear::OVERWRITE,
+                    &[0.0 as $element],
+                );
+
+                let mut want = <AccOf<$element> as Accumulator>::ZERO;
+                for p in 0..k {
+                    <$element as Element>::mac(&mut want, a[p], symbols[p & 1]);
+                }
+                let want = <$element as EncodeFrom<AccOf<$element>>>::encode_from(
+                    want,
+                    EncodeMode::Nearest,
+                );
+                assert_eq!(got[0].symbol_bits(), want.symbol_bits());
+                assert_eq!(census.multiplies, 0);
+                assert_eq!(census.kernel_calls, k.div_ceil(blocking::KC) as u64);
+                assert_eq!(census.adds, (k.div_ceil(blocking::KC) - 1) as u64);
+                assert_eq!(census.decodes, k as u64);
+            }};
+        }
+
+        family!(f32);
+        family!(f64);
+
+        #[cfg(feature = "std")]
+        assert_eq!(
+            crate::float::atlas_dot_resolutions(GemmOptions::default().backend),
+            1,
+            "all f32/f64 pages share one cached Atlas family resolution"
+        );
+    }
+
+    /// `CD-20`: an empty reduction has no real partial with which to establish
+    /// empty-rest dense acceptance. It remains in the public `StreamLane`,
+    /// applies the caller epilogue once per output, and records no kernel,
+    /// multiply, or decode.
+    #[test]
+    fn an_empty_float_reduction_uses_the_public_stream_zero_cd_20() {
+        let symbols = [0.5f32];
+        let table: &[Alphabet<f32, Whole<f32>>; 1] =
+            as_alphabet_whole(&symbols).try_into().unwrap();
+        let (m, k, n) = (2usize, 0usize, 3usize);
+        let c0 = [1.0f32, -2.0, 3.0, -4.0, 5.0, -6.0];
+        for traversal in [
+            Traversal::Tabulated,
+            Traversal::Blocked,
+            Traversal::OutputMajor,
+        ] {
+            for offer in [0, OFFER_STEPS] {
+                let (got, census) = arena_tabulated(
+                    table,
+                    &[] as &[u8],
+                    &[],
+                    m,
+                    k,
+                    n,
+                    traversal,
+                    offer,
+                    0,
+                    &Linear::ACCUMULATE,
+                    &c0,
+                );
+
+                assert_eq!(
+                    got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    c0.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                    "{traversal:?} at offer {offer} must apply the exact stream zero"
+                );
+                assert_eq!(census.table_reads, 0);
+                assert_eq!(census.decodes, 0);
+                assert_eq!(census.multiplies, 0);
+                assert_eq!(census.kernel_calls, 0);
+            }
+        }
     }
 
     /// `CD-17`: collapsing bit-identical rows of `A` in the float tabulated
@@ -4425,7 +9020,7 @@ mod tests {
         assert_eq!(canonicalize(&mut pool64), 8, "eight distinct bit patterns");
 
         macro_rules! case {
-            ($t:ty, $label:expr, $pool:expr, $nan1:expr, $nan2:expr, $build:expr) => {{
+            ($t:ty, $label:expr, $pool:expr, $nan1:expr, $nan2:expr, $table:expr) => {{
                 let label = $label;
                 let table: &[Alphabet<$t, Whole<$t>>; 8] =
                     as_alphabet_whole(&$pool).try_into().unwrap();
@@ -4433,6 +9028,15 @@ mod tests {
                 // Codes past the table on purpose: the enumeration reduces them
                 // modulo `D`, and the reference decodes them the same way.
                 let codes: Vec<u16> = fill(n * k, 0xa4ea, |x| (x % 17) as u16);
+                let demanded_entries = (0..k)
+                    .map(|p| {
+                        let mut seen = [false; 8];
+                        for column in codes.chunks_exact(k) {
+                            seen[usize::from(column[p]) % table.len()] = true;
+                        }
+                        seen.into_iter().filter(|present| *present).count()
+                    })
+                    .sum::<usize>();
                 // Distinct bit patterns, so row `r` of `symbols[r..r + k]`
                 // differs from every other row in its first element. Both zeros
                 // and two NaN payloads are among them.
@@ -4449,8 +9053,12 @@ mod tests {
                     -2.5,
                     3.75,
                 ];
-                let m = 8usize;
-                for d in [1usize, 2, m / 2, m] {
+                // One row past the dense stream's derived batch width makes
+                // the opaque family-call census distinguish a successful
+                // collapse from an uncollapsed product without inventing the
+                // dense engine's internal arithmetic count.
+                let m = ROW_TILES[0] + 1;
+                for d in [1usize, 2, 4, 8] {
                     // `d` distinct rows, numbered by first occurrence: row `i`
                     // is row `i % d`, and the first `d` are pairwise distinct.
                     let a: Vec<$t> = (0..m * k).map(|x| symbols[(x / k % d) + x % k]).collect();
@@ -4470,6 +9078,12 @@ mod tests {
                     // No offer, a rows offer too short for the distinct rows,
                     // exactly enough, and the worst case.
                     for collapse_offer in [0usize, k / 2, d * k, m * k] {
+                        // Keep the f32 panel below the whole decoded operand so
+                        // its bounded Atlas stream census, rather than a single
+                        // packed presentation, witnesses the row collapse. f64
+                        // needs the complete table offer whose build is its
+                        // witness.
+                        let route_offer = if $table { OFFER_STEPS } else { 1 };
                         let (got, census) = arena_tabulated(
                             table,
                             &codes,
@@ -4478,7 +9092,7 @@ mod tests {
                             k,
                             n,
                             Traversal::Tabulated,
-                            OFFER_STEPS,
+                            route_offer,
                             collapse_offer,
                             &Linear::OVERWRITE,
                             &vec![<$t>::default(); m * n],
@@ -4489,28 +9103,29 @@ mod tests {
                             "{label} {m}x{k}x{n} d={d} rows offer {collapse_offer}: the collapse \
                              must give the dense float driver's bytes ({census:?})"
                         );
-                        // The build charges per *distinct* row when the collapse
-                        // ran, and per row when anything declined it. What one
-                        // charged row is charged *for* depends on the route
-                        // below the collapse: the table builds `space` entries
-                        // per element of the reduction, the dense route computes
-                        // `n` products. The scaled lane declines a non-finite
-                        // panel by declaration (`CD-20`) --- and `symbols`
-                        // carries NaNs and an infinity --- so `f32`'s route is
-                        // the dense one and the witness is `n`; `f64`'s lane is
-                        // the complete accumulator, which holds them, and its
-                        // witness is the table's `space`. Either way the count
-                        // moves with `d`, which is the collapse's evidence.
+                        // The work charges per *distinct* row when the collapse
+                        // ran, and per row when it did not. f32's non-finite
+                        // panel reaches the dense presentation count; f64's
+                        // complete table reports its build presentations plus
+                        // gather combines. Both move with `d`, which is the
+                        // collapse's evidence.
                         let charged = if collapse_offer >= d * k && d < m {
                             d
                         } else {
                             m
                         };
+                        let (observed, expected) = if $table {
+                            (census.adds, (charged * (demanded_entries + n * k)) as u64)
+                        } else {
+                            (
+                                census.kernel_calls,
+                                (n * charged.div_ceil(ROW_TILES[0])) as u64,
+                            )
+                        };
                         assert_eq!(
-                            census.multiplies,
-                            (charged * k * $build) as u64,
-                            "{label} {m}x{k}x{n} d={d} rows offer {collapse_offer}: the build \
-                             must charge per distinct row ({census:?})"
+                            observed, expected,
+                            "{label} {m}x{k}x{n} d={d} rows offer {collapse_offer}: the selected \
+                             factorization must charge per distinct row ({census:?})"
                         );
                     }
 
@@ -4544,20 +9159,21 @@ mod tests {
                 }
 
                 // The witness that bit identity and not numeric equality
-                // decides: six rows, four symbols. Rows 0 and 1 differ only in
+                // decides: seventeen rows over four symbols. Rows 0 and 1 differ only in
                 // the sign of a zero; rows 2 and 3 only in a NaN payload; rows
-                // 4 and 5 repeat rows 0 and 2 bit for bit. Numeric `==` would
-                // merge the first pair and refuse the repeats --- five rows it
-                // can call distinct, where bit identity sees four.
-                let m = 6usize;
-                let a: Vec<$t> = vec![
-                    1.0, -0.0, 0.5, -1.5, // row 0
-                    1.0, 0.0, 0.5, -1.5, // row 1: the sign of a zero, and nothing else
-                    $nan1, 1.0, 0.5, -1.5, // row 2
-                    $nan2, 1.0, 0.5, -1.5, // row 3: a NaN payload, and nothing else
-                    1.0, -0.0, 0.5, -1.5, // row 4: row 0's bits again
-                    $nan1, 1.0, 0.5, -1.5, // row 5: row 2's bits again
+                // after those repeat them bit for bit. Numeric `==` would
+                // merge the zero pair and refuse every NaN repeat, while bit
+                // identity sees exactly four rows.
+                let m = ROW_TILES[0] + 1;
+                let patterns = [
+                    [1.0, -0.0, 0.5, -1.5],
+                    [1.0, 0.0, 0.5, -1.5],
+                    [$nan1, 1.0, 0.5, -1.5],
+                    [$nan2, 1.0, 0.5, -1.5],
                 ];
+                let a: Vec<$t> = (0..m)
+                    .flat_map(|row| patterns[row % patterns.len()])
+                    .collect();
                 let d = 4usize;
                 let want: Vec<u64> = arena_reference(
                     table,
@@ -4573,6 +9189,7 @@ mod tests {
                 .map(|v| v.symbol_bits())
                 .collect();
                 for collapse_offer in [0usize, d * k] {
+                    let route_offer = if $table { OFFER_STEPS } else { 1 };
                     let (got, census) = arena_tabulated(
                         table,
                         &codes,
@@ -4581,7 +9198,7 @@ mod tests {
                         k,
                         n,
                         Traversal::Tabulated,
-                        OFFER_STEPS,
+                        route_offer,
                         collapse_offer,
                         &Linear::OVERWRITE,
                         &vec![<$t>::default(); m * n],
@@ -4593,9 +9210,16 @@ mod tests {
                          the dense float driver's bytes ({census:?})"
                     );
                     let charged = if collapse_offer >= d * k { d } else { m };
+                    let (observed, expected) = if $table {
+                        (census.adds, (charged * (demanded_entries + n * k)) as u64)
+                    } else {
+                        (
+                            census.kernel_calls,
+                            (n * charged.div_ceil(ROW_TILES[0])) as u64,
+                        )
+                    };
                     assert_eq!(
-                        census.multiplies,
-                        (charged * k * $build) as u64,
+                        observed, expected,
                         "{label} bit cases, rows offer {collapse_offer}: `-0.0` beside `+0.0` \
                          and one NaN payload beside another are distinct rows ({census:?})"
                     );
@@ -4608,10 +9232,11 @@ mod tests {
             pool32,
             f32::from_bits(0x7fc0_0001),
             f32::from_bits(0x7fc0_0002),
-            // The scaled lane declines the NaN rows and the non-finite
-            // codebook, so the route below the collapse is the dense one and
-            // a charged row is `n` products --- nine, the `n` bound inside.
-            9
+            // The q lane retains the NaN rows and non-finite codebook as
+            // singleton tags. Its stream engine is opaque here; kernel
+            // presentations, rather than a fabricated multiply count, witness
+            // the collapse.
+            false
         );
         case!(
             f64,
@@ -4619,9 +9244,9 @@ mod tests {
             pool64,
             f64::from_bits(0x7ff8_0000_0000_0001),
             f64::from_bits(0x7ff8_0000_0000_0002),
-            // The complete accumulator holds every code, so the table runs
-            // and a charged row is the build's `space` entries per element.
-            8
+            // The complete table builds each distinct addressed entry once
+            // per reduction position and gathers every stored code.
+            true
         );
     }
 
@@ -5317,14 +9942,20 @@ mod tests {
                         census.table_reads > 0,
                         "{m}x{k}x{n} d={d}: the offer was sized for a table and none was read"
                     );
-                    // The build charges per *distinct* row when the collapse
-                    // ran, and per row when anything declined it.
+                    // The lookup build charges each product as an add. The
+                    // collapse still changes only the number of distinct rows
+                    // that are built, never the bytes or the table identity.
                     let charged = if rows_offer >= d * k && d < m { d } else { m };
                     assert_eq!(
-                        census.multiplies,
+                        census.multiplies, 0,
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the i8 lookup build \
+                         must issue no multiplies ({census:?})"
+                    );
+                    assert_eq!(
+                        census.adds - census.table_reads,
                         (charged * k * space) as u64,
-                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the build must charge \
-                         per distinct row ({census:?})"
+                        "{m}x{k}x{n} d={d} rows offer {rows_offer}: the lookup build must \
+                         charge each product as an add ({census:?})"
                     );
                 }
             }
@@ -5362,9 +9993,13 @@ mod tests {
             "both axes: the dense driver's bytes ({census:?})"
         );
         assert_eq!(
-            census.multiplies,
+            census.multiplies, 0,
+            "both axes: the i8 lookup build issues no multiplies ({census:?})"
+        );
+        assert_eq!(
+            census.adds - census.table_reads,
             (rows_d * k * space) as u64,
-            "both axes: the build charges per distinct row ({census:?})"
+            "both axes: the lookup build charges each product as an add ({census:?})"
         );
         assert_eq!(
             census.table_reads,
@@ -5456,10 +10091,13 @@ mod tests {
     /// The offer is the point of the fixture. The exact `i32` lane *is* the
     /// accumulator, so a table in it costs one accumulator per lane word ---
     /// `slab * rows * depth` of them past the `rows * n` tile. The modular
-    /// lane is four lane words per accumulator, so the same stack costs a
-    /// quarter as many, and the offer below covers the modular stack and not
-    /// the exact one. The census then says which lane ran, rather than the
-    /// predicate being asked to say it again.
+    /// lane is four lane words per accumulator, so its smallest one-row,
+    /// one-column, one-slot plan needs one exact output cell plus
+    /// `ceil((one carried column + slab) / 4)` accumulator words, while the
+    /// exact lane needs one output plus that carried column and slab one for
+    /// one. The offer below covers the former and not the latter even after the
+    /// shared-offer planner searches narrower plans. The census then says which
+    /// lane ran.
     #[allow(clippy::type_complexity)]
     fn modular_i32_fixture() -> (
         [[Alphabet<i32, Full<i32>>; 4]; 16],
@@ -5476,13 +10114,11 @@ mod tests {
             "the fixture's row tile fits L1 in either lane"
         );
         let slab = slab_codes(space);
-        let tile = rows * n;
-        // `tile + ceil((tile + slab * rows * blocks) / 4)`: the modular take,
-        // derived in the doc comment above. The exact take at this offer is
-        // `tile + tile + slab * rows` --- one slot deep, which is all the
-        // remainder buys at one accumulator per word --- and it exceeds the
-        // offer, so the exact lane must decline.
-        let offer = tile + (tile + slab * rows * (k / block)).div_ceil(4);
+        let offer = 1 + (1 + slab).div_ceil(4);
+        assert!(
+            offer < 1 + 1 + slab,
+            "the exact lane's smallest plan cannot fit"
+        );
         let flat: Vec<i32> = fill(space * block, 0xb32c, |x| {
             (x as i32).wrapping_mul(0x9E37_79B9u32 as i32)
         });
@@ -5758,14 +10394,14 @@ mod tests {
     ///
     /// Three numbers say it, and each is a closed form rather than a fitted one:
     ///
-    /// - `adds == table_reads == m * n * (k / Bk)`. That is the *whole* content of
-    ///   the column loop: one read and one add per code, covering `Bk` weights.
+    /// - `adds == table_reads + m * k * code_space`. The first term is the
+    ///   column loop's one read and one add per code; the second is the lookup
+    ///   build's one add per product.
     /// - `decodes == code_space * Bk`, for the whole call. The codebook is
     ///   decoded once, not once per row tile and per block of the reduction, so
     ///   the codec's cost does not scale with the shape at all.
-    /// - `multiplies == m * k * code_space`, independent of `n`. The build is the
-    ///   only arithmetic that scales with the code space, and it does not scale
-    ///   with the output width at all.
+    /// - `multiplies == 0`: both the lookup build and the column loop are
+    ///   multiply-free, independent of `n`.
     #[test]
     fn the_tabulated_column_loop_has_no_multiply_cu_06() {
         let table = e8_table::<Full<i8>>().expect("i8 holds E8");
@@ -5816,12 +10452,13 @@ mod tests {
 
         assert_eq!(
             census.adds,
-            (m * n * blocks) as u64,
-            "one add per code per row: {census:?}"
+            (m * n * blocks + m * k * space) as u64,
+            "one gather add per code plus one lookup-build add per product: {census:?}"
         );
         assert_eq!(
-            census.table_reads, census.adds,
-            "every table read is exactly one add and nothing else: {census:?}"
+            census.adds - census.table_reads,
+            (m * k * space) as u64,
+            "the lookup build contributes one add per product: {census:?}"
         );
         assert_eq!(
             census.decodes,
@@ -5829,9 +10466,8 @@ mod tests {
             "the codebook is decoded once for the whole call, not once per tile: {census:?}"
         );
         assert_eq!(
-            census.multiplies,
-            (m * k * space) as u64,
-            "the build is `m * k * code_space` and does not scale with n: {census:?}"
+            census.multiplies, 0,
+            "the lookup build is multiply-free and does not scale with n: {census:?}"
         );
 
         // The claim the whole construction exists for, in the spec's own
@@ -5967,6 +10603,85 @@ mod tests {
         assert!(!tabulation_pays(256, 8, usize::MAX, rows, vnni, l1, lane));
     }
 
+    /// `CM-04`: the shipped selector prices the build sequence that will
+    /// actually run, including a build density different from gather density,
+    /// and its three-factor comparison stays exact at the address boundary.
+    #[test]
+    fn the_private_planner_prices_build_density_without_saturation_cm_04() {
+        for a in [0usize, 1, 2, 7, 16] {
+            for b in [0usize, 1, 2, 7, 16] {
+                for c in [0usize, 1, 2, 7, 16] {
+                    for x in [0usize, 1, 2, 7, 16] {
+                        for y in [0usize, 1, 2, 7, 16] {
+                            for z in [0usize, 1, 2, 7, 16] {
+                                assert_eq!(
+                                    CostProduct::of(a, b, c).greater_than(CostProduct::of(x, y, z)),
+                                    (a as u128) * (b as u128) * (c as u128)
+                                        > (x as u128) * (y as u128) * (z as u128)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            CostProduct::of(usize::MAX, usize::MAX, usize::MAX).greater_than(CostProduct::of(
+                usize::MAX,
+                usize::MAX,
+                usize::MAX - 1
+            ))
+        );
+        assert!(!CostProduct::of(usize::MAX, usize::MAX - 1, usize::MAX)
+            .greater_than(CostProduct::of(usize::MAX, usize::MAX, usize::MAX)));
+
+        let mut spec = portable_table::<i8, i32>(1, 1);
+        let steps = Steps {
+            table: 4,
+            dense: 1,
+            dense_rows: 1,
+        };
+        spec.build_products_per_step = 1;
+        assert!(
+            !tabulation_pays_for_spec(
+                16,
+                4,
+                11,
+                1,
+                steps,
+                usize::MAX,
+                core::mem::size_of::<i32>(),
+                &spec,
+            ),
+            "3*11 does not repay a 16-code build at q=1"
+        );
+        spec.build_products_per_step = 2;
+        assert!(
+            tabulation_pays_for_spec(
+                16,
+                4,
+                11,
+                1,
+                steps,
+                usize::MAX,
+                core::mem::size_of::<i32>(),
+                &spec,
+            ),
+            "6*11 repays the same build at q=2"
+        );
+        spec.build_products_per_step = 0;
+        assert!(!tabulation_pays_for_spec(
+            16,
+            4,
+            usize::MAX,
+            1,
+            steps,
+            usize::MAX,
+            core::mem::size_of::<i32>(),
+            &spec,
+        ));
+    }
+
     /// `CG-18`: the performance gate, counted rather than timed.
     ///
     /// A wall-clock gate on shared CI would measure the machine as much as the
@@ -5977,21 +10692,21 @@ mod tests {
     ///
     /// - Selection is the derivation. The break-even is recomputed at test
     ///   time from the declarations the host's own sequences make (the table
-    ///   spec's `lanes_per_add` against the dense tile's numbers, at the
-    ///   model's cache and blocking constants), never from a recorded one:
-    ///   the NEON row and the AVX2 row of `model/tiers.toml` differ because
-    ///   the pairs do, and a hardcoded 683 fails on aarch64 exactly as a
-    ///   hardcoded 2049 fails on x86. Below the first column width the
-    ///   predicate pays at, the census must show the dense route; at and
-    ///   above it, the table.
+    ///   spec's independent `build_products_per_step` and `lanes_per_add`
+    ///   declarations against the dense tile's numbers, at the model's cache
+    ///   and blocking constants), never from a recorded one. The ISA rows of
+    ///   `model/tiers.toml` differ because the sequence declarations do. Below
+    ///   the first column width the predicate pays at, the census must show the
+    ///   dense route; at and above it, the table.
     /// - The gather never multiplies. When the table runs, the census's
     ///   multiplies are exactly the build's charge --- `code_space * block *
     ///   rows` per slot of the stack --- and one more is the asymptotic
     ///   regression this gate exists to catch.
     ///
-    /// And the boundary the other way: a codec one element wide per code is
-    /// declined at every `n`, so the census shows the dense route at every
-    /// size. A decline that ever flips is the same regression read backwards.
+    /// The boundary the other way is the integer Grid's product build: one
+    /// element per code saves no operation, so the reference cost predicate
+    /// declines it at every `n`. The separately measured contextual Scaled64
+    /// declaration is intentionally not generalized to this builder.
     #[test]
     fn selection_is_the_derivation_and_the_gather_never_multiplies_cg_18() {
         let table = e8_table::<Full<i8>>().expect("i8 holds E8");
@@ -6001,16 +10716,19 @@ mod tests {
         // records it.
         let space = 256usize;
         let block = 8usize;
-        let (m, k) = (16usize, 64usize);
+        // Two code blocks keep every column distinct through the largest
+        // shipped break-even while avoiding work that does not strengthen the
+        // boundary assertion.
+        let (m, k) = (16usize, 16usize);
         let blocks = k / block;
         let lane = core::mem::size_of::<<i8 as Tabulated>::Lane>();
         let l1 = blocking::L1_BYTES;
 
         // The derivation, at the host's own pair of declarations: the table
         // sequence the family resolves to against the dense tile it would
-        // otherwise run. This is `run_lane`'s own arithmetic, asked from the
-        // outside; a boundary computed from a recorded number would pass on
-        // one ISA and be wrong on every other.
+        // otherwise run. This is `run_lane`'s own arithmetic, including the
+        // independent build density; a boundary computed from a recorded
+        // number would pass on one ISA and be wrong on every other.
         let bound = <Full<i8> as Bound>::VALUE;
         let backend = GemmOptions::default().backend;
         let rows = ROW_TILES
@@ -6022,10 +10740,12 @@ mod tests {
         let steps =
             <i8 as Tabulated>::dense_steps(backend, bound, rows, block * spec.lanes_per_add);
         let break_even = (1..)
-            .find(|&cols| tabulation_pays(space, block, cols, rows, steps, l1, lane))
+            .find(|&cols| {
+                tabulation_pays_for_spec(space, block, cols, rows, steps, l1, lane, &spec)
+            })
             .expect("E8 pays at some column width on every pair this workspace ships");
         assert!(
-            !tabulation_pays(space, block, break_even - 1, rows, steps, l1, lane),
+            !tabulation_pays_for_spec(space, block, break_even - 1, rows, steps, l1, lane, &spec,),
             "the first paying width is a boundary, not a plateau"
         );
 
@@ -6033,7 +10753,7 @@ mod tests {
         // and the product is asserted against the dense driver's bytes.
         let a: Vec<i8> = (0..m * k).map(|i| ((i % 255) as i64 - 127) as i8).collect();
 
-        for n in [break_even - 1, break_even, break_even + 1, 2 * break_even] {
+        for n in [break_even - 1, break_even, break_even + 1] {
             // Column `j` is `j` in base `space`, so no two columns repeat and
             // the gather's closed form is exact rather than a census of a
             // hash's luck.
@@ -6110,14 +10830,13 @@ mod tests {
                     "one read per code at n = {n}: {census:?}"
                 );
                 assert_eq!(
-                    census.adds, census.table_reads,
-                    "every read is exactly one add at n = {n}: {census:?}"
+                    census.adds - census.table_reads,
+                    (m * k * space) as u64,
+                    "the lookup build contributes one add per product at n = {n}: {census:?}"
                 );
                 assert_eq!(
-                    census.multiplies,
-                    (space * k * m * n.div_ceil(plan.cols)) as u64,
-                    "the only multiplies are the build's (`code_space * block * rows` per slot) \
-                     at n = {n}: {census:?}"
+                    census.multiplies, 0,
+                    "the lookup build and gather issue no multiplies at n = {n}: {census:?}"
                 );
             }
 
@@ -6143,18 +10862,12 @@ mod tests {
             );
         }
 
-        // The boundary the other way: `block = 1` names one element per code,
-        // the derivation declines at every `n`, and the census must show the
-        // dense route at every size.
+        // The boundary the other way: this integer Grid's block-one product
+        // build has no measured contextual contraction to replace, so the
+        // derivation declines it at every `n`.
         let i4: [A8; 16] = core::array::from_fn(|i| Alphabet::of((i as i8) - 8));
         let grid = Grid::<i8, Full<i8>, 16>::new(&i4);
-        for n in [
-            1usize,
-            break_even - 1,
-            break_even,
-            break_even + 1,
-            2 * break_even,
-        ] {
+        for n in [1usize, break_even - 1, break_even, break_even + 1] {
             let stream: Vec<u16> = fill(n * k, 0x61d, |x| (x % 16) as u16);
             let w = CodedMatrix::new(grid, n, k, &stream).expect("the codes describe n x k");
             let (got, census) = tabulated(
@@ -6170,12 +10883,588 @@ mod tests {
             assert_eq!(got, reference(&w, &a, m, k, n));
             assert_eq!(
                 census.table_reads, 0,
-                "a block-1 codec is declined at every n ({n}): {census:?}"
+                "the integer Grid product build is declined at n={n}: {census:?}"
             );
             assert!(
                 census.kernel_calls > 0,
                 "and the dense route is what ran at n = {n}: {census:?}"
             );
         }
+    }
+
+    /// Which factorization ran, read from the census.
+    ///
+    /// The census's *counts* move with the operand's degeneracy --- that is what
+    /// `CD-15` and `CD-16` are about, and it is a different claim --- so what is
+    /// read here is which of the three routes issued anything at all.
+    fn ran(census: &Census) -> Traversal {
+        if census.table_reads > 0 {
+            Traversal::Tabulated
+        } else if census.kernel_calls > 0 {
+            Traversal::Blocked
+        } else {
+            Traversal::OutputMajor
+        }
+    }
+
+    /// A recorded 64-bit hash of a code stream, rendered in the manifest's
+    /// digest shape.
+    ///
+    /// Not SHA-256, and not offered as one. What `CS-10` needs of a digest field
+    /// is that it *moves with the bytes*, and a cryptographic digest would need
+    /// a dependency this workspace does not carry.
+    /// [`Manifest::write_canonical_json`] checks the shape and nothing else,
+    /// which is what makes the stand-in usable and what makes the manifests
+    /// below genuinely different rather than declared different.
+    fn digest_of(codes: &[u16]) -> String {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &c in codes {
+            for b in c.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        // Sixteen hex digits, four times: the field is 64 lowercase hex
+        // characters wide and this fills it from the one number it has.
+        let word = format!("{h:016x}");
+        format!("sha256:{word}{word}{word}{word}")
+    }
+
+    /// `CS-10`: the traversal is selected from the coded operand's declaration,
+    /// and that declaration is what the artifact's address is minted from.
+    ///
+    /// Both directions, because a one-sided version passes for a selector that
+    /// reads neither the declaration nor the operand:
+    ///
+    /// - Hold the declaration and move the *values*. Five operands of one shape,
+    ///   at the extremes of the code space and of the alphabet and at a recorded
+    ///   fill between them, on both sides of the break-even. Each mints a
+    ///   different artifact --- the digest is the manifest's one field that moves
+    ///   with the bytes --- and each selects the same traversal.
+    /// - Hold the values and move the *declaration*. The same code bytes
+    ///   declared `n x k` and `k x n` admit exactly one triple each, opposite
+    ///   ways round. And one decoded operand under two declarations differing in
+    ///   the block alone takes two factorizations to one answer.
+    #[test]
+    fn traversal_selection_reads_the_declaration_and_never_the_operand_cs_10() {
+        const SPEC: &str = "uor-matmul/1";
+        const NO_TABLE: &str =
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+        let table = e8_table::<Full<i8>>().expect("i8 holds E8");
+        let book = e8_codec(&table);
+        let space = 256usize;
+        let block = 8usize;
+        let (m, k) = (16usize, 64usize);
+        let blocks = k / block;
+        let lane = core::mem::size_of::<<i8 as Tabulated>::Lane>();
+        let l1 = blocking::L1_BYTES;
+        let bound = <Full<i8> as Bound>::VALUE;
+        let backend = GemmOptions::default().backend;
+
+        // The break-even, recomputed from the host's own declarations exactly as
+        // `CG-18` recomputes it: a recorded number would make this test about
+        // one ISA rather than about the selection.
+        let rows = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= tabulation_rows(space, l1, lane).min(m))
+            .expect("a 256-entry table fits L1 at some tile");
+        let spec =
+            <i8 as Tabulated>::table_spec(backend, bound, false, rows, column_group(rows), block);
+        let steps =
+            <i8 as Tabulated>::dense_steps(backend, bound, rows, block * spec.lanes_per_add);
+        let break_even = (1..)
+            .find(|&cols| tabulation_pays(space, block, cols, rows, steps, l1, lane))
+            .expect("E8 pays at some column width on every pair this workspace ships");
+
+        // One side of the predicate and the other: the selection has to be
+        // value-independent where the table runs and where it declines, or the
+        // invariance is an accident of always answering the same thing.
+        for n in [8usize, break_even] {
+            let shape = Shape { m, k, n };
+            let codes = n * blocks;
+            let operands: Vec<(&str, Vec<u16>, Vec<i8>)> = vec![
+                (
+                    "one code and one activation, repeated",
+                    vec![0u16; codes],
+                    vec![0i8; m * k],
+                ),
+                (
+                    "the top of the code space against the bottom of the alphabet",
+                    vec![(space - 1) as u16; codes],
+                    vec![-128i8; m * k],
+                ),
+                (
+                    "the two ends of the code space, alternating, against the top of the alphabet",
+                    (0..codes)
+                        .map(|i| if i % 2 == 0 { 0 } else { (space - 1) as u16 })
+                        .collect(),
+                    vec![127i8; m * k],
+                ),
+                (
+                    "no two columns alike",
+                    (0..codes)
+                        .map(|i| {
+                            let (j, p) = (i / blocks, i % blocks);
+                            ((0..p).fold(j, |acc, _| acc / space) % space) as u16
+                        })
+                        .collect(),
+                    (0..m * k).map(|i| ((i % 255) as i64 - 127) as i8).collect(),
+                ),
+                (
+                    "a recorded pseudorandom fill",
+                    fill(codes, 0xc510, |x| (x % space as u64) as u16),
+                    fill(m * k, 0xc511, |x| ((x % 255) as i64 - 127) as i8),
+                ),
+            ];
+
+            let mut selected: Option<(&str, Traversal)> = None;
+            let mut minted: Vec<(&str, String)> = Vec::new();
+            for (label, stream, a) in &operands {
+                let w = CodedMatrix::new(book, n, k, stream).expect("the codes describe n x k");
+                // Every field but the digest comes from the operand itself, so
+                // this is that artifact's manifest and not a stand-in written
+                // beside it.
+                let declared = Manifest::of(&w, NO_TABLE, NO_TABLE, SPEC);
+                let digest = digest_of(stream);
+                let artifact = Manifest {
+                    codes_sha256: &digest,
+                    ..declared
+                };
+                let mut buf = vec![0u8; 512];
+                let len = artifact
+                    .write_canonical_json(&mut buf)
+                    .expect("a canonical manifest");
+                minted.push((
+                    label,
+                    String::from_utf8(buf[..len].to_vec()).expect("the manifest is ascii"),
+                ));
+
+                assert!(
+                    artifact.reduces_along_the_block(shape),
+                    "the operand is declared n x k at {label}"
+                );
+                assert_eq!(
+                    artifact.addressing(),
+                    Addressing::of(TierId::Book, block, bound),
+                    "the addressing is the declaration's and nothing else's at {label}"
+                );
+
+                let (got, census) =
+                    tabulated(&w, a, m, n, Traversal::Blocked, OFFER_STEPS, OFFER_STEPS, 0);
+                assert_eq!(
+                    got,
+                    reference(&w, a, m, k, n),
+                    "the product at n = {n}, {label} ({census:?})"
+                );
+                match selected {
+                    None => selected = Some((label, ran(&census))),
+                    Some((first, want)) => assert_eq!(
+                        ran(&census),
+                        want,
+                        "at n = {n} the selection moved from {first} to {label}: {census:?}"
+                    ),
+                }
+            }
+
+            // And the artifacts really are different artifacts: the field that
+            // moved with the values is the field the derivation does not read.
+            for (i, (x, xs)) in minted.iter().enumerate() {
+                for (y, ys) in &minted[i + 1..] {
+                    assert_ne!(xs, ys, "at n = {n}, {x} and {y} minted one manifest");
+                }
+            }
+        }
+
+        // ---- the declaration moves: orientation ----
+        //
+        // The same 64 code words declared `8 x 64` and then `64 x 8`. Not one
+        // byte of the operand differs between the two, and each declaration
+        // admits exactly one of the two triples --- opposite ways round.
+        let n = 8usize;
+        let shape = Shape { m, k, n };
+        let stream: Vec<u16> = fill(n * blocks, 0xc512, |x| (x % space as u64) as u16);
+        let a: Vec<i8> = fill(m * k, 0xc513, |x| ((x % 255) as i64 - 127) as i8);
+        let along = CodedMatrix::new(book, n, k, &stream).expect("the codes describe n x k");
+        let across = CodedMatrix::new(book, k, n, &stream).expect("the same codes describe k x n");
+        let ma = Manifest::of(&along, NO_TABLE, NO_TABLE, SPEC);
+        let mx = Manifest::of(&across, NO_TABLE, NO_TABLE, SPEC);
+        assert_eq!(
+            ma.addressing(),
+            mx.addressing(),
+            "only the orientation moved, so the code declaration did not"
+        );
+        assert!(ma.reduces_along_the_block(shape));
+        assert!(!ma.reduces_across_the_block(shape));
+        assert!(mx.reduces_across_the_block(shape));
+        assert!(!mx.reduces_along_the_block(shape));
+
+        // The constructors answer the same question the declaration answered,
+        // and they answer it the same way. This is the whole orientation half of
+        // `CS-10`: the traversal that exists at all is decided here, from
+        // `rows` and `cols`, before a code has been looked at.
+        let av = MatView::row_major(as_alphabet_full(&a), m, k).unwrap();
+        let mut c = vec![0i32; m * n];
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                TabulatedTriple::new(av, along, cv).is_ok(),
+                "the n x k declaration is the tabulated orientation"
+            );
+        }
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                matches!(
+                    TabulatedTriple::new(av, across, cv),
+                    Err(NotAProduct::Nonconformant { .. })
+                ),
+                "and the k x n declaration is not"
+            );
+        }
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                CodedTriple::new(av, across, cv).is_ok(),
+                "the k x n declaration is the streaming orientation"
+            );
+        }
+        {
+            let cv = MatViewMut::row_major(&mut c, m, n).unwrap();
+            assert!(
+                matches!(
+                    CodedTriple::new(av, along, cv),
+                    Err(NotAProduct::Nonconformant { .. })
+                ),
+                "and the n x k declaration is not"
+            );
+        }
+
+        // ---- the declaration moves: the block ----
+        //
+        // One decoded operand under two declarations differing in the block
+        // alone: a 16-entry grid at one element per code, and a 16-codeword
+        // book whose `c`-th codeword is eight copies of the grid's `c`-th
+        // element. The code space is 16 either way, so the block is what moved.
+        let vals: [A8; 16] = core::array::from_fn(|i| Alphabet::of((i as i8) - 8));
+        let grid = Grid::<i8, Full<i8>, 16>::new(&vals);
+        let words: [[A8; 8]; 16] = core::array::from_fn(|c| [vals[c]; 8]);
+        let runs = Book::<i8, Full<i8>, 16, 8, u16>::new(&words);
+        let small = 16usize;
+
+        let rows16 = ROW_TILES
+            .into_iter()
+            .find(|&r| r <= tabulation_rows(small, l1, lane).min(m))
+            .expect("a 16-entry table fits L1 at some tile");
+        let spec16 =
+            <i8 as Tabulated>::table_spec(backend, bound, false, rows16, column_group(rows16), 8);
+        let steps16 =
+            <i8 as Tabulated>::dense_steps(backend, bound, rows16, 8 * spec16.lanes_per_add);
+        let pays_at = (1..)
+            .find(|&cols| {
+                tabulation_pays_for_spec(small, 8, cols, rows16, steps16, l1, lane, &spec16)
+            })
+            .expect("a 16-entry codebook of eight-element codewords pays at some column width");
+        // This block-one integer product build is refused at every width by the
+        // public reference predicate. A contextual Atlas block-one body is not
+        // allowed to leak a clock-derived rule into this integer product build.
+        let spec1 =
+            <i8 as Tabulated>::table_spec(backend, bound, false, rows16, column_group(rows16), 1);
+        let steps1 = <i8 as Tabulated>::dense_steps(backend, bound, rows16, spec1.lanes_per_add);
+        assert!(
+            !tabulation_pays(small, 1, usize::MAX, rows16, steps1, l1, lane),
+            "one element per code repays no build at any width"
+        );
+        assert!(Addressing::of(TierId::Book, 8, bound).addresses_a_run());
+        assert!(!Addressing::of(TierId::Grid, 1, bound).addresses_a_run());
+        assert!(Addressing::of(TierId::Grid, 1, bound).addresses_an_element());
+
+        let n = pays_at;
+        let shape = Shape { m, k, n };
+        let a: Vec<i8> = fill(m * k, 0xc514, |x| ((x % 255) as i64 - 127) as i8);
+        let coarse: Vec<u16> = fill(n * blocks, 0xc515, |x| (x % 16) as u16);
+        let fine: Vec<u16> = (0..n * k).map(|i| coarse[i / block]).collect();
+        let wb = CodedMatrix::new(runs, n, k, &coarse).expect("n x k at a block of eight");
+        let wg = CodedMatrix::new(grid, n, k, &fine).expect("n x k at a block of one");
+        for j in 0..n {
+            for t in 0..k {
+                assert_eq!(
+                    wb.at(j, t),
+                    wg.at(j, t),
+                    "one operand, two declarations, at ({j}, {t})"
+                );
+            }
+        }
+        let mb = Manifest::of(&wb, NO_TABLE, NO_TABLE, SPEC);
+        let mg = Manifest::of(&wg, NO_TABLE, NO_TABLE, SPEC);
+        assert!(mb.reduces_along_the_block(shape));
+        assert!(mg.reduces_along_the_block(shape));
+        assert!(mb.addressing().addresses_a_run());
+        assert!(!mg.addressing().addresses_a_run());
+
+        // The plan the two calls resolve to, recomputed from the offers the
+        // helper passes, so a decline for want of room reads as the failure it
+        // would be rather than as the claim.
+        let plan = Plan::choose(
+            small,
+            shape,
+            lane,
+            suggested_tabulation::<i8, Full<i8>>(shape, small, 8).max(1),
+            suggested_tabulation_lanes::<i8, Full<i8>>(shape, small, 8).max(1) * 8 / lane,
+            8,
+            <i8 as Tabulated>::probe_capacity::<<i8 as Tabulated>::Lane>(bound),
+        )
+        .expect("the suggested offers admit a plan");
+        assert_eq!(plan.cols, n, "the amortization axis is `n` itself");
+        assert_eq!(plan.rows, rows16, "the tile the derivation priced");
+
+        let (got_b, cen_b) = tabulated(
+            &wb,
+            &a,
+            m,
+            n,
+            Traversal::Blocked,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        let (got_g, cen_g) = tabulated(
+            &wg,
+            &a,
+            m,
+            n,
+            Traversal::Blocked,
+            OFFER_STEPS,
+            OFFER_STEPS,
+            0,
+        );
+        assert_eq!(got_b, reference(&wb, &a, m, k, n));
+        assert_eq!(
+            got_b, got_g,
+            "the declaration moved the factorization and not the answer"
+        );
+        assert_eq!(
+            ran(&cen_b),
+            Traversal::Tabulated,
+            "a block of eight is tabulated at n = {n}: {cen_b:?}"
+        );
+        assert_eq!(
+            ran(&cen_g),
+            Traversal::Blocked,
+            "and a block of one is not, on the same decoded operand: {cen_g:?}"
+        );
+    }
+
+    /// Every knob but the encode mode, at one element type and one pair of
+    /// operands: the traversal, the backend, the panel offer, and the tile
+    /// partition the caller writes its output through.
+    ///
+    /// Asserts byte identity across the whole sweep and returns those bytes, so
+    /// a caller can hold them against another mode's.
+    fn one_answer<E, Bd, O, Ep>(
+        a: &[Alphabet<E, Bd>],
+        b: &[Alphabet<E, Bd>],
+        shape: Shape,
+        epilogue: &Ep,
+        encode: EncodeMode,
+    ) -> Vec<O>
+    where
+        E: Element,
+        Bd: Bound,
+        O: Element + EncodeFrom<AccOf<E>>,
+        Ep: Epilogue<E, O>,
+    {
+        let Shape { m, k, n } = shape;
+        let mut answer: Option<Vec<O>> = None;
+        for traversal in [
+            Traversal::OutputMajor,
+            Traversal::Blocked,
+            Traversal::Tabulated,
+        ] {
+            for backend in core::iter::once(Backend::Auto).chain(Backend::ALL) {
+                for panel in [0usize, 1, k, crate::suggested_scratch(shape)] {
+                    for (tr, tc) in [(m, n), (1, 1), (2, 3), (m, 1), (1, n)] {
+                        let mut c = vec![O::ZERO; m * n];
+                        let mut buf = vec![Alphabet::<E, Bd>::ZERO; panel];
+                        let mut scratch = Scratch::new(&mut buf);
+                        // One tile at a time, into its own region of `C`
+                        // through its own strides: the partition is a knob a
+                        // caller turns, and the sum a tile computes cannot
+                        // depend on which tiles ran beside it (`CD-08`).
+                        for tile in Partition::new(shape, tr, tc) {
+                            let av = MatView::new(
+                                &a[tile.row * k..],
+                                tile.rows,
+                                k,
+                                Strides::row_major(k),
+                            )
+                            .expect("a row block of A");
+                            let bv = MatView::new(
+                                &b[tile.col..],
+                                k,
+                                tile.cols,
+                                Strides {
+                                    rs: n as isize,
+                                    cs: 1,
+                                },
+                            )
+                            .expect("a column block of B");
+                            let cv = MatViewMut::new(
+                                &mut c[tile.row * n + tile.col..],
+                                tile.rows,
+                                tile.cols,
+                                Strides {
+                                    rs: n as isize,
+                                    cs: 1,
+                                },
+                            )
+                            .expect("the tile's own region of C");
+                            let mut t = Triple::new(av, bv, cv).expect("a product");
+                            gemm(
+                                &mut t,
+                                epilogue,
+                                GemmOptions {
+                                    traversal,
+                                    backend,
+                                    encode,
+                                },
+                                &mut scratch,
+                            );
+                        }
+                        match &answer {
+                            None => answer = Some(c),
+                            Some(want) => assert_eq!(
+                                &c, want,
+                                "{traversal:?} on {backend:?}, a panel offer of {panel}, \
+                                 tiled {tr}x{tc}, at {encode:?}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        answer.expect("the sweep names at least one setting of every knob")
+    }
+
+    /// `CD-28`: within one element type, the encode mode is the only knob that
+    /// moves the output bytes.
+    ///
+    /// `CD-05` says the encode mode is the only thing that changes the output
+    /// bytes, and with a second semiring in the workspace that reads as
+    /// falsified: the ring product and the `(max, +)` product of one pair of
+    /// operands write different bytes, and neither changed mode. It is not
+    /// falsified. The quantifier is *per element type* --- the element type is
+    /// what carries the semiring, so two element types are two functions and
+    /// were never obliged to agree --- and this is that quantifier asserted at
+    /// both families, so the row is about the quantifier and not about one
+    /// algebra.
+    ///
+    /// Two-sided at each family: every other knob held against byte identity,
+    /// then the mode moved and the bytes with it.
+    #[test]
+    fn within_one_element_type_the_encode_mode_is_the_only_mover_cd_28() {
+        let (m, k, n) = (5usize, 7usize, 6usize);
+        let shape = Shape { m, k, n };
+        let modes = [
+            EncodeMode::Nearest,
+            EncodeMode::TowardZero,
+            EncodeMode::Saturating,
+            EncodeMode::Wrapping,
+        ];
+
+        // The output alphabet is as narrow as the input's, so the accumulation
+        // leaves its range and the mode has something to decide. The extreme is
+        // placed rather than hoped for: the first row of `A` and the first
+        // column of `B` sit at the top of the alphabet, so cell `(0, 0)` is past
+        // `i8` by construction.
+        let mut ring_a: Vec<i8> = fill(m * k, 0xcd28, |x| ((x % 255) as i64 - 127) as i8);
+        let mut ring_b: Vec<i8> = fill(k * n, 0xcd29, |x| ((x % 255) as i64 - 127) as i8);
+        for x in ring_a.iter_mut().take(k) {
+            *x = 127;
+        }
+        for p in 0..k {
+            ring_b[p * n] = 127;
+        }
+        let ring: Vec<Vec<i8>> = modes
+            .iter()
+            .map(|&mode| {
+                one_answer::<i8, Full<i8>, i8, _>(
+                    as_alphabet_full(&ring_a),
+                    as_alphabet_full(&ring_b),
+                    shape,
+                    &Linear::OVERWRITE,
+                    mode,
+                )
+            })
+            .collect();
+
+        // The same shape at the tropical instance. `⊗` is addition, so two
+        // elements at the top of the alphabet sum past it and the mode decides
+        // the same question it decides in the ring. Lanes at the semiring zero
+        // are swept too, because a masked operand is an operand.
+        let mut trop_a: Vec<Trop<i8>> = ring_a
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                if i % 11 == 3 {
+                    Trop::NEG_INF
+                } else {
+                    Trop::finite(x)
+                }
+            })
+            .collect();
+        let mut trop_b: Vec<Trop<i8>> = ring_b
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                if i % 13 == 5 {
+                    Trop::NEG_INF
+                } else {
+                    Trop::finite(x)
+                }
+            })
+            .collect();
+        trop_a[0] = Trop::finite(127);
+        trop_b[0] = Trop::finite(127);
+        let trop: Vec<Vec<Trop<i8>>> = modes
+            .iter()
+            .map(|&mode| {
+                one_answer::<Trop<i8>, Full<i8>, Trop<i8>, _>(
+                    as_alphabet_tropical(&trop_a),
+                    as_alphabet_tropical(&trop_b),
+                    shape,
+                    &MaxPlus::OVERWRITE,
+                    mode,
+                )
+            })
+            .collect();
+
+        // Three of the four modes are one map at an integer output: there is
+        // nothing to round, so `Nearest`, `TowardZero` and `Saturating` all
+        // clamp. `Wrapping` is a different map, and it is the one knob this row
+        // says the bytes turn on --- at both families.
+        assert_eq!(ring[0], ring[1], "the ring clamps under TowardZero");
+        assert_eq!(ring[0], ring[2], "the ring clamps under Saturating");
+        assert_ne!(
+            ring[0], ring[3],
+            "and Wrapping moves the ring's bytes, so the mode is not inert"
+        );
+        assert_eq!(trop[0], trop[1], "the tropical instance clamps too");
+        assert_eq!(trop[0], trop[2], "and under Saturating as well");
+        assert_ne!(
+            trop[0], trop[3],
+            "and Wrapping moves the tropical bytes, so the row is not about one family"
+        );
+
+        // The observation the quantifier exists for: at one mode and one pair of
+        // operands the two element types write different numbers. Nothing is
+        // violated --- they compute two products --- and that is exactly why
+        // `CD-05`'s "only" is read inside an element type.
+        let ring_values: Vec<Option<i8>> = ring[0].iter().map(|&x| Some(x)).collect();
+        let trop_values: Vec<Option<i8>> = trop[0].iter().map(|&x| x.get()).collect();
+        assert_ne!(
+            ring_values, trop_values,
+            "two element types are two functions, which is what the quantifier says"
+        );
     }
 }

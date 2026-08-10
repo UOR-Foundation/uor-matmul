@@ -16,6 +16,7 @@
 use uor_matmul_core::{as_alphabet_full, dot_ref, Backend};
 
 use crate::table::{choose_table, Mod32, Mod64, TableSpec};
+use crate::tropical::{TROP_I16_MAX_BOUND, TROP_I8_BOUND, TROP_ZERO};
 use crate::{packed_slot, KernelSpec, LaneLayout};
 
 /// The whole depth corpus: every tail and every threshold the sequences have.
@@ -184,6 +185,116 @@ pub fn dot_i64_mod(a: &[i64], b: &[i64]) -> i64 {
     a.iter()
         .zip(b)
         .fold(0i64, |s, (&x, &y)| s.wrapping_add(x.wrapping_mul(y)))
+}
+
+/// The reference dot for the packed tropical family: `max_p (a_p ⊗ b_p)`, with
+/// `⊗` the saturating add and `⊕` a signed max.
+///
+/// The fold starts at [`TROP_ZERO`] and not at `i16::default()`, which is the
+/// one place a `(max, +)` reference cannot borrow the ring's shape: the identity
+/// of `max` is the semiring zero, so an empty reduction is `-inf` and a fold
+/// from `0` would report it as the largest finite answer there is.
+///
+/// Zip-truncating, exactly as [`uor_matmul_core::dot_tropical_ref`] is, and
+/// written out here rather than delegating to it because it is the *packed*
+/// arithmetic that the sequences have to agree with. The link between the two
+/// --- pack, run, unpack, and get `dot_tropical_ref`'s answer --- is the anchor
+/// half of `CB-13`, and it is a separate assertion for the same reason `CB-01`
+/// is separate from `CB-02`.
+pub fn dot_trop_i16(a: &[i16], b: &[i16]) -> i16 {
+    let mut best = TROP_ZERO;
+    for (&x, &y) in a.iter().zip(b) {
+        let product = x.saturating_add(y); // R3-ok: the absorbing law, not an accumulation
+        best = best.max(product);
+    }
+    best
+}
+
+/// A packed tropical fill at a declared bound: finite values spread across
+/// `[-bound, bound]`, with one position in eight at the semiring zero.
+///
+/// The masked positions are in the ordinary sweep rather than in a special
+/// case, because absorption is where a `(max, +)` sequence goes wrong: a fill
+/// of finite values alone never issues the saturating add the representation
+/// turns on, and would pass against a wrapping one.
+fn trop_fill(v: i64, bound: i64) -> i16 {
+    if v % 8 == 0 {
+        TROP_ZERO
+    } else {
+        (v.rem_euclid(2 * bound + 1) - bound) as i16
+    }
+}
+
+/// The tropical fill at the narrowest alphabet past the empty one.
+pub fn trop_fill_bound1(v: i64) -> i16 {
+    trop_fill(v, 1)
+}
+
+/// The tropical fill at the `Trop<i8>` alphabet, which is what the packing is
+/// for.
+pub fn trop_fill_i8(v: i64) -> i16 {
+    trop_fill(v, TROP_I8_BOUND as i64)
+}
+
+/// The tropical fill at the widest alphabet the packed lane declares, where the
+/// finite range and the absorbed range are a single value apart.
+pub fn trop_fill_max(v: i64) -> i16 {
+    trop_fill(v, TROP_I16_MAX_BOUND as i64)
+}
+
+/// One leg of the tropical sweep: the two panel salts, and the fill that
+/// realizes one declared bound.
+pub type TropSweep = ((u64, u64), fn(i64) -> i16);
+
+/// The declared bounds `CB-13` sweeps, each with its salts and its fill.
+///
+/// One list, read by both harnesses, so the host sweep and the Cortex-M sweep
+/// cannot come to walk different alphabets while reporting the same ID --- the
+/// same reason the check bodies themselves live here (R13).
+///
+/// Three bounds, and each asks a different question. At `1` the finite range is
+/// three values wide and the absorbed one is the rest of the lane. At
+/// [`crate::tropical::TROP_I8_BOUND`] it is the alphabet the packing exists
+/// for. At [`TROP_I16_MAX_BOUND`] the two ranges are a single value apart,
+/// which is where a wrapping add, or an unpacking that compared against the
+/// wrong threshold, stops agreeing.
+pub const TROP_SWEEPS: [TropSweep; 3] = [
+    ((35, 36), trop_fill_bound1),
+    ((37, 38), trop_fill_i8),
+    ((39, 40), trop_fill_max),
+];
+
+/// The tropical extremes, by name.
+///
+/// A random fill reaches "both operands at the semiring zero" with probability
+/// `2^-6` per position and "both at exactly `-B`" with probability `2^-28`. The
+/// first is the input that separates a saturating add from a wrapping one, and
+/// the second is the input that separates the declared bound from one past it,
+/// so neither is left to a generator.
+pub const TROP_EXTREMES: [(i16, i16); 9] = {
+    let b = TROP_I16_MAX_BOUND as i16;
+    [
+        (-b, -b),
+        (-b, b),
+        (b, b),
+        (b, -b),
+        (TROP_ZERO, b),
+        (b, TROP_ZERO),
+        (TROP_ZERO, -b),
+        (-b, TROP_ZERO),
+        (TROP_ZERO, TROP_ZERO),
+    ]
+};
+
+/// The packed answer for a constant tropical panel: `max` over `kc` copies of
+/// one product, which is that product --- and the semiring zero when there is
+/// no product at all, because the identity of `max` is `-inf` and not zero.
+pub fn trop_expect(kc: usize, a: i16, b: i16) -> i16 {
+    if kc == 0 {
+        TROP_ZERO
+    } else {
+        a.saturating_add(b) // R3-ok: the absorbing law, not an accumulation
+    }
 }
 
 /// The buffers a tile parity check runs on. Sizes are named for the largest
@@ -881,7 +992,8 @@ where
 }
 
 /// `CB-10`: every bound-1 build equals the model, and selection offers the
-/// adds-only build exactly when the declared bound admits it.
+/// adds-only build exactly when the declared bound admits it; a wider finite
+/// alphabet lookup build may also issue no multiplies.
 ///
 /// At bound 1 every product is `+-a` or `0`, so a build can fill the same slot
 /// the reference fills with adds and subtracts alone. The selection half is
@@ -1000,8 +1112,9 @@ where
     }
 
     // The selection half. At bound 1 the adds-only build is what `Auto` runs;
-    // one past its declaration it is not considered at all --- not because it
-    // is riskier there, but because there it computes a different number.
+    // one past its declaration a bound-1 build is not considered. A finite
+    // alphabet lookup build remains admissible beyond bound 1 and also issues
+    // no multiplies, so the assertion distinguishes its wider declaration.
     for &(rows, group) in corpus.sel_tiles {
         for &block in corpus.sel_blocks {
             let picked = choose_table(available(rows, group), Backend::Auto, 1, block)
@@ -1018,8 +1131,8 @@ where
             let past = choose_table(available(rows, group), Backend::Auto, 2, block)
                 .expect("the reference sequence is always present");
             assert!(
-                past.build_multiplies,
-                "{check}: bound 2 must not be offered the adds-only build at {rows}x{group} \
+                past.max_bound > 1,
+                "{check}: bound 2 must not select a bound-1 build at {rows}x{group} \
                  b={block}"
             );
         }

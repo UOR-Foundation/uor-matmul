@@ -48,11 +48,12 @@ use uor_matmul_core::EncodeMode;
 pub mod coissue;
 pub mod corpus;
 pub mod counting;
+pub mod float_corpus;
 pub mod float_tab;
 pub mod oracle;
 pub mod scaling;
 
-pub use corpus::{Case, Corpus};
+pub use corpus::{Case, Corpus, Mask};
 pub use counting::Counting;
 pub use oracle::{Agreement, Oracle};
 

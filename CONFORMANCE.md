@@ -23,166 +23,196 @@ returns an error the model does not sanction.
 
 ## `CS-*` --- Structural: public API shape, stride semantics, view construction
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CS-01` | `build` | `C <- alpha*A*B + beta*C` with A `m x k`, B `k x n`, C `m x n` |
-| `CS-02` | `build` | A and B strides are arbitrary: negative, zero, and non-contiguous all give the defined result |
-| `CS-03` | `build` | Output strides that alias are rejected at `Triple::new` and nowhere else |
-| `CS-04` | `build` | `beta == 0` overwrites C without reading it, so uninitialized or NaN-filled C is admissible |
-| `CS-05` | `build` | The raw-pointer entry points are signature-identical to `matrixmultiply` and produce the same bytes as the safe API on the same inputs |
-| `CS-06` | `build` | `m`, `n`, `k` that are not multiples of `MR`, `NR`, or `K_GROUP` take the same path and give the same result |
-| `CS-07` | `build` | The generated `133144` pin equals `k_max(127, i32::MAX)` recomputed at test time |
-| `CS-08` | `build` | The slice entry points take `(m, k, n)`, leading dimensions, `alpha` and `beta` like any GEMM, and give the same bytes as the view API on the same operands |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CS-01` | `build` | `C <- alpha*A*B + beta*C` with A `m x k`, B `k x n`, C `m x n` | a conformant triple whose computed `C` differs from the defining sum at one cell |
+| `CS-02` | `build` | A and B strides are arbitrary: negative, zero, and non-contiguous all give the defined result | one stride pattern --- negative, zero, or non-contiguous --- giving different bytes from the contiguous spelling of the same operand |
+| `CS-03` | `build` | Output strides that alias are rejected at `Triple::new` and nowhere else | an aliasing output accepted by `Triple::new`, a non-aliasing one refused by it, or the condition reported anywhere later |
+| `CS-04` | `build` | `beta == 0` overwrites C without reading it, so uninitialized or NaN-filled C is admissible | a run at `beta == 0` whose output depends on the bytes `C` held on entry |
+| `CS-05` | `build` | The raw-pointer entry points are signature-identical to `matrixmultiply` and produce the same bytes as the safe API on the same inputs | the raw face giving different bytes from the safe API on the same operands, or a signature that is not `matrixmultiply`'s |
+| `CS-06` | `build` | `m`, `n`, `k` that are not multiples of `MR`, `NR`, or `K_GROUP` take the same path and give the same result | a shape that is not a multiple of `MR`, `NR`, or `K_GROUP` taking a different path, or giving different bytes from the padded spelling of the same operand |
+| `CS-07` | `build` | The generated `133144` pin equals `k_max(127, i32::MAX)` recomputed at test time | the generated pin disagreeing with `k_max(127, i32::MAX)` recomputed at test time |
+| `CS-08` | `build` | The slice entry points take `(m, k, n)`, leading dimensions, `alpha` and `beta` like any GEMM, and give the same bytes as the view API on the same operands | one slice call giving different bytes from the view call on the same operands and leading dimensions |
+| `CS-12` | `build` | The tropical epilogue's `alpha` and `beta` are applied exactly, in the accumulator's width, once per output element | a scalar the epilogue discards, a `-inf` in C absorbed to a finite zero rather than contributing nothing, or an `alpha` at the semiring zero that fails to absorb the product |
+| `CS-13` | `build` | The float `Linear` epilogue evaluates the complete terminal expression `alpha * sum + beta * C` exactly for every `i64` scalar, then applies the requested float encoding once with the sign and magnitude of that exact expression | one `i64` scalar pair whose exact cancellation changes the encoded zero, one reachable scaled sum whose terminal sign or magnitude is lost before encoding, or one float encode mode applied to a wrapped intermediate instead of the exact terminal expression |
+| `CS-10` | `build` | Traversal selection reads the operand's orientation from its declared manifest and never probes the operand | a selection that changes when only the operand's values change with the manifest held fixed, or an orientation read from anywhere but the declared manifest |
+| `CS-11` | `build` | The semiring zero as `beta` overwrites C without reading it, so a masked or uninitialized output buffer is admissible | a run with `beta` at the semiring zero whose output depends on the bytes C held on entry |
 
 ## `CT-*` --- Totality: the operation is infallible on everything it can represent
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CT-01` | `build` | No representable input errors or panics: fuzzed shapes, strides, magnitudes, and depths, under a checked-arithmetic build |
-| `CT-02` | `build` | No accumulation overflows: the whole corpus under checked arithmetic, zero overflow events |
-| `CT-03` | `build` | Non-finite float codes propagate by the IEEE rules and never error |
-| `CT-04` | `build` | Zero, one, and prime dimensions take the same path as any other, and a zero-extent view constructs rather than erroring |
-| `CT-05` | `build` | The two reportable conditions --- a non-conformant shape and an output whose strides map two coordinates onto one cell --- are the only ones, and both are decided at view construction before any arithmetic is named |
-| `CT-06` | `build` | A super-massive product --- operands past the last level of cache, a depth past every lane's capacity, and an extent past every block --- is exact, on every traversal the offer admits |
-| `CT-07` | `build` | Tabulation is total: every code value the codec can hold indexes a live table entry, so no input can produce a miss, a bounds failure, or a panic |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CT-01` | `build` | No representable input errors or panics: fuzzed shapes, strides, magnitudes, and depths, under a checked-arithmetic build | one representable shape, stride, magnitude, or depth on which the library panics or reports |
+| `CT-02` | `build` | No accumulation overflows: the whole corpus under checked arithmetic, zero overflow events | one overflow event in the checked build over the whole corpus |
+| `CT-03` | `build` | Non-finite float codes propagate by the IEEE rules and never error | a NaN or infinity code that reports, or that propagates otherwise than clause 6 says |
+| `CT-04` | `build` | Zero, one, and prime dimensions take the same path as any other, and a zero-extent view constructs rather than erroring | a zero, one, or prime dimension taking a different path, or a zero-extent view refusing to construct |
+| `CT-05` | `build` | The two reportable conditions --- a non-conformant shape and an output whose strides map two coordinates onto one cell --- are the only ones, and both are decided at view construction before any arithmetic is named | a third reportable condition, or either of the two decided after view construction rather than at it |
+| `CT-06` | `build` | A super-massive product --- operands past the last level of cache, a depth past every lane's capacity, and an extent past every block --- is exact, on every traversal the offer admits | one traversal the offer admits disagreeing with the exact reference on the super-massive product |
+| `CT-07` | `build` | Tabulation is total: every code value the codec can hold indexes a live table entry, so no input can produce a miss, a bounds failure, or a panic | one code value the codec can hold that indexes no live table entry |
+| `CT-08` | `build` | No tropical operation overflows under the checked profile, at every bound and depth, including a masked lane at the semiring zero | one overflow event in a checked tropical build, at any bound, at any depth, or on a lane held at the semiring zero |
 
 ## `CD-*` --- Determinism: same inputs, same bytes
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CD-01` | `build` | Backend choice does not change output bytes |
-| `CD-02` | `build` | Tile count and completion order do not change output bytes, over `{1,2,3,5,8,64,m*n}` and shuffled orders |
-| `CD-03` | `build` | Every partial sum stays inside the accumulator, measured by `dot_instrumented`, never inferred |
-| `CD-04` | `build` | Traversal and blocking preset do not change output bytes, including deliberately bad presets |
-| `CD-05` | `build` | Encode mode is the only thing that changes the output bytes for a fixed accumulation |
-| `CD-06` | `build` | Big-endian and little-endian targets agree on the serialized output |
-| `CD-07` | `build` | Splitting the operand stream at any index sums the parts |
-| `CD-08` | `build` | Two tiles reduce in either order |
-| `CD-09` | `build` | The narrow-register tile path agrees with `dot_wide` |
-| `CD-10` | `build` | `Scratch::None`, one byte, `suggested_scratch - 1`, `suggested_scratch`, and ten times it all give the same bytes |
-| `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room |
-| `CD-12` | `build` | Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer |
-| `CD-13` | `build` | `Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all |
-| `CD-15` | `build` | Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer |
-| `CD-16` | `build` | Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block |
-| `CD-17` | `build` | Collapsing bit-identical rows of A in the float tabulated traversal cannot change a byte, at every degeneracy and every offer; rows differing only in the sign of zero or in a NaN payload are distinct |
-| `CD-21` | `build` | The sub-cubic recursion (Winograd's form of Strassen's) is byte-identical to the cubic packed walk at every shape, depth, requested level count, and offer including none, and to the `CX-01` wrapping oracle at every corpus size; a level the shape, the bound's headroom, or the offer does not admit is declined, and declining changes no byte |
-| `CD-22` | `build` | The documented default integer entry point selects, at the caller's offer and the host's declarations, the kernelized factorization the offer admits --- witnessed by the route census, not inferred --- and every route from it returns the reference traversal's bytes at every offer including none; the reference traversal remains directly callable under its own name |
-| `CD-23` | `build` | The one-level modular bilinear factorization (Winograd's form over the quotient `Z/2^w`, seven base block products against the classical decomposition's eight, counted by the census) returns the direct packed modular walk's bytes at every shape --- even, odd, prime, ragged, rectangular, degenerate --- and every offer including none, and declines to the direct walk wherever the shape, the encode, the lane, or the offer does not admit it |
-| `CD-14` | `build` | An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all |
-| `CD-18` | `build` | A u8-symbol-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, at every offer including none, and under an epilogue that reads `C` |
-| `CD-19` | `build` | The float driver's scaled lanes give byte-identical output whether the integer dot product runs as the scalar loop or on the integer kernel table, at every shape and every offer, including none |
-| `CD-20` | `build` | A u8-symbol-coded float weight matrix tabulated in the scaled integer lane gives byte-identical output to the dense float driver at every shape and every offer, including none, with the span walk admitted and declined alike, and a depth past the lane's run is chunked exactly |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CD-01` | `build` | Backend choice does not change output bytes | two backends producing different bytes for one input |
+| `CD-02` | `build` | Tile count and completion order do not change output bytes, over `{1,2,3,5,8,64,m*n}` and shuffled orders | one tile count or completion order producing different bytes from another |
+| `CD-03` | `build` | Every partial sum stays inside the accumulator, measured by `dot_instrumented`, never inferred | `dot_instrumented` reporting one partial sum outside the accumulator's declared width |
+| `CD-04` | `build` | Traversal and blocking preset do not change output bytes, including deliberately bad presets | one traversal or blocking preset, including a deliberately bad one, producing different bytes from another |
+| `CD-05` | `build` | Encode mode is the only thing that changes the output bytes for a fixed accumulation | anything other than the encode mode changing an output byte at a fixed accumulation |
+| `CD-06` | `build` | Big-endian and little-endian targets agree on the serialized output | a big-endian target's serialized output differing from a little-endian target's |
+| `CD-07` | `build` | Splitting the operand stream at any index sums the parts | one split index at which the parts do not sum to the whole |
+| `CD-08` | `build` | Two tiles reduce in either order | two tiles whose reduction depends on the order they complete in |
+| `CD-09` | `build` | The narrow-register tile path agrees with `dot_wide` | one depth at which the narrow tile path disagrees with `dot_wide` |
+| `CD-10` | `build` | `Scratch::None`, one byte, `suggested_scratch - 1`, `suggested_scratch`, and ten times it all give the same bytes | one scratch amount producing different bytes from another |
+| `CD-11` | `build` | Forcing a wider accumulator than necessary changes nothing but the room | a forced wider accumulator changing an output byte |
+| `CD-12` | `build` | Collapsing equal rows of A cannot change a byte, at every degeneracy and every offer | one degeneracy or offer at which the collapsed walk differs by a byte from the uncollapsed one |
+| `CD-13` | `build` | `Tabulated`, `Blocked`, and `OutputMajor` produce byte-identical output at every shape, including shapes on both sides of `tabulation_pays` and with no offer at all | one shape --- on either side of `tabulation_pays`, or with no offer --- at which the three traversals differ by a byte |
+| `CD-15` | `build` | Collapsing equal rows of A in the tabulated traversal cannot change a byte, at every degeneracy and every offer | one degeneracy or offer at which the collapsed tabulated walk differs by a byte from the uncollapsed one |
+| `CD-16` | `build` | Collapsing equal columns of the coded operand cannot change a byte at any column-block width, and a repeated column is never charged twice within its block | one column-block width at which the collapsed walk differs by a byte, or a repeated column charged twice inside its block |
+| `CD-17` | `build` | Collapsing bit-identical rows of A in the float tabulated traversal cannot change a byte, at every degeneracy and every offer; rows differing only in the sign of zero or in a NaN payload are distinct | two bit-identical rows failing to collapse, or two rows differing only in the sign of zero or in a NaN payload collapsing together |
+| `CD-21` | `build` | The sub-cubic recursion (Winograd's form of Strassen's) is byte-identical to the cubic packed walk at every shape, depth, requested level count, and offer including none, and to the `CX-01` wrapping oracle at every corpus size; a level the shape, the bound's headroom, or the offer does not admit is declined, and declining changes no byte | one shape, depth, level count, or offer at which the sub-cubic recursion differs by a byte from the cubic packed walk, or a declined level changing a byte |
+| `CD-22` | `build` | The documented default integer entry point selects, at the caller's offer and the host's declarations, the kernelized factorization the offer admits --- witnessed by the route census, not inferred --- and every route from it returns the reference traversal's bytes at every offer including none; the reference traversal remains directly callable under its own name | a route census that names no route, or one route returning bytes the reference traversal does not |
+| `CD-23` | `build` | The one-level modular bilinear factorization (Winograd's form over the quotient `Z/2^w`, seven base block products against the classical decomposition's eight, counted by the census) returns the direct packed modular walk's bytes at every shape --- even, odd, prime, ragged, rectangular, degenerate --- and every offer including none, and declines to the direct walk wherever the shape, the encode, the lane, or the offer does not admit it | one shape or offer at which the modular level differs by a byte from the direct packed modular walk, an eighth base product counted, or a level taken where the shape, encode, lane, or offer does not admit it |
+| `CD-14` | `build` | An arena-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, and with no offer at all | one shape, with the tabulated traversal forced or declined, at which the arena-coded operand differs by a byte from the dense float driver |
+| `CD-18` | `build` | A u8-symbol-coded float weight matrix gives byte-identical output to the dense float driver at every shape, with the tabulated traversal forced and declined alike, at every offer including none, and under an epilogue that reads `C` | one shape or offer at which the u8-symbol-coded operand differs by a byte from the dense float driver, including under an epilogue that reads `C` |
+| `CD-19` | `build` | Every historical float workspace spelling is a zero-copy view of the same Atlas-octet reduction and gives byte-identical output at every shape and offer, including none, without whole-operand reification | one public float workspace spelling producing different bytes, reaching a non-Atlas arithmetic body, requiring an offer, or materializing either complete operand |
+| `CD-20` | `build` | A symbol-coded float weight matrix gives the dense Atlas driver's bytes at every shape and offer; admitted f32 common-grade projection and Scaled64 consumption compose as one contextual balanced-octet lookup protocol, while the f64 complete Atlas lane is selected parametrically from each Enumerable codec's declaration and executes when its table pays | one coded float product differing by a byte from the dense Atlas driver, either half of the contextual f32 carrier protocol being interpreted standalone or severed from the other, an admitted table product using a traditional multiply, a coefficient lost when a table run is chunked, or one downstream f64 codec being categorically declined despite a fitting paying declaration |
+| `CD-24` | `build` | The selection witness is invariant under partition, count and order, because the order on `(value, index)` is total | one partition, completion count, or order of combination at which the witness index differs |
+| `CD-25` | `build` | Both witness mechanisms give identical bytes at every shape, degeneracy, and offer including none | one shape, degeneracy, or offer at which `Lexicographic` and `ComparePass` write different witness bytes |
+| `CD-26` | `build` | Recentring is the canonical section of the shift gauge: gauge-invariant, idempotent, and its representative's maximum is exactly zero | a shift the section leaves in, a second application that moves a value, or a representative whose maximum is not exactly zero |
+| `CD-27` | `build` | The dyadic section is exact, and equals the arithmetic shift at every `k` where that shift exists | one `k` at which the dyadic placement differs from the arithmetic shift, or one input the placement rounds |
+| `CD-28` | `build` | Within one element type, encode mode is the only thing that changes the output bytes | anything other than the encode mode changing an output byte within one element type |
+| `CD-29` | `build` | One traversal computes both products of the operation census: the dense driver is parametric in the semiring | a second driver, a branch on the semiring inside the traversal, or a census product the driver cannot compute from `E::mac` and `Accumulator::combine` alone |
+| `CD-30` | `build` | Every pure-UOR float factorization returns the exact reference bytes for `f32` and `f64`, at every IEEE code class, shape, schedule, public workspace spelling, and offer including none | one float input, shape, schedule, public entry, or offer at which a pure-UOR factorization differs from the independently computed exact reference by one byte |
+| `CD-31` | `build` | As an executable formal certificate, variable-capacity common-base intervals equal direct coefficient admission, greedy interval stabbing uses the minimum number of gauge-coherent groups, and the greatest common base maximizes exact accumulator headroom; this theorem does not declare a runtime selector | one coefficient set whose derived interval admits a base direct construction refuses or omits one it accepts, one interval family for which greedy uses more groups than exhaustive search, or one smaller admissible base giving more headroom than the greatest one |
+| `CD-32` | `build` | Binary32 tabulation is total through one contextual q-carrier and one self-describing product-grade token: the exact coefficient-product bound is `(2^24-1)^2 < 2^48`; 507 relative grades at two signs plus all seven Complete non-finite unions make 1021 states in 10 bits; the 48-bit magnitude and state reserve the top-positive `2^58` interval beginning at `0x7c00_0000_0000_0000`; and the compact capacity is `max(1,floor((TAG_BASE-1)/(P*2^(wa+wb))))`, equal to 31744 at zero span and one on denominator overflow or a non-finite witness. Every IEEE value and span remains table-executable, a capacity below the codec block scalar-fractures without declining, non-finite products place immediately, compact composition is unchanged, and already-projected source slots use the maximal prefix recurrence `H=0; accept b_s iff b_s<=Q-H; H=H+b_s` for the least scalar certificate `b_s=\|\|v_s\|\|_infinity`. Its groups are minimum only among source-ordered common-boundary schedules using those nonnegative per-slot certificates; traversal selection remains value-blind, and the global span capacity is only a totality bound rather than the schedule | one binary32 bit pattern or exponent span declining a resident forced table, one compact product changing its complete bytes, one finite sign/grade state or Complete non-finite union aliasing another state or an untagged coefficient, one run exceeding the exact compact ceiling, a non-finite product entering a multi-product run, one capacity below a codec block declining instead of scalar-fracturing with the codec's original stride, one projected source slot being split although its nonnegative certificate fits the current headroom, one accepted group whose certificate sum exceeds the compact ceiling, one source-ordered common-boundary certificate schedule using fewer groups than the maximal-prefix recurrence, a global-span fracture replacing per-slot grouping, or two equal-shape operands selecting different traversals because of their values |
 
 ## `CB-*` --- Backend parity: every backend equals the portable reference
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CB-01` | `build` | Portable equals `dot_ref` on the whole corpus |
-| `CB-02` | `build` | AVX2 equals portable |
-| `CB-03` | `build` | AVX-512 VNNI equals portable, on all three of its sequences |
-| `CB-04` | `build` | NEON and NEON dotprod equal portable |
-| `CB-05` | `build` | wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on |
-| `CB-06` | `build` | Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes |
-| `CB-07` | `build` | Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet |
-| `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two |
-| `CB-09` | `build` | Every modular table sequence equals the portable modular reference lane for lane |
-| `CB-10` | `build` | At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, and the census counts zero multiplies for a bound-1 tabulated run |
-| `CB-11` | `build` | Every sequence a Cortex-M build offers equals its reference, run under qemu-system on an mps2 machine --- parity there is a run, not a compile, and no user-mode emulator covers Cortex-M |
-| `CB-12` | `build` | The wasm SIMD128 SWAR sequence --- three B-row elements packed at 21-bit spacing in each 64-bit lane, multiplied by one broadcast scalar --- equals the portable reference lane for lane at every packed depth, at the alphabet's extremes, and at the W4A8 bound; selection offers it nowhere, because CG-17 measured it slower than the dot sequence it would displace |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CB-01` | `build` | Portable equals `dot_ref` on the whole corpus | one corpus entry at which the portable sequence differs from `dot_ref` |
+| `CB-02` | `build` | AVX2 equals portable | one corpus entry at which AVX2 differs from portable |
+| `CB-03` | `build` | AVX-512 VNNI equals portable, on all three of its sequences | one of the three VNNI sequences differing from portable on a corpus entry |
+| `CB-04` | `build` | NEON and NEON dotprod equal portable | NEON or NEON dotprod differing from portable on a corpus entry |
+| `CB-05` | `build` | wasm SIMD128 equals portable, and SIMD128-off equals SIMD128-on | SIMD128 differing from portable, or a SIMD128-off build differing from a SIMD128-on one |
+| `CB-06` | `build` | Every reduce sequence --- lanes on `k` rather than on the output --- equals its own reference, at every declared panel width, and a shape narrower than a tile takes it and produces the same bytes | one declared panel width, or a shape narrower than a tile, at which a reduce sequence differs from its own reference |
+| `CB-07` | `build` | Every sequence is exact at the extremes of the alphabet it declares, and selection never offers one outside its declared alphabet | one sequence inexact at an extreme of the alphabet it declares, or selection offering one outside its declared alphabet |
+| `CB-08` | `build` | Every table sequence --- the build and the gather --- equals the reference sequence lane for lane, at every tile height, column group and code space the driver walks, including a code space that is not a power of two | one tile height, column group, or code space --- including a code space that is not a power of two --- at which a table sequence differs from the reference in a single lane |
+| `CB-09` | `build` | Every modular table sequence equals the portable modular reference lane for lane | one modular table sequence differing from the portable modular reference in a single lane |
+| `CB-10` | `build` | At bound 1 the table build issues no multiply: every bound-1 build sequence equals the portable reference slot for slot, selection offers the adds-only build exactly when the declared bound admits it, finite-alphabet lookup builds remain admissible beyond bound 1, and the census counts the issued operations | a bound-1 build differing from the portable reference in one slot, selection offering the adds-only build where the declared bound does not admit it, or the census counting one multiply in a bound-1 tabulated run |
+| `CB-11` | `build` | Every sequence a Cortex-M build offers equals its reference, run under qemu-system on an mps2 machine --- parity there is a run, not a compile, and no user-mode emulator covers Cortex-M | one sequence a Cortex-M build offers disagreeing with its reference under qemu-system on an mps2 machine, or the parity never running there at all |
+| `CB-12` | `build` | The wasm SIMD128 SWAR sequence --- three B-row elements packed at 21-bit spacing in each 64-bit lane, multiplied by one broadcast scalar --- equals the portable reference lane for lane at every packed depth, at the alphabet's extremes, and at the W4A8 bound; selection offers it nowhere, because CG-17 measured it slower than the dot sequence it would displace | one packed depth, alphabet extreme, or the W4A8 bound at which the SWAR sequence differs from the portable reference, or selection offering it anywhere |
+| `CB-13` | `build` | Every tropical instruction sequence agrees with the portable tropical reference, lane for lane, at every bound and depth | one tropical sequence differing from `dot_tropical_ref` in a single lane, at any bound or depth |
 
 ## `CU-*` --- Purity: one answer, many factorizations; no classical path, no fallback
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CU-01` | `build` | No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target --- except inside a function holding the `F64Exact` witness, where the declared alphabet bound and panel depth keep every product and every partial sum below 2^53, so the opcode computes the same integer the exact accumulator does. The witness's only constructor is a compile-time proof of that bound; the gates check the type, not a comment |
-| `CU-02` | `build` | The instrumented count of narrow-path tiles matches `fits_narrow` exactly, so no tile takes an unintended path |
-| `CU-03` | `build` | Every instruction sequence agrees at depths straddling its own threshold |
-| `CU-04` | `build` | Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases |
-| `CU-05` | `build` | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph |
-| `CU-06` | `build` | The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop |
-| `CU-07` | `build` | Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked |
-| `CU-08` | `build` | The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CU-01` | `build` | No float add, subtract, multiply, or FMA opcode appears in any shipped kernel's disassembly, on any target --- except inside a function holding the `F64Exact` witness, where the declared alphabet bound and panel depth keep every product and every partial sum below 2^53, so the opcode computes the same integer the exact accumulator does. The witness's only constructor is a compile-time proof of that bound; the gates check the type, not a comment | one float add, subtract, multiply, or FMA opcode in a shipped kernel's disassembly, outside a function holding the `F64Exact` witness |
+| `CU-02` | `build` | The instrumented count of narrow-path tiles matches `fits_narrow` exactly, so no tile takes an unintended path | the instrumented narrow-path tile count differing from `fits_narrow`'s answer by one tile |
+| `CU-03` | `build` | Every instruction sequence agrees at depths straddling its own threshold | one sequence disagreeing with another at a depth on either side of its own threshold |
+| `CU-04` | `build` | Float accumulation is order-independent: shuffled tiles and every backend agree bit for bit, including on catastrophic-cancellation cases | one shuffled tile order or one backend changing a single bit of a float accumulation, catastrophic cancellation included |
+| `CU-05` | `build` | There is exactly one accumulation path per element family, asserted by `audit-purity` over the call graph | a second accumulation path for one element family in the call graph `audit-purity` walks |
+| `CU-06` | `build` | The tabulated inner loop issues no multiply, asserted by the operation census and by the disassembly of the emitted loop | one integer-multiply mnemonic in the emitted tabulated column loop, or one multiply charged to it by the census |
+| `CU-07` | `build` | Every shipped crate either forbids `unsafe_code` outright or is a crate the Miri job runs, so no shipped `unsafe` block goes unchecked | a shipped crate that neither forbids `unsafe_code` nor is a crate the Miri job runs |
+| `CU-08` | `build` | The modular table lane runs exactly when the encode is `Wrapping` and the output is no wider than the lane; its depth is unbounded at every bound | the modular table lane running under an encode that is not `Wrapping`, or at an output wider than the lane, or declining where both hold |
+| `CU-10` | `build` | No tropical sequence issues a multiply, read from the emitted instructions | one integer-multiply mnemonic in the emitted instructions of a tropical sequence |
+| `CU-11` | `build` | Between IEEE decode and the single encode, the float call graph contains only operations in the declared UOR census: total q contraction walks the occupied extent-fractal grades from their highest site, and its column dictionary, TableBuild, and portable gathers use canonical radix recurrence and Euclidean address projection without legacy limb placement, scalar support-mask routing, hash seeds or value multiplication, packed shifts, masks, XOR, bit scans, float arithmetic, or an undeclared reserve path | one reachable post-decode/pre-encode operation absent from the UOR census, one q contraction scanning an unoccupied leading grade or zero-initializing the whole grade carrier, one seeded or multiplied hash, one shift/mask/XOR/bit-scan address projection in the float-reachable column dictionary, TableBuild, or portable gathers, one legacy limb-placement call, one scalar packed-support mask or population-count route, one float arithmetic instruction, one reserve route, or the audit finding no pure-UOR float body to inspect |
 
 ## `CK-*` --- Codec: tier equivalence, transcode, kappa addressing
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CK-01` | `build` | Two codecs with equal decodes give equal output bytes |
-| `CK-02` | `build` | Codec-invariance holds when both operands are coded |
-| `CK-03` | `build` | The packed panels themselves are byte-equal across codecs that decode equally |
-| `CK-04` | `build` | A transcoded stream equals the composite codec |
-| `CK-05` | `build` | Two `CodedMatrix` values with different kappa labels and equal decodes give equal output bytes |
-| `CK-06` | `build` | A run codec's returned counts sum to the declared row width on every row |
-| `CK-08` | `build` | The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected |
-| `CK-09` | `build` | `Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type |
-| `CK-11` | `build` | The `Sign` tier decodes the same alphabet stream as the `Packed<Grid<2>,8>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream |
-| `CK-12` | `build` | The `Ternary` tier decodes the same alphabet stream as the `Packed<Grid<4>,4>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream |
-| `CK-13` | `build` | Sign-coded weights (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) produce byte-identical output to the dense spelling of the same decoded operand, packed and tabulated, and the ternary spelling (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) likewise |
-| `CK-10` | `build` | An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal decodes and NaN payloads are distinct symbols |
-| `CK-14` | `build` | The arena tier at a `u8` code width decodes the same alphabet stream as its `u16` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its codebook is borrowed, never owned |
-| `CK-15` | `build` | The `u8` spelling of a 256-entry tier --- `Book<256, 8>`, `Sign<8>`, `Ternary<4>` --- stores half the bytes of its `u16` spelling, decodes the same alphabet stream, and its index stream is the code stream, byte-identical through the tabulated driver at every shape and every offer, with the gather dispatched once per call between monomorphic u8 and u16 sequences |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CK-01` | `build` | Two codecs with equal decodes give equal output bytes | two codecs with equal decoded streams producing different output bytes |
+| `CK-02` | `build` | Codec-invariance holds when both operands are coded | one input on which codec-invariance fails where both operands are coded |
+| `CK-03` | `build` | The packed panels themselves are byte-equal across codecs that decode equally | two codecs that decode equally packing different panel bytes |
+| `CK-04` | `build` | A transcoded stream equals the composite codec | a transcoded stream decoding otherwise than the composite codec does |
+| `CK-05` | `build` | Two `CodedMatrix` values with different kappa labels and equal decodes give equal output bytes | two coded matrices with different kappa labels and equal decodes producing different output bytes |
+| `CK-06` | `build` | A run codec's returned counts sum to the declared row width on every row | one row on which a run codec's returned counts do not sum to the declared width |
+| `CK-08` | `build` | The canonical manifest is byte-stable: keys in lexicographic order, no insignificant whitespace, a short buffer reports the need, and a malformed digest is rejected | a manifest whose bytes move under a key reordering or insignificant whitespace, a short buffer that does not report its need, or a malformed digest accepted |
+| `CK-09` | `build` | `Enumerable`'s laws hold for every implementing codec: `index_of(code_at(i)) == i` over the whole code space, and `index_of` is total on the code type | one index at which `index_of(code_at(i)) != i`, or one code value on which `index_of` is not defined |
+| `CK-11` | `build` | The `Sign` tier decodes the same alphabet stream as the `Packed<Grid<2>,8>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream | the `Sign` tier decoding a different alphabet stream from `Packed<Grid<2>,8>`, or its index stream differing from its code stream |
+| `CK-12` | `build` | The `Ternary` tier decodes the same alphabet stream as the `Packed<Grid<4>,4>` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its index stream is the code stream | the `Ternary` tier decoding a different alphabet stream from `Packed<Grid<4>,4>`, or its index stream differing from its code stream |
+| `CK-13` | `build` | Sign-coded weights (`Packed<Grid<2>,8>` over `Bnd<1>`, table `[-1,+1]`) produce byte-identical output to the dense spelling of the same decoded operand, packed and tabulated, and the ternary spelling (`Packed<Grid<4>,4>`, table `[-1,0,+1,dead]`) likewise | one shape at which sign-coded or ternary-coded weights differ by a byte from the dense spelling of the same decoded operand |
+| `CK-10` | `build` | An arena's codebook is canonical: the source matrix's distinct bit patterns, sorted as unsigned integers and deduplicated, so `-0.0` and `+0.0` are distinct symbols with equal dyadic evaluations and NaN payloads are distinct symbols | a codebook that is not the source's distinct bit patterns sorted as unsigned integers and deduplicated --- `-0.0` merged with `+0.0`, or two NaN payloads merged |
+| `CK-14` | `build` | The arena tier at a `u8` code width decodes the same alphabet stream as its `u16` spelling (byte-identical output, packed and tabulated), indexes its code space totally, and its codebook is borrowed, never owned | the u8 arena spelling decoding a different alphabet stream from the u16 one, or a codebook that is owned rather than borrowed |
+| `CK-15` | `build` | The `u8` spelling of a 256-entry tier --- `Book<256, 8>`, `Sign<8>`, `Ternary<4>` --- stores half the bytes of its `u16` spelling, decodes the same alphabet stream, and its index stream is the code stream, byte-identical through the tabulated driver at every shape and every offer, with the gather dispatched once per call between monomorphic u8 and u16 sequences | a u8 spelling storing as many bytes as its u16 spelling, decoding a different stream, or a gather dispatched more than once per call |
+| `CK-16` | `build` | The semiring laws hold at every instance, and idempotence holds precisely at the tropical instance and fails precisely at the ring | one instance at which a semiring law fails, an idempotent `+` at the ring instance, or a non-idempotent `max` at the tropical one |
+| `CK-17` | `build` | The semiring zero is simultaneously the pad and the mask, so a masked shape and a zero-padded shape are byte-identical | a masked shape and the zero-padded shape of the same operand differing by a byte, or a pad that decodes to anything but `Element::ZERO` |
+| `CK-18` | `build` | The complete signed i8 product alphabet is byte-identical to an independent shift-add construction, so the canonical i8 product route is a lookup followed by addition | one signed i8 pair whose lookup product differs from the independent shift-add product, or a lookup route that issues an operation other than the declared native additions |
+| `CK-19` | `build` | Finite non-adjacent form is the canonical section of `Z[X,X^-1]/(X-2)`: evaluation is preserved, normalization is idempotent and unique, `mu` is coefficient negation, and the mixed-radix Atlas page address crosses context, scope, and word boundaries without cyclic wrap | one dyadic value with no finite canonical representative, two distinct canonical representatives of one value, normalization changing evaluation, negation failing to commute with the section, or one grade failing to round-trip through `(word, scope, context)` |
+| `CK-20` | `build` | The declared `3 Z^(3x8)` Atlas carrier embeds in the ambient dyadic module, its four canonical projectors reconstruct it exactly, and the interaction block is load-bearing for signed-digit value and full-carrier selection | one projected coordinate requiring a denominator other than a power of two, the four blocks failing to reconstruct their carrier, or two carriers with equal global, modality, and context blocks whose differing interaction fails to distinguish their signed-digit values |
+| `CK-21` | `build` | `PackedCode::of` is a lossless sixteen-byte encoding of every `Decoded` variant: the two reserved finite tags recover every sign, `u64` mantissa, and `i32` exponent including signed zero and the non-finite sentinel exponents; ordinary IEEE finite values retain the inline layout, and every other formerly ignored padding value retains its exponent-based kind | two distinct decoded codes producing one packed code, one finite field changing under the reserved-tag interpretation, one finite sentinel exponent classified as non-finite, one ordinary nonzero IEEE finite value leaving the inline layout, or a nonreserved padding value changing the exponent-based kind it had before the extension |
 
 ## `CX-*` --- Cross-library agreement against an external library
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CX-01` | `build` | `ndarray` `i32`, byte-identical over the whole corpus under `EncodeMode::Wrapping` |
-| `CX-02` | `build` | `nalgebra` `i32`, likewise |
-| `CX-03` | `build` | `ndarray` `i32` against our `i8` kernels on widened inputs |
-| `CX-04` | `build` | `nalgebra` `i32` against our coded kernels on decoded weights |
-| `CX-05` | `open` | `matrixmultiply` `sgemm`: deviation from our exact value, in ulps |
-| `CX-06` | `open` | `faer` `f32`: likewise |
-| `CX-07` | `open` | `ndarray` `f32`: likewise, recorded as not independent of `CX-05` |
-| `CX-08` | `open` | `gemm` crate `f32`: likewise |
-| `CX-09` | `open` | `matrixmultiply` `dgemm`: likewise at f64 |
-| `CX-10` | `build` | NumPy `int64` out of process, byte-identical |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CX-01` | `build` | `ndarray` `i32`, byte-identical over the whole corpus under `EncodeMode::Wrapping` | one corpus entry at which `ndarray`'s `i32` product differs by a byte under `EncodeMode::Wrapping` |
+| `CX-02` | `build` | `nalgebra` `i32`, likewise | one corpus entry at which `nalgebra`'s `i32` product differs by a byte under `EncodeMode::Wrapping` |
+| `CX-03` | `build` | `ndarray` `i32` against our `i8` kernels on widened inputs | one corpus entry at which the widened `i8` kernels differ by a byte from `ndarray`'s `i32` |
+| `CX-04` | `build` | `nalgebra` `i32` against our coded kernels on decoded weights | one corpus entry at which the coded kernels differ by a byte from `nalgebra` on the decoded weights |
+| `CX-05` | `open` | `matrixmultiply` `sgemm`: deviation from our exact value, in ulps | the recorded `sgemm` deviation not reproducing at the host, seed, and harness the record names |
+| `CX-06` | `open` | `faer` `f32`: likewise | the recorded `faer` deviation not reproducing at the host, seed, and harness the record names |
+| `CX-07` | `open` | `ndarray` `f32`: likewise, recorded as not independent of `CX-05` | the recorded `ndarray` `f32` deviation not reproducing at the recorded host and seed, or the record dropping that its lineage is not independent of `CX-05` |
+| `CX-08` | `open` | `gemm` crate `f32`: likewise | the recorded `gemm` deviation not reproducing at the host, seed, and harness the record names |
+| `CX-09` | `open` | `matrixmultiply` `dgemm`: likewise at f64 | the recorded `dgemm` deviation not reproducing at the host, seed, and harness the record names |
+| `CX-10` | `build` | NumPy `int64` out of process, byte-identical | one corpus entry at which NumPy's `int64` product differs by a byte, or a transported digest that is not the one NumPy computed |
+| `CX-11` | `build` | NumPy `(max, +)` out of process, byte-identical | one corpus entry at which the NumPy max-plus product differs by a byte, or a transported digest that is not the one NumPy computed |
 
 ## `CA-*` --- Allocation and environment: zero heap, no_std, embedded and wasm
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CA-01` | `build` | Zero allocations during any call, on every hosted target |
-| `CA-02` | `build` | Identical bytes on `thumbv7em-none-eabihf` and both wasm targets as on x86-64 |
-| `CA-03` | `build` | No shipped crate links an allocator symbol on a `no_std` target |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CA-01` | `build` | Zero allocations during any call, on every hosted target | one allocation observed during a call, on any hosted target |
+| `CA-02` | `build` | Identical bytes on `thumbv7em-none-eabihf` and both wasm targets as on x86-64 | a corpus digest from `thumbv7em-none-eabihf` or either wasm target differing from the x86-64 digest |
+| `CA-03` | `build` | No shipped crate links an allocator symbol on a `no_std` target | an allocator symbol linked by a shipped crate on a `no_std` target |
+| `CA-04` | `build` | The tropical accumulator's width is independent of `k`, and is the same width at depth one and at the deepest reduction the machine can address | a tropical accumulator width that differs between depth one and `2^MAX_K_BITS`, or one that carries a depth term at all |
+| `CA-05` | `build` | The Atlas carrier and projector layer is a zero-copy view over caller-owned storage: it owns no carrier buffer, allocates nothing, carries its dyadic denominator implicitly, and remains total when the caller offers no scratch | one carrier view changing the backing address, one owned carrier allocation or materialization, one explicit per-coordinate denominator, or one no-scratch call refusing or changing the result |
 
 ## `CP-*` --- Statistical / property-based, with sample size and seed recorded
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CP-01` | `build` | The randomized differential suite at the sample size derived in `ANALYSIS.md`, seeds recorded |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CP-01` | `build` | The randomized differential suite at the sample size derived in `ANALYSIS.md`, seeds recorded | one seeded case in the differential suite disagreeing with the reference, or a run at fewer samples than `ANALYSIS.md` derives |
 
 ## `CG-*` --- Scaling: fitted exponent, compared against the same fit for each oracle
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CG-01` | `open` | Arithmetic scaling exponent, this library and every oracle |
-| `CG-02` | `open` | Per-axis scaling exponents for `m`, `n`, `k` separately |
-| `CG-03` | `open` | Residency scaling: bytes of weight storage touched, per codec, against every oracle |
-| `CG-04` | `open` | Working-set scaling, `suggested_scratch` against each oracle's measured internal allocation |
-| `CG-05` | `open` | Allocation count and peak bytes: zero here, whatever the oracle does there |
-| `CG-06` | `open` | Parallel speedup against tile count, with byte-equality asserted inside the timed harness |
-| `CG-08` | `open` | Sustained throughput on super-massive input, reported per pass, against every oracle that finishes |
-| `CG-09` | `open` | Throughput against the degeneracy of the operand, including the price of looking when there is none |
-| `CG-07` | `open` | Small-shape latency, where a heavyweight prologue costs more than an asymptote |
-| `CG-10` | `open` | Operation census and wall time for `Tabulated` against `Blocked` and against every oracle, swept over `n` through the derived break-even, with the duplicate-entry ratio of the enumeration reported |
-| `CG-11` | `build` | Static issue analysis (`llvm-mca`) over the emitted inner loops reports, for each kernel sequence, per-port occupancy, the critical path, predicted throughput, and a named bottleneck resource --- scheduling-model predictions, reported, never asserted as measurements |
-| `CG-12` | `open` | Achieved MACs per second of the sub-cubic recursion against the cubic packed walk on the i32-exact lane, swept through the crossover with the fitted exponent's interval and sample count and the host's fastest sustained product rate on the same axes, with byte-identity asserted inside the timed region |
-| `CG-13` | `build` | The resolved kernel sequence is cached per element family; a cached selection returns the same sequence the full walk returns (asserted), and the latency this buys is reported under CG-07 and never asserted |
-| `CG-14` | `open` | Achieved bytes per second for a u8-symbol-coded gemv and skinny GEMM, and for an f32 oracle, against the host's STREAM triad number measured in the same harness, with byte-identity asserted inside the timed region |
-| `CG-15` | `open` | Achieved MACs per second of the float placement bridge --- the default driver's auto-selected lane against the explicit entry's richer offers, with the decline fills pricing the scalar lanes both fall to --- measured on the shapes ANALYSIS tables, with byte-identity asserted inside the timed region |
-| `CG-16` | `open` | Achieved MACs per second of the symbol tabulated traversal in the scaled integer lane against the float placement bridge, the dense float driver, and an f32 oracle, on gemv, skinny, and tabulation-sweep shapes, with byte-identity asserted inside the timed region |
-| `CG-17` | `open` | Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime, per panel depth and bound, with byte-identity asserted inside the timed region |
-| `CG-18` | `build` | The operation census is the performance gate, asserted where the clock cannot be: at shapes straddling the break-even recomputed from the sequences' own per-ISA declarations, auto-selection runs the dense route below it (`kernel_calls`, no `table_reads`) and the table at and above it; the running table's multiplies are exactly the build's `code_space * block * rows` per slot (charged as adds at bound 1, `CB-10`), and a codec the derivation declines at `block = 1` shows the dense route at every size |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CG-01` | `open` | Arithmetic scaling exponent, this library and every oracle | the recorded exponent not reproducing at the host, sweep, and seed the record names, or a fit reported without its interval |
+| `CG-02` | `open` | Per-axis scaling exponents for `m`, `n`, `k` separately | one per-axis exponent not reproducing at the recorded host and seed, or an axis reported without a fit of its own |
+| `CG-03` | `open` | Residency scaling: bytes of weight storage touched, per codec, against every oracle | the recorded bytes-touched figure not reproducing at the host and codec the record names |
+| `CG-04` | `open` | Working-set scaling, `suggested_scratch` against each oracle's measured internal allocation | the recorded `suggested_scratch` comparison not reproducing against the oracle's measured allocation on the recorded host |
+| `CG-05` | `open` | Allocation count and peak bytes: zero here, whatever the oracle does there | the recorded allocation count or peak not reproducing at the host and harness the record names |
+| `CG-06` | `open` | Parallel speedup against tile count, with byte-equality asserted inside the timed harness | the recorded speedup not reproducing at the host and tile count the record names, or the byte-equality assertion inside the timed region failing |
+| `CG-08` | `open` | Sustained throughput on super-massive input, reported per pass, against every oracle that finishes | the recorded sustained rate not reproducing at the host and pass the record names, or an oracle that did not finish recorded as though it had |
+| `CG-09` | `open` | Throughput against the degeneracy of the operand, including the price of looking when there is none | the recorded throughput against degeneracy not reproducing at the recorded host, or the price of looking left out of the sweep |
+| `CG-07` | `open` | Small-shape latency, where a heavyweight prologue costs more than an asymptote | the recorded small-shape latency not reproducing at the host and shapes the record names |
+| `CG-10` | `open` | Operation census and wall time for `Tabulated` against `Blocked` and against every oracle, swept over `n` through the derived break-even, with the duplicate-entry ratio of the enumeration reported | the recorded census or wall time not reproducing at the host and sweep the record names, or a duplicate-entry ratio recorded apart from the enumeration it came from |
+| `CG-11` | `build` | Static issue analysis (`llvm-mca`) over the emitted inner loops reports, for each kernel sequence, per-port occupancy, the critical path, predicted throughput, and a named bottleneck resource --- scheduling-model predictions, reported, never asserted as measurements | one kernel sequence the census analyses reported without a named bottleneck resource, or a tool that is not `llvm-mca` accepted as one |
+| `CG-12` | `open` | Achieved MACs per second of the sub-cubic recursion against the cubic packed walk on the i32-exact lane, swept through the crossover with the fitted exponent's interval and sample count and the host's fastest sustained product rate on the same axes, with byte-identity asserted inside the timed region | the recorded rates not reproducing at the host and crossover the record names, or the byte-identity assertion inside the timed region failing |
+| `CG-13` | `build` | The resolved kernel sequence is cached per element family; a cached selection returns the same sequence the full walk returns (asserted), and the latency this buys is reported under CG-07 and never asserted | one family, bound, or panel height at which a cached selection returns a sequence the full walk does not |
+| `CG-14` | `open` | Achieved bytes per second for a u8-symbol-coded gemv and skinny GEMM, and for an f32 oracle, against the host's STREAM triad number measured in the same harness, with byte-identity asserted inside the timed region | the recorded bytes per second not reproducing at the host and shapes the record names, or the byte-identity assertion inside the timed region failing |
+| `CG-15` | `open` | Historical float-workspace throughput protocol, rerun over the default and compatibility spellings of the one Atlas-octet operation at the recorded shapes and exponent fills, with byte identity asserted inside every timed region | the recorded product rates not reproducing at the host and shapes the record names, either spelling reaching distinct arithmetic, or the byte-identity assertion inside the timed region failing |
+| `CG-16` | `open` | Paired product-rate crossover of the public forced block-one Atlas table against the public coded Atlas decline at the recorded code spaces, shapes, spans, and offers; every calibrated batch is poisoned before timing and completely byte-checked after timing while only repeated production calls occupy the measured interval, and counted calls independently establish both routes and a multiply-free table | a repeated run at the recorded host, seed, shapes, offers, and harness not reproducing the reported paired intervals, either measured arm not invoking its named public production route, a setup or correctness guard entering the timer, a complete post-batch byte comparison failing, or the counted table naming a traditional multiply |
+| `CG-17` | `open` | Achieved MACs per second of the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends sequence and the portable reference, on wasm32-wasip1 under wasmtime, per panel depth and bound, with byte-identity asserted inside the timed region | the recorded MACs per second not reproducing under wasmtime at the host, depth, and bound the record names, or the byte-identity assertion inside the timed region failing |
+| `CG-18` | `build` | The operation census is the performance gate, asserted where the clock cannot be: at shapes straddling the break-even recomputed from the sequences' own per-ISA declarations, auto-selection runs the dense route below it (`kernel_calls`, no `table_reads`) and the table at and above it; the running table's multiplies are exactly the build's `code_space * block * rows` per slot (charged as adds at bound 1, `CB-10`), and a codec the derivation declines at `block = 1` shows the dense route at every size | auto-selection running the table below the recomputed break-even, or the dense route at and above it, or the running table charging one multiply beyond the build's `code_space * block * rows` per slot |
+| `CG-19` | `open` | Tropical selection throughput against the ring lane at matched shapes, and witness mechanism A against B | the recorded rates not reproducing at the host, shapes, and seed the record names |
+| `CG-21` | `open` | Pure-UOR `f32` and `f64` throughput, traffic, and latency against the incumbent exact route and float oracles, with integer and tropical controls measured in the same run; every calibrated batch is poisoned before timing and completely byte-checked after timing while only the real production call occupies the measured interval | a repeated run at the recorded host, seed, shapes, and harness not reproducing the reported intervals, one measured arm not invoking its real production API, one correctness guard entering the timer, or one post-batch complete byte comparison failing |
+| `CG-22` | `build` | The one direct pure-UOR float traversal selects only among eligible group-one lookup/add kernel orientations by model-derived executed work after exact-cell residency, live-only product-carrier initialization, and fixed-workspace factorization, and its executed coordinate census equals the model while every non-float route and operation count remains unchanged | one shape selecting a lookup/add orientation other than the global model-derived executed-work minimum, one selector omitting exact-cell residency, live-only product-carrier initialization, fixed workspace, or an eligible family, one edge tile clearing a padded product carrier, one threshold literal or support-mask route in the selector, one executed coordinate count differing from the model, a silent route census, or one integer or tropical control changing route or operation count |
+| `CG-23` | `open` | On the recorded compiler and host, every structurally changed native lookup case retains the preregistered demonstrated-superiority rule, while cases whose linked hot bodies are statically equivalent to their retained controls after exact ELF inspection are completely measured and reported as open static controls; all cases use the same safe wrappers, poisoned outputs, complete byte checks, and 256 interleaved paired samples | one changed case whose paired upper 95% confidence endpoint exceeds one, one changed case being classified as a static-equivalent control, one static control turning its open clock into a hard truth assertion, one case emitting fewer than 256 paired samples, raw and resolved clocks traversing different wrappers, poison or complete-output verification failing, or the recorded ELF inspection not showing the claimed normalized hot-body equivalence and no-worse aligned direct production alphabet address |
 
 ## `CM-*` --- Model integrity: the model is the single source of every constant
 
-| ID | Level | Statement |
-| --- | --- | --- |
-| `CM-01` | `build` | The generated Rust consts equal `model/constants.toml` |
-| `CM-02` | `build` | Every ID in `model/ids.toml` has a scenario and a test, and every test's ID is in the register |
-| `CM-03` | `build` | Every `some-true` claim has a row in `model/authorities.toml` with a citation |
-| `CM-04` | `build` | `tabulation_pays`'s inputs come from `model/tiers.toml`, and the resolved break-even matches the model's recorded value for every enumerable codec |
+| ID | Level | Statement | Refuted by |
+| --- | --- | --- | --- |
+| `CM-01` | `build` | The generated Rust consts equal `model/constants.toml` | one generated const differing from the value `model/constants.toml` carries |
+| `CM-02` | `build` | Every ID in `model/ids.toml` has a scenario and a test, and every test's ID is in the register | a registered ID with no scenario or no test, or a test naming an ID the register does not carry |
+| `CM-03` | `build` | Every `some-true` claim has a row in `model/authorities.toml` with a citation | a `some-true` claim naming an authority with no row here, or a row with no citation |
+| `CM-04` | `build` | `tabulation_pays`'s inputs come from `model/tiers.toml`, and the resolved break-even matches the model's recorded value for every enumerable codec | one enumerable codec whose recorded break-even differs from the derivation recomputed at test time |
 
 ## Cited authorities
 
@@ -199,29 +229,34 @@ Never re-derived, vendored, or gated on.
 | `INTEL-VNNI` | Intel Intrinsics Guide, `_mm512_dpbusd_epi32`, `_mm512_dpwssd_epi32`. | `CB-03`, `CU-03` |
 | `UOR-ADDR-1` | UOR-Foundation/uor-addr-1 v0.1.0, `uor_addr_1::address`. | `CK-05` |
 | `UOR-R4-OPKERNEL` | UOR-Foundation/uor-r4, `crates/uor-r4-core/src/transformerless/runtime.rs`, `OpKernel`. | `CU-06`, `CG-10` |
+| `TF1` | UOR-Foundation, TF1 --- Formalization of the Transformer over the UOR Atlas, upstream. | `CK-19`, `CK-20`, `CK-16`, `CK-17`, `CS-11`, `CT-08`, `CA-04`, `CD-24`, `CD-25`, `CD-26`, `CD-27`, `CD-31`, `CD-32`, `CD-29`, `CB-13`, `CU-10`, `CU-11` |
+| `UOR-ATLAS-UTQC` | UOR-Foundation, UOR Atlas: Universal Transform Quantum Computing, upstream. | `CM-02`, `CM-03` |
 
 ## Claims that are not conformance IDs
 
-| ID | Level | Claim |
-| --- | --- | --- |
-| `AUTH-CL-MM01` | `some-true` | the accumulation does not depend on the codec |
-| `AUTH-CL-MM02` | `some-true` | a scalar codec is the block codec of its singletons |
-| `AUTH-CL-MM03` | `some-true` | the composite of two codecs is a codec with the composed decode |
-| `AUTH-CL-MM04` | `some-true` | all bound theorems hold for arbitrary (B, cap); W8A8 is one instantiation |
-| `AUTH-IEEE754` | `some-true` | a finite IEEE 754 value names an exact dyadic rational; NaN and infinity propagate by clause 6. |
-| `AUTH-RING-HOM` | `some-true` | reduction modulo 2^w is a ring homomorphism, so reducing the exact sum once at the end equals reducing at every step. This is why the integer oracles agree byte for byte with no exempted region (§3.4). |
-| `AUTH-VNNI` | `some-true` | vpdpbusd multiplies unsigned bytes by signed bytes and accumulates into i32; vpdpwssd multiplies signed words. |
-| `AUTH-UOR-ADDR` | `some-true` | JCS-RFC8785 + NFC then SHA-256 over the canonical manifest |
-| `OPEN-CODEBOOK-QUALITY` | `open` | the reconstruction quality of any codebook, including E8, is measured per (model, codebook) and reported, never asserted (N3). |
-| `OPEN-ORACLE-ULPS` | `open` | each classical float oracle's rounding error against the exact value this library holds, in ulps. Reported by CX-05 through CX-09. |
-| `OPEN-RESIDENCY` | `open` | the residency collapse of the coded tiers, measured as a scaling constant against the oracle (CG-03), never asserted. |
-
-## Suspended rules
-
-A working rule suspended for one named scope. What each suspension admits is
-read from `model/ledger.toml` by the gate it exempts, so the exemption is model
-data and not a constant inside the gate.
-
-| ID | Rule | Scope | Admits | Ends |
-| --- | --- | --- | --- | --- |
-| `SUSP-R15-WIDTH-PHASE` | R15 | the representation-width performance phase | `MEASUREMENT-LOG.md` | the phase closes: the log's open items have each either shipped with their IDs and gates, or been measured and recorded as results, and this row and the exemption are removed together. |
+| ID | Level | Claim | Refuted by |
+| --- | --- | --- | --- |
+| `AUTH-CL-MM01` | `some-true` | the accumulation does not depend on the codec | `UorMatMul.lean`'s Theorem CL-MM01 not carrying this statement, or the development carrying no such theorem |
+| `AUTH-CL-MM02` | `some-true` | a scalar codec is the block codec of its singletons | `scalar_eq_block` not carrying this statement, or being absent from the development |
+| `AUTH-CL-MM03` | `some-true` | the composite of two codecs is a codec with the composed decode | `transcode_decode` not carrying this statement, or being absent from the development |
+| `AUTH-CL-MM04` | `some-true` | all bound theorems hold for arbitrary (B, cap); W8A8 is one instantiation | one (B, cap) at which a bound theorem fails, or W8A8's (127, 2^31 - 1) turning out not to be an instance of the general statement |
+| `AUTH-IEEE754` | `some-true` | a finite IEEE 754 value names an exact dyadic rational; NaN and infinity propagate by clause 6. | IEEE Std 754-2019 clause 3.4 or clause 6 not carrying this statement at the clause the citation names. |
+| `AUTH-RING-HOM` | `some-true` | reduction modulo 2^w is a ring homomorphism, so reducing the exact sum once at the end equals reducing at every step. This is why the integer oracles agree byte for byte with no exempted region (§3.4). | one summand sequence and one w at which reducing once at the end differs from reducing at every step. |
+| `AUTH-VNNI` | `some-true` | vpdpbusd multiplies unsigned bytes by signed bytes and accumulates into i32; vpdpwssd multiplies signed words. | the Intrinsics Guide entries for `_mm512_dpbusd_epi32` or `_mm512_dpwssd_epi32` describing different operand signedness, or a different accumulator width. |
+| `AUTH-UOR-ADDR` | `some-true` | JCS-RFC8785 + NFC then SHA-256 over the canonical manifest | `uor_addr_1::address` at the version `Cargo.lock` pins computing anything but SHA-256 over the JCS-RFC8785 and NFC canonical form |
+| `AUTH-TF1-A4` | `some-true` | the (max, +) semiring is the selection algebra: `max` is the additive operation and addition is the multiplicative one. | TF1's A-4 naming a different algebra for selection, or naming (max, +) for something other than selection. |
+| `AUTH-TF1-A6` | `some-true` | a masked position is the semiring zero --- the same value a padded position decodes to, not a second convention beside it. | TF1's A-6 giving a mask a value distinct from the semiring zero, or leaving the two conventions unidentified. |
+| `AUTH-TF1-D6` | `some-true` | the tie-break for the selection witness is the smallest index, and it is total: every set of achieving terms has exactly one winner. | TF1's D-6 naming a different tie-break, or a set of achieving terms on which the order it declares admits two winners. |
+| `AUTH-TF1-D8` | `some-true` | the operation census is matrix products under complete accumulation, max, addition, table lookup, and power-of-two shifts. | TF1's D-8 census naming an operation outside this list, or omitting one of these five. |
+| `AUTH-TF1-D1` | `some-true` | the canonical Atlas instance has scope, modality, and context `(q,T,O) = (4,3,8)`; one carrier is `V_T tensor V_O`, while scope indexes four copies outside that 24-dimensional carrier. | TF1's D-1 or S-18 giving a different canonical tuple, placing scope inside the carrier, or assigning the carrier a dimension other than `T*O`. |
+| `AUTH-TF1-D2` | `some-true` | Atlas addresses are words over the fixed alphabet, so composition depth extends without widening the alphabet or imposing a fixed ceiling. | TF1's D-2 bounding address-word depth, widening the alphabet as depth grows, or defining an address as only one fixed-depth symbol. |
+| `AUTH-TF1-S3` | `some-true` | the modality generator is the mirror `mu(d) = (T-1)-d`; at `T=3` it swaps the outer modalities and fixes the middle one. | TF1's S-3 assigning `mu` another action, another order, or a full modality cycle rather than a mirror. |
+| `AUTH-TF1-S12` | `some-true` | the global, modality, context, and interaction projectors are pairwise annihilating idempotents whose sum is the identity on `V_T tensor V_O`. | TF1's S-12 omitting a block, failing reconstruction, or assigning the four blocks ranks other than `1`, `T-1`, `O-1`, and `(T-1)(O-1)`. |
+| `AUTH-TF1-S17` | `some-true` | the context block has rank `O-1`, so its sign refinement has `2^(O-1)` leaves and the full alphabet has `(q*T*O)*2^(O-1)` symbols. | TF1's S-17 giving the context block another rank, deriving a different leaf count, or leaving the alphabet's refinement factor posited rather than derived. |
+| `AUTH-TF1-S19` | `some-true` | the primary Atlas address selects from the whole carrier under the declared least-index tie-break rather than selecting independently from proper spectral projections. | TF1's S-19 defining the primary address through a proper block projection, a hash, or a non-total selection. |
+| `AUTH-TF1-S20` | `some-true` | a coordinate form reading only modality and context projections is blind to the interaction block, while whole-carrier selection can separate interaction perturbations. | TF1's S-20 exhibiting no interaction perturbation invisible to the marginal projections, or showing whole-carrier selection factors through those proper projections. |
+| `AUTH-TF1-G2` | `some-true` | recentring --- subtracting the maximum --- is the canonical section of the shift gauge. | TF1's G-2 naming a different section of the shift gauge, or naming no canonical representative at all. |
+| `AUTH-TF1-G5` | `some-true` | the dyadic section: scaling by a power of two is a gauge, and placement at a signed exponent is its section. | TF1's G-5 naming a different section of the dyadic gauge, or a section that is not exact. |
+| `OPEN-CODEBOOK-QUALITY` | `open` | the reconstruction quality of any codebook, including E8, is measured per (model, codebook) and reported, never asserted (N3). | a reconstruction-quality figure stated in this repository as a property of a codebook rather than of a (model, codebook) pair it was measured on. |
+| `OPEN-ORACLE-ULPS` | `open` | each classical float oracle's rounding error against the exact value this library holds, in ulps. Reported by CX-05 through CX-09. | a recorded ulp figure not reproducing at the host, seed, and harness the record names. |
+| `OPEN-RESIDENCY` | `open` | the residency collapse of the coded tiers, measured as a scaling constant against the oracle (CG-03), never asserted. | the recorded residency constant not reproducing at the host and codec the record names. |

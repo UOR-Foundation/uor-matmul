@@ -53,6 +53,41 @@ git diff --stat oracles/numpy/     # must be empty
 Each artifact's SHA-256 is recorded in `oracles/numpy/manifest.json` and
 verified by the test before the bytes are believed.
 
+## Reproducing the selection half
+
+The `(max, +)` claims are checked the same way the ring's are, and with the same
+distinction between what agreement means in each. Byte identity is the whole
+claim here: `max` and integer addition round nothing, so unlike the float
+oracles there is no deviation to report and nothing to be tolerant of.
+
+```sh
+cargo test -p uor-matmul-core   -- tropical semiring gauge   # CK-16, CK-17, CT-08, CA-04, CD-26, CD-27
+cargo test -p uor-matmul-gemm   -- selection driver          # CD-24, CD-25, CD-29, CS-11
+cargo test -p uor-matmul-kernels -- cb_13                    # CB-13, all three
+```
+
+Two things a sceptic should check specifically, because they are the two places
+a selection gate goes vacuous:
+
+- **The tie-break corpus must actually tie.** `CD-24` and `CD-25` are about which
+  index is chosen when several attain the maximum. A randomized sweep over a wide
+  value range produces no ties at all, and such a sweep would read as evidence
+  while testing nothing --- so the fixtures use a deliberately tiny value range,
+  and the test asserts that ties were in fact produced before it asserts anything
+  about them.
+- **Agreement between the two witness mechanisms is not sufficient.** If both were
+  inverted to take the *largest* index they would still agree, and `CD-25` would
+  pass. `CD-24` carries a separate half that pins the convention on a forced tie
+  at both mechanisms; the two rows together are what makes the claim two-sided.
+
+To regenerate the external tropical oracle from scratch and confirm it was not
+fabricated, exactly as for NumPy above:
+
+```sh
+pip install numpy && python3 oracles/tropical/generate.py
+git diff --stat oracles/tropical/   # must be empty
+```
+
 ## Reproducing the float measurements
 
 `CX-05` .. `CX-09` report how far a classical `f32`/`f64` GEMM is from the exact

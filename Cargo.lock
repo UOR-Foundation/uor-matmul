@@ -1799,6 +1799,7 @@ dependencies = [
 name = "uor-matmul-conformance"
 version = "0.1.0"
 dependencies = [
+ "toml",
  "uor-matmul",
  "uor-matmul-core",
  "uor-matmul-model",
@@ -1830,14 +1831,17 @@ dependencies = [
  "uor-matmul-codec",
  "uor-matmul-core",
  "uor-matmul-kernels",
+ "uor-matmul-model",
 ]
 
 [[package]]
 name = "uor-matmul-kernels"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "uor-matmul-core",
  "uor-matmul-kernels",
+ "uor-matmul-model",
 ]
 
 [[package]]
@@ -1859,11 +1863,14 @@ dependencies = [
  "matrixmultiply",
  "nalgebra",
  "ndarray",
+ "num-bigint",
+ "num-traits",
  "serde_json",
  "uor-matmul",
  "uor-matmul-codec",
  "uor-matmul-core",
  "uor-matmul-gemm",
+ "uor-matmul-model",
 ]
 
 [[package]]

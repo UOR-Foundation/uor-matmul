@@ -39,9 +39,83 @@ confidence-threshold = 0.93
 multiple-versions = "warn"
 wildcards = "deny"
 
-# R11: oracle crates are dev-dependencies of uor-matmul-validate only. The
-# shipped crates depend on none of them.
-deny = []
+# The crates this workspace must never acquire, written down while the list is
+# provably inert: `cargo deny check bans` passes on the graph as it stands, so
+# nothing below is a negotiation with an existing dependency. That is the only
+# moment a ban is cheap. A rule added after the crate arrives has to argue with
+# working code and a deadline; one added before is a decision made once.
+#
+# Three kinds of entry, and each one names the rule it enforces.
+#
+# **R11, by `wrappers` rather than by comment.** The oracle crates are
+# dev-and-CI-only dependencies of `uor-matmul-validate`, which is `publish =
+# false`. `wrappers` says that in the form cargo-deny checks: the crate is
+# admitted only while every direct dependent of it is on its list, so a shipped
+# crate that reached for one fails this gate rather than being caught by a
+# reader. The lists are the graph's own edges, read out of Cargo.lock.
+#
+# **R2 and R6: no float arithmetic, and no second implementation of the
+# product.** A BLAS binding is not a dependency, it is a *different answer* ---
+# C5 says one answer with many factorizations, and a foreign kernel linked in
+# is a second one that no gate here can validate. None of these is in the graph
+# and none ever should be.
+#
+# **R7: no heap in a shipped crate.** An arbitrary-precision integer library or
+# a replacement allocator is the shape of dependency that would make
+# `thumbv7em-none-eabihf` stop linking. The exact accumulator is a fixed-width
+# register derived from the bound (§3.2), which is what makes a bignum
+# unnecessary rather than merely unwelcome.
+#
+# Three crates that *look* like they belong here are deliberately absent, and
+# saying so is the point of the list rather than an exception to it. `libm`,
+# `num-bigint` and `approx` are already in the graph --- `libm` through
+# `num-traits`, `num-bigint` through `num-rational`, `approx` through
+# `nalgebra` --- so banning them would either fail today or rest on a wrapper
+# list long enough to be a standing warning, which this file's licence comment
+# explains is worse than no rule. What keeps them out of a shipped crate is
+# `just no-alloc`, which builds those crates for a target that has no allocator
+# at all, and the absence of any edge to them in Cargo.lock.
+deny = [
+    # R11: the differential oracles. One dependent each, and it is the crate
+    # that exists to be compared against.
+    { name = "ndarray", wrappers = ["uor-matmul-validate"] },
+    { name = "nalgebra", wrappers = ["uor-matmul-validate"] },
+    { name = "faer", wrappers = ["uor-matmul-validate"] },
+    { name = "gemm", wrappers = ["uor-matmul-validate", "faer"] },
+    { name = "matrixmultiply", wrappers = ["uor-matmul-validate", "ndarray", "nalgebra"] },
+
+    # R6, C5, R2: a foreign GEMM is a second answer, and a `-sys` crate for one
+    # also drags a C toolchain and a float library into a workspace whose whole
+    # claim is that the product is computed exactly, here, in integers.
+    { name = "blas-src" },
+    { name = "openblas-src" },
+    { name = "intel-mkl-src" },
+    { name = "accelerate-src" },
+    { name = "blis-src" },
+    { name = "cblas-sys" },
+    { name = "ndarray-linalg" },
+
+    # R2: float comparison by epsilon. §3.3-oracles is explicit that agreement
+    # is byte equality and never a tolerance, and a crate whose purpose is to
+    # supply the tolerance would make that a matter of taste.
+    { name = "float-cmp" },
+    { name = "float_eq" },
+    { name = "ordered-float" },
+
+    # R7: arbitrary precision on the heap, where this library has a fixed-width
+    # register derived from the declared bound.
+    { name = "rug" },
+    { name = "ibig" },
+    { name = "dashu" },
+    { name = "malachite" },
+    { name = "num-bigint-dig" },
+
+    # R7, CA-03: a replacement allocator is an allocator, and the shipped
+    # crates link on a target that has none.
+    { name = "mimalloc" },
+    { name = "jemallocator" },
+    { name = "tikv-jemallocator" },
+]
 
 [sources]
 unknown-registry = "deny"

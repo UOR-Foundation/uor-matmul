@@ -1,11 +1,46 @@
 # MEASUREMENT LOG
 
-The working log of the representation-width performance phase. This file is
-the one place a named next step may live while `SUSP-R15-WIDTH-PHASE` stands
-in `model/ledger.toml`: performance work is iterative, and a rule forbidding a
-named next step makes this log unwritable. Everywhere else R15 stands as
-written, and when the suspension's ledger row is removed this file is held to
-the rule like every other document.
+**The finite i8 lookup route (first host measurement; open).** The complete
+signed i8 product alphabet is now a static 256 KiB lookup table, and selected
+i8 dense, reduce, and table entries use lookup plus accumulation on every ISA
+family. The table is generated at compile time by an independent shift-add
+constructor; shipped calls do not allocate. On the development host (Apple M4
+Max, aarch64), the existing `gemm/i8_i32_128cubed` Criterion case measured
+**992.81 us--1.0875 ms**, midpoint **1.0350 ms** over ten samples. Criterion
+compared this with the prior route at **+5.58%--+12.44%** (midpoint **+8.94%**),
+so this correctness-complete lookup route was a small regression. Byte identity
+and the zero-multiply census passed. The follow-up native vector-add/gather
+route retains the same table identity: on the same host and shape it measured
+**880.00 us--889.39 us**, midpoint **883.99 us**, or **-15.14% to -8.15%**
+(midpoint **-11.85%**) against the scalar lookup route. ARM's table reads remain
+scalar because NEON has no general i32 gather; its accumulation is now native
+four-lane add. The AVX2 and AVX-512 table builders now use native i32 gather
+plus add as well. The pinned Rust toolchain cross-checks both x86-64 and Wasm
+kernel builds; no non-CPU path was added in this step. The reduce factorization
+now has the same native vectorized lookup accumulation on all three ISA
+families. On the development host, `workspace/none[0B]/1x1048576x1` measured **383.69 us--386.95 us**,
+midpoint **385.33 us**, or **-8.74% to -7.03%** (midpoint **-7.89%**) against
+the prior reduce route. Byte identity was asserted in the timed path. The
+isolated finite-i8 table-build benchmark now covers the full-alphabet
+builder at `space=4096`, `block=16`, `rows=16`: portable measured
+**383.21 us--398.29 us**, midpoint **391.98 us**, while the native NEON build
+measured **379.36 us--385.02 us**, midpoint **381.70 us** (about **2.62%**
+faster at the midpoint, ten samples). A CPU byte-sliced i16 table-build
+experiment was rejected: portable measured **105.04 us** versus **1.758 ms**
+for native NEON, about **16.7x slower**; that path was reverted and does not
+ship. The AVX2 and AVX-512 builders are complete registered sequences whose
+bytes and operation declarations are covered by the backend differential and
+CM-04 gates. Host timing is a separate optional `open` claim, never a
+completion condition for either sequence or its declaration-derived boundary.
+
+## Closed representation-width investigation
+
+This log is held to R15 exactly like every other workspace file. The original
+representation-width investigation is closed: each implementation capability
+either ships with its IDs and gates or was measured and declined. Rows that
+compare instruction declarations are `build` evidence and do not become
+incomplete merely because a particular ISA was absent from the measurement
+host.
 
 Three axes, kept separate because confusing them decides what each item may
 claim:
@@ -25,38 +60,74 @@ above the floor, so the existing gemv margins against ndarray and
 matrixmultiply are a *residency* result, which the symbol-bandwidth
 measurement below says in numbers.
 
-## The queue
+### Disposition
 
-In landing order. An entry leaves this list by shipping with its IDs and
-gates, or by being measured and recorded below as a result.
+The original items have final dispositions:
 
-The phase's eight items are all landed. What remains are the follow-ups the
-measurements named:
+| Item | Disposition |
+| --- | --- |
+| VNNI declaration boundary | **Closed as `build`.** `model/tiers.toml` records the AVX-512/VNNI sequence pair's declared build, gather, and dense densities; CM-04 recomputes each result without consulting a clock. The runner's lack of AVX-512 only means its open artifact exercised the AVX2 pair. It creates no missing performance capability. |
+| The co-issue thesis | **Answered and refuted.** 2.6--11.2x slower at every recorded configuration; no kernel ships. The retained harness is a reproducible falsification instrument, not an incomplete capability. |
+| Mantissa slicing | **Answered and declined.** Every measured host sits at a narrow-to-wide ratio of four to five, below the proposed eightfold trigger. More importantly, the direct balanced-octet Atlas projection exposes the narrow alphabet without nine materialized operand passes or nine traditional integer GEMMs. ANALYSIS.md retains the rejected derivation so it is not rediscovered. |
+| The multi-host remainder | **Closed.** The `CG-17` x86 figure landed: 0.30x at `k = 64` and 0.20x at `k = 1024` and `16384`, the same decline on a second host. |
 
-1. **The multi-host remainder.** All read now. The CG-17 x86 figure: the
+1. **The multi-host result.** The CG-17 x86 figure: the
    SWAR broadcast at 0.30x of the dot sequence at `k = 64` and 0.20x at
    `k = 1024` and `16384` on the x86 runner --- worse than the M4 Max's
    0.32--0.38x, the same decline on a second host. The VNNI break-even
-   question is answered for this runner class: the runner declares no
-   AVX-512, so the breakeven artifact's flip at the AVX2 pair's derived 683
-   is the caller-experienced crossing there, and the VNNI rows stay
-   `Unmeasured` with the reason recorded in the rows and the resolved pair
-   printed in every artifact. The co-issue experiment is answered: with the
+   artifact resolved the AVX2 pair because the runner declares no AVX-512; it
+   therefore observed that pair rather than the separately complete VNNI
+   declaration rows. The co-issue experiment is answered: with the
    packing defect removed, the co-issued form is 2.6--11.2x slower than the
    vector-only tile at every configuration --- the thesis is refuted, no
-   kernel ships, and the instrument stays for a second host. The VNNI rows'
-   measurement now wants one thing: a host that has AVX-512.
-2. **Mantissa slicing, conditionally.** The analysis (ANALYSIS.md
-   §"Mantissa slicing, and the RNS beside it") is recorded: nine 8-bit
-   passes, shift recombination, a wash where the narrow-to-wide ratio is
-   two, worth it at eight or better (VNNI, NEON dotprod, tensor units). The
-   trigger is a host whose measured ratio is eight or better, and the first
-   composition to measure is the sliced symbol. This host's ratio, read off
-   the lanes already measured here (i8 dotprod at 63.1 Gmac/s against the
-   `i32`-exact lane's 13--16), is about four to five, so the trigger does
-   not fire here.
+   kernel ships, and the retained instrument reproduces that disposition.
+2. **Mantissa slicing, declined.** The analysis (ANALYSIS.md
+   §"Mantissa slicing, and the RNS beside it") records nine 8-bit passes,
+   shift recombination, and the proposed narrow-to-wide trigger so the cost
+   argument is not rediscovered. This host's measured ratio --- i8 dotprod at
+   63.1 Gmac/s against the `i32`-exact lane's 13--16 --- is about four to five,
+   below the proposed eightfold trigger. The direct balanced-octet projection
+   also makes the legacy decomposition unnecessary: it reaches the same narrow
+   alphabet without materializing nine operands or invoking nine integer GEMMs.
 
 ## Measurements
+
+**Float-history notice.** Every float result below that names the placement
+bridge, scaled/scalar lanes, whole-operand reification, or a traditional
+integer product records the implementation that existed when the measurement
+was taken. Those numbers are preserved as historical evidence; they do not
+describe the current call graph. The `CG-21` section at the end distinguishes
+its logged pre-one-frame baseline from the fresh sweep required for the frozen
+pure-Atlas refactor; neither status retroactively rewrites an older result.
+
+**The selection lane against the ring lane (`CG-19`, measured; every figure
+`open`).** Measured on the CI-class development host (x86_64-unknown-linux-gnu,
+AVX2, no AVX-512), 2026-08-06, `just tropical-sweep` in release, seed 20260805,
+best of a 0.35 s budget per point, with byte-identity against the reference
+traversal asserted inside every timed run.
+
+At `64^3`: the `(max, +)` reference lane reads **0.683 Gmac/s**, the ring
+reference lane 0.995, and the ring's *packed* lane 11.144. The first two are the
+comparison the row is about --- the same traversal at two instantiations --- and
+they sit within a factor of one and a half, which is what a traversal that
+branches on nothing should look like. The third is not a tropical figure and is
+recorded only so the first two are not read as this library's throughput: the
+packed ring lane is an order above both, because it is kernelized and the
+reference is not. The tropical sequences that would close that gap are pinned by
+`CB-13` and are not what this row times.
+
+The two witness mechanisms, at `16x4096x16`: on a tie-dense fill, lexicographic
+**0.316 Gmac/s** against compare-pass **0.854**; on a fill whose maximum falls
+last, lexicographic **0.388** against **0.316**. The order reverses, which is why
+both fills are timed and why neither mechanism is a default in the sense of being
+faster --- `Witness::Lexicographic` is the default because its invariance is a
+property of the order rather than of the loop (`CD-24`), and `CD-25` asserts the
+two write the same bytes whatever the clock says.
+
+Nothing here is asserted as a property of the library. A reader who reruns
+`just tropical-sweep` on another host should expect different numbers and the
+same two orderings, and a disagreement about the *orderings* at this host, seed
+and shape is what would refute the row.
 
 **The public-path and workspace benches (CD-22 and the Phase B plans,
 measured; figures `open`).** On the development host (Apple M4 Max, quiet
@@ -103,20 +174,21 @@ is noted rather than re-derived. The symbol path against the bus on x86
 decode-bound finding, not the bandwidth one, on a second host. The symbol
 table's boundary on x86 (`CG-16`): the same shape as the M4 Max's --- a
 2.45x win at `1x1024x1024`, 1.7x at the `64x4096` shapes, catastrophic
-losses at the same one-column shapes --- so the `op-cost-fit` verdict above
-is not one machine's weather. Two harness defects the first run exposed,
+losses at the same one-column shapes --- so the historical op-kind-fit verdict
+recorded below is not one machine's weather. Two harness defects the first run exposed,
 fixed in this branch: the swar step's toolchain had no wasip1 std (the
 pinned channel's target list does not name it and the action's `targets:`
 installs for stable), and the step's pipe swallowed the failure, so the
 artifact was empty and the job green; the workflow now adds the target
 explicitly and every measurement step runs under `pipefail`, which is the
 honesty rule applied to a workflow --- a measurement that cannot fail is
-not a measurement. `CG-17`'s x86 figure lands with the next scheduled run.
+not a measurement. At the time of this first read, `CG-17`'s x86 figure had not
+landed; its later result is recorded in the closed disposition above.
 
-**The quiet-host batch: the M1 gemv, the Strassen A/B, and the op-cost
-feasibility fit (CG-12, CG-16; figures `open`).** Three deferred measurements
-from the entries below, taken in one quiet window on the same host (Apple M4
-Max, dev machine, aarch64-apple-darwin), 2026-07-30 late, byte-identity
+**The quiet-host batch: the M1 gemv, the Strassen A/B, and the historical
+op-kind feasibility fit (CG-12, CG-16; figures `open`).** Three then-open
+measurements from the entries below, taken in one quiet window on the same host
+(Apple M4 Max, dev machine, aarch64-apple-darwin), 2026-07-30 late, byte-identity
 asserted inside every timed run. The M1 variant's gemv effect, against the
 `CG-16` table above: none. At `1x1024x1024` the bridge reads 0.517 against
 the pre-M1 0.533 --- a wash, because those shapes are bound by decode and
@@ -135,9 +207,9 @@ modular lane's rate (29.4 against 22.0), not merely matches it. The fitted
 exponent is `2.8721 +/- 0.0102` against `n`: the interval still excludes
 `3.0`, and the MAC-count fit `0.9574 +/- 0.0034` still excludes `1.0`.
 
-**The op-kind cost model, measured and closed as nothing (CG-16).** The
-queue item's escape hatch, taken. `just op-cost-fit` fits per-op-kind
-nanosecond constants over the `CG-16` grid --- 43 points, both sides timed
+**The op-kind cost model, measured, rejected, and removed (CG-16).** The
+now-removed instrument fit per-op-kind nanosecond constants over the historical
+`CG-16` grid --- 43 points, both sides timed
 with their censuses --- and the model does not fit: the decode coefficient
 comes out negative (-2.14 ns, least-squares noise across collinear counts,
 not physics), the dense side's mean relative residual is 126%, and the
@@ -147,11 +219,16 @@ to get right. A margin swept over the survivors is a boundary read from a
 subset that excludes the catastrophic losses, and that is a fiction, not a
 conservative rule --- the recorded separation is against the bridge only,
 where all 8 points price (any margin in `[0.32, 1.39)` separates), and it
-changes nothing: the bridge is not the path the table would displace. So
-selection keeps declining the symbol table, `Traversal::Tabulated` remains
-the entry for the caller who knows its shape, and `tiers.toml:241`'s note
-stands. The instrument stays in the tree (`just op-cost-fit`) for the
-second host, whose op costs may compose differently; two harness defects
+changes nothing: the bridge is not the path the table would displace. At that
+time automatic selection declined the symbol table and
+`Traversal::Tabulated` remained the entry for a caller who knew its shape. The
+instrument stayed in the tree for a second host,
+whose op costs could compose differently; that second-host result is recorded
+above. The instrument was removed with the placement bridge because its dense
+count vector named reification and scalar-lane routes that no longer exist;
+retaining it under the new Atlas body would fabricate counts for dead
+operations. `CG-16` retains the current symbol-table timing and live census,
+while `CG-21` measures dense Atlas symmetrically. Two harness defects
 the first run exposed are fixed and worth recording: the fitted constants
 were seconds per op where the printer and the predictor read nanoseconds
 (every constant printed 0.0000 and every residual 1.0 --- a vacuous fit
@@ -181,7 +258,7 @@ at 39.4--39.7 across both, so the runs are comparable:
 
 The reading: a real sequence closes the gap to matrixmultiply on this host
 from 3.7x to 3.0x (39.6 against 13.2 at `1024` cubed) --- partway through the
-3.8x the queue item named, not through it. What remains is structural:
+3.8x the historical item named, not through it. The measured residual is structural:
 `vmlal_s32` covers two columns an instruction where the f32 FMA path covers
 four lanes across two units, so this lane's ceiling sits under half the float
 path's on this silicon, and closing the rest is blocking and pack cost
@@ -216,7 +293,7 @@ uses only add, subtract, and multiply. The one sign in the combination is
 folded into a sum temporary, so the accumulator only ever adds. The `i16`
 lane's analysis --- per-operation penalty about two, break-even near five
 levels, which `4^5 * B <= 2^15` admits no useful bound for --- is recorded,
-not implemented. Measured on an Apple M4 Max (dev machine,
+and the lane is excluded by that declaration-derived result. Measured on an Apple M4 Max (dev machine,
 aarch64-apple-darwin), 2026-07-30, `just strassen-sweep`, nominal Gmac/s
 (`m*k*n` per second) on random dense `i32` at a declared `2^24` bound, seed
 `20260730`, best of a 0.35 s budget per point, byte-identity against the
@@ -255,10 +332,11 @@ unchanged at `512` (the threshold declines), wide spans declining as before
 different program. Two harness defects the measurement found are recorded in
 VERIFICATION.md: the first baseline column was the modular lane in exact
 clothing, and the base case streamed per tile at deep levels until the plan
-offered the output block of accumulators unconditionally. What remains: an
-x86 runner measuring the same sweep (the work order's economics were priced
-there); a depth-aware level rule (at `1024`, `L=2` is a wash over the `L=1`
-the plan takes); and the `i16` lane, whose analysis says decline.
+offered the output block of accumulators unconditionally. At that point the
+recorded follow-ups were an x86 run of the same sweep, a depth-aware level rule,
+and the `i16` lane. Later sections record the multi-host result; the bridge that
+motivated the other two questions has since been removed, and the `i16`
+analysis remains a measured decline rather than an open capability.
 
 **SWAR / Kronecker substitution (CB-12, CG-17, shipped as a measured decline;
 CG-17 figures `open`).** The broadcast form on baseline wasm SIMD128: three
@@ -296,40 +374,52 @@ fifth step. This is the outcome OpenBLAS's decline predicts --- the trick
 loses on throughput, not numerics, here as there. So no family list carries
 the sequence: a listed sequence is one `Auto` may select, and selecting this
 one would be a measured regression. The spec stays exported and `CB-12` pins
-both halves, the bytes and the absence. The x86 co-issue experiment is
-declined on this host: the `CG-11` census reads the AVX2 `i8` tile bound on
-`Zn4FP2` (85 instructions, 14.5 cycles a tile-step, IPC 5.88 ---
-scheduling-model predictions, reported as such), which leaves the scalar
-ports idle in the model and makes the single-digit co-issue gain plausible,
-but the x86 kernels do not run on this aarch64 host and a gain that cannot be
-measured cannot ship; an x86 runner measuring the co-issued pair is what would
-change that. The Cortex-M half is analysis only, in ANALYSIS.md §"The SWAR
+both halves, the bytes and the absence. The `CG-11` census reads the AVX2 `i8`
+tile bound on `Zn4FP2` (85 instructions, 14.5 cycles a tile-step, IPC 5.88 ---
+scheduling-model predictions, reported as such), which leaves the scalar ports
+idle in the model. The later x86 co-issue experiment recorded below tested that
+hypothesis and rejected the sequence across its complete grid; no co-issue
+measurement obligation remains. The Cortex-M half is analysis only, in
+ANALYSIS.md §"The SWAR
 broadcast, measured and declined": thumbv7em has `SMLAD`, so the
 multiplexing is already in silicon there, and thumbv6m has no executor in
 this repository --- qemu user-mode does not cover Cortex-M, and `CB` parity
 is a run, not a compile --- so no Cortex-M sequence is registered.
 
-**The symbol table in the scaled lane (CD-20, CG-16, shipped; CG-16 figures
-`open`).** The remainder of the symbol item above: a `Tabulated` lane for
-`f32` whose lane word is an `i64` of pre-scaled significands (`Scaled64`)
-rather than the 80-byte `Complete`, so the 256-entry slab is 2 KiB a row and
-fits L1, which is the answer `tabulation_fits` was measured to decline for
-the wide lane. The scale channel is a per-call declaration, not lane state:
-a walk of `A` and of the codebook --- `m * k + code_space` decodes, the
-coded stream never read, charged to the census --- asked only after the
-table is selected, so a call the predicate declines never pays it. The walk
-is the bridge's own span walk and admission (`24 + span <= 31`, finite codes
-only); the run depth is derived per side, `2^63 / 2^(48 + wa + wb)`,
-because the lane holds one element of each panel and is not bound by the
-kernel table's one-alphabet interface. `CD-20` asserts byte-identity with
-the dense float driver at every shape and every offer, the walk admitted
-and declined alike, including a worst-case fill that drives a run to one
-product short of `2^63` across a chunk boundary; `f64` declines by
-declaration --- its `Tabulated` lane is the complete accumulator, because a
-53-bit significand is not an `i32` at any span. Measured on an Apple M4 Max
-(dev machine, aarch64-apple-darwin), 2026-07-30, `just symbol-tabulated`,
-Gmac/s, byte-identity asserted inside every timed run, STREAM 135.10 GB/s in
-the same harness:
+**The symbol table in the Atlas lanes (CD-20 build evidence; historical CG-16
+figures `open`).** The live `f32` lane is `Scaled64`, an eight-byte exact Atlas
+carrier. Its contextual projection and builder contract balanced signed octets
+through lookup and addition. The one-product contraction follows the occupied
+octet extent: its dedicated q observer records that variable work, while the
+generic table Census names one opaque contraction presentation rather than
+assigning it a fabricated fixed add count. For a pointwise block-one code stream
+shorter than the declared enumeration, the scale walk visits `A` and the
+addressed symbol visits only. The decoded book and each slab likewise fill only
+addressed canonical entries for a column block; unused symbols cannot widen the
+span or charge a build. Duplicate visits are permitted deliberately, avoiding a
+bitmap or a parallel carrier allocation.
+
+The caller's panel offer holds the decoded book and one sixteen-row activation
+tile. Any remaining complete `m * k` row spans are reinterpreted in place as a
+zero-copy activation-projection cache: cached rows project once per call, while
+uncached rows project once per column block. An exact-sized offer has no cache
+tail and still executes the same table arithmetic. The census counts the span
+observation, codec decode, contextual projection, opaque demand-build
+presentation, gather, and table add at those actual presentation counts
+(`CD-20`); `CD-32` owns the occupied-extent observation.
+
+`f64` is not categorically declined. Its public table lane is the complete
+`Wide<Complete>` carrier, and a forced block-one `Arena<8>` call executes a real
+eight-symbol table with nonzero table reads and byte identity against dense
+Atlas. An independently declared block-two enumerable `f64` codec also admits
+the same lane from its own declarations. Precision changes carrier occupancy
+and residency, not whether a table object exists.
+
+The following 2026-07-30 Apple M4 Max table is a historical measurement of the
+former full-codebook `f32` build and removed placement bridge. It remains an
+`open` record and is not a performance claim for the demand-built Atlas table.
+That harness asserted byte identity inside every timed run and measured STREAM
+at 135.10 GB/s:
 
 | fill | `m x k x n` | sym table | bridge | uor `f32` | `matrixmultiply` |
 | --- | --- | --- | --- | --- | --- |
@@ -345,24 +435,25 @@ the same harness:
 | a few binades (3) | `64x4096x4096` | **2.716** | 1.358 | 2.293 | 50.646 |
 | wide spans (~18, declines) | `64x4096x4096` | 0.187 | 1.879 | 2.331 | 50.737 |
 
-The reading: the lever the `CG-14` reading priced is real and narrower than
+The historical reading: the lever the `CG-14` reading priced was real and narrower than
 priced. The table wins 1.8--2.2x over the dense driver at `1x1024x1024` ---
 a gemv the bridge refuses to walk --- and 1.2--1.6x at the tabulation-sweep
 shapes, where it is 2.8x the bridge, whose per-call reification of the
 `k x n` operand amortizes over `m = 64` rows rather than a cube's thousand.
-It loses wherever the build's `code_space` products per reduction element do
+It loses wherever that build's `code_space` products per reduction element do
 not amortize over `n`, and the losses are catastrophic, not marginal: 175x
-at `1024x1024x1`, 44x at `8x262144x8`. So `tabulation_pays` is unchanged
-and selection keeps declining the one-element block: the win is an op-*kind*
+at `1024x1024x1`, 44x at `8x262144x8`. At that revision `tabulation_pays` was
+unchanged and selection declined the one-element block: the win was an op-*kind*
 difference (a read and an add against a decode and a placement), which the
 instruction-count predicate cannot see, and the boundary would have to be
 built from measured per-op-kind constants --- a model change with a `CM-04`
 trail --- to select a 1.2--2.2x win at the risk of a 40--175x loss. The
-table is reachable under `Traversal::Tabulated` for a caller who knows its
-shape, and the full argument with the per-shape census is in ANALYSIS.md
-§"The symbol table in the scaled lane".
+historical full argument is preserved in ANALYSIS.md §"The symbol table in
+the scaled lane". The live selector boundary is measured by the current CG-16
+instrument and is recorded only with that instrument's demand-build census.
 
-**Float placement bridge (CD-19, CG-15, shipped; CG-15 figures `open`).** The
+**Float placement bridge (CD-19, CG-15, historical and removed; CG-15 figures
+`open`).** The
 float driver's scaled panels are exact integers, so their product is an exact
 integer dot product at one known scale, `2^-(base_a + base_b)`. The bridge
 reifies the panels as the `i32` alphabet they already are, hands the reduction
@@ -401,12 +492,13 @@ and this host's family entry is a portable loop the compiler vectorized --- and
 the gap to `matrixmultiply` closed to 3.8x at `1024` cubed on this host, from
 13x, further than the predicted 6--10x because this host's `sgemm` posts 58--61
 Gmac/s where the prediction priced the x86 runner's. The boundary is reported,
-not smoothed over: spans past seven binades decline (the wide fill's row), every
-`f64` declines (a 53-bit significand is not an `i32` at any span, and the
+not smoothed over: spans past seven binades declined that bridge (the wide fill's
+row), and every `f64` bridge call declined it (a 53-bit significand is not an `i32` at any span, and the
 `i64`-element family's `i128` lane has no SIMD multiply on any supported
 target), and an asymmetric span declares the wider panel's bound, which can
 collapse the lane depth to one product --- exact, and no faster than the scalar
-lane. What the bridge unblocked was the narrow float-symbol tabulation lane
+lane. This was a property of the removed bridge, not of the live complete `f64`
+table described above. What the bridge unblocked was the narrow float-symbol tabulation lane
 the `CG-14` reading priced, and that lane is the entry above this one:
 `Scaled64`, the same span walk and the same declaration, the exact integer
 sum placed at the panel's scale through the accumulator's own `add_scaled`.
@@ -464,6 +556,80 @@ and the sub-cubic level want, which is the remaining distance to the
 `CG-15` explicit column (14.95 against 13.89 at one-exponent `1024` cubed)
 and to the oracle (3.8x at `1024` cubed, from 13x).
 
+**Deep default bridge re-read (CG-15, open).** The panel-only float entry had
+enough room for the bridge's reified operands and kernel panels, but no exact
+accumulator offer. At a depth past the selected lane's capacity it therefore
+declined to the scalar scaled loop, even though the same kernel traversal was
+faster when [`gemm_float_bridged`] supplied accumulator room. The default now
+keeps one tile-sized `i128` accumulator block on the stack and lets the kernel
+chunk the reduction; the byte-identical test now pins the bridge at both shallow
+and deep admitted depths. This adds no model constant and keeps the no-allocation
+API unchanged.
+
+On the same aarch64-macos host, `just bridge-sweep` (best of a 0.35 s budget per
+point, 2026-08-05) read the retained version as follows:
+
+| fill | default at `512` cubed | explicit | default at `1024` cubed | explicit |
+| --- | ---: | ---: | ---: | ---: |
+| one exponent | 14.208 | 13.905 | 15.271 | 17.285 |
+| a few binades (3/4) | 4.552 | 12.369 | 4.888 | 15.202 |
+| wide spans (18/22) | 3.602 | 3.694 | 3.658 | 3.672 |
+
+The accumulator closes part of the default deep-span gap, but the large
+explicit offer still has more output-block room and can admit richer factoring.
+The wide-span row is unchanged: its exponent range does not fit the `i32`
+bridge, so both entries correctly use the scalar scaled lane.
+
+**Wide-span compact-band probe (CG-15, open; rejected).** A caller-owned
+experiment compacted each finite `f32` code to a band-local `i32` value and
+bucketed each output by `(A-band, B-band)`, placing each non-empty bucket once.
+It was byte-identical to the scalar lane, but on the same aarch64-macos host
+it reached only `0.415`, `0.431`, `0.434`, `0.342`, and `0.401` Gmac/s at
+`32`, `256`, `512`, `1024` cubed, and `509x1021x257`, respectively, against
+`1.649`, `3.414`, `3.711`, `3.837`, and `3.819` for the scalar lane. The
+per-output bucket bookkeeping and wide integer accumulation cost more than the
+placements removed, so the experiment is not part of the shipped API. The
+result closes the scalar-band proposal as a decline. The direct Atlas
+contraction recorded later supplies the representation-level grouping without
+shipping this bucket mechanism.
+
+**Portable tropical baseline (CG-19, open).** The first completed slice of
+the plan's D-8 selection half is the exact portable `(max, +)` reference:
+finite inputs use a one-step wider signed sum, `-inf` is the semiring zero,
+and reduction combines by max. The release sweep on the development host
+(Apple M4 Max, aarch64-apple-darwin; 2026-08-05) measured:
+
+| shape | portable reference (Gop/s) |
+| --- | ---: |
+| 32x32x32 | 1.504 |
+| 128x128x128 | 1.557 |
+| 256x256x256 | 1.478 |
+
+The timed result is byte-identical to an independently written scalar oracle.
+This is a baseline, not a performance claim.
+
+**Native tropical lane (CG-19, open; shipped).** The plan's first native
+factorization is a separate tropical kernel family: an 8x16 stack block packs
+each operand once, then invokes a 4x8 NEON tile whose interleaved loads decode
+eight `Trop<i8>` records at once and reuse that B vector across four A rows.
+The tile applies `smax`/`add` and processes depth in stack chunks. It is
+byte-identical to the portable result, including `-inf`, tails, and a depth
+that crosses a chunk boundary. On the same host and release harness it
+measured:
+
+| shape | portable reference (Gop/s) | native NEON (Gop/s) |
+| --- | ---: | ---: |
+| 32x32x32 | 1.542 | 6.292 |
+| 128x128x128 | 1.595 | 6.727 |
+| 256x256x256 | 1.498 | 6.235 |
+
+The native blocked path is about 4.0--4.2x here. The representation-aware
+load, four-row reuse, and 8x16 stack block remove the prior scalar conversion,
+repeated-B decode, and panel-copy costs while keeping one semantic data path.
+This record establishes the shipped NEON block and makes no claim for an
+alternate cache geometry. AVX2 and wasm are separate registered backend
+factorizations under the same tropical contract.
+
 **f32 as a symbol (CK-14, CD-18, shipped; CG-14 figures `open`).** The arena
 tier's code width is a parameter now: `Arena<'_, E, N, u8>` stores one byte a
 symbol against the dense float's four, decodes the same stream as the `u16`
@@ -499,9 +665,8 @@ census counts one decode per stored byte and the W column is a quarter of the
 dense spelling's) and buys nothing here, because nothing at these shapes is
 waiting on the bus: the bottleneck is per-element work, decode and placement,
 not bandwidth. That is the finding this item promised to report either way,
-and it prices the rest of the queue: what closes the gap is products per
-step, which is the bridge (shipped above) and the narrow lane it unblocks, not
-a narrower stream. The oracle's 13-16% of the bus is the inexact path's
+and it established that products per step, rather than a narrower stream, was
+the relevant axis for the later Atlas refactor. The oracle's 13-16% of the bus is the inexact path's
 figure, reported for scale; `CX-05` records what its bytes deviate by.
 
 **Port and issue census (CG-11, shipped).** `cargo xtask issue-census` emits
@@ -536,7 +701,7 @@ slice against the closure chain; and a single call at `n = 1` lands inside
 one tick of this host's clock, which is why the harness amortizes over a
 batch rather than timing one call.
 
-**The Gray-walk sign build (prototype shipped, verdict pending).** The
+**The Gray-walk sign build (shipped; measured verdict: ship).** The
 bound-1 table build was per-codeword independent sums: `code_space * block`
 adds per row of the table (2048 at `Sign<8>`), zero multiplies, charged to
 the census as `adds`. The Gray construction walks the code space in reflected
@@ -578,7 +743,7 @@ inside every timed closure. The build is a small term at these shapes, so
 the e2e figure is close to parity by construction; the rule asked for no
 regression, and there is none.
 
-**The block-16 pricing sweep (harness registered; measurement pending).** A
+**The block-16 pricing sweep (measured; parametric implementation retained).** A
 `Book<256, 16>` tier is expressible today (Phase C's width-parameterized
 `Book`), and the density argument in `model/tiers.toml` says a longer
 codeword improves everything except the codebook: stored codes halve per
@@ -607,11 +772,9 @@ ratios held exactly --- reads halve, build products constant, codebook
 decodes double, plans identical, and the `u8` census equal to the `u16` one
 field for field --- and the derived break-even moved from `n = 2049` at
 block 8 to `n = 1366` at block 16, the direction the density argument
-predicts. **The timed run is pending a quiet window** --- the host was
-loaded when the harness landed, and a contaminated measurement is not a
-result. No figure is recorded; no tier is added to `model/tiers.toml`, and
-none ships until the measured numbers say the longer codeword wins by enough
-to matter.
+predicts. The first attempted timed run was discarded because the host was
+loaded; a contaminated measurement is not a result. The quiet-host outcome
+that governs the decision is recorded immediately below.
 
 *Outcome, measured 2026-07-31 on the development host (Apple M4 Max, quiet
 window; every figure `open`, byte-identity asserted inside every timed run):*
@@ -628,18 +791,391 @@ tier is added: the machinery is already parametric, a caller with a 16-wide
 codebook uses it today, and whether real weight artifacts have reachable
 16-wide codebooks is the per-model question this sweep does not ask.
 
-**The one-level modular bilinear factorization (shipped as an explicit entry; auto-selection pending measurement).** Winograd's form at one level over the quotient `Z/2^w`: eight block sums, seven base block products against the classical decomposition's eight, the base products on the modular packed kernels. The quotient is a ring, so the sums and the combination are exact in it by definition --- the exact lane's `4^L * B` headroom bookkeeping has no modular analogue, and there is no bound to track. One level is `Theta(n^3)`; this is a bilinear factorization, not a subcubic implementation, and there is no recursion below it. It ships as `gemm_strassen_modular`, an explicit entry the caller names: admitted by a `Wrapping` encode, a modular lane for the output width, even extents, and the offer (`modular_level_needs`), declining to the direct packed modular walk at the same bytes otherwise --- `CD-23` pins the bytes at every shape and offer, and the route census counts the seven products (`Route::StrassenModular`). strassen.rs's machinery is shared, not duplicated: the sums formation and the combination are the exact recursion's own loops (`E::add`/`E::sub` are wrapping spellings, which are the ring's operations here), and only the base product is new (`gemm_packed_modular_raw`, the direct modular arm's own traversal at a raw sink).
+**The one-level modular bilinear factorization (shipped; auto crossover measured).** Winograd's form at one level over the quotient `Z/2^w`: eight block sums, seven base block products against the classical decomposition's eight, the base products on the modular packed kernels. The quotient is a ring, so the sums and the combination are exact in it by definition --- the exact lane's `4^L * B` headroom bookkeeping has no modular analogue, and there is no bound to track. One level is `Theta(n^3)`; this is a bilinear factorization, not a subcubic implementation, and there is no recursion below it. It ships as `gemm_strassen_modular`, an explicit entry the caller names: admitted by a `Wrapping` encode, a modular lane for the output width, even extents, and the offer (`modular_level_needs`), declining to the direct packed modular walk at the same bytes otherwise --- `CD-23` pins the bytes at every shape and offer, and the route census counts the seven products (`Route::StrassenModular`). strassen.rs's machinery is shared, not duplicated: the sums formation and the combination are the exact recursion's own loops (`E::add`/`E::sub` are wrapping spellings, which are the ring's operations here), and only the base product is new (`gemm_packed_modular_raw`, the direct modular arm's own traversal at a raw sink).
 
-*Verdict rule, pre-registered:* the modular arm's auto-selection takes the level only if the factorization beats the direct packed modular walk end-to-end at a measured crossover. Until that measurement exists, the model records `strassen_modular_min_extent = usize::MAX` and the arm declines everywhere; the harness is the `modular_strassen` group in `crates/uor-matmul-validate/benches/scaling.rs` (squares 512--4096 on the `i8`-into-`i32` and `i32`-into-`i32` rings, the explicit entry against `gemm_packed` at `Wrapping`, packing and recombination included, byte-identity asserted inside the timed closures).
+*Pre-registered verdict rule (historical):* auto-selection would take the modular level only if the factorization beat the direct packed modular walk end to end at a measured crossover. Before the outcome below existed, the model recorded `strassen_modular_min_extent = usize::MAX` and the arm declined everywhere; the harness was the `modular_strassen` group in `crates/uor-matmul-validate/benches/scaling.rs` (squares 512--4096 on the `i8`-into-`i32` and `i32`-into-`i32` rings, the explicit entry against `gemm_packed` at `Wrapping`, packing and recombination included, byte-identity asserted inside the timed closures).
 
 *Outcome, measured 2026-07-31 on the development host (Apple M4 Max, quiet window; every figure `open`, byte-identity asserted inside every timed closure):* the crossover exists and the arm takes the level. At 512 cubed the level loses on both rings --- 2.09 ms against the direct walk's 1.25 at `i8` (0.60x), 5.15 against 4.95 at `i32` (0.96x), the sums' cost against one level's saved product. At 1024 cubed it wins (9.18 against 10.46 at `i8`, 1.14x; 36.2 against 40.1 at `i32`, 1.11x), and the win widens with size: 1.41x at 2048 and 1.57x at 4096 on the `i8` ring, 1.20x and 1.31x on `i32`. The model's `strassen_modular_min_extent` is now the smallest measured winner, 1024, recorded in `model/constants.toml` with this measurement; the explicit entry is unchanged, and at shapes below the threshold the arm declines to the direct walk exactly as before.
 
-**The scalar-port co-issue experiment (harness registered; measurement pending, x86 only).** The last unwritten item in the queue. The CG-11 census reads the AVX2 `i8` tile kernel bound on `Zn4FP2` (85 instructions, ~14.5 cycles a tile-step, IPC ~5.88, scheduling-model predictions) with the scalar integer ports idle in the model, so the port-multiplexing thesis says a scalar integer stream should co-issue beside the kernel for a single-digit-percent throughput gain. The census's own caution is the reason this is an experiment and not a kernel: if both streams bind the same port, one bottleneck has been split into two queues for it, and only a measurement answers which. The harness is `crates/uor-matmul-validate/src/coissue.rs`, a dev-only instrument in the FloatBook mould: the vector stream is the AVX2 tile kernel itself, called through the kernels crate's public `KernelSpec` interface (never copied); the scalar stream is Kronecker substitution over the integers in safe-Rust `u64` arithmetic --- three biased fields at 21-bit spacing to a word, one multiply producing three products, guard bits absorbing a chunk of 32 products a field, the `dpbusd` offset identity paid at extraction (the wasm sequence's own construction, `model/constants.toml`'s `wasm_swar_field_w8a8` row) --- interleaved with the kernel in one depth loop, not two passes, because the co-issue is the point. Column splits 48|16 and 32|32 of `n = 64`, `m` in {4, 8, 16}, `k` in {64, 1024, 16384}, at full `i8` range and at W4A8; byte-identity against the schoolbook reference is asserted inside every timed run.
+**The scalar-port co-issue experiment (measured and rejected, x86).** The CG-11 census reads the AVX2 `i8` tile kernel bound on `Zn4FP2` (85 instructions, ~14.5 cycles a tile-step, IPC ~5.88, scheduling-model predictions) with the scalar integer ports idle in the model, so the port-multiplexing thesis says a scalar integer stream should co-issue beside the kernel for a single-digit-percent throughput gain. The census's own caution is the reason this is an experiment and not a kernel: if both streams bind the same port, one bottleneck has been split into two queues for it, and only a measurement answers which. The harness is `crates/uor-matmul-validate/src/coissue.rs`, a dev-only instrument in the FloatBook mould: the vector stream is the AVX2 tile kernel itself, called through the kernels crate's public `KernelSpec` interface (never copied); the scalar stream is Kronecker substitution over the integers in safe-Rust `u64` arithmetic --- three biased fields at 21-bit spacing to a word, one multiply producing three products, guard bits absorbing a chunk of 32 products a field, the `dpbusd` offset identity paid at extraction (the wasm sequence's own construction, `model/constants.toml`'s `wasm_swar_field_w8a8` row) --- interleaved with the kernel in one depth loop, not two passes, because the co-issue is the point. Column splits 48|16 and 32|32 of `n = 64`, `m` in {4, 8, 16}, `k` in {64, 1024, 16384}, at full `i8` range and at W4A8; byte-identity against the schoolbook reference is asserted inside every timed run.
 
-*Verdict rule, pre-registered:* the co-issued form is evidence for or against port multiplexing, and either is a result. Ship a kernel only if the measured gain clears the noise by enough to matter --- pre-registered at **> 5% sustained across the configuration grid** (every split, both bounds, all three depths; a win at one configuration and a loss at another is a split thesis, recorded as such). Below that, the outcome is recorded here and the thesis is answered: the scalar ports were not free, or the scheduler was already using them. **Timing is pending an x86 run** --- the development host is aarch64 and cannot answer the question; the harness declines off-x86 with the reason printed, and CI's `scaling.yml` x86 job runs it as `just coissue | tee target/measurements/coissue-x86.txt` after the breakeven step. The dry-run correctness half passed on the development host: the scalar stream and the co-issue are byte-identical to the schoolbook reference at the alphabet's extremes, at W4A8, at all three depths and every `m`, both splits.
+*Pre-registered verdict rule (historical):* the co-issued form was evidence for or against port multiplexing, and either result would answer the thesis. A kernel would ship only for a gain above **5% sustained across the configuration grid** (every split, both bounds, all three depths; a win at one configuration and a loss at another would be a split result). The development host was aarch64 and could not answer that question; the x86 CI outcome immediately below did. The dry-run correctness half also established that the scalar stream and co-issue were byte-identical to the schoolbook reference at the alphabet's extremes, at W4A8, at all three depths and every `m`, both splits.
 
-*Outcome, measured 2026-08-01 on the CI x86 runner (scaling run `#30719729460`; every figure `open`, byte-identity asserted inside every timed run):* **the thesis is refuted, and the wire stays out.** With the packing defect removed, the co-issued form is slower than the vector-only tile at *every* configuration --- 2.7--3.4x at the 192|64 split and 4.2--5.8x at 128|128 at `k = 64`, rising to 2.6--11.2x at `k = 16384`, at both bounds --- because the scalar stream's density is two orders below the tile's: three products per `u64` multiply against sixteen products per instruction at several instructions a cycle, so no port the scheduler leaves free is capacity worth using. The census's "scalar ports idle in the model" is true and useless here: the ports are idle because the tile is dense, not because work could profitably move. The verdict rule's answer is decline, and no kernel ships; the instrument stays for a second host, whose scalar-to-vector density ratio could differ. (The workflow now tees stderr as well as stdout, so the artifact carries the figures the CI log carried this time.)
+*Outcome, measured 2026-08-01 on the CI x86 runner (scaling run `#30719729460`; every figure `open`, byte-identity asserted inside every timed run):* **the thesis is refuted, and the wire stays out.** With the packing defect removed, the co-issued form is slower than the vector-only tile at *every* configuration --- 2.7--3.4x at the 192|64 split and 4.2--5.8x at 128|128 at `k = 64`, rising to 2.6--11.2x at `k = 16384`, at both bounds --- because the scalar stream's density is two orders below the tile's: three products per `u64` multiply against sixteen products per instruction at several instructions a cycle, so no port the scheduler leaves free is capacity worth using. The census's "scalar ports idle in the model" is true and useless here: the ports are idle because the tile is dense, not because work could profitably move. The verdict rule's answer is decline, and no kernel ships; the retained instrument makes that host-scoped `open` result reproducible. (The workflow now tees stderr as well as stdout, so the artifact carries the figures the CI log carried this time.)
 
-**The coissue harness's first artifact measured packing, not ports (a harness defect, recorded and superseded).** The first x86 run of the co-issue sweep came back with the split winning 10--40% everywhere, at per-call times around 0.7 Gmac/s --- thirty times below the AVX2 tile's real rate. That is the number that gives the defect away: the timed region was allocating and packing panels per tile per rep, and the split "won" because it packed fewer tiles. A measurement that answers a different question than it asked is the falsifiability table's own tradition, and the artifact is recorded here as one, not cited anywhere. The harness was rebuilt on the driver's structure: `Coissue::prepare` packs every panel and owns every buffer once, and `Coissue::run` --- the timed path --- borrows all of it (per-chunk contiguous slices of the pre-packed panels, the scalar stream's stack arrays, one reused output buffer), with byte-identity asserted inside the timed rep against that buffer and a counting-allocator test asserting the timed path's allocation count is zero. The width was also raised so the vector part is kernel-dominated: `n = 256` at splits 192|64 and 128|128, with the `n = 64` configurations kept as a second group labelled small-tile regime. The verdict rule stands unchanged: ship only if the co-issued form clears **> 5% sustained across the grid**. The first artifact is void; the fixed run supersedes it when CI next runs `just coissue`.
+**The coissue harness's first artifact measured packing, not ports (a harness defect, recorded and superseded).** The first x86 run of the co-issue sweep came back with the split winning 10--40% everywhere, at per-call times around 0.7 Gmac/s --- thirty times below the AVX2 tile's real rate. That is the number that gives the defect away: the timed region was allocating and packing panels per tile per rep, and the split "won" because it packed fewer tiles. A measurement that answers a different question than it asked is the falsifiability table's own tradition, and the artifact is recorded here as one, not cited anywhere. The harness was rebuilt on the driver's structure: `Coissue::prepare` packs every panel and owns every buffer once, and `Coissue::run` --- the timed path --- borrows all of it (per-chunk contiguous slices of the pre-packed panels, the scalar stream's stack arrays, one reused output buffer), with byte-identity asserted inside the timed rep against that buffer and a counting-allocator test asserting the timed path's allocation count is zero. The width was also raised so the vector part is kernel-dominated: `n = 256` at splits 192|64 and 128|128, with the `n = 64` configurations kept as a second group labelled small-tile regime. The verdict rule remained unchanged: ship only if the co-issued form cleared **> 5% sustained across the grid**. The first artifact is void; the corrected fixed run recorded above supersedes it.
 
-**The breakeven artifact's 683 is the AVX2 pair's crossing --- the runner declares no AVX-512 (diagnosis, case (a)).** The queue item asked why the breakeven instrument flipped kernels-to-table between `n = 512` and `n = 683` on the x86 CI runner, matching the AVX2 pair's derived 683 and not the VNNI rows' 2049. The code's answer: nothing resolves the AVX2 pair on a host that has AVX-512. The table family's last admissible entry is `avx512_table_i8_i32` whenever `avx512_available()` --- `avx512f` and `avx512bw` (x86.rs:54-64) --- answers true (table.rs:1816-1817, and `choose_table` takes the widest admissible, table.rs:1941-1952), and that spec declares `lanes_per_add = 16` (x86.rs:2852, 2879), so the predicate's crossing on any such host is the VNNI rows' 2049; the dense side likewise resolves `AVX512_DPBUSD_I8_I32` when `avx512vnni_available()` answers (spec.rs's `i8` family, `choose_for_rows` widest). A flip at 683 therefore means `avx512_available()` answered false on the runner --- no AVX-512 at all, VNNI included --- and the pair the runner's callers experience is the AVX2 one, whose derived crossing is 683. (A Skylake-SP-class host with f+bw but no VNNI would cross at 293 instead; the artifact's 683 rules that out too.) So: the instrument is not forcing anything --- it runs the shipped `Auto` selection end to end --- and the VNNI rows in `model/tiers.toml` remain `Unmeasured`, now with the reason recorded in the rows themselves and in the instrument's output, which prints the resolved pair (backend and per-instruction declarations) so any future artifact says which sequences it measured. The AVX2 row's 683 is the measured half of this run: derivation and artifact agree, on the runner class that derivation describes.
+**The breakeven artifact's 683 is the AVX2 pair's crossing --- the runner declares no AVX-512 (diagnosis, case (a)).** The instrument flipped kernels-to-table between `n = 512` and `n = 683` on the x86 CI runner, matching the AVX2 declaration pair. The code's answer is direct: the table family resolves `avx512_table_i8_i32` only when `avx512_available()` reports `avx512f` and `avx512bw`, while the dense side resolves `AVX512_DPBUSD_I8_I32` only with VNNI. This runner resolved neither, so both sides used the AVX2 declarations. The artifact therefore says nothing about an AVX-512/VNNI clock. Those model rows are already complete `build` declarations whose boundaries CM-04 recomputes from registered sequence densities; no unavailable-host observation is part of their claim. The resolved-pair print makes the host-scoped `open` artifact explicit, while the declaration comparison remains host-independent.
+
+**Historical pre-one-frame pure-UOR float performance census (CG-21 baseline,
+open; measured 2026-08-06).** The then-current `just uor-float-sweep` completed
+in 25.80 s after compilation on the shared x86-64 Codespace host (AMD EPYC
+7763, Linux). Each point used nine independently timed batches targeted at 4 ms
+and a two-sided 95% Student interval (eight degrees of freedom). That harness
+version poisoned C and compared every output code inside each timed invocation:
+both Atlas routes and the incumbent exact reference matched the independently
+accumulated exact bytes throughout. The external routes were compared
+byte-for-byte with their own pre-run output in the timed closure and separately
+reported against the exact result in ulps, so their inexact answers could
+neither fail nor flatter the timing. These intervals consequently include the
+guard traversals and are preserved as the baseline they actually measured.
+
+The symmetric f32/f64 grid was `(m,k,n,fill,seed)` =
+`(1,1,1,one-grade,101)`, `(32,32,32,few-grades,102)`,
+`(16,128,16,inverse-gauge,103)`, `(7,31,5,full-finite-range,104)`,
+`(1,65536,1,dense-significand,105)`, and
+`(128,8,128,sparse-significand,106)`.  Those are V&V workload sizes, not an
+implementation envelope: their purpose is to retain every structural axis
+while letting the deliberately unoptimized reference compute every expected
+byte.  Traffic below is the explicitly named logical lower bound A-read +
+B-read + C-write; the timed poison and validation add two C traversals, printed
+by the harness but not misreported as algorithm traffic, and no hardware-counter
+claim is made.
+
+Representative intervals (latency, nominal product rate, logical caller
+traffic) were:
+
+| format / case / route | latency (us) | Gproduct/s | logical GB/s |
+| --- | ---: | ---: | ---: |
+| f32, few-grades 32 cubed, Atlas offered | 3339.6 +/- 1454.7 | 0.0160 +/- 0.0099 | 0.0060 +/- 0.0037 |
+| f32, few-grades 32 cubed, Atlas no-offer | 3947.1 +/- 2302.8 | 0.0121 +/- 0.0057 | 0.0045 +/- 0.0021 |
+| f32, few-grades 32 cubed, exact reference | 133450.8 +/- 42767.3 | 0.0003 +/- 0.0001 | 0.0001 +/- 0.0000 |
+| f32, few-grades 32 cubed, matrixmultiply | 4.19 +/- 1.26 | 8.609 +/- 1.775 | 3.228 +/- 0.666 |
+| f32, few-grades 32 cubed, faer | 4.86 +/- 2.23 | 7.772 +/- 1.499 | 2.915 +/- 0.562 |
+| f64, few-grades 32 cubed, Atlas offered | 5446.7 +/- 752.0 | 0.0062 +/- 0.0008 | 0.0046 +/- 0.0006 |
+| f64, few-grades 32 cubed, Atlas no-offer | 5254.3 +/- 2207.4 | 0.0076 +/- 0.0023 | 0.0057 +/- 0.0017 |
+| f64, few-grades 32 cubed, exact reference | 306430.6 +/- 41483.6 | 0.0001 +/- 0.0000 | 0.0001 +/- 0.0000 |
+| f64, few-grades 32 cubed, matrixmultiply | 5.72 +/- 1.89 | 6.242 +/- 1.032 | 4.682 +/- 0.774 |
+| f64, few-grades 32 cubed, faer | 6.30 +/- 1.65 | 5.518 +/- 0.814 | 4.138 +/- 0.610 |
+| i8 control, 32x256x32, packed | 424.2 +/- 76.0 | 0.650 +/- 0.119 | 0.0507 +/- 0.0093 |
+| tropical control, 32x256x32, portable | 1821.9 +/- 195.2 | 0.147 +/- 0.018 | 0.0229 +/- 0.0028 |
+
+The historical performance finding is mixed and therefore useful. On coherent grades
+the Atlas factorization is tens of times faster than the element-by-element
+exact incumbent, but it remains orders of magnitude behind both inexact float
+oracles. More importantly, **full-range f64 gauge handling was the bottleneck in
+that revision**: at only `7x31x5` (1,085 products), offered and no-offer Atlas took
+`71.17 +/- 21.61` ms and `65.60 +/- 15.37` ms, respectively, while the exact
+reference took `26.61 +/- 9.18` ms and the two classical oracles took about
+1--2 us.  Full-range f32 shows the same inversion (14.92 and 10.55 ms Atlas
+against 1.76 ms exact). The census therefore rejects any claim that the
+then-current full-range gauge projection was optimal; the direct contraction
+removed that route. The wide intervals
+record contention on this shared host rather than hiding it, and all values
+remain `open` observations, never acceptance thresholds.
+
+## Current pure-Atlas CG-16 and CG-21 measurement record
+
+Current performance evidence belongs under this heading as an append-only
+record carrying the command, host declaration, source identity, raw samples,
+confidence intervals, route Census, and complete byte guards. Historical
+figures above do not describe the live call graph.
+
+### CG-16 preliminary value-blind block-one candidate --- rejected
+
+**Provenance.** This `open` measurement completed on 2026-08-08 at
+12:54:43 UTC. The host was Linux 6.8.0-1052-azure x86-64 on an AMD EPYC 7763
+64-Core Processor. The release compiler was rustc 1.97.1
+(`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, LLVM 22.1.6). The working tree
+was based on `54cca2ad51fae469e5a342902b034196c34cc3bf` on
+`agent/pure-uor-float-fractal`. Because the run preceded the final commit, these
+SHA-256 content identities name the measured sources exactly:
+
+| measured input | SHA-256 |
+| --- | --- |
+| `crates/uor-matmul-validate/tests/symbol_tabulated_sweep.rs` | `3a5114ac97d136eaa2a1995fb00edfb16541e51ecfed550ae1bfd7bedd9f7a2b` |
+| `crates/uor-matmul-gemm/src/tabulated.rs` | `d42be31c94213e63fc39f6f5b2b232a9beea15f303c1370fd7d29e8f5037bf81` |
+| `model/constants.toml` | `306d0914490e07c8fe462ce38f7fa6d9588bb9b97937623f12a775f5f488fb76` |
+| `model/widths.toml` | `61d95e052695a60da927ef5e3c3eeb2701a065f3f9f1ea9a7e529f2231578c75` |
+
+The exact release invocation was retained without changing its test semantics:
+
+```text
+set -o pipefail
+cargo test --release -p uor-matmul-validate --test symbol_tabulated_sweep symbol_tabulated_value_blind_boundary_cg_16 -- --exact --ignored --nocapture --test-threads=1 2>&1 | tee target/measurements/cg16-pure-atlas-selector-2026-08-08.log
+```
+
+The transcript is 938 lines and 100,848 bytes; its SHA-256 is
+`9e2e852831bcf00f1fa03ac8317ca8cc9c397c893cf01c21bf07fec2ee6bebf2`.
+The release test passed 1 test with 2 filtered out and no failures; the measured
+body finished in 5.22 seconds after the release build.
+
+Before that clock, the exact structural/plants gate and the nonignored live
+replay-to-Census reconciliation were run separately and passed:
+
+```text
+cargo test -p uor-matmul-validate --test symbol_tabulated_sweep symbol_tabulated_selector_structure_and_plants_cg_16 -- --exact --nocapture --test-threads=1
+cargo test -p uor-matmul-validate --test symbol_tabulated_sweep symbol_tabulated_replay_reconciles_live_census_cg_16 -- --exact --nocapture --test-threads=1
+```
+
+Each command passed its one selected test with 2 filtered out. The second gate
+reconciled one representative block-one compact-q case and one block-three
+scalar-fracture control against the live Census and complete output bytes.
+
+**Matrix and samples.** The source-pinned corpus contains 32 calibration
+identities: 28 distinct value-blind `StructuralWork` keys and four additional
+value-twin rows. Their adversarial envelopes form a `28 x 14` table design of
+exact rank 14 and a `28 x 6` decline design of exact rank 6; deleting any named
+coordinate lowers its rank. The holdout has 12 block-one identities over 11
+unseen structural keys, plus the block-three H13 and block-five H14 controls.
+Every one of those 46 identities emitted nine immutable paired rounds for both
+routes, for 828 raw `SAMPLE` rows labelled by split, identity, structural key,
+round, and route. All untimed replay/Census, poison, and complete-byte guards
+passed before any observation was reported.
+
+The exhaustive active-face nonnegative fit selected four active table
+coordinates with RSS `5.990364769142e-6` and two active decline coordinates with
+RSS `1.582258120540e-5`. Its conservative non-overlap rule predicted table for
+9 block-one holdouts and decline for 3. The paired ratios below are table time
+divided by decline time; each uncertainty is the reported paired 95% interval
+half-width:
+
+| holdout | candidate route | table / decline | measured side |
+| --- | --- | ---: | --- |
+| H01 | table | `0.1792 +/- 0.0278` | table |
+| H02 | table | `3.2966 +/- 0.4884` | decline |
+| H03 | table | `0.0443 +/- 0.0022` | table |
+| H04 | table | `0.0340 +/- 0.0020` | table |
+| H05 | decline | `1.3257 +/- 0.2759` | decline |
+| H06 | decline | `1.1626 +/- 0.0728` | decline |
+| H07 | table | `0.2283 +/- 0.0050` | table |
+| H08 | decline | `11.8425 +/- 1.8207` | decline |
+| H09 | table | `0.1274 +/- 0.0134` | table |
+| H10 | table | `0.1510 +/- 0.0116` | table |
+| H11 | table | `0.8369 +/- 0.0618` | table |
+| H12 | table | `0.3214 +/- 0.0519` | table |
+
+The scalar-fracture controls reported `1.0197 +/- 0.3579` at H13/B3 and
+`0.7547 +/- 0.0940` at H14/B5. They validate the parametric control paths; they
+do not enter the block-one fit.
+
+**Disposition.** H01 and H02 are the decisive falsifier. Their structural keys
+are field-for-field equal before admission and the harness asserts that the
+candidate route is equal, yet their unlike values put the paired 95% intervals
+strictly on opposite sides of one. A selector satisfying `CS-10` cannot inspect
+those values, so it cannot choose the winning route for both presentations of
+that key. The fitted candidate is rejected. No coefficient or route was written
+to the model or production selector; automatic block-one selection remains the
+current value-blind decline, while forced tabulation remains byte-identical and
+available to an informed caller.
+
+#### Post-native source-frozen rerun
+
+The authoritative current-source rerun completed later on 2026-08-08 with the
+same host and compiler. It grouped the exact structural/plants gate, the live
+Census reconciliation, and the ignored release clock in one transcript:
+
+```text
+target/measurements/cg16-pure-atlas-selector-post-native-2026-08-08.log
+```
+
+The artifact is 1,204 lines and 120,985 bytes with SHA-256
+`b63ceb82416148b7801e501de35f70ad7ea5537fb365ca33986b2d5c4be45a34`.
+Its sorted full-source manifest is
+`88f1ee00d2e4e1a60b70a8568f6b4aadcaca40ae4ba2044298436d4602dbeed1`
+both before and after the run. Both non-release gates passed, the release gate
+passed, all poison/byte/Census guards passed, and the same 46 identities emitted
+828 raw samples in 92 route groups with exactly nine rounds each.
+
+The fresh table fit has five active coordinates and RSS
+`2.962146178607e-6`; the fresh decline fit has three active coordinates and RSS
+`1.282755807339e-5`. It again predicted table for 9 block-one holdouts and
+decline for 3. The decisive same-key twins remained contradictory:
+
+| holdout | candidate route | table / decline | measured side |
+| --- | --- | ---: | --- |
+| H01 | table | `0.1792 +/- 0.0318` | table |
+| H02 | table | `3.9968 +/- 1.7006` | decline |
+
+The B3 and B5 controls reported `0.8164 +/- 0.0610` and
+`0.8194 +/- 0.0900`. This post-native rerun therefore confirms rather than
+changes the disposition above: the fitted value-blind block-one candidate is
+rejected, the automatic default remains decline, and forced exact tabulation
+remains available.
+
+#### Final current-source closure
+
+The final source-frozen rerun began at 03:21:45 UTC on 2026-08-09 and retained
+the complete provenance, both non-release gates, release clock, and all raw
+rows in
+`target/measurements/cg16-uor-naf-current-source-2026-08-09.log`. The artifact
+is 1,258 lines and 132,217 bytes with SHA-256
+`e17813b6fdac249411b42c6a5b0dde4c8b096da524e8bcf7c0afc506785218b6`.
+Its complete sorted Rust/TOML/toolchain source manifest is
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`
+both before and after the commands. All three selected tests passed, and all
+828 `SAMPLE` rows were retained.
+
+The final table fit has five active coordinates and RSS
+`2.420251599492e-6`; the decline fit has three active coordinates and RSS
+`1.158848535650e-5`. It again predicted table for nine holdouts and decline for
+three. The same-key falsifier remains decisive: H01 measured
+`0.1821 +/- 0.0397`, while H02 measured `2.9348 +/- 0.3215`, both under the
+same predicted table route. The B3 and B5 controls measured
+`0.8300 +/- 0.0802` and `0.7784 +/- 0.0555`. Thus the current source supplies
+the same disposition without a stale-source inference: no fitted constant or
+value-dependent repair enters production.
+
+### CG-21 UOR-NAF cleanup sweep --- completed, open
+
+The frozen implementation uses the direct one-pass diagonal contraction, one
+exact live-cell frame, and in-place Atlas projection caches described in
+ARCHITECTURE.md. The cleanup additionally initializes only live product
+carriers, clears only retired coordinate suffixes, and decodes each streamed
+source once into its six-state boundary quotient plus finite payload. These are
+storage/work refinements of the same contraction, not another numerical route.
+
+The live `CG-21` harness poisons with expected-derived distinct values before
+every calibrated batch and completely checks lengths and bytes after it, so
+only real production calls are timed. The authoritative current-source grouped
+run began at 03:11:45 UTC on 2026-08-09 on the EPYC 7763 host with rustc
+1.97.1. Its retained transcript is:
+
+```text
+target/measurements/cg21-uor-naf-current-source-2026-08-09.log
+```
+
+The artifact is 4,251 lines and 1,199,248 bytes with SHA-256
+`f17aba1c0bbbb280b94130410c1aa8cb7dd420990ae2e4382d332460d8ec92e6`.
+Its complete sorted Rust/TOML/toolchain source manifest is identical before and
+after the commands:
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`.
+The exact timer/plant test passed, the live audit reached 11 roots, 93 functions,
+and 116 call edges, and both ignored release sweeps passed.
+
+The public sweep retained 558 `CG21_SAMPLE` rows: 62 width/case/route groups,
+each with rounds 0 through 8 exactly once. The forced-candidate supplement
+retained 2,916 more rows: 324 f32/f64 case/offer/route groups, again with nine
+rounds each. Every poison, length, and expected-byte comparison passed. Selected
+current public latencies are:
+
+| corpus | offered | no offer | exact incumbent |
+| --- | ---: | ---: | ---: |
+| f32 one grade, `1x1x1` | `1.089 +/- 0.313` us | `0.954 +/- 0.101` us | `3.369 +/- 0.305` us |
+| f32 few grades, `32^3` | `6545.4 +/- 468.8` us | `6061.5 +/- 257.1` us | `146570.4 +/- 5699.4` us |
+| f32 full finite range, `7x31x5` | `221.9 +/- 23.9` us | `176.4 +/- 16.8` us | `6353.8 +/- 1071.9` us |
+| f32 sparse significand, `128x8x128` | `18650.5 +/- 2220.4` us | `15144.2 +/- 1044.0` us | `49569.0 +/- 6838.4` us |
+| f64 few grades, `32^3` | `13261.5 +/- 2435.1` us | `12069.9 +/- 1018.8` us | `787286.6 +/- 19135.7` us |
+| f64 full finite range, `7x31x5` | `481.3 +/- 60.4` us | `554.3 +/- 63.8` us | `25263.7 +/- 2179.2` us |
+
+Against the immediately preceding source-pinned run, every selected pure-UOR
+95% interval overlaps except both f32 full-range intervals, which are faster in
+this run. No x86 production route changed between those measurements, so the
+disjoint intervals are retained as host-scoped observations rather than used as
+an optimization claim or selector input. The float oracles generally produce
+different codes because they round intermediate products while this method
+returns the correctly rounded exact sum. These are `open` figures, not
+acceptance thresholds, selector constants, or an unqualified global-optimality
+claim. The build-level optimum remains exactly the model-derived minimum over
+the complete eligible group-one lookup/add universe named by `CG-22`.
+
+## Column dictionary radix recurrence
+
+**Outcome, remeasured on the final source on 2026-08-09 (`open`).** The pure
+ternary column-dictionary filter passed the pre-registered no-regression rule
+against the immutable pre-refactor comparator at every measured reduction
+depth. The host was Linux 6.8.0-1052-azure x86-64 on an AMD EPYC 7763 64-Core
+Processor. The release compiler was rustc 1.97.1
+(`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, LLVM 22.1.6). The retained
+current-source transcript is
+`target/measurements/column-hash-uor-naf-current-source-2026-08-09.log`:
+308 lines, 30,624 bytes, SHA-256
+`6ea0ded47e84ce359e7360773de857948aba731e522d60d6a610d92c6c4587da`.
+Its full source manifest is
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`
+before and after the clock.
+
+The exact command was:
+
+```text
+cargo test -p uor-matmul-gemm --release --lib tabulated::tests::ternary_radix_column_collapse_does_not_regress_the_retained_legacy_clock_cu_11 -- --exact --ignored --nocapture
+```
+
+The immutable corpus has 257 columns over `Arena<f32, 251, u8>`, at depths 1,
+16, 64, and 256. Column `j` uses representative `j - 1` exactly when
+`j % 5 == 1`; coordinate `p` is `(representative * 29 + p * 17) % 251`.
+Before timing, both arms were required to return the same distinct count and
+the same complete first-occurrence map. The candidate was the live
+`h <- h + h + h + index` recurrence over the model-owned 16-coordinate prefix,
+initialized by the complete source length and reduced only once at the final
+dictionary modulus. The comparator retained the former seeded FNV multiply,
+rotate/XOR mixing, and masked linear probe verbatim inside the ignored test; it
+is evidence, not a shipped alternate route.
+
+Each depth calibrated one common power-of-two batch until the faster of the two
+arms occupied at least 20 ms. It then collected 64 paired samples, alternating
+both arms in 32-call chunks and reversing the first arm between samples. Each
+paired sample was poisoned before either clock, and both distinct counts and
+complete maps were checked after both clocks. Ratios are the
+geometric mean of the 64 paired `candidate / retained` duration ratios; the 95%
+interval is the paired log mean plus or minus two standard errors (63 degrees
+of freedom, conservatively wider than Student `t_0.975,63`). The registered
+acceptance rule was exact: every upper endpoint must be at most 1.0.
+
+Two unchanged-source preliminary runs exposed full-arm order drift at depth
+256. Rather than select a favourable rerun, the harness was made symmetric
+inside every sample by alternating fixed 32-call chunks; a mutation that
+removes that alternation is required to fail the audit. The current-source
+transcript below reruns that frozen protocol without changing the corpus,
+calibrated batch rule, complete guards, or exact upper-endpoint criterion.
+
+| depth | common batch | paired ratio | paired 95% interval | verdict |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 16384 | 0.5454 | [0.5341, 0.5568] | pass |
+| 16 | 8192 | 0.7964 | [0.7894, 0.8034] | pass |
+| 64 | 4096 | 0.8366 | [0.8290, 0.8442] | pass |
+| 256 | 2048 | 0.8993 | [0.8885, 0.9102] | pass |
+
+The timing claim is deliberately only host-scoped `open` evidence. Correctness
+does not depend on it: canonical index-stream equality remains the dictionary
+authority, and the differential separately proves that removing the redundant
+initial remainder preserves every final address. The model independently
+derives the widest live unreduced accumulator from a full 64-bit source-length
+coordinate and 16 full 64-bit indices at radix three:
+`1_191_107_759_025_695_718_254_230_815`, exactly 90 bits. The exact model test,
+the CU-11 mutation gate, and the live source audit passed before this clock; the
+live audit reached 11 roots, 93 functions, and 116 edges, including 23 Atlas
+functions and 57 Atlas edges, so the measurement is not attached to a vacuous
+or stale graph.
+
+## Native lookup factorization (`CG-23`)
+
+The final host-scoped protocol distinguishes four changed lookup bodies from
+three mechanically normalized static controls before timing. Changed cases keep
+the preregistered demonstrated-superiority assertion (`upper95 <= 1.0`); static
+controls retain the same 256 paired samples and report their intervals without
+turning a true equality into an almost-always-failing superiority test. Raw and
+resolved arms traverse the same safe `KernelSpec` or `TableSpec` wrapper.
+
+The source/model/scenario protocol test was captured red before the
+classification existed, then passed with mutation plants for a changed-to-
+control relabel and wrapper asymmetry. Model regeneration/check, seven native
+audit/plant tests, the final live 11-root/93-function/116-edge audit, and five release
+parity tests passed before the clock. The linked x86-64 artifact contained one
+64-byte-aligned, local-hidden 262,144-byte production product alphabet with no
+dynamic relocation; the MR1 reduction used a direct RIP-relative address and
+the normalized 19-instruction recurrence/backedge.
+
+The final current-source CPU-0 transcript is
+`target/measurements/native-lookup-uor-naf-current-source-2026-08-09.log`:
+313 lines, 70,973 bytes, SHA-256
+`dc4f790627d7f17b815df312948155a7d9483d11dc6ee01c63034652392be962`.
+Its full source manifest is
+`7dc928ae373f2625723a25ba4ad7b2169fe7e2ac4f824ac60c55033f84672f2e`
+before and after the clock.
+Every case emitted 256 paired observations:
+
+| class | case | resolved / raw | upper 95% endpoint | disposition |
+| --- | --- | ---: | ---: | --- |
+| changed | tile MR1/NR8/KG1 | 0.943490 | 0.948814 | pass |
+| changed | tile MR6/NR8/KG1 | 0.923135 | 0.926702 | pass |
+| static control | reduce MR1/NR1/KG1 | 1.017984 | 1.020605 | report |
+| changed | reduce MR4/NR1/KG1 | 0.872975 | 0.876997 | pass |
+| changed | table rows16/KG2 | 0.819785 | 0.833379 | pass |
+| static control | tile MR1/NR16/KG1 | 0.998818 | 1.001661 | report |
+| static control | tile MR6/NR16/KG1 | 0.953769 | 0.955862 | report |
+
+All four changed factorizations passed their exact rule. The three normalized
+controls remain `open` reports, as required by R4; their clocks are evidence of
+the host observation, while emitted-code and byte parity discharge the build
+claim.

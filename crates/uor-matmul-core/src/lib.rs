@@ -51,9 +51,13 @@ pub mod alphabet;
 pub mod bounds;
 pub mod dot;
 pub mod error;
+mod float_atlas;
+pub mod gauge;
 pub mod generated;
 pub mod layout;
 pub mod policy;
+pub mod semiring;
+pub mod tropical;
 
 pub use acc::{AccOf, Accumulator, Complete, EncodeFrom, Limbs};
 pub use alphabet::{
@@ -64,5 +68,11 @@ pub use alphabet::{
 pub use bounds::{acc_bits, narrow_cap_for, F64Exact, NARROW_CAPS};
 pub use dot::{dot_instrumented, dot_ref, dot_wide};
 pub use error::NotAProduct;
+pub use gauge::{dyadic, dyadic_exact, lift_tropical, recenter};
 pub use layout::{MatView, MatViewMut, Shape, Strides, Triple, Walk};
 pub use policy::{Backend, EncodeMode, Traversal};
+pub use semiring::{laws_of, Laws, Ring, Semiring, Tropical};
+pub use tropical::{
+    as_alphabet_tropical, as_alphabet_tropical_bounded, dot_tropical_ref, trop_acc_bits, Trop,
+    TropAcc, TropicalValue,
+};

@@ -41,6 +41,11 @@ test:
 features:
     cargo check --workspace --all-features --all-targets
     cargo test -p uor-matmul-codec --all-features
+    # `CX-08`'s harness sits behind `ref-gemm`, which is not a default feature,
+    # so `cargo test --workspace` compiles it and never runs it. The strengthened
+    # `CM-02` found that: a test that is compiled out is not evidence, it is a
+    # name. This line is what makes the oracle's row honest.
+    cargo test -p uor-matmul-validate --all-features
 
 # CT-02: the whole corpus in a build where every accumulator operation is
 # checked and any overflow panics. The width is derived so that this is
@@ -53,6 +58,7 @@ checked:
 # R2, R3, R13, and CU-01's disassembly.
 purity:
     cargo run -q -p xtask -- audit-purity
+    cargo run -q -p xtask -- audit-uor-float
     cargo run -q -p xtask -- audit-disassembly
 
 # R7, C1, CA-03: every shipped crate builds for a target with no allocator at
@@ -183,13 +189,34 @@ cross: no-alloc cross-run
 
 # The bench half of `scaling`, on its own for the quick loop: one criterion
 # group per element type times this library beside every enabled oracle at
-# three shapes, byte-equality asserted inside each timed closure. A regression
+# three shapes; this includes tropical lane and witness scaling. Byte-equality
+# is asserted inside each timed closure. A regression
 # against your own last run is a criterion baseline away ---
 # `--save-baseline before` before the change, `--baseline before` after.
 #
-# "Are we faster?", beside every enabled oracle. Seconds.
+# "Are we faster?", beside every enabled oracle. Seconds. The completed
+# Criterion measurements are consolidated into target/criterion/REPORT.md and
+# target/criterion/REPORT.html after the run.
 bench:
     cargo bench -p uor-matmul-validate
+    cargo run --release -p uor-matmul-validate --bin benchmark_report
+
+# CG-23's native lookup protocol is deliberately absent from ordinary Criterion
+# runs. It collects and emits 256 paired 50 ms epochs for all seven cases on one
+# pinned CPU. Exact linked-ELF inspection on the recorded compiler/host found
+# the MR1 reduction and unchanged NR16 tiles normalized-static-equivalent to
+# their controls, with the production alphabet 64-byte aligned and addressed by
+# direct LEA. Their clocks are labeled open/static-control and never asserted as
+# build truth. The four structurally changed cases retain the preregistered
+# demonstrated-superiority rule `upper95 <= 1`; poison, complete-output checks,
+# and identical safe wrappers apply to both classes.
+native-lookup-acceptance:
+    @mkdir -p target/measurements
+    bash -o pipefail -c 'taskset -c 0 cargo bench -p uor-matmul-validate --bench scaling -- __native_lookup_acceptance_only__ --noplot 2>&1 | tee target/measurements/native-lookup-acceptance-2026-08-08.log'
+
+# Regenerate the comparison report from an existing Criterion directory.
+bench-report:
+    cargo run --release -p uor-matmul-validate --bin benchmark_report
 
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a
 # fitted exponent with a confidence interval, against the same fit for the
@@ -202,6 +229,18 @@ bench:
 # Fitted scaling exponents against the oracle's, every figure `open`.
 scaling: bench
     cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
+
+# CG-21: both IEEE widths walk the same structural shapes against the retained
+# exact reference, matrixmultiply, and faer, followed by matched integer and
+# tropical controls.  Every calibrated batch is poisoned before timing and
+# checks all result bytes after timing; latency, throughput, and logical caller
+# traffic carry 95% confidence intervals, and every raw calibrated duration is
+# emitted with its width, case, route, round, and batch.  The
+# oracle features are intentionally enabled: a performance recipe that silently
+# omitted its comparison would not discharge the claim.
+uor-float-sweep:
+    cargo test --release -p uor-matmul-gemm --lib float::tests::every_atlas_candidate_is_measurable_with_byte_checks_cg_21 -- --ignored --exact --nocapture --test-threads=1
+    cargo test --release -p uor-matmul-validate --test uor_float_sweep -- --ignored --nocapture --test-threads=1
 
 # CG-09: throughput against the degeneracy of the operand, over the large shapes
 # `just vv` has no time for. Minutes.
@@ -230,21 +269,27 @@ honesty: bdd
 bdd:
     cargo test -p uor-matmul-conformance
 
-# CT-01, CT-03, CK-06: the fuzz targets. Needs `cargo install cargo-fuzz` and a
-# nightly toolchain, which is why it is not part of `just vv`.
+# CT-01, CT-03, CK-06, CT-08, CD-25: the fuzz targets. Needs `cargo install
+# cargo-fuzz` and a nightly toolchain, which is why it is not part of `just vv`.
 #
-# Totality over unstructured input, on all three targets.
+# The `tropical` target carries a differential as well as a totality claim: it
+# runs both witness mechanisms on the operands the fuzzer drew and compares
+# their bytes, because a corpus is a list of shapes someone thought of.
+#
+# Totality over unstructured input, on all four targets.
 fuzz duration="60":
     cargo +nightly fuzz run totality -- -max_total_time={{duration}}
     cargo +nightly fuzz run float_decode -- -max_total_time={{duration}}
     cargo +nightly fuzz run codec_shapes -- -max_total_time={{duration}}
+    cargo +nightly fuzz run tropical -- -max_total_time={{duration}}
 
 # Regenerate the committed oracle and corpus artifacts. Run only when a corpus
 # changes; the outputs are committed and their digests are recorded.
 #
-# Regenerate the NumPy oracle and symbol-corpus artifacts. Only when a corpus changes.
+# Regenerate the NumPy oracles and the symbol corpus. Only when a corpus changes.
 oracles:
     python3 oracles/numpy/generate.py
+    python3 oracles/tropical/generate.py
     python3 oracles/symbols/generate.py
 
 # CG-11: the static issue census --- llvm-mca over the emitted inner loops, one
@@ -284,12 +329,13 @@ symbol-bandwidth:
     cargo test --release -p uor-matmul-validate --test symbol_bandwidth -- \
         --ignored --nocapture --test-threads=1
 
-# CG-15: the float placement bridge against the scalar scaled lanes it
-# factorizes, on the shapes ANALYSIS tables, with byte-identity asserted
-# inside every timed run. Minutes, and every figure is `open`. `--release` is
-# not optional: a throughput figure from an unoptimised build is not a figure.
+# CG-15: the retained default and compatibility float-workspace spellings over
+# one Atlas operation, on the recorded workspace-sweep shapes, with byte
+# identity asserted inside every timed run. Minutes, and every figure is
+# `open`. `--release` is not optional: an unoptimised throughput figure is not
+# a figure.
 #
-# The bridge against the scalar lanes, measured. Minutes.
+# The retained float-workspace protocol over the one Atlas operation. Minutes.
 bridge-sweep:
     cargo test --release -p uor-matmul-validate --test bridge_sweep -- \
         --ignored --nocapture --test-threads=1
@@ -318,30 +364,15 @@ coissue:
     cargo test --release -p uor-matmul-validate --lib coissue -- \
         --ignored --nocapture --test-threads=1
 
-# CG-16: the symbol tabulated traversal in the scaled integer lane against the
-# float placement bridge, the dense float driver, and the oracle, on gemv,
-# skinny, and tabulation-sweep shapes, with byte-identity asserted inside
-# every timed run. Minutes, and every figure is `open`. `--release` is not
-# optional: a throughput figure from an unoptimised build is not a figure.
+# CG-16: the symbol-tabulated Atlas traversal against the compatibility
+# spelling, dense Atlas, and the oracle, on gemv, skinny, and tabulation-sweep
+# shapes, with byte identity asserted inside every timed run. Minutes, and
+# every figure is `open`. `--release` is not optional: an unoptimised
+# throughput figure is not a figure.
 #
-# The narrow lane against the bridge and the bus, measured. Minutes.
+# Atlas symbol tabulation against dense Atlas and the bus. Minutes.
 symbol-tabulated:
     cargo test --release -p uor-matmul-validate --test symbol_tabulated_sweep -- \
-        --ignored --nocapture --test-threads=1
-
-# CG-16 follow-on: the feasibility test for a per-op-kind cost model of the
-# symbol-table selection boundary. Fits nanosecond constants per op kind over
-# the sweep's (shape, fill) grid --- the table's counts read off its census,
-# the dense side's derived from the drivers' own arithmetic --- and reports
-# the residuals and whether a safety-margin boundary separates every measured
-# win from every measured loss. If the intervals do not overlap the output
-# says so plainly: that is the "nothing" outcome, and it is the evidence the
-# queue item closes on. Minutes, and every figure is `open`. `--release` is
-# not optional: a throughput figure from an unoptimised build is not a figure.
-#
-# The per-op-kind cost fit, measured. Minutes.
-op-cost-fit:
-    cargo test --release -p uor-matmul-validate --test op_cost_fit -- \
         --ignored --nocapture --test-threads=1
 
 # CG-12: the sub-cubic recursion against the cubic packed walk on the
@@ -353,6 +384,19 @@ op-cost-fit:
 # The recursion against the cubic walk, measured. Minutes.
 strassen-sweep:
     cargo test --release -p uor-matmul-validate --test strassen_sweep -- \
+        --ignored --nocapture --test-threads=1
+
+# CG-19: the selection lane against the accumulation lane at matched shapes ---
+# one driver at two instantiations of `E`, so what separates the rates is the
+# arithmetic and not the traversal --- with the packed ring lane beside them for
+# scale, and the two witness mechanisms at both ends of the compare pass's cost.
+# Byte-identity with a reference computed off the timed path is asserted inside
+# every timed run. Seconds, and every figure is `open`. `--release` is not
+# optional: a throughput figure from an unoptimised build is not a figure.
+#
+# The selection lane against the ring lane, measured. Seconds.
+tropical-sweep:
+    cargo test --release -p uor-matmul-validate --test tropical_sweep -- \
         --ignored --nocapture --test-threads=1
 
 # CG-17: the i64x2 SWAR broadcast sequence against the i32x4 dot-with-extends

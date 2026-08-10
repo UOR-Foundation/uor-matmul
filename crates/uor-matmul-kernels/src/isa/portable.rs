@@ -12,6 +12,7 @@
 use uor_matmul_core::Backend;
 
 use crate::spec::{Factorization, KernelSpec, LaneLayout};
+use crate::tropical::{TROP_I16_MAX_BOUND, TROP_ZERO};
 
 /// Build one reference kernel: `mr x nr` of `E`, accumulating in `L`.
 ///
@@ -84,7 +85,7 @@ macro_rules! reference_kernel {
 reference_kernel!(
     /// `i8 x i8 -> i32`, exact. The reference `CB-01` pins to `dot_ref`.
     I8_I32, mac_i8_i32, i8, i32, 4, 4, Factorization::Exact, i32::MAX as u128,
-    |a: i8, b: i8| i32::from(a) * i32::from(b)
+    crate::lookup::i8_product
 );
 
 reference_kernel!(
@@ -192,7 +193,7 @@ macro_rules! reduce_reference {
 reduce_reference!(
     /// `i8 x i8 -> i32`, exact, reducing four rows at a time.
     R_I8_I32, red_i8_i32, i8, i32, 4, Factorization::Exact, i32::MAX as u128,
-    |a: i8, b: i8| i32::from(a) * i32::from(b)
+    crate::lookup::i8_product
 );
 
 reduce_reference!(
@@ -238,7 +239,7 @@ reduce_reference!(
 reduce_reference!(
     /// `i8 x i8 -> i32`, exact, one row.
     R1_I8_I32, red1_i8_i32, i8, i32, 1, Factorization::Exact, i32::MAX as u128,
-    |a: i8, b: i8| i32::from(a) * i32::from(b)
+    crate::lookup::i8_product
 );
 
 reduce_reference!(
@@ -276,3 +277,83 @@ reduce_reference!(
     R1_I64_MOD, red1_i64_mod, i64, i64, 1, Factorization::Modular, 0,
     |a: i64, b: i64| a.wrapping_mul(b)
 );
+
+// ---------------------------------------------------------------------------
+// The `(max, +)` reduction in a packed i16 lane
+// ---------------------------------------------------------------------------
+
+/// Rows of the tropical reference tile.
+const TROP_MR: usize = 4;
+/// Columns: the same four, because a reference has no register to fill and the
+/// square tile is what the other references use.
+const TROP_NR: usize = 4;
+
+crate::tile_fits!(TROP_MR, TROP_NR);
+
+/// The `(max, +)` reference: `max_p (a_p ⊗ b_p)` in the packed `i16` lane
+/// (`CB-13`).
+///
+/// Written out rather than instantiated from [`reference_kernel`], and the
+/// reason is the whole content of the family. That macro hard-codes two things
+/// a `(max, +)` reduction does not have: `wrapping_add` as `⊕`, and
+/// `<L>::default()` as the identity. Here `⊕` is `max`, whose identity is the
+/// semiring zero and not zero --- an empty reduction is `-inf`, so a tile that
+/// started at `0` would report a product of two masked operands as the largest
+/// possible finite answer. Generalizing the macro over both would have made a
+/// two-instantiation macro whose body no instantiation shares; the honest
+/// spelling is one kernel, written once.
+///
+/// `⊗` is [`i16::saturating_add`] and not `wrapping_add`, and
+/// [`crate::tropical`] derives why: the saturation *is* the absorbing law
+/// `-inf ⊗ a = -inf`, and a wrap would send `i16::MIN + i16::MIN` to `0`.
+///
+/// Never optimized and never removed (R6): every vector tropical sequence is
+/// differentially tested against this one, lane for lane.
+pub const TROP_I16: KernelSpec<i16, i16> = KernelSpec {
+    backend: Backend::Portable,
+    factorization: Factorization::Exact,
+    mr: TROP_MR,
+    nr: TROP_NR,
+    lane_layout: LaneLayout::Interleaved,
+    // As every reference: no grouping, and therefore no tail.
+    k_group: 1,
+    products_per_step: 1,
+    // The largest magnitude the packed lane holds, which is the semiring
+    // zero's --- the finite range is narrower, by the derivation in
+    // `crate::tropical`.
+    lane_cap: u128::MAX,
+    // The reference declares the same bound the vector sequences do, because
+    // the bound belongs to the *representation* and not to an instruction.
+    max_bound: TROP_I16_MAX_BOUND,
+    mac_tile: mac_trop_i16,
+};
+
+/// # Safety
+///
+/// `pa` must have `TROP_MR * kc` readable elements, `pb` must have
+/// `TROP_NR * kc`, and `acc` must have `TROP_MR * TROP_NR` writable lanes.
+unsafe fn mac_trop_i16(kc: usize, pa: *const i16, pb: *const i16, acc: *mut i16) {
+    // SAFETY: the caller guaranteed the three extents, so one conversion here
+    // makes every read below safe indexing.
+    let (pa, pb, acc) = unsafe {
+        (
+            core::slice::from_raw_parts(pa, TROP_MR * kc),
+            core::slice::from_raw_parts(pb, TROP_NR * kc),
+            core::slice::from_raw_parts_mut(acc, TROP_MR * TROP_NR),
+        )
+    };
+    // The identity of `max`, not of `+`. At `kc == 0` this is the whole answer,
+    // and it is the semiring zero rather than a zero.
+    let mut tile = [TROP_ZERO; TROP_MR * TROP_NR];
+    for p in 0..kc {
+        for i in 0..TROP_MR {
+            let a = pa[p * TROP_MR + i];
+            for j in 0..TROP_NR {
+                let product = a.saturating_add(pb[p * TROP_NR + j]); // R3-ok: the absorbing law
+                let cell = &mut tile[i * TROP_NR + j];
+                *cell = (*cell).max(product);
+            }
+        }
+    }
+    acc.copy_from_slice(&tile);
+}

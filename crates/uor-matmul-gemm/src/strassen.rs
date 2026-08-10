@@ -282,7 +282,7 @@ pub fn gemm_strassen<E, Bd, O, Ep>(
         // switched off. A caller who asked for zero levels gets zero levels ---
         // the packed walk's own auto-selection would otherwise take them, which
         // is the same bytes (`CD-21`) and not what was asked.
-        crate::kernel::gemm_packed_impl(triple, epilogue, options, scratch, false, &mut ());
+        crate::kernel::gemm_packed_impl(triple, epilogue, options, scratch, &mut ());
         return;
     }
     run(triple, epilogue, options, scratch, Bd::VALUE, take);
@@ -696,10 +696,9 @@ fn sums_view<E: IntegerElement>(s: &[E], r: usize, c: usize) -> MatView<'_, Alph
 //
 // One level is `Theta(n^3)`: this is a bilinear factorization of one block
 // pair, never a subcubic implementation, and there is no recursion below it.
-// The level is admitted by the explicit entry a caller names, and declined
-// by the modular arm's auto-selection until the lane's crossover is measured
-// (`MEASUREMENT-LOG.md`) --- the model records the threshold as `usize::MAX`
-// while there is no measurement.
+// The level is admitted by the explicit entry a caller names. The automatic
+// arm additionally reads the model-owned measured crossover; the current row
+// is 1024 and `MEASUREMENT-LOG.md` records its host-scoped evidence.
 
 /// What one level of the modular factorization wants at `shape`: the level's
 /// sums and seven product temporaries, plus the base case's own traversal
@@ -729,10 +728,8 @@ pub fn modular_level_needs(shape: Shape) -> (usize, usize) {
 /// The terms are all declarations: the encode is `Wrapping` and the output
 /// width admits a modular lane, every extent is even, and the offer holds
 /// [`modular_level_needs`]. `auto` adds the arm wire's own term: the measured
-/// crossover the model records, which is `usize::MAX` while the modular lane
-/// has no measurement, so the auto path declines everywhere until the
-/// pre-registered sweep records one. The explicit entry passes `false` --- a
-/// caller who named the level is in the same position as a caller who asked
+/// crossover the model records. The explicit entry passes `false` --- a caller
+/// who named the level is in the same position as a caller who asked
 /// [`gemm_strassen`] for a level count.
 pub(crate) fn modular_level_admitted<E, Bd, O>(
     shape: Shape,

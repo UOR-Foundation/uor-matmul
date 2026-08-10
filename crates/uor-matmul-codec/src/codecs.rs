@@ -732,10 +732,10 @@ impl<E: IntegerElement, Bd: Bound, C: Codec<E, Bd>, const MAX_RUN: usize> Codec<
 
 // `Runs` does not implement `Enumerable`. A run code carries a *length*, so the
 // table would have to be indexed by `(value, length)` rather than by code, and
-// the length is data rather than an enumerable space. That is expressible, but
-// it is a second construction and no measurement calls for it yet, so it is not
-// built (§4). The absence is a type error at the traversal's boundary, not a
-// runtime refusal.
+// the length is artifact-local data rather than the codec's fixed enumerable
+// space. Such a pair is not the `code -> fixed block` declaration tabulation
+// requires. The absence is structural at the traversal's type boundary, not a
+// performance capability withheld behind a runtime refusal (§4).
 
 // ---------------------------------------------------------------------------
 // Transcode

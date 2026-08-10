@@ -11,6 +11,11 @@ are `(Element, Bound, Codec, MaxBlock, Backend, Traversal)`, and W8A8 is the
 instantiation `(i8, 127, Identity, 1, *, *)`. Nothing privileges it beyond its
 having the most instruction support and the most external oracles.
 
+The **algebra is not a seventh parameter**. It is carried inside the first one:
+`Trop<i8>` is a different `Element` from `i8`, with a different `Element::Acc`,
+and that is the whole of how the `(max, +)` semiring reaches the code. See "The
+two semirings, and why one of them is an element type" below.
+
 ## The crates, and why they are separate
 
 | Crate                    | Contains                                                                      | `unsafe`              | `alloc` | float arithmetic |
@@ -59,19 +64,177 @@ rather than one per target. A 32-bit host cannot reach that depth, so the width
 is conservative there and wrong nowhere --- and `CD-06` and `CA-02` become
 comparisons of one function rather than of two that happen to agree.
 
-For a float element the accumulator is `Complete<L, MIN_EXP>`: a fixed-point
-register spanning the entire product exponent range, plus sticky flags for the
-non-finite states.
+For a float element the terminal accumulator is `Complete<L, MIN_EXP>`: `L`
+low fixed-point limbs span the entire product reduction, and the already
+alignment-rounded tail word is a signed extension limb for `Linear`. The model
+adds 63 bits for an arbitrary `i64` scalar and one bit for the two terms in
+`alpha * sum + beta * C`. It is the sink of the Atlas contraction, not the
+arithmetic used to form a product: resolved signed coefficients enter at their
+Laurent grades after lookup and addition have completed.
 
-| `E`   | product exponent span | limbs | bytes |
-| ----- | --------------------- | ----- | ----- |
-| `f32` | `2^-298 .. 2^256`     | 10    | 80    |
-| `f64` | `2^-2148 .. 2^2048`   | 67    | 536   |
+| `E`   | reduction bits | terminal bits | low limbs + tail | physical bytes |
+| ----- | -------------- | ------------- | ---------------- | -------------- |
+| `f32` | 619            | 683           | 10 + 1           | 88             |
+| `f64` | 4261           | 4325          | 67 + 1           | 544            |
 
-The non-finite state is a *flag*, not a value. A value would have to take part
-in the fixed-point addition, and then the answer would depend on where in the
-accumulation the infinity arrived. IEEE 754 clause 6 is about the value, not the
-schedule.
+The same tail word preserves all seven nonempty unions of the former `nan`,
+`pos_inf`, and `neg_inf` flags at seven extreme sentinel values. This retains
+the public value's former equality, hash, debug, and sticky-state observations;
+the canonical NaN and two signed infinities are three members of that complete
+state space. A finite terminal expression needs only 43 signed tail bits for
+`f32` and 37 for `f64`; the model checks both ranges are strictly disjoint from
+all seven sentinels (`CS-13`).
+
+## The pure-UOR float Atlas
+
+The finite float embedding has one semantic section and one optimized
+factorization of it:
+
+```text
+                         /-> finite NAF -> address/carrier/projector witnesses
+finite dyadic -> section
+                         \-> balanced signed octets -> lookup/add diagonals
+                                                      -> Complete -> encode once
+```
+
+Normalization removes the dyadic valuation before an address is chosen. The
+remaining odd coefficient is emitted lazily in non-adjacent form, with digits
+in `{-1, 0, +1}`; the sign is the modality involution `mu`, not an arithmetic
+negation performed later. A Laurent grade uses Euclidean mixed-radix addressing
+with `context = 8`, `scope = 4`, hence 32 ordered grades per word. Negative and
+positive grades cross word boundaries without wrap (`CK-19`).
+
+The formal branch establishes the section and the optimized branch realizes it;
+`CD-30` compares their final bytes over both IEEE formats, every code class,
+public spelling, shape, and offer. Runtime normalization removes the same
+valuation, carries it as the Laurent grade, and repeatedly emits one balanced
+signed octet until the remaining coefficient is zero. That recurrence is the
+precision rule. Neither `f32`, `f64`, exponent span, nor `k` selects another
+representation. Execution panels hold a bounded kernel tile and are reused, so
+source precision and reduction depth do not become storage limits.
+
+The carrier certificate is the declared `3 Z^(3 x 8)` lattice.
+`AtlasCarrier<'a>` borrows a witness slice and `AtlasBlocks<'a>` computes its
+global, modality, context, and interaction projectors on observation with one
+implicit dyadic denominator. They are executable theorem objects, not hot-loop
+storage. Neither owns an array, copies its source, or allocates (`CK-20`,
+`CA-05`); omitting the load-bearing interaction projector demonstrably merges
+carriers whose signed-digit values differ. `CD-31` likewise certifies the exact
+common-base interval theorem and its minimum grouping, but no grouping selector
+ships: measurement rejected it.
+
+The runtime has only the direct self-similar contraction. Each normalized atom
+is read as balanced radix-256 octets; occupied pairs on the same Laurent
+diagonal are contracted together. Coordinate products are entries of the
+complete signed-`i8` product alphabet. Every diagonal result enters one bounded
+three-limb carrier for the mathematical source product; after all diagonals
+have arrived, that carrier resolves once and Euclidean-fractures the magnitude
+in the signed-place radix `i128::MAX + 1`. Its low digit and possible unit high
+digit are placed at the base grade and its radix-successor grade. Thus the
+post-decode/pre-encode call graph has no scalar packed-support mask or
+population count, float arithmetic, significand multiply, whole-operand
+integer reification, per-diagonal legacy placement loop, or reserve route
+(`CU-11`).
+
+Tile and reduce kernels are orientations of this same direct octet contraction.
+Their selector globally compares every eligible group-one tile, narrow, and
+reduce declaration by model-derived executed work. That work includes each
+`KernelSpec`'s contraction cost, exact output-cell residency after the fixed
+Atlas workspace is charged to L1, live-only product-carrier initialization, and
+full tiles plus row, column, and corner edges; it carries no restated threshold
+or data-dependent route. One exact frame owns all live cells of a tile for one
+complete reduction. Its exact capacity comes from a model-generated contiguous
+dispatch over the maximum family geometry, so neither `f64` nor an edge tile
+replays through a smaller window or allocates the maximum frame. Each offered
+`PackedCode` slot is reinterpreted in place as the ready contextual q cell,
+reusing both decode and projection without another object. A short or empty
+offer decodes each source once into the same six-state boundary quotient and
+finite payload; coordinate replacement rewrites its live prefix and clears only
+the retired suffix. Every historical workspace spelling delegates to that one
+body and leaves the compatibility-only integer buffers untouched (`CD-19`,
+`CD-30`, `CG-22`).
+
+That selector is internal to the dense Atlas arithmetic: it chooses an
+orientation after that factorization has already been admitted. It is distinct
+from the coded driver's table-versus-decline question below and cannot use an
+internal tile price to admit block-one tabulation.
+
+## The two semirings, and why one of them is an element type
+
+The operation census this library realizes names two products: *matrix products
+under complete accumulation*, and *max*. The second is the `(max, +)` semiring
+--- `⊕` is `max`, `⊗` is addition, the additive identity is `-inf` and the
+multiplicative identity is `0`.
+
+It reaches the code as an **element type**, `Trop<E>`, and not as a parameter on
+the driver. The reason is `Element::Acc`, which is documented as *not a
+parameter and not a choice*: exactly one accumulator per element type. The two
+semirings do not share one --- the ring's is seventy-nine bits at `i8` and this
+one's is ten --- so a semiring parameter beside the element type would make
+`Acc` a function of two things and contradict its own contract.
+
+Carrying it in the element type buys the property this document opens with. The
+dense driver's body names `E::mac` and `Accumulator::combine` and nothing else,
+so it computes a ring product over `Alphabet<i8, _>` and a `(max, +)` product
+over `Alphabet<Trop<i8>, _>` with no branch and no second traversal (`CD-29`).
+`gemm`'s bound is `E: Element`, not `E: IntegerElement`, for exactly this
+reason.
+
+| | ring | tropical |
+| --- | --- | --- |
+| element | `i8` .. `i64`, `Complex<_>`, `f32`, `f64` | `Trop<i8>` .. `Trop<i64>` |
+| `⊕` | `+` | `max` |
+| `⊗` | `*` | `+` |
+| additive identity | `0` | `-inf` |
+| accumulator | `acc_bits(E)`, with a `MAX_K_BITS` term | `trop_acc_bits(E)`, with **no** depth term |
+| `⊕` idempotent | no | yes |
+| epilogue | `Linear { alpha, beta }` (`CS-05`) | `MaxPlus { alpha, beta }` (`CS-12`) |
+| sub-cubic recursion | available | absent: no additive inverses |
+
+The last two rows are enforced by the type system rather than by a check.
+`Trop<E>` does not implement `IntegerElement`, so `gemm_strassen` --- which needs
+`IntegerElement::sub` --- does not exist at a tropical instantiation; and the
+`Linear` impl requires `AccOf<E>: ScaleExact`, which `TropAcc` does not
+implement, so `beta * C` cannot be written where it has no meaning. Neither
+exclusion can be reached at run time, which is the difference between excluding
+by construction and refusing by a branch (U-ii).
+
+`Semiring` is the declaration that makes this checkable: two zero-sized markers,
+`Ring<E>` and `Tropical<E>`, each declaring whether its `⊕` is idempotent, so
+that one gate body quantifies over both. Nothing in a traversal reads it and no
+traversal signature mentions it; removing it would change no output byte. What
+it changes is that `CK-16` can say *the laws hold at every instance, and
+idempotence holds precisely at one of them* --- a sentence that is not
+expressible as two independent tests.
+
+### The selection witness
+
+A `(max, +)` product answers a question a sum cannot: which term achieved the
+maximum. `SelectedTriple` carries a witness matrix beside `C`, validated at
+construction against the same two conditions `Triple::new` reports and no
+others, and `gemm_selected` writes both. The tie-break is the smallest index; it
+is cited (`AUTH-TF1-D6`), not chosen here.
+
+Two mechanisms produce it, and they are factorizations rather than alternatives.
+`Witness::Lexicographic` reduces `(value, index)` under an order that is total
+on the pair, so invariance under partition and order is a property of the order
+and not of the loop. `Witness::ComparePass` reduces the value and takes a
+compare-only second pass for the least index attaining it. `CD-25` asserts their
+bytes are identical at every shape, degeneracy and offer including none.
+
+### The two gauge sections
+
+`recenter` is the canonical section of the shift gauge: `(max, +)` is invariant
+under `⊗ c`, and the representative is the one whose maximum is exactly zero. It
+is taken in the accumulator's width, where it is exact for every input --- a
+difference of two alphabet elements has magnitude at most `2^BITS`, which is
+precisely what `trop_acc_bits` derives the width against.
+
+`dyadic` is the canonical section of the dyadic gauge, and it is a *placement*
+rather than a division: `Complete::add_scaled` takes a signed exponent, so
+writing a value at `2^-k` in the fixed-point register **is** division by `2^k`
+with every bit preserved. No division opcode is emitted and none is needed,
+which is why the census has no division in it.
 
 ## The tile and reduce factorizations
 
@@ -142,6 +305,45 @@ side outright, and a short offer, or an operand with nothing to share, gives
 the same bytes from the uncollapsed traversal. `CD-15`, `CD-16`, and `CD-17`
 assert the
 bytes at every degeneracy, and the census asserts the charge actually moved.
+
+### Addressing is a declaration, not an exclusion
+
+Whether this grouping exists for an operand is decided by what the operand
+*declares*, never by what it holds. `Addressing::of(tier, block, bound)` reads
+exactly the three manifest fields that describe the code --- and neither of the
+two that describe the artifact's bytes --- and answers whether a code addresses
+an element at all, and whether it addresses a *run*. `Identity` and `Runs`
+address nothing, and take the dense traversal; that is not a refusal, it is what
+their declarations say, and the dense traversal is the census's first product
+rather than a fallback from this one.
+
+Orientation is the second half of the same question. The reduction must run
+along the code block, so the coded operand must be stored `n x k` --- which is
+`rows` and `cols` in the canonical manifest. `Manifest::reduces_along_the_block`
+asks the declaration; nothing probes the stream. `CS-10` asserts both directions:
+at a fixed manifest the selection does not move when the operand's values change,
+and it does move when the declaration changes.
+
+A block of one is not categorically excluded from the driver. The locked public
+`tabulation_pays` query sees declarations but not build kind, so it retains the
+long-codeword operation inequality and answers false at block one. Forced
+`Tabulated` nevertheless executes any structurally resident table. The private
+automatic selector prices larger blocks from the actual table spec: build
+density, gather density, and the row-adjusted dense density remain independent
+declarations in the exact cost inequality. A contextual block-one Atlas build
+is not that product-build model. The final 2026-08-09 `CG-16` release fit used 32
+calibration identities, collapsed only the four source-pinned value twins to 28
+structural envelopes, and then chose the table for 9 of 12 unseen block-one
+identities. H01 and H02 carried the identical pre-admission structural key, so
+the candidate was required to choose the same route for both. Their held-out
+paired clocks instead put the table/decline ratio on opposite sides of one:
+`0.1821 +/- 0.0397` for H01 and `2.9348 +/- 0.3215` for H02. Because `CS-10`
+forbids reading the unlike values that distinguish them, this candidate is
+rejected and automatic block-one selection remains the value-blind decline.
+Forced `Tabulated` remains executable and byte-identical. An independently
+declared block-two `f64` codec exercises admission from its own declarations,
+without a type- or format-specific refusal. All outcomes are factorizations of
+the same Atlas contraction; the timing ratios are `open`, not model constants.
 
 Three things make this a factorization of the same identity rather than a
 different algorithm:
@@ -215,8 +417,8 @@ a per-shape search, which was a mechanism with one answer.
 ### The arena tier: a float is a symbol with an address
 
 A float was always a code here --- `FloatElement::decode` reads the name of a
-dyadic rational, and the accumulation below it is the same integer accumulation
-every other element family uses. The arena tier carries that one level up: the
+dyadic rational, and the Atlas section gives that value its canonical address.
+The arena tier carries identity one level up: the
 distinct bit patterns of a weight artifact are its codebook, canonicalized by
 `canonicalize` into unsigned pattern order, so the artifact's identity at the
 kappa level is its manifest and its elements are `u16` indices. Two artifacts
@@ -227,58 +429,62 @@ and `CK-08` pins the manifest spelling, `bound` recording `Whole`'s `u128::MAX`
 because a float alphabet has no magnitude to declare.
 
 Nothing below the identity level changes. `Codec` and `CodedMatrix` are generic
-over `Element`, the arena's decode is the table read `Grid` performs, and the
-table's lane is a register that holds the products exactly, so tabulation is
-exact for the same reason it is for integer codes: the table entries are exact
-partial sums and reusing them is regrouping, not rounding. Which register ---
-the complete accumulator, or the scaled integer word the next paragraph names
---- is the family's declaration, and `CD-14` asserts the whole traversal
-byte-equal to the dense float driver, forced and declined alike.
+over `Element`, the arena's decode is the table read `Grid` performs, and every
+decoded finite symbol enters the same canonical Atlas section as a dense code.
+Tabulation remains exact because table entries are exact partial contractions
+and reusing them is regrouping, not rounding. `CD-14`, `CD-18`, and `CD-20`
+assert the coded spellings byte-equal to the dense Atlas driver at every shape,
+offer, gauge distribution and reduction depth.
 
-What the tier does not claim is a traversal win, and the model records why.
-`MAX_BLOCK` is one --- one symbol per code --- and `tabulation_pays` refuses a
-one-element block on op count, exactly as it refuses `Grid<16>`: the table
-saves the multiply and no adds, so selection declines and the byte-identical
-dense route runs. The arena's claim is identity and residency; `CG-03` measures
-residency like any other codec's, and `CG-14` reports what the residency buys
+`MAX_BLOCK` is one --- one symbol per code --- so the model-derived tabulation
+census may choose the dense Atlas factorization when constructing a slab would
+issue more declared work than direct contraction. This is not a fallback: both
+routes consume the same canonical coefficients and neither can reach classical
+arithmetic. The arena's independent claim is identity and residency; `CG-03`
+measures residency like any other codec's, and `CG-14` reports what it buys
 against the bus.
 
 The code width is a parameter of the one tier, not a second tier:
 `Arena<'_, E, N>` addresses the codebook with a `u16`, and
 `Arena<'_, E, N, u8>` with a byte (`CK-14`). At the byte width a codebook of
 256 distinct patterns stores one byte a symbol against the dense float's four,
-and the coded operand drives the same exact accumulation: the traversal
-declines the one-element block, as it always does, and the stream below the
-decline is the coded float path --- `CD-18` pins it byte-identical to
-`gemm_float` at every shape and every offer, under both epilogues. A `u8`
+and the coded operand drives the same exact Atlas contraction. `CD-18` pins it
+byte-identical to `gemm_float` at every shape and every offer, under both
+epilogues. A `u8`
 stream is never the index stream the gather borrows --- the gather's index
 type is `u16` --- so the narrow spelling re-spells its codes as indices
 wherever the traversal builds one, at the same bytes.
 
-What the byte width does not buy by itself is the table's arithmetic: a table
-entry is `rows` lane words, and over the 80-byte complete accumulator a
-256-entry table holds no L1 slab at any tile. The lane question is answered
-one level up, not in the codec: `f32`'s table lane is `Scaled64`, an `i64` of
-significands pre-scaled to the panels' measured base exponents --- the
-placement bridge's span walk and admission, over `A` and over the codebook,
-asked once per call and only when the table was selected. At eight bytes a
-word the same slab holds at a four-row tile, and the forced traversal
-tabulates: the build decodes each symbol into the scaled alphabet once, the
-gather accumulates the narrow words, and the exact sum is placed at
-`2^(base_a + base_b)` through the accumulator's own `add_scaled` (`CD-20`).
-The exact accumulator is still the lane the streaming decline accumulates
-in, because the stream walks raw elements with no walk ahead of them; and it
-is still the whole answer for `f64`, whose 53-bit significand is not an
-`i32` at any span. Selection is a separate question, and `CG-16` measured
-it: the win is an op-kind one the instruction-count predicate cannot see,
-so the costed traversal still declines the one-element block. A float block
-codebook --- `MAX_BLOCK` past one --- remains a further step: `Book` is
-bounded to integer elements, so such a codebook would be a generalization of
-`Book`, not an instantiation of anything here.
+The table carrier for `f32` is `Scaled64`. Its eight-byte word keeps a
+256-entry slab resident, while its arithmetic remains pure Atlas. Each existing
+four-byte panel cell is relabelled in place as one contextual q factor. Its
+occupied balanced radix-256 coordinates meet only through the signed-`i8`
+lookup alphabet; Horner contraction starts at the highest occupied product
+grade and repeats the same radix-add rule only for the remaining occupied
+extent. `Scaled64::mac` returns either the complete compact coefficient or its
+self-describing finite/boundary tag, never a runtime significand multiply. The
+local source-ordered scheduler accumulates the maximal prefix admitted by the
+least per-slot L-infinity certificates, makes every boundary tag a singleton,
+and places each resolved word at the call's Atlas base (`CD-20`, `CD-32`).
+
+A pointwise block-one call demand-builds the entries addressed by its current
+column block when that set is smaller than the declared enumeration. Its scale
+walk and decoded book likewise visit addressed symbols, so an unused non-finite
+code cannot widen the call. The fixed panel offer holds the book and activation
+tile; any complete activation rows in the remaining caller-owned tail become
+their contextual projections in place. Cached rows project once per call and
+uncached rows once per column block, with neither a copy nor a side bitmap.
+
+`f64` uses the same recursive rule directly over the complete carrier;
+precision causes more occupied coordinate octets, not a different arithmetic
+family or a categorical table refusal. Forced `Arena<8>` block-one tabulation
+executes its `Wide<Complete>` table and reads it, while a downstream block-two
+enumerable codec is admitted from its own declarations. The larger carrier may
+change which offer and geometry pay, never whether the operation exists.
 
 One implementation note is load-bearing. The portable gather staged a column
 group of lane words in a compile-time array, which pays when the words can sit
-in registers and is a frame of pure copy when they cannot --- 80 or 536 bytes
+in registers and is a frame of pure copy when they cannot --- 88 or 544 bytes
 of limbs never can. `portable_table` chooses at compile time: words of sixteen
 bytes or fewer take the staged gather, wider words accumulate in place, and
 both are the same reads and the same adds (`CB-08`).

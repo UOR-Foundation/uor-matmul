@@ -16,6 +16,7 @@ use std::path::Path;
 
 use uor_matmul_model::{Level, Model};
 
+use crate::harvest::TestNames;
 use crate::runner::SuiteReport;
 
 /// What the meta-gate found.
@@ -54,10 +55,15 @@ const ASSERTIVE: &[&str] = &[
 
 /// Run the meta-gate.
 ///
-/// `root` is the repository root. `tests` are the test names collected from the
-/// workspace, which the caller gathers because it knows how to run `cargo`.
-pub fn check_honesty(root: &Path, tests: &BTreeSet<String>) -> std::io::Result<HonestyReport> {
+/// `root` is the repository root. `tests` is the classified harvest: which
+/// `#[test]` functions exist, and which of them anything actually runs. The two
+/// halves are used for different questions and must not be conflated --- an ID
+/// is discharged only by a test that *runs*, but an ID named by a test that
+/// never runs is still an ID a name claims, and the third direction below has
+/// to see it.
+pub fn check_honesty(root: &Path, tests: &TestNames) -> std::io::Result<HonestyReport> {
     let mut report = HonestyReport::default();
+    let running = tests.running();
     let model = match Model::load(&root.join("model")) {
         Ok(m) => m,
         Err(e) => {
@@ -83,11 +89,27 @@ pub fn check_honesty(root: &Path, tests: &BTreeSet<String>) -> std::io::Result<H
             ));
         }
         let slug = row.id.to_lowercase().replace('-', "_");
-        if !tests.iter().any(|t| t.ends_with(&slug)) {
+        if running.iter().any(|t| t.ends_with(&slug)) {
+            continue;
+        }
+        // A test that exists and never runs is a different defect from a test
+        // that was never written, and it has a different fix. Reporting both as
+        // "no test name ends in ..." sends the reader to write a test that is
+        // already there.
+        let stalled = tests.stalled(&slug);
+        if stalled.is_empty() {
             report.violations.push(format!(
                 "CM-02: {} is registered but no test name ends in `{slug}`. A claim with \
                  no test is an assertion.",
                 row.id
+            ));
+        } else {
+            report.violations.push(format!(
+                "CM-02: {} is registered and every test named for it is unreachable, so the \
+                 claim runs nowhere. A test that is compiled out, or skipped, is not evidence \
+                 --- it is a name.\n    {}",
+                row.id,
+                stalled.join("\n    ")
             ));
         }
     }
@@ -137,7 +159,7 @@ pub fn check_honesty(root: &Path, tests: &BTreeSet<String>) -> std::io::Result<H
         .iter()
         .filter_map(|r| r.id.split('-').next().map(str::to_lowercase))
         .collect();
-    for name in tests {
+    for name in &tests.all() {
         let Some(tail) = name.rsplit("::").next() else {
             continue;
         };

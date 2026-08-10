@@ -47,3 +47,9 @@ Feature: Totality
     Given the standing corpus
     When the suite exercises CT-07
     Then the claim holds byte for byte
+
+  @CT-08 @build
+  Scenario: No tropical operation overflows under the checked profile, at every bound and depth, including a masked lane at the semiring zero
+    Given the standing corpus
+    When the suite exercises CT-08
+    Then the claim holds byte for byte

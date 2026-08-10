@@ -1,0 +1,200 @@
+{
+  "byte_order": "little-endian",
+  "cases": [
+    {
+      "a_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "b_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_sha256": "sha256:e6ad6c9a3a3b7658c35bacf6553fcb8ffe34387534a648fe18f875b8f7a86ddb",
+      "shape": {
+        "k": 0,
+        "m": 1,
+        "n": 1
+      },
+      "stem": "1x0x1"
+    },
+    {
+      "a_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "b_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_sha256": "sha256:77c57b6716f0139d7a560c34ff44cd3b75e371e5a07640d40764f215a36ab634",
+      "shape": {
+        "k": 0,
+        "m": 3,
+        "n": 4
+      },
+      "stem": "3x0x4"
+    },
+    {
+      "a_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "b_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "shape": {
+        "k": 0,
+        "m": 0,
+        "n": 0
+      },
+      "stem": "0x0x0"
+    },
+    {
+      "a_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "b_sha256": "sha256:59f4ac3d6dc5fb561d5a4372bcf50971600bdfa1a272572810b53e9accda0fc3",
+      "expected_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "shape": {
+        "k": 5,
+        "m": 0,
+        "n": 7
+      },
+      "stem": "0x5x7"
+    },
+    {
+      "a_sha256": "sha256:839db7d2a463d25d95ef3a2bcefb2259e75af3a367d6bee494fba766e2397574",
+      "b_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "shape": {
+        "k": 7,
+        "m": 5,
+        "n": 0
+      },
+      "stem": "5x7x0"
+    },
+    {
+      "a_sha256": "sha256:12a3ae445661ce5dee78d0650d33362dec29c4f82af05e7e57fb595bbbacf0ca",
+      "b_sha256": "sha256:af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+      "expected_sha256": "sha256:12a3ae445661ce5dee78d0650d33362dec29c4f82af05e7e57fb595bbbacf0ca",
+      "shape": {
+        "k": 1,
+        "m": 1,
+        "n": 1
+      },
+      "stem": "1x1x1"
+    },
+    {
+      "a_sha256": "sha256:385cb118b05b0a9d054e95f73024022d5a0048fd45a410562d9c6c1d75fc8973",
+      "b_sha256": "sha256:eea27726699f46ca05b7a8432810f6e3b94e1385a9ef6dd9ec44dd0998a97777",
+      "expected_sha256": "sha256:4c95ccc069724c2ccc31b9a9e83235fb36cf257b06226bda37cb76d3b709033e",
+      "shape": {
+        "k": 1,
+        "m": 7,
+        "n": 5
+      },
+      "stem": "7x1x5"
+    },
+    {
+      "a_sha256": "sha256:954c6bf69a8c3a2bde165111e31d866cf255b8395216f5f613bc42527b943d00",
+      "b_sha256": "sha256:0666a302e5627b584c41984040760f5b5f31b82481fca79ba677b607e3e546ff",
+      "expected_sha256": "sha256:7edcfeb689683ee96e882f592eaa546e80f57a4e9d11229d856c36d0f24357bf",
+      "shape": {
+        "k": 1,
+        "m": 35,
+        "n": 35
+      },
+      "stem": "35x1x35"
+    },
+    {
+      "a_sha256": "sha256:295eeb0b2b07a2b9b645750bca67d625005fa16f6658d08594b22e095e34b445",
+      "b_sha256": "sha256:d91a40546e29067b21100eaf3d78f23d0c87b85a90aa64b0c7896096616ad713",
+      "expected_sha256": "sha256:da4d7124f0c110276a053898248ab396a39d72c436ac8906d9e01e9bdaf5f2af",
+      "shape": {
+        "k": 7,
+        "m": 3,
+        "n": 11
+      },
+      "stem": "3x7x11"
+    },
+    {
+      "a_sha256": "sha256:c38896818c11574a26d28463ae89e351e02a32dc1fd4fe69f3eeb863d1836ce5",
+      "b_sha256": "sha256:22400b2d29de340156f47b6c68b6f22a33eaa4736f6dd1defcb4adaa61899421",
+      "expected_sha256": "sha256:91a004a61ef9dce5d39ba816c1ae77af0eba6b8b1765485beaf1a2327d670ef9",
+      "shape": {
+        "k": 17,
+        "m": 13,
+        "n": 19
+      },
+      "stem": "13x17x19"
+    },
+    {
+      "a_sha256": "sha256:41a451bd9fed1670000fe9c276129075fc91084b61716aeb39116b15665938e8",
+      "b_sha256": "sha256:d25469e1cbc55720af727af00f2a64c80974abeecdbb9b8ebe8dc0bc510ede44",
+      "expected_sha256": "sha256:f410fb144de81eff9e62481ef99bbd11c40949a4da394d804d201018b423e92e",
+      "shape": {
+        "k": 29,
+        "m": 23,
+        "n": 31
+      },
+      "stem": "23x29x31"
+    },
+    {
+      "a_sha256": "sha256:f54d131c70f0de642f958b29955c98dd893a8fd0356e67bd7ca23860502a3e13",
+      "b_sha256": "sha256:1e9808df4a03b2c313181965baa15b700e6b7148e06d89c48ccbf55ccd8b8d3b",
+      "expected_sha256": "sha256:af9ecbe177721660da15f82901d733ec169d867cd5f1455cdac1533c6f8f85a8",
+      "shape": {
+        "k": 97,
+        "m": 2,
+        "n": 3
+      },
+      "stem": "2x97x3"
+    },
+    {
+      "a_sha256": "sha256:da79461888677bdf85d0b512f31e83ba2c23747cb4062e426b5e030301d0dfda",
+      "b_sha256": "sha256:3747746dd62ed177e6e85308dc2fc30bc0995b40f2dcefde1ff737cf0f08d7cb",
+      "expected_sha256": "sha256:d86e8112f3c4c4442126f8e9f44f16867da487f29052bf91b810457db34209a4",
+      "shape": {
+        "k": 1024,
+        "m": 1,
+        "n": 1
+      },
+      "stem": "1x1024x1"
+    },
+    {
+      "a_sha256": "sha256:58b2ad63cb175eefc98eafe59783fe1e0387817d6b250429ba9ed4b510c80f7c",
+      "b_sha256": "sha256:89ab8a6fed6072eec2c7514f6e3f9e2b658110edb1232873f2aec42fbf65c11b",
+      "expected_sha256": "sha256:3186e9dde16da3da2debe89c23145384856b71b563c85188c2d977c37504cb7e",
+      "shape": {
+        "k": 4093,
+        "m": 4,
+        "n": 4
+      },
+      "stem": "4x4093x4"
+    },
+    {
+      "a_sha256": "sha256:8ec65a6655be335e5f74fe1f1a7e0cc78a6c8e08e7d435af2cc26f5c04fceeda",
+      "b_sha256": "sha256:cf1019bda0d8cd3719df86da4f6aba6fa538f7d6b8e9cb66972d0917d6d83dda",
+      "expected_sha256": "sha256:846f4370c9a6757051690a63470bd0f232812439fc861937e5ac59c256ea63be",
+      "shape": {
+        "k": 3,
+        "m": 128,
+        "n": 128
+      },
+      "stem": "128x3x128"
+    },
+    {
+      "a_sha256": "sha256:47d7c8e07d1340e64b4318576d560667e4a98b4fb75a7b8041245b963c3099b2",
+      "b_sha256": "sha256:7bf14910d42ade62d065e10bbeffc81f7e48f0747ddc182a83a315d76981d668",
+      "expected_sha256": "sha256:fbdc44ca8abbf599943eafdb38242bb4432df1bad27e60d2ca2607b85c7cafd5",
+      "shape": {
+        "k": 64,
+        "m": 16,
+        "n": 16
+      },
+      "stem": "16x64x16"
+    }
+  ],
+  "dtype": "int64",
+  "entry": "(A[:, :, None] + B[None, :, :]).max(axis=1)",
+  "id": "CX-11",
+  "mask_a": {
+    "period": 7,
+    "phase": 3
+  },
+  "mask_b": {
+    "period": 5,
+    "phase": 2
+  },
+  "neg_inf": -9223372036854775808,
+  "note": "The (max, +) half of the operation census, witnessed out of process and outside the Rust ecosystem. A max-plus product has no rounding for two implementations to disagree about, so the comparison is byte equality with no exempted region. The semiring zero is spelled -2^63 in the artifact and decoded into the element type's own discriminant on the way in, so no sentinel enters the element type.",
+  "numpy_version": "2.5.1",
+  "oracle": "numpy",
+  "seed": 20260805,
+  "semiring": "(max, +)",
+  "span": 3,
+  "spec": "uor-matmul/1"
+}

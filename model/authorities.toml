@@ -108,3 +108,59 @@ operation census --- adds, xors, shifts, compares, table reads, candidate scans
 --- and there is no multiplication method and no multiplication field. When the
 operand is a code, the product is a table read."""
 realized_by = ["CU-06", "CG-10"]
+
+[[authority]]
+id = "TF1"
+name = "the transformer over the UOR Atlas"
+citation = "UOR-Foundation, TF1 --- Formalization of the Transformer over the UOR Atlas, upstream."
+checksum = "none"
+checksum_reason = """the formalization is a document, upstream, and is cited
+rather than vendored (N2). This repository contains no proof development and
+pins no proof artifact; what it pins is its own behaviour against the clauses
+it realizes."""
+statement = """the selection half of the census: (max, +) is the selection
+algebra (A-4), a masked position is the semiring zero (A-6), the witness's
+tie-break is the smallest index and is total (D-6), the native operation set is
+matrix products under complete accumulation, max, addition, table lookup and
+power-of-two shifts (D-8), and the two gauges have canonical sections ---
+recentring (G-2) and dyadic placement (G-5). The canonical Atlas instance is
+`(q,T,O)=(4,3,8)`, scope indexes copies outside the `T*O` carrier (D-1, S-18),
+addresses are words of unbounded depth (D-2), modality carries a mirror (S-3),
+the four spectral projectors resolve the carrier exactly (S-12), and
+the context block's rank derives the sign-refinement leaf count (S-17), while
+whole-carrier selection consumes interaction information that marginal block
+selection cannot (S-19, S-20)."""
+realized_by = [
+  "CK-19",
+  "CK-20",
+  "CK-16",
+  "CK-17",
+  "CS-11",
+  "CT-08",
+  "CA-04",
+  "CD-24",
+  "CD-25",
+  "CD-26",
+  "CD-27",
+  "CD-31",
+  "CD-32",
+  "CD-29",
+  "CB-13",
+  "CU-10",
+  "CU-11",
+]
+
+[[authority]]
+id = "UOR-ATLAS-UTQC"
+name = "the UTQC whitepaper"
+citation = "UOR-Foundation, UOR Atlas: Universal Transform Quantum Computing, upstream."
+checksum = "none"
+checksum_reason = """a document, upstream, cited and not vendored (N2). What
+this repository pins is its own register and the gate that reads it, not the
+whitepaper's text."""
+statement = """the method this repository is built under: the capability is a
+scenario before it is code, every external result arrives through a committed
+oracle, and every claim carries exactly one of three honesty levels ---
+some-true, build, open --- with the separation between them gated rather than
+trusted."""
+realized_by = ["CM-02", "CM-03"]

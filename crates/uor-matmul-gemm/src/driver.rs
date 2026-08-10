@@ -1,8 +1,8 @@
 //! The dense driver (§5.5, S7--S13).
 
 use uor_matmul_core::{
-    AccOf, Accumulator, Alphabet, Backend, Bound, Element, EncodeFrom, EncodeMode, IntegerElement,
-    Traversal, Triple,
+    AccOf, Accumulator, Alphabet, Backend, Bound, Element, EncodeFrom, EncodeMode, Traversal,
+    Triple,
 };
 
 use crate::epilogue::Epilogue;
@@ -34,6 +34,19 @@ pub struct GemmOptions {
 /// - Any magnitude, at any depth. The accumulator cannot overflow (§3.2).
 /// - Any scratch amount, including none (S13, `CD-04`).
 ///
+/// # Parametric in the algebra
+///
+/// The bound is `E: Element`, not `E: IntegerElement`, and the body names
+/// exactly two operations: [`Element::mac`] and
+/// [`uor_matmul_core::Accumulator::combine`]. Both are the element type's own,
+/// so this one traversal computes a ring product over `Alphabet<i8, _>` and a
+/// `(max, +)` product over `Alphabet<Trop<i8>, _>` with no branch, no second
+/// driver, and no line that asks which algebra it is in. The census's two
+/// products are one traversal at two instantiations, which is what R13 says
+/// about every other axis of this library and is now true of this one too.
+///
+/// [`Trop`]: uor_matmul_core::Trop
+///
 /// # Examples
 ///
 /// ```
@@ -57,10 +70,48 @@ pub fn gemm<E, Bd, O, Ep>(
     options: GemmOptions,
     scratch: &mut Scratch<'_, E, Bd>,
 ) where
-    E: IntegerElement,
+    E: Element,
     Bd: Bound,
     O: Element + EncodeFrom<AccOf<E>>,
     Ep: Epilogue<E, O>,
+{
+    gemm_with_ledger(triple, epilogue, options, scratch, &mut ());
+}
+
+/// Zero-cost census channel for the algebra-parametric reference traversal.
+/// The production instantiation is `()`, whose empty methods monomorphize
+/// away; CG-22 instantiates this same body with counters.
+trait DenseLedger {
+    fn routed(&mut self, traversal: Traversal, panel: usize);
+    fn operated(&mut self);
+    fn combined(&mut self);
+    fn encoded(&mut self);
+}
+
+impl DenseLedger for () {
+    #[inline(always)]
+    fn routed(&mut self, _: Traversal, _: usize) {}
+    #[inline(always)]
+    fn operated(&mut self) {}
+    #[inline(always)]
+    fn combined(&mut self) {}
+    #[inline(always)]
+    fn encoded(&mut self) {}
+}
+
+#[inline]
+fn gemm_with_ledger<E, Bd, O, Ep, Lg>(
+    triple: &mut Triple<'_, '_, '_, Alphabet<E, Bd>, O>,
+    epilogue: &Ep,
+    options: GemmOptions,
+    scratch: &mut Scratch<'_, E, Bd>,
+    ledger: &mut Lg,
+) where
+    E: Element,
+    Bd: Bound,
+    O: Element + EncodeFrom<AccOf<E>>,
+    Ep: Epilogue<E, O>,
+    Lg: DenseLedger,
 {
     // The backend is not consulted here. Every backend computes the same
     // integer, so selecting one is a question about instructions and never
@@ -88,6 +139,7 @@ pub fn gemm<E, Bd, O, Ep>(
         // and `CD-13` asserts the bytes (R13, C5).
         Traversal::Blocked | Traversal::Tabulated => scratch.panel(shape.k),
     };
+    ledger.routed(options.traversal, panel);
 
     let (a, b, c) = triple.parts();
     let reads_c = epilogue.reads_c();
@@ -99,6 +151,7 @@ pub fn gemm<E, Bd, O, Ep>(
             if panel == 0 {
                 for p in 0..shape.k {
                     E::mac(&mut acc, a.at(i, p).get(), b.at(p, j).get());
+                    ledger.operated();
                 }
             } else {
                 // The same accumulation, in panels. `combine` is associative on
@@ -110,8 +163,10 @@ pub fn gemm<E, Bd, O, Ep>(
                     let mut part = <AccOf<E> as Accumulator>::ZERO;
                     for q in p..end {
                         E::mac(&mut part, a.at(i, q).get(), b.at(q, j).get());
+                        ledger.operated();
                     }
                     acc = acc.combine(part);
+                    ledger.combined();
                     p = end;
                 }
             }
@@ -121,6 +176,7 @@ pub fn gemm<E, Bd, O, Ep>(
             // uninitialised output buffer is admissible (`CS-04`).
             let prior = if reads_c { Some(*c.at(i, j)) } else { None };
             *c.at_mut(i, j) = epilogue.finish(acc, prior, options.encode);
+            ledger.encoded();
         }
     }
 }
@@ -137,6 +193,100 @@ mod tests {
     use std::vec;
     use std::vec::Vec;
     use uor_matmul_core::{as_alphabet_full, MatView, MatViewMut, Strides};
+
+    #[derive(Default, Debug, PartialEq, Eq)]
+    struct DenseCensus {
+        route: Option<(Traversal, usize)>,
+        operations: usize,
+        combines: usize,
+        encodes: usize,
+    }
+
+    impl DenseLedger for DenseCensus {
+        fn routed(&mut self, traversal: Traversal, panel: usize) {
+            assert!(self.route.replace((traversal, panel)).is_none());
+        }
+
+        fn operated(&mut self) {
+            self.operations += 1;
+        }
+
+        fn combined(&mut self) {
+            self.combines += 1;
+        }
+
+        fn encoded(&mut self) {
+            self.encodes += 1;
+        }
+    }
+
+    fn assert_dense_census(census: &DenseCensus, traversal: Traversal, panel: usize) {
+        let expected = uor_matmul_model::derive::dense_reference_census(3, 7, 5, panel);
+        assert_eq!(census.route, Some((traversal, panel)));
+        assert_eq!(census.operations, expected[0]);
+        assert_eq!(census.combines, expected[1]);
+        assert_eq!(census.encodes, expected[2]);
+    }
+
+    /// `CG-22`: the float work cannot perturb the one algebra-parametric
+    /// reference route. Ring and tropical instantiations execute the exact same
+    /// model-derived operation census on both sides of the panel boundary.
+    #[test]
+    fn integer_and_tropical_reference_counts_remain_identical_cg_22() {
+        use crate::epilogue::MaxPlus;
+        use uor_matmul_core::{as_alphabet_tropical, Trop};
+
+        for (traversal, offered) in [
+            (Traversal::OutputMajor, 0usize),
+            (Traversal::Blocked, 3usize),
+        ] {
+            let a = vec![1i8; 3 * 7];
+            let b = vec![1i8; 7 * 5];
+            let mut c = vec![0i32; 3 * 5];
+            let mut panel = vec![Alphabet::ZERO; offered];
+            let av = MatView::row_major(as_alphabet_full(&a), 3, 7).unwrap();
+            let bv = MatView::row_major(as_alphabet_full(&b), 7, 5).unwrap();
+            let cv = MatViewMut::row_major(&mut c, 3, 5).unwrap();
+            let mut triple = Triple::new(av, bv, cv).unwrap();
+            let mut ring = DenseCensus::default();
+            gemm_with_ledger(
+                &mut triple,
+                &Linear::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    ..GemmOptions::default()
+                },
+                &mut Scratch::new(&mut panel),
+                &mut ring,
+            );
+            assert_dense_census(&ring, traversal, offered);
+            assert!(c.iter().all(|&value| value == 7));
+
+            let finite = Trop::<i8>::finite;
+            let ta = vec![finite(1); 3 * 7];
+            let tb = vec![finite(1); 7 * 5];
+            let mut tc = vec![Trop::<i32>::NEG_INF; 3 * 5];
+            let mut tpanel = vec![Alphabet::ZERO; offered];
+            let av = MatView::row_major(as_alphabet_tropical(&ta), 3, 7).unwrap();
+            let bv = MatView::row_major(as_alphabet_tropical(&tb), 7, 5).unwrap();
+            let cv = MatViewMut::row_major(&mut tc, 3, 5).unwrap();
+            let mut triple = Triple::new(av, bv, cv).unwrap();
+            let mut tropical = DenseCensus::default();
+            gemm_with_ledger(
+                &mut triple,
+                &MaxPlus::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    ..GemmOptions::default()
+                },
+                &mut Scratch::new(&mut tpanel),
+                &mut tropical,
+            );
+            assert_dense_census(&tropical, traversal, offered);
+            assert_eq!(tropical, ring);
+            assert!(tc.iter().all(|&value| value == Trop::finite(2)));
+        }
+    }
 
     fn product(m: usize, k: usize, n: usize, traversal: Traversal, panel: usize) -> Vec<i32> {
         let a: Vec<i8> = (0..m * k).map(|i| ((i * 37) % 255) as i8).collect();
@@ -286,6 +436,305 @@ mod tests {
         // A^T (3x2) * B (2x3), computed by hand:
         //   [[1,4],[2,5],[3,6]] * [[1,2,3],[4,5,6]]
         assert_eq!(d, [17, 22, 27, 22, 29, 36, 27, 36, 45]);
+    }
+
+    /// `CD-29`: the *same* driver computes the `(max, +)` product.
+    ///
+    /// Not a second traversal and not a branch: the loops above name `E::mac`
+    /// and `combine`, so instantiating `E` at `Trop<i8>` is the whole of the
+    /// change. The census's two products are one traversal.
+    #[test]
+    fn the_same_driver_computes_the_tropical_product_cd_29() {
+        use uor_matmul_core::{as_alphabet_tropical, Trop};
+        let f = Trop::<i8>::finite;
+        let g = Trop::<i32>::finite;
+        // A = [[1,2],[3,4]], B = [[5,6],[7,8]] over (max, +):
+        //   c00 = max(1+5, 2+7) = 9    c01 = max(1+6, 2+8) = 10
+        //   c10 = max(3+5, 4+7) = 11   c11 = max(3+6, 4+8) = 12
+        let (av, bv) = ([f(1), f(2), f(3), f(4)], [f(5), f(6), f(7), f(8)]);
+        let mut c = [Trop::<i32>::NEG_INF; 4];
+        let a = MatView::row_major(as_alphabet_tropical(&av), 2, 2).unwrap();
+        let b = MatView::row_major(as_alphabet_tropical(&bv), 2, 2).unwrap();
+        let cv = MatViewMut::row_major(&mut c, 2, 2).unwrap();
+        let mut t = Triple::new(a, b, cv).unwrap();
+        gemm(
+            &mut t,
+            &crate::epilogue::MaxPlus::OVERWRITE,
+            GemmOptions::default(),
+            &mut Scratch::none(),
+        );
+        assert_eq!(
+            c,
+            [g(9), g(10), g(11), g(12)],
+            "the (max, +) product of the same two operands"
+        );
+
+        // The value half above is necessary and nowhere near sufficient. This
+        // row's `refuted_by` names *a branch on the semiring inside the
+        // traversal*, and four correct numbers cannot see one: a driver that
+        // dispatched on which algebra it was in would compute exactly these
+        // numbers by a second route and read as discharged. So the structural
+        // half is read from the source, the way `CU-06` reads its claim from the
+        // emitted instructions rather than inferring it.
+        //
+        // A planted `if <AccOf<E> as Accumulator>::BITS <= 66 { ...second
+        // traversal... }` --- the ring accumulator at `i8` is 79 bits and the
+        // tropical one 10, so the guard is exactly a semiring test --- passed
+        // every gate in the workspace before this half existed.
+        let source = include_str!("driver.rs");
+        let start = source
+            .find("pub fn gemm<E, Bd, O, Ep>")
+            .expect("the driver is in this file");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n#[cfg(test)]")
+                    .expect("the tests follow the driver")];
+        for token in [
+            // The width of an accumulator, which is what tells the two families
+            // apart without naming either.
+            "BITS",
+            // Either family, named.
+            "Trop",
+            "IntegerElement",
+            "FloatElement",
+            // Any run-time question about which type this is.
+            "TypeId",
+            "type_name",
+        ] {
+            assert!(
+                !body.contains(token),
+                "`gemm` names `{token}`, so it can tell the two semirings apart --- and a \
+                 traversal that can tell them apart is two traversals sharing a name"
+            );
+        }
+        // And it does name the two operations it is written against, so the
+        // absence above is parametricity rather than an empty function.
+        assert!(
+            body.contains("E::mac(&mut acc"),
+            "the one arithmetic primitive"
+        );
+        assert!(body.contains(".combine(part)"), "and the one reduction");
+    }
+
+    /// `CS-11`: the tropical sibling of `CS-04`. `beta` at the semiring zero
+    /// overwrites `C` without reading it, so a masked or garbage-filled output
+    /// buffer is admissible.
+    #[test]
+    fn the_semiring_zero_beta_overwrites_without_reading_cs_11() {
+        use crate::epilogue::MaxPlus;
+        use uor_matmul_core::{as_alphabet_tropical, Trop};
+        let f = Trop::<i8>::finite;
+        let g = Trop::<i32>::finite;
+        let (av, bv) = ([f(1), f(2), f(3), f(4)], [f(5), f(6), f(7), f(8)]);
+        // A pattern no reduction can produce, so a read would show.
+        let mut c = [g(i32::MAX); 4];
+        let a = MatView::row_major(as_alphabet_tropical(&av), 2, 2).unwrap();
+        let b = MatView::row_major(as_alphabet_tropical(&bv), 2, 2).unwrap();
+        let cv = MatViewMut::row_major(&mut c, 2, 2).unwrap();
+        let mut t = Triple::new(a, b, cv).unwrap();
+        assert!(!Epilogue::<Trop<i8>, Trop<i32>>::reads_c(
+            &MaxPlus::OVERWRITE
+        ));
+        assert!(Epilogue::<Trop<i8>, Trop<i32>>::reads_c(
+            &MaxPlus::ACCUMULATE
+        ));
+        gemm(
+            &mut t,
+            &MaxPlus::OVERWRITE,
+            GemmOptions::default(),
+            &mut Scratch::none(),
+        );
+        assert_eq!(c, [g(9), g(10), g(11), g(12)]);
+    }
+
+    /// `CS-12`: the tropical epilogue's `alpha` and `beta` are applied exactly,
+    /// in the accumulator's width, once per output element --- the sibling of
+    /// `CS-05`, and the row that makes `MaxPlus`'s `⊗` arithmetic live.
+    ///
+    /// Both scalars had no gate at all until this one. Every call site in the
+    /// workspace passed `MaxPlus::OVERWRITE`, whose `alpha` is the
+    /// multiplicative identity and whose `beta` is the semiring zero, so
+    /// `ShiftExact::shift_exact` was only ever evaluated at an identity and
+    /// `AbsorbPrior::of_prior` was never evaluated at all. Two planted defects
+    /// --- `⊗` discarding its scalar, and `-inf` in `C` absorbed to a finite
+    /// zero --- both survived `cargo test --workspace`. This row is what those
+    /// plants now fail.
+    #[test]
+    fn the_tropical_alpha_and_beta_are_exact_cs_12() {
+        use crate::epilogue::MaxPlus;
+        use uor_matmul_core::{as_alphabet_tropical, Trop};
+
+        let f = Trop::<i8>::finite;
+        let g = Trop::<i32>::finite;
+        // A ⊗ B over (max, +): c00 = max(1+5, 2+7) = 9, c01 = 10, c10 = 11, c11 = 12.
+        let (av, bv) = ([f(1), f(2), f(3), f(4)], [f(5), f(6), f(7), f(8)]);
+        let product = [9i32, 10, 11, 12];
+
+        let run = |ep: &MaxPlus, prior: [Trop<i32>; 4]| {
+            let mut c = prior;
+            let a = MatView::row_major(as_alphabet_tropical(&av), 2, 2).unwrap();
+            let b = MatView::row_major(as_alphabet_tropical(&bv), 2, 2).unwrap();
+            let cv = MatViewMut::row_major(&mut c, 2, 2).unwrap();
+            let mut t = Triple::new(a, b, cv).unwrap();
+            gemm(&mut t, ep, GemmOptions::default(), &mut Scratch::none());
+            c
+        };
+
+        // `alpha` shifts the product, exactly. A scalar the epilogue discarded
+        // would leave the product unmoved, which is the first plant.
+        for alpha in [-40i64, -1, 0, 1, 37] {
+            let ep = MaxPlus {
+                alpha: Trop::finite(alpha),
+                beta: Trop::NEG_INF,
+            };
+            let want: [Trop<i32>; 4] = core::array::from_fn(|i| g(product[i] + alpha as i32));
+            assert_eq!(run(&ep, [Trop::NEG_INF; 4]), want, "alpha = {alpha}");
+        }
+
+        // `beta` shifts what `C` already held, and `⊕` takes the larger. Three
+        // regimes, so neither side can be the answer by accident: `C` far below
+        // the product, `C` far above it, and `C` straddling it.
+        for (beta, prior, want) in [
+            (0i64, -100i32, product),
+            (0, 100, [100, 100, 100, 100]),
+            (0, 10, [10, 10, 11, 12]),
+            (5, 0, [9, 10, 11, 12]),
+            (-100, 100, product),
+        ] {
+            let ep = MaxPlus {
+                alpha: Trop::finite(0),
+                beta: Trop::finite(beta),
+            };
+            let got = run(&ep, [g(prior); 4]);
+            let want: [Trop<i32>; 4] = core::array::from_fn(|i| g(want[i]));
+            assert_eq!(got, want, "beta = {beta}, C = {prior}");
+        }
+
+        // The case the second plant broke: `C` at the semiring zero, under a
+        // *finite* `beta`. `-inf ⊗ b` is `-inf`, which contributes nothing, so
+        // the answer is the product --- and if `of_prior` mapped `-inf` to a
+        // finite zero instead, every cell would gain a floor of zero and the
+        // two negative cells below would be wrong.
+        let (nv, mv) = ([f(-5), f(-6), f(-7), f(-8)], [f(-5), f(-6), f(-7), f(-8)]);
+        let negative = {
+            let mut c = [g(0); 4];
+            let a = MatView::row_major(as_alphabet_tropical(&nv), 2, 2).unwrap();
+            let b = MatView::row_major(as_alphabet_tropical(&mv), 2, 2).unwrap();
+            let cv = MatViewMut::row_major(&mut c, 2, 2).unwrap();
+            let mut t = Triple::new(a, b, cv).unwrap();
+            gemm(
+                &mut t,
+                &MaxPlus {
+                    alpha: Trop::finite(0),
+                    beta: Trop::NEG_INF,
+                },
+                GemmOptions::default(),
+                &mut Scratch::none(),
+            );
+            c
+        };
+        assert!(
+            negative.iter().all(|x| x.get().is_some_and(|v| v < 0)),
+            "the fixture must produce negative cells, or the floor is invisible"
+        );
+        let mut c = [Trop::<i32>::NEG_INF; 4];
+        let a = MatView::row_major(as_alphabet_tropical(&nv), 2, 2).unwrap();
+        let b = MatView::row_major(as_alphabet_tropical(&mv), 2, 2).unwrap();
+        let cv = MatViewMut::row_major(&mut c, 2, 2).unwrap();
+        let mut t = Triple::new(a, b, cv).unwrap();
+        gemm(
+            &mut t,
+            &MaxPlus::ACCUMULATE,
+            GemmOptions::default(),
+            &mut Scratch::none(),
+        );
+        assert_eq!(c, negative, "`-inf` in C is absorbed, not floored at zero");
+
+        // `alpha` at the semiring zero absorbs the whole product, whatever the
+        // operands were --- the other half of `⊗`'s absorbing law, which no
+        // other row reaches.
+        let absorbed = run(
+            &MaxPlus {
+                alpha: Trop::NEG_INF,
+                beta: Trop::NEG_INF,
+            },
+            [g(0); 4],
+        );
+        assert_eq!(absorbed, [Trop::NEG_INF; 4]);
+    }
+
+    /// `CD-04` and `CD-10` at the tropical instance: traversal and scratch
+    /// amount are invisible there for the same reason they are invisible in the
+    /// ring --- `⊕` is associative, so the panel length cannot be seen.
+    #[test]
+    fn tropical_traversal_and_scratch_are_invisible_cd_04() {
+        use crate::epilogue::MaxPlus;
+        use uor_matmul_core::{as_alphabet_tropical, Trop};
+
+        // A prime depth, so no panel length divides it evenly, and a mask in
+        // the middle of every row so the semiring zero is walked too.
+        const K: usize = 97;
+        // Row 0 of A is masked *entirely*, so cell (0, j) is the semiring zero
+        // for every j and A-6's mask reaches the answer rather than only the
+        // operand. Scattered masks alone cannot do that: at K = 97 with a mask
+        // every eleventh element, some term of every cell is always live, and
+        // an assertion about masked output would have had nothing to assert.
+        let a: Vec<Trop<i8>> = (0..5 * K)
+            .map(|i| {
+                if i < K || i % 11 == 0 {
+                    Trop::NEG_INF
+                } else {
+                    Trop::finite(((i * 37) % 255) as i8)
+                }
+            })
+            .collect();
+        let b: Vec<Trop<i8>> = (0..K * 7)
+            .map(|i| {
+                if i % 13 == 0 {
+                    Trop::NEG_INF
+                } else {
+                    Trop::finite(((i * 53) % 255) as i8)
+                }
+            })
+            .collect();
+
+        let run = |traversal: Traversal, panel: usize| {
+            let mut c = vec![Trop::<i32>::NEG_INF; 5 * 7];
+            let mut buf = vec![Alphabet::ZERO; panel];
+            let av = MatView::row_major(as_alphabet_tropical(&a), 5, K).unwrap();
+            let bv = MatView::row_major(as_alphabet_tropical(&b), K, 7).unwrap();
+            let cv = MatViewMut::row_major(&mut c, 5, 7).unwrap();
+            let mut t = Triple::new(av, bv, cv).unwrap();
+            gemm(
+                &mut t,
+                &MaxPlus::OVERWRITE,
+                GemmOptions {
+                    traversal,
+                    ..Default::default()
+                },
+                &mut Scratch::new(&mut buf),
+            );
+            c
+        };
+
+        let reference = run(Traversal::OutputMajor, 0);
+        for panel in [0usize, 1, 2, 3, 13, 96, 97, 98, 1000] {
+            assert_eq!(run(Traversal::Blocked, panel), reference, "panel {panel}");
+        }
+        assert_eq!(run(Traversal::OutputMajor, 1000), reference);
+        // The masks reached the *answer*, not merely the operand: the whole of
+        // row 0 is the semiring zero, and the rest is finite. Both halves are
+        // asserted, because either alone is satisfied by a fixture that does
+        // not exercise A-6 at all.
+        assert!(
+            reference[..7].iter().all(|x| !x.is_finite()),
+            "a wholly masked row reduces to the semiring zero, not to a number"
+        );
+        assert!(
+            reference[7..].iter().all(|x| x.is_finite()),
+            "and every other cell has a live term, or the fixture says nothing"
+        );
     }
 
     /// CT-01: a depth past every narrow-register threshold is exact, because

@@ -15,9 +15,9 @@ pub mod derive;
 pub mod registry;
 
 pub use registry::{
-    Authorities, Authority, AuthorityRow, Blocking, Claim, Codebook, Complete, Constants, Element,
-    IdRow, Ids, Instantiation, Ledger, Level, Narrow, Oracle, Oracles, Suspension, Threshold, Tier,
-    Tiers, Width, Widths,
+    Atlas, Authorities, Authority, AuthorityRow, Blocking, Claim, Codebook, ColumnHash, Complete,
+    Constants, Element, IdRow, Ids, Instantiation, KernelCapacity, Ledger, Level, Narrow, Oracle,
+    Oracles, Suspension, Threshold, Tier, Tiers, Width, Widths,
 };
 
 use std::path::{Path, PathBuf};
@@ -88,7 +88,12 @@ impl std::error::Error for ModelError {}
 /// beyond the build's is read off the operation census, which is a count and
 /// not a clock --- constructed here and asserted, which is `build`. What the
 /// boundary buys in nanoseconds stays `open` under CG-10.
-const CG_BUILD_ROWS: &[&str] = &["CG-11", "CG-13", "CG-18"];
+///
+/// CG-22 likewise asserts a route/census correspondence rather than a clock:
+/// the selected float factorization is the model's derivation, and the
+/// non-float controls retain their route and counts. The achieved rates remain
+/// `open` under CG-21.
+const CG_BUILD_ROWS: &[&str] = &["CG-11", "CG-13", "CG-18", "CG-22"];
 
 impl Model {
     /// Load every model file from a `model/` directory.
@@ -119,6 +124,135 @@ impl Model {
     pub fn check(&self) -> Result<(), ModelError> {
         let bad = |m: String| ModelError::Inconsistent(m);
         let max_k_bits = self.constants.max_k_bits;
+
+        // The Atlas tuple is source data; every other Atlas numeral is a
+        // derivation. Scope indexes carrier copies and modality names a value
+        // at an ordered grade site, so neither may be folded into the other's
+        // dimension without this check noticing.
+        let atlas = &self.constants.atlas;
+        if atlas.scope == 0 || atlas.modality < 3 || atlas.context < 2 {
+            return Err(bad(format!(
+                "Atlas dimensions must admit scope, the negative/zero/positive modalities, and a centered context; got ({}, {}, {})",
+                atlas.scope, atlas.modality, atlas.context
+            )));
+        }
+        if atlas.source.trim().is_empty() {
+            return Err(bad(
+                "the Atlas source tuple has no clause provenance".to_string()
+            ));
+        }
+        let carrier = derive::atlas_carrier_dim(atlas.modality, atlas.context);
+        let ranks = derive::atlas_projector_ranks(atlas.modality, atlas.context);
+        if ranks.into_iter().sum::<u128>() != u128::from(carrier) {
+            return Err(bad(format!(
+                "Atlas projector ranks {ranks:?} do not exhaust carrier dimension {carrier}"
+            )));
+        }
+        let classes = derive::atlas_class_count(atlas.scope, atlas.modality, atlas.context);
+        if classes != u128::from(atlas.scope) * u128::from(carrier) {
+            return Err(bad(format!(
+                "Atlas class count {classes} is not scope {} times carrier {carrier}",
+                atlas.scope
+            )));
+        }
+        let page_sites = derive::atlas_page_sites(atlas.scope, atlas.context);
+        if page_sites == 0 {
+            return Err(bad(
+                "an Atlas address page has no ordered grade sites".to_string()
+            ));
+        }
+        let refinement = derive::atlas_refinement_leaves(atlas.context);
+        let refinement_power = atlas.context - 1;
+        if refinement.coefficient() != 1 || refinement.power() != refinement_power {
+            return Err(bad(format!(
+                "Atlas refinement {refinement} is not the exact power 2^{refinement_power}"
+            )));
+        }
+        let alphabet = derive::atlas_alphabet(atlas.scope, atlas.modality, atlas.context);
+        if alphabet.coefficient() != classes || alphabet.power() != refinement_power {
+            return Err(bad(format!(
+                "Atlas alphabet {alphabet} is not class count {classes} times the exact refinement power"
+            )));
+        }
+
+        // `repr(align(N))` accepts exactly nonzero powers of two through
+        // 2^29. The cache line remains an honestly measured blocking value;
+        // this check proves only that its generated private layout witness is
+        // a total Rust representation on every target.
+        let blocking = &self.constants.blocking;
+        if !blocking.allowlisted_from_r1 || blocking.reason.trim().is_empty() {
+            return Err(bad(
+                "the measured cache-shaped constants lack their R1 allowlist provenance"
+                    .to_string(),
+            ));
+        }
+        if !blocking.cache_line_bytes.is_power_of_two() {
+            return Err(bad(format!(
+                "cache line {} is not a nonzero power-of-two Rust representation alignment",
+                blocking.cache_line_bytes
+            )));
+        }
+        const RUST_MAX_REPR_ALIGN: usize = 1usize << 29;
+        if blocking.cache_line_bytes > RUST_MAX_REPR_ALIGN {
+            return Err(bad(format!(
+                "cache line {} exceeds Rust's maximum representation alignment {RUST_MAX_REPR_ALIGN}",
+                blocking.cache_line_bytes
+            )));
+        }
+
+        let capacity = &self.constants.kernel_capacity;
+        if capacity.max_tile_lanes == 0 {
+            return Err(bad(
+                "the declared kernel-family maximum has no output cells".to_string(),
+            ));
+        }
+        if capacity.max_source_sites == 0 {
+            return Err(bad(
+                "the declared kernel-family maximum has no source sites".to_string(),
+            ));
+        }
+        if capacity.source.trim().is_empty() {
+            return Err(bad(
+                "the declared kernel-family maximum has no derivation provenance".to_string(),
+            ));
+        }
+
+        // The hash is not an authority: canonical stream equality is. Its
+        // prefix is therefore an honestly open work measurement, while the
+        // u128 carrier proof is exact geometry over the largest dictionary
+        // and canonical index that a 64-bit address space can present.
+        let hash = &self.constants.column_hash;
+        if hash.level != Level::Open {
+            return Err(bad(
+                "the column-hash prefix is measured and must remain open".to_string(),
+            ));
+        }
+        if hash.prefix == 0 {
+            return Err(bad(
+                "the measured column-hash prefix must observe at least one coordinate".to_string(),
+            ));
+        }
+        if hash.source.trim().is_empty() || !hash.source.contains("MEASUREMENT-LOG.md") {
+            return Err(bad(
+                "the measured column-hash prefix lacks its retained-clock provenance in MEASUREMENT-LOG.md"
+                    .to_string(),
+            ));
+        }
+        let hash_bound =
+            derive::column_hash_accumulator_bound(max_k_bits, atlas.modality, hash.prefix)
+                .ok_or_else(|| {
+                    bad(format!(
+                "the measured {}-coordinate Atlas column hash does not fit its u128 carrier",
+                hash.prefix
+            ))
+                })?;
+        let hash_bits = derive::unsigned_bits(hash_bound);
+        if hash.accumulator_bits != hash_bits {
+            return Err(bad(format!(
+                "the measured {}-coordinate Atlas column hash needs {hash_bits} accumulator bits, model says {}",
+                hash.prefix, hash.accumulator_bits
+            )));
+        }
 
         // CM-01: every accumulator width is `acc_bits` of its element type.
         for w in &self.widths.width {
@@ -189,8 +323,156 @@ impl Model {
             }
         }
 
-        // Complete accumulators: the span is the product exponent range, and
-        // the limb count covers span + guard + sign.
+        // Complete accumulators: low limbs cover the product reduction, while
+        // the existing tail word covers arbitrary i64 scaling and the two-term
+        // Linear expression without changing the associated accumulator type.
+        let complete_state = &self.widths.complete_state;
+        if complete_state.scalar_bits != derive::integer_scalar_growth_bits(i64::BITS) {
+            return Err(bad(format!(
+                "complete scalar headroom is {}, but i64 scaling needs {} bits",
+                complete_state.scalar_bits,
+                derive::integer_scalar_growth_bits(i64::BITS)
+            )));
+        }
+        let terminal_terms_bits = derive::sum_terms_bits(complete_state.terminal_terms);
+        if complete_state.terminal_terms_bits != terminal_terms_bits {
+            return Err(bad(format!(
+                "{} terminal terms need {terminal_terms_bits} bits, model says {}",
+                complete_state.terminal_terms, complete_state.terminal_terms_bits
+            )));
+        }
+        if complete_state.extension_bits != i64::BITS {
+            return Err(bad(format!(
+                "complete extension is {} bits, but its i64 word has {}",
+                complete_state.extension_bits,
+                i64::BITS
+            )));
+        }
+        if complete_state.nonfinite_flag_count != 3 {
+            return Err(bad(format!(
+                "a complete accumulator preserves three former non-finite flags, model says {}",
+                complete_state.nonfinite_flag_count
+            )));
+        }
+        let nonfinite_states =
+            derive::complete_nonfinite_states(complete_state.nonfinite_flag_count);
+        if complete_state.nonfinite_states != nonfinite_states {
+            return Err(bad(format!(
+                "{} complete non-finite flags have {nonfinite_states} nonempty unions, model says {}",
+                complete_state.nonfinite_flag_count, complete_state.nonfinite_states
+            )));
+        }
+
+        // CD-32's f32 table word has one exact compact-or-tagged spelling. The
+        // top-positive interval is a consequence of its product and state
+        // widths, not a second capacity threshold: values below it are compact
+        // coefficients and values inside it are self-describing one-product
+        // tokens.
+        let q = &self.widths.f32_q_carrier;
+        let product_magnitude_bits = q
+            .significand_bits
+            .checked_mul(2)
+            .ok_or_else(|| bad("the f32 q-carrier product width overflows u32".to_string()))?;
+        if q.product_magnitude_bits != product_magnitude_bits {
+            return Err(bad(format!(
+                "two {}-bit coefficients need {product_magnitude_bits} product bits, model says {}",
+                q.significand_bits, q.product_magnitude_bits
+            )));
+        }
+        let product_bound = derive::f32_q_product_bound(q.significand_bits)
+            .ok_or_else(|| bad("the f32 q-carrier product bound exceeds u128".to_string()))?;
+        if u128::from(q.product_bound) != product_bound {
+            return Err(bad(format!(
+                "the f32 q-carrier product bound is {product_bound}, model says {}",
+                q.product_bound
+            )));
+        }
+        let factor_span = q
+            .max_factor_exp
+            .checked_sub(q.min_factor_exp)
+            .ok_or_else(|| bad("the f32 q-carrier factor-grade span underflows".to_string()))?;
+        let relative_grade_count = u32::try_from(factor_span)
+            .ok()
+            .and_then(|span| span.checked_mul(2))
+            .and_then(|span| span.checked_add(1))
+            .ok_or_else(|| bad("the f32 q-carrier relative-grade count overflows".to_string()))?;
+        if q.relative_grade_count != relative_grade_count {
+            return Err(bad(format!(
+                "the f32 q-carrier has {relative_grade_count} relative product grades, model says {}",
+                q.relative_grade_count
+            )));
+        }
+        let signed_finite_states = q
+            .relative_grade_count
+            .checked_mul(2)
+            .ok_or_else(|| bad("the f32 q-carrier finite-state count overflows".to_string()))?;
+        if q.signed_finite_states != signed_finite_states {
+            return Err(bad(format!(
+                "{} grades at two signs make {signed_finite_states} finite states, model says {}",
+                q.relative_grade_count, q.signed_finite_states
+            )));
+        }
+        let state_count = q
+            .signed_finite_states
+            .checked_add(complete_state.nonfinite_states)
+            .ok_or_else(|| bad("the f32 q-carrier total state count overflows".to_string()))?;
+        if q.state_count != state_count {
+            return Err(bad(format!(
+                "{} finite states plus {} Complete unions make {state_count} states, model says {}",
+                q.signed_finite_states, complete_state.nonfinite_states, q.state_count
+            )));
+        }
+        let state_bits = derive::state_bits(q.state_count);
+        if q.state_bits != state_bits {
+            return Err(bad(format!(
+                "{} f32 q-carrier states need {state_bits} bits, model says {}",
+                q.state_count, q.state_bits
+            )));
+        }
+        let tag_payload_bits = q
+            .product_magnitude_bits
+            .checked_add(q.state_bits)
+            .ok_or_else(|| bad("the f32 q-carrier tag payload width overflows".to_string()))?;
+        if q.tag_payload_bits != tag_payload_bits {
+            return Err(bad(format!(
+                "product magnitude plus state needs {tag_payload_bits} tag bits, model says {}",
+                q.tag_payload_bits
+            )));
+        }
+        let tag_interval = derive::power_of_two(q.tag_payload_bits)
+            .ok_or_else(|| bad("the f32 q-carrier tag interval exceeds u128".to_string()))?;
+        if u128::from(q.tag_interval) != tag_interval {
+            return Err(bad(format!(
+                "the f32 q-carrier tag interval is {tag_interval}, model says {}",
+                q.tag_interval
+            )));
+        }
+        let tag_base =
+            derive::top_positive_interval_base(complete_state.extension_bits, q.tag_payload_bits)
+                .ok_or_else(|| {
+                bad("the f32 q-carrier tag interval does not fit positive i64".to_string())
+            })?;
+        if u128::from(q.tag_base) != tag_base {
+            return Err(bad(format!(
+                "the f32 q-carrier tag base is {tag_base:#x}, model says {:#x}",
+                q.tag_base
+            )));
+        }
+        let compact_ceiling = tag_base - 1;
+        if u128::from(q.compact_ceiling) != compact_ceiling {
+            return Err(bad(format!(
+                "the f32 q-carrier compact ceiling is {compact_ceiling}, model says {}",
+                q.compact_ceiling
+            )));
+        }
+        let zero_span_capacity =
+            derive::f32_q_lane_capacity(compact_ceiling, product_bound, 0, 0, false);
+        if u128::from(q.zero_span_capacity) != zero_span_capacity {
+            return Err(bad(format!(
+                "the f32 q-carrier zero-span capacity is {zero_span_capacity}, model says {}",
+                q.zero_span_capacity
+            )));
+        }
         for c in &self.widths.complete {
             let span = c
                 .max_product_exp
@@ -202,27 +484,85 @@ impl Model {
                     c.element, c.span_bits
                 )));
             }
-            let total = c.span_bits + c.guard_bits as i64 + c.sign_bits as i64;
+            let accumulation = c.span_bits + c.guard_bits as i64 + c.sign_bits as i64;
+            if accumulation != c.accumulation_bits {
+                return Err(bad(format!(
+                    "{}: accumulation bits should be {accumulation}, model says {}",
+                    c.element, c.accumulation_bits
+                )));
+            }
+            let total = c.accumulation_bits
+                + complete_state.scalar_bits as i64
+                + complete_state.terminal_terms_bits as i64;
             if total != c.total_bits {
                 return Err(bad(format!(
-                    "{}: total bits should be {total}, model says {}",
+                    "{}: terminal-expression bits should be {total}, model says {}",
                     c.element, c.total_bits
                 )));
             }
-            let limbs = derive::limbs_for(c.total_bits as u32);
-            if limbs != c.limbs {
+            let accumulation_bits = u32::try_from(c.accumulation_bits).map_err(|_| {
+                bad(format!(
+                    "{}: accumulation_bits {} cannot size a finite NAF carrier",
+                    c.element, c.accumulation_bits
+                ))
+            })?;
+            let sites = derive::naf_sites(accumulation_bits);
+            if sites != c.naf_sites {
                 return Err(bad(format!(
-                    "{}: {} bits needs {limbs} limbs, model says {}",
-                    c.element, c.total_bits, c.limbs
+                    "{}: {accumulation_bits} accumulation bits needs {sites} NAF sites, model says {}",
+                    c.element, c.naf_sites
                 )));
             }
-            if c.bytes != c.limbs.saturating_mul(8) {
+            let pages = derive::atlas_pages(sites, page_sites);
+            if pages != c.atlas_pages {
                 return Err(bad(format!(
-                    "{}: {} limbs is {} bytes, model says {}",
-                    c.element,
-                    c.limbs,
-                    c.limbs * 8,
-                    c.bytes
+                    "{}: {sites} NAF sites at {page_sites} sites per Atlas word needs {pages} pages, model says {}",
+                    c.element, c.atlas_pages
+                )));
+            }
+            let limbs = derive::limbs_for(accumulation_bits);
+            if limbs != c.limbs {
+                return Err(bad(format!(
+                    "{}: {} accumulation bits needs {limbs} low limbs, model says {}",
+                    c.element, c.accumulation_bits, c.limbs
+                )));
+            }
+            let low_bits = (c.limbs as u32).saturating_mul(u64::BITS);
+            let physical_bits = low_bits.saturating_add(complete_state.extension_bits);
+            if c.physical_bits != physical_bits {
+                return Err(bad(format!(
+                    "{}: low limbs plus extension are {physical_bits} bits, model says {}",
+                    c.element, c.physical_bits
+                )));
+            }
+            if c.total_bits > i64::from(c.physical_bits) {
+                return Err(bad(format!(
+                    "{}: {} terminal bits exceed {} physical bits",
+                    c.element, c.total_bits, c.physical_bits
+                )));
+            }
+            let finite_state_bits = derive::extension_value_bits(c.total_bits, low_bits);
+            if c.finite_state_bits != finite_state_bits {
+                return Err(bad(format!(
+                    "{}: terminal expression needs {finite_state_bits} signed extension bits, model says {}",
+                    c.element, c.finite_state_bits
+                )));
+            }
+            if !derive::sentinels_outside_signed_width(
+                finite_state_bits,
+                complete_state.extension_bits,
+                complete_state.nonfinite_states,
+            ) {
+                return Err(bad(format!(
+                    "{}: a finite terminal expression can alias a non-finite state",
+                    c.element
+                )));
+            }
+            let bytes = (c.physical_bits as usize).div_ceil(u8::BITS as usize);
+            if c.bytes != bytes {
+                return Err(bad(format!(
+                    "{}: {} physical bits is {bytes} bytes, model says {}",
+                    c.element, c.physical_bits, c.bytes
                 )));
             }
         }
@@ -274,11 +614,18 @@ impl Model {
         // at the row's own pair of sequences, because both sides of the count
         // are ISA declarations and a host is priced at its own.
         for t in &self.tiers.tabulation {
+            let Some(table_step) = t.block.checked_mul(t.lanes_per_add) else {
+                return Err(bad(format!(
+                    "tabulation {} ({}): block {} times lanes_per_add {} exceeds usize",
+                    t.codec, t.isa, t.block, t.lanes_per_add
+                )));
+            };
             let expect = derive::tabulation_break_even(
                 t.code_space,
                 t.block,
                 t.rows,
-                t.block.saturating_mul(t.lanes_per_add),
+                table_step,
+                t.build_products_per_step,
                 t.kernel_products_per_step
                     .unwrap_or(self.constants.blocking.kernel_products_per_step),
                 self.constants.blocking.kernel_rows,
@@ -286,8 +633,15 @@ impl Model {
             if expect != t.break_even_n {
                 return Err(bad(format!(
                     "tabulation {} ({}): break-even of code_space {} over block {} at {} rows \
-                     is {:?}, but tiers.toml says {:?}",
-                    t.codec, t.isa, t.code_space, t.block, t.rows, expect, t.break_even_n
+                     and build density {} is {:?}, but tiers.toml says {:?}",
+                    t.codec,
+                    t.isa,
+                    t.code_space,
+                    t.block,
+                    t.rows,
+                    t.build_products_per_step,
+                    expect,
+                    t.break_even_n
                 )));
             }
             if t.code_space == 0 {
@@ -343,6 +697,29 @@ impl Model {
             if row.statement.trim().is_empty() {
                 return Err(bad(format!(
                     "{}: an untagged claim does not ship (R4)",
+                    row.id
+                )));
+            }
+            if row.refuted_by.trim().is_empty() {
+                return Err(bad(format!(
+                    "{}: a claim with no refutation condition is not falsifiable; every row \
+                     states what would refute it",
+                    row.id
+                )));
+            }
+            // R10, CM-02: `CONFORMANCE.md` groups the register by class, and
+            // the generator skips a class it does not know. Left to the
+            // generator, that skip is silent: the row stays gated by every
+            // rule here and by the meta-gate, and reaches the published index
+            // nowhere. No byte comparison can catch it either, because the
+            // rendered bytes and the committed bytes agree on the absence. So
+            // the register refuses the row, which is the one place the
+            // omission is visible.
+            if !codegen::CLASSES.iter().any(|(p, _)| row.id.starts_with(p)) {
+                return Err(bad(format!(
+                    "{}: `CONFORMANCE.md` renders no class this ID belongs to, so the row \
+                     would be gated everywhere and published nowhere; add its class to \
+                     `codegen::CLASSES`, or register the ID under a class that exists",
                     row.id
                 )));
             }
@@ -472,12 +849,413 @@ mod tests {
         model.check().expect("model checks");
     }
 
+    /// The Atlas dimensions and complete-carrier depth are derivations rather
+    /// than unchecked numerals in the model.
+    #[test]
+    fn atlas_and_naf_width_pins_are_falsifiable_cm_01() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.check().expect("the committed derivations agree");
+
+        model.widths.complete[0].atlas_pages += 1;
+        let e = model
+            .check()
+            .expect_err("an Atlas page count that is one too large must fail");
+        assert!(e.to_string().contains("Atlas word"), "{e}");
+        model.widths.complete[0].atlas_pages -= 1;
+
+        // Refinement cardinality stays symbolic.  A context wider than a
+        // machine integer therefore remains a valid model instance; only the
+        // finite source support determines how many address words it visits.
+        model.constants.atlas.context = 512;
+        let page_sites =
+            derive::atlas_page_sites(model.constants.atlas.scope, model.constants.atlas.context);
+        for complete in &mut model.widths.complete {
+            complete.atlas_pages = derive::atlas_pages(complete.naf_sites, page_sites);
+        }
+        model
+            .check()
+            .expect("symbolic refinement has no machine-word context ceiling");
+
+        model.constants.atlas.context = 0;
+        let e = model
+            .check()
+            .expect_err("a context with no centered block must fail");
+        assert!(e.to_string().contains("Atlas dimensions"), "{e}");
+    }
+
+    /// The capacity pin owns both generated consumers and refuses an empty or
+    /// unproven declaration. Its equality with the live family maximum is the
+    /// independent CG-22 differential in `uor-matmul-kernels`.
+    #[test]
+    fn kernel_capacity_generates_one_complete_dispatch_interval_cm_01() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.check().expect("the committed capacity is valid");
+
+        let maximum = model.constants.kernel_capacity.max_tile_lanes;
+        let dispatch = codegen::render_atlas_dispatch(&model);
+        for capacity in 1..maximum {
+            let arm = format!("{capacity} => $execute!({capacity}),");
+            assert_eq!(
+                dispatch.matches(&arm).count(),
+                1,
+                "every nonterminal capacity is emitted exactly once"
+            );
+        }
+        assert_eq!(
+            dispatch
+                .matches("MAX_TILE_LANES => $execute!(MAX_TILE_LANES),")
+                .count(),
+            1
+        );
+        assert!(codegen::render_kernel_capacity(&model)
+            .contains(&format!("MAX_TILE_LANES: usize = {maximum};")));
+        let source_sites = model.constants.kernel_capacity.max_source_sites;
+        assert!(codegen::render_kernel_capacity(&model)
+            .contains(&format!("MAX_ATLAS_SOURCE_SITES: usize = {source_sites};")));
+        assert!(codegen::render_atlas_dispatch(&model)
+            .contains(&format!("MAX_ATLAS_SOURCE_SITES: usize = {source_sites};")));
+
+        model.constants.kernel_capacity.max_tile_lanes = 0;
+        let error = model
+            .check()
+            .expect_err("an empty generated interval cannot dispatch a physical tile");
+        assert!(error.to_string().contains("no output cells"), "{error}");
+
+        model.constants.kernel_capacity.max_tile_lanes = maximum;
+        model.constants.kernel_capacity.max_source_sites = 0;
+        let error = model
+            .check()
+            .expect_err("an empty generated source frame cannot hold a kernel");
+        assert!(error.to_string().contains("no source sites"), "{error}");
+
+        model.constants.kernel_capacity.max_source_sites = source_sites;
+        model.constants.kernel_capacity.source.clear();
+        let error = model
+            .check()
+            .expect_err("a derived capacity without provenance is not a model value");
+        assert!(
+            error.to_string().contains("no derivation provenance"),
+            "{error}"
+        );
+    }
+
+    /// The generated kernel artifact may use the measured cache line only as
+    /// a private layout alignment. Invalid Rust alignments and missing
+    /// measurement provenance each fail before code generation can make them
+    /// source literals.
+    #[test]
+    fn kernel_capacity_generates_model_owned_cache_alignment_cm_01() {
+        let model = Model::load_from_repo_root().expect("model loads");
+        model.check().expect("the committed cache alignment checks");
+        let alignment = model.constants.blocking.cache_line_bytes;
+        let generated = codegen::render_kernel_capacity(&model);
+        assert_eq!(
+            generated
+                .matches(&format!("#[repr(align({alignment}))]"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            generated
+                .matches(&format!("CACHE_LINE_BYTES: usize = {alignment};"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            generated
+                .matches("pub(crate) struct CacheAligned<T>(pub(crate) T);")
+                .count(),
+            1
+        );
+        assert_eq!(
+            generated
+                .matches("impl<T> core::ops::Deref for CacheAligned<T>")
+                .count(),
+            1
+        );
+        assert!(generated.contains("#[inline(always)]\n    fn deref(&self) -> &Self::Target"));
+        assert!(generated.contains("[blocking] cache_line_bytes"));
+
+        for invalid in [0usize, 63] {
+            let mut model = Model::load_from_repo_root().expect("model loads");
+            model.constants.blocking.cache_line_bytes = invalid;
+            let error = model
+                .check()
+                .expect_err("a zero or non-radix cache alignment must fail");
+            assert!(
+                error
+                    .to_string()
+                    .contains("power-of-two Rust representation alignment"),
+                "{error}"
+            );
+        }
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.blocking.cache_line_bytes = 1usize << 30;
+        let error = model
+            .check()
+            .expect_err("an alignment beyond Rust's representation range must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("maximum representation alignment"),
+            "{error}"
+        );
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.blocking.allowlisted_from_r1 = false;
+        let error = model
+            .check()
+            .expect_err("a measured alignment without its allowlist provenance must fail");
+        assert!(
+            error.to_string().contains("allowlist provenance"),
+            "{error}"
+        );
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.blocking.reason.clear();
+        let error = model
+            .check()
+            .expect_err("a measured alignment without an allowlist reason must fail");
+        assert!(
+            error.to_string().contains("allowlist provenance"),
+            "{error}"
+        );
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.blocking.cache_line_bytes = 128;
+        model
+            .check()
+            .expect("another valid measured alignment is parametric");
+        let generated = codegen::render_kernel_capacity(&model);
+        assert!(generated.contains("CACHE_LINE_BYTES: usize = 128;"));
+        assert!(generated.contains("#[repr(align(128))]"));
+    }
+
+    /// CU-11's prefix is an honest measurement, while its unreduced carrier
+    /// width is derived. Every field has an independently failing mutation so
+    /// neither the open provenance nor the overflow proof can become inert.
+    #[test]
+    fn measured_column_hash_prefix_is_open_generated_and_falsifiable_cu_11() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model
+            .check()
+            .expect("the committed hash measurement checks");
+        assert_eq!(model.constants.column_hash.level, Level::Open);
+        assert_eq!(model.constants.column_hash.prefix, 16);
+        assert_eq!(model.constants.column_hash.accumulator_bits, 90);
+        assert!(codegen::render_atlas_dispatch(&model)
+            .contains("pub(crate) const COLUMN_HASH_PREFIX: usize = 16;"));
+
+        model.constants.column_hash.level = Level::Build;
+        let error = model
+            .check()
+            .expect_err("a measured prefix cannot claim build honesty");
+        assert!(error.to_string().contains("must remain open"), "{error}");
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.column_hash.prefix = 0;
+        let error = model
+            .check()
+            .expect_err("an empty measured prefix cannot filter a coordinate");
+        assert!(
+            error.to_string().contains("at least one coordinate"),
+            "{error}"
+        );
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.column_hash.source.clear();
+        let error = model
+            .check()
+            .expect_err("a measured prefix needs retained-clock provenance");
+        assert!(error.to_string().contains("provenance"), "{error}");
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.column_hash.accumulator_bits -= 1;
+        let error = model
+            .check()
+            .expect_err("a narrowed recurrence carrier pin must fail");
+        assert!(error.to_string().contains("accumulator bits"), "{error}");
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.constants.column_hash.prefix = 64;
+        let error = model
+            .check()
+            .expect_err("a prefix whose exact recurrence exceeds u128 must fail");
+        assert!(
+            error.to_string().contains("does not fit its u128 carrier"),
+            "{error}"
+        );
+    }
+
+    /// The shared tail preserves the former three independent public flag
+    /// fields, so its reserved state count is the number of their nonempty
+    /// unions rather than a hand-picked list of canonical IEEE results.
+    #[test]
+    fn complete_tail_nonfinite_state_space_is_derived_cs_13() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model
+            .check()
+            .expect("the committed tail state space is valid");
+
+        let state = &model.widths.complete_state;
+        assert_eq!(state.nonfinite_flag_count, 3);
+        assert_eq!(
+            state.nonfinite_states,
+            derive::complete_nonfinite_states(state.nonfinite_flag_count)
+        );
+        let generated = codegen::render(&model);
+        for witness in [
+            "const BASE: i64 = i64::MIN;",
+            "const NAN_MASK: u8 = 1;",
+            "const POS_INF_MASK: u8 = 2;",
+            "const NEG_INF_MASK: u8 = 4;",
+            "const COUNT: u32 = 7;",
+        ] {
+            assert!(
+                generated.contains(witness),
+                "the generated tail omits `{witness}`"
+            );
+        }
+
+        model.widths.complete_state.nonfinite_states = 3;
+        let error = model
+            .check()
+            .expect_err("the planted canonical-only state count must fail");
+        assert!(error.to_string().contains("nonempty unions"), "{error}");
+
+        model.widths.complete_state.nonfinite_states = 7;
+        model.widths.complete_state.nonfinite_flag_count = 2;
+        let error = model
+            .check()
+            .expect_err("the planted dropped public flag must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("preserves three former non-finite flags"),
+            "{error}"
+        );
+    }
+
+    /// CD-32's carrier constants are consequences of the binary32 coefficient
+    /// and grade ranges plus Complete's seven non-finite unions. Each mutation
+    /// below leaves a syntactically valid model and must still be rejected.
+    #[test]
+    fn total_f32_q_carrier_pins_are_falsifiable_cd_32() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model
+            .check()
+            .expect("the committed carrier geometry checks");
+        let q = &model.widths.f32_q_carrier;
+        assert_eq!(q.product_bound, 281_474_943_156_225);
+        assert_eq!(q.relative_grade_count, 507);
+        assert_eq!(q.signed_finite_states, 1_014);
+        assert_eq!(q.state_count, 1_021);
+        assert_eq!(q.state_bits, 10);
+        assert_eq!(q.tag_payload_bits, 58);
+        assert_eq!(q.tag_base, 0x7c00_0000_0000_0000);
+        assert_eq!(q.compact_ceiling, q.tag_base - 1);
+        assert_eq!(q.zero_span_capacity, 31_744);
+
+        let kernels = codegen::render_kernel_capacity(&model);
+        let gemm = codegen::render_atlas_dispatch(&model);
+        for witness in [
+            "pub(crate) mod f32_q",
+            "const PRODUCT_BOUND: u64 = 281474943156225;",
+            "const STATE_COUNT: u32 = 1021;",
+            "const TAG_BASE: u64 = 8935141660703064064;",
+            "const COMPACT_CEILING: u64 = 8935141660703064063;",
+            "const ZERO_SPAN_CAPACITY: u64 = 31744;",
+            "const MAGNITUDE_RADIX: u64 = 281474976710656;",
+            "const SPLIT_STATE: u32 = 1021;",
+        ] {
+            assert!(kernels.contains(witness), "kernel view lacks `{witness}`");
+            assert!(gemm.contains(witness), "gemm view lacks `{witness}`");
+        }
+
+        model.widths.f32_q_carrier.product_bound -= 1;
+        let error = model
+            .check()
+            .expect_err("a narrowed coefficient product bound must fail");
+        assert!(error.to_string().contains("product bound"), "{error}");
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.widths.f32_q_carrier.state_count -= 1;
+        let error = model
+            .check()
+            .expect_err("dropping one Complete state must fail");
+        assert!(error.to_string().contains("Complete unions"), "{error}");
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.widths.f32_q_carrier.tag_base += 1;
+        let error = model
+            .check()
+            .expect_err("moving the top-positive interval must fail");
+        assert!(error.to_string().contains("tag base"), "{error}");
+
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.widths.f32_q_carrier.zero_span_capacity -= 1;
+        let error = model
+            .check()
+            .expect_err("an inexact compact capacity must fail");
+        assert!(error.to_string().contains("zero-span capacity"), "{error}");
+    }
+
     /// CM-02: every registered ID is unique and well formed.
     #[test]
     fn the_id_register_is_well_formed_cm_02() {
         let model = Model::load_from_repo_root().expect("model loads");
         model.check().expect("model checks");
         assert!(model.ids.id.len() > 50, "the register is the whole of §2.1");
+    }
+
+    /// CM-02: a row whose class `CONFORMANCE.md` does not render is refused
+    /// rather than skipped.
+    ///
+    /// This is the one omission the index cannot report about itself: an
+    /// unrendered row leaves the rendered bytes and the committed bytes
+    /// equally silent, so `check-model`'s byte comparison passes over it. The
+    /// refusal is therefore asserted here, with the committed register as the
+    /// control that the rule admits every class actually in use.
+    #[test]
+    fn a_class_the_index_does_not_render_is_refused_cm_02() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model
+            .check()
+            .expect("every committed row names a rendered class");
+
+        let mut planted = model.ids.id[0].clone();
+        planted.id = "CZ-01".to_string();
+        model.ids.id.push(planted);
+        let e = model
+            .check()
+            .expect_err("a class the index does not render is refused");
+        let text = e.to_string();
+        assert!(text.contains("CZ-01"), "{text}");
+        assert!(text.contains("codegen::CLASSES"), "{text}");
+    }
+
+    /// CM-02, R4: a row that names no refutation condition does not ship,
+    /// in the ID register and in the ledger alike.
+    ///
+    /// Whitespace rather than an empty string, because a condition spelled as
+    /// a space is exactly the omission that would otherwise read as a value.
+    #[test]
+    fn a_claim_with_no_refutation_condition_is_refused_cm_02() {
+        let mut model = Model::load_from_repo_root().expect("model loads");
+        model.check().expect("every committed row states one");
+
+        let restore = model.ids.id[0].refuted_by.clone();
+        model.ids.id[0].refuted_by = "   ".to_string();
+        let e = model.check().expect_err("an ID row with none is refused");
+        assert!(e.to_string().contains("not falsifiable"), "{e}");
+        model.ids.id[0].refuted_by = restore;
+
+        model.ledger.claim[0].refuted_by = String::new();
+        let e = model
+            .check()
+            .expect_err("a ledger row with none is refused");
+        assert!(e.to_string().contains("not falsifiable"), "{e}");
     }
 
     /// CM-03: every `some-true` claim cites an authority that exists.

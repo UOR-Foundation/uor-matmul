@@ -108,6 +108,11 @@ pub struct KernelSpec<E, L> {
     /// multiple of this with the alphabet's zero, which contributes nothing to
     /// the sum and nothing to the lane. An arbitrary `k` therefore takes this
     /// path and not a different one, and no kernel has a `k`-tail (S8).
+    ///
+    /// The float Atlas selector can consume only the one-coordinate layout.
+    /// `CU-11` audits the selector's possible winners, including list-order
+    /// ties, so this structural admission cannot mistake an earlier legacy
+    /// sequence for the later lookup declaration that dominates it.
     pub k_group: usize,
     /// How many products this sequence computes per issued instruction.
     ///
@@ -124,10 +129,23 @@ pub struct KernelSpec<E, L> {
     /// It cannot change a value --- it is a claim about instructions, and
     /// `CD-01` asserts every traversal gives the same bytes whatever it says.
     pub products_per_step: usize,
-    /// The largest magnitude one lane holds.
+    /// The magnitude at which one lane fills, and therefore what bounds its
+    /// depth.
     ///
     /// Ignored for [`Factorization::Modular`], where the lane wraps by design
     /// and the depth is unbounded.
+    ///
+    /// `u128::MAX` names a lane that **does not fill**, and so has no depth to
+    /// bound. That is the same spelling and the same meaning
+    /// [`crate::TableSpec::lane_cap`] already carries, so it is one convention
+    /// rather than two. A `(max, +)` sequence declares it: `⊕` is a selection,
+    /// which has no per-step growth, so `max_p (a_p ⊗ b_p)` is bounded by
+    /// `max_p a_p ⊗ max_p b_p` whatever `k` is --- the same fact
+    /// `uor_matmul_core::trop_acc_bits` states by having no depth term
+    /// (`CA-04`). The magnitude such a lane actually reaches is a property of
+    /// its packed representation and is pinned there, by
+    /// `crate::tropical`'s own const assertions, rather than here, because here
+    /// it would be read as a depth answer and it is not one.
     pub lane_cap: u128,
     /// The widest alphabet bound at which this sequence is exact.
     ///
@@ -147,7 +165,8 @@ pub struct KernelSpec<E, L> {
     /// factorization's: which instructions are admissible is a question about
     /// the caller's declarations, never about the data (R13).
     pub max_bound: u128,
-    /// Accumulate an `mr x nr` tile of `C` over a `kc`-deep packed panel pair.
+    /// Write an `mr x nr` tile of `C` reduced over a `kc`-deep packed panel
+    /// pair. Every lane is overwritten; its incoming bytes are not an addend.
     ///
     /// # Safety
     ///
@@ -204,9 +223,14 @@ impl<E, L> KernelSpec<E, L> {
     ///
     /// A question about a register, not a limit on `k`: a deeper accumulation
     /// is split into more chunks, and the chunks combine exactly. For a modular
-    /// lane there is nothing to bound --- the wrap *is* the encode.
+    /// lane there is nothing to bound --- the wrap *is* the encode --- and for a
+    /// lane that declares [`Self::lane_cap`] as `u128::MAX` there is nothing to
+    /// bound either, because it does not fill: a `(max, +)` sequence's `⊕` is a
+    /// selection, which has no per-step growth, so the register that holds one
+    /// product holds the whole reduction (`CA-04`). Both are the same early
+    /// return [`crate::TableSpec::lane_depth`] takes, for the same two reasons.
     pub fn lane_depth(&self, bound: u128) -> usize {
-        if matches!(self.factorization, Factorization::Modular) {
+        if matches!(self.factorization, Factorization::Modular) || self.lane_cap == u128::MAX {
             return usize::MAX;
         }
         let per_step = bound.saturating_mul(bound); // R3-ok: a lane-width question, not an accumulation
@@ -269,8 +293,20 @@ macro_rules! count {
 /// rather than re-running a chain of predicates; on a host where the
 /// predicates *are* compile-time constants the two forms measure the same.
 macro_rules! family {
-    ($(#[$meta:meta])* $name:ident, $cached:ident, $cache:ident, $E:ty, $L:ty;
+    ($(#[$meta:meta])* $name:ident, $all:ident, $cached:ident, $cache:ident, $E:ty, $L:ty;
      $($cond:expr => $spec:expr),* $(,)?) => {
+        // The assertion is generated beside every entry, so adding a backend
+        // remains one line and cannot bypass the model-owned frame capacity.
+        const _: () = {
+            $(
+                assert!($spec.mr * $spec.nr <= MAX_TILE_LANES);
+                assert!(
+                    $spec.mr + $spec.nr
+                        <= crate::generated_capacity::MAX_ATLAS_SOURCE_SITES
+                );
+            )*
+        };
+
         #[cfg(feature = "std")]
         static $cache: std::sync::OnceLock<(
             [Option<KernelSpec<$E, $L>>; count!($($spec),*)],
@@ -281,6 +317,15 @@ macro_rules! family {
         #[inline]
         pub fn $name() -> impl Iterator<Item = KernelSpec<$E, $L>> {
             collect![$($cond => $spec),*]
+        }
+
+        // Verification needs the declarations, not merely the subset this
+        // host can execute. Generating the test-only walk from the same entry
+        // list preserves the one-line backend rule and makes model capacity
+        // exactness independent of runtime feature detection.
+        #[cfg(test)]
+        fn $all() -> impl Iterator<Item = KernelSpec<$E, $L>> {
+            core::iter::empty()$(.chain(core::iter::once($spec)))*
         }
 
         #[doc(hidden)]
@@ -314,7 +359,7 @@ macro_rules! family {
 /// rather than overflowing a buffer. That is what keeps it a derivation and not
 /// a ceiling --- there is no input that can reach it, and no way to add a
 /// kernel that quietly exceeds it.
-pub const MAX_TILE_LANES: usize = 8 * 16;
+pub const MAX_TILE_LANES: usize = crate::generated_capacity::MAX_TILE_LANES;
 
 /// Assert at compile time that a kernel's tile fits [`MAX_TILE_LANES`].
 #[macro_export]
@@ -329,15 +374,24 @@ macro_rules! tile_fits {
 
 family! {
     /// Every `i8 x i8 -> i32` kernel this build can run, portable first.
-    available_i8, cached_i8, I8_TILE, i8, i32;
+    available_i8, all_i8, cached_i8, I8_TILE, i8, i32;
     true => crate::isa::portable::I8_I32,
+    // The one-row lookup is available to the Atlas layout walk. Keeping it
+    // before the established grouped entry preserves ordinary i8's later-on-
+    // equal-height selection exactly; CU-11 audits both orderings.
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_I8_I32_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_I8_I32,
     crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPWSSD_I8_I32,
     crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_DPBUSD_I8_I32,
+    crate::isa::x86::avx512vnni_available() => crate::isa::x86::AVX512_LOOKUP_I8_I32,
     crate::isa::arm::neon_available() => crate::isa::arm::NEON_I8_I32,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_LOOKUP_I8_I32,
     crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_I8_I32,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_LOOKUP_I8_I32,
     crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_I8_I32,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_LOOKUP_I8_I32,
 }
 
 family! {
@@ -349,7 +403,7 @@ family! {
     /// `32767`; the widening sequence is exact at every `i16` and issues more
     /// instructions. The paired one is listed last so that a declaration admitting
     /// it gets it.
-    available_i16, cached_i16, I16_TILE, i16, i64;
+    available_i16, all_i16, cached_i16, I16_TILE, i16, i64;
     true => crate::isa::portable::I16_I64,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_I64_FULL,
@@ -363,7 +417,7 @@ family! {
     /// The product of two `i32` needs 62 bits, so the lane must be 64.
     /// `_mm256_mul_epi32` is a signed `32x32 -> 64` multiply, which is this
     /// family's whole arithmetic in one instruction.
-    available_i32_exact, cached_i32_exact, I32_EXACT, i32, i64;
+    available_i32_exact, all_i32_exact, cached_i32_exact, I32_EXACT, i32, i64;
     true => crate::isa::portable::I32_I64,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_I64,
@@ -377,7 +431,7 @@ family! {
     /// The lane is `Z/2^32`. Legitimate exactly when the caller asked to encode by
     /// wrapping into a 32-bit output, because then the lane's own wrap *is* the
     /// encode and nothing is lost that the caller did not ask to lose.
-    available_i32_modular, cached_i32_modular, I32_MODULAR, i32, i32;
+    available_i32_modular, all_i32_modular, cached_i32_modular, I32_MODULAR, i32, i32;
     true => crate::isa::portable::I32_MOD,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I32_MOD,
@@ -388,10 +442,9 @@ family! {
     ///
     /// The product of two `i64` needs 128 bits, so the lane is an `i128`. No SIMD
     /// integer multiply reaches that width on any target this crate supports, so
-    /// the portable kernel is not a placeholder here --- it is the whole of what
-    /// the hardware offers, and packing still buys it the locality every other
-    /// family gets.
-    available_i64_exact, cached_i64_exact, I64_EXACT, i64, i128;
+    /// the portable kernel is the complete hardware-realizable sequence here,
+    /// and packing still buys it the locality every other family gets.
+    available_i64_exact, all_i64_exact, cached_i64_exact, I64_EXACT, i64, i128;
     true => crate::isa::portable::I64_I128,
 }
 
@@ -401,7 +454,7 @@ family! {
     /// Twice the lanes of the exact `i16` kernel, because in `Z/2^32` there is
     /// nothing to widen to: `madd` already lands in `i32` and the accumulation
     /// stays there.
-    available_i16_modular, cached_i16_modular, I16_MODULAR, i16, i32;
+    available_i16_modular, all_i16_modular, cached_i16_modular, I16_MODULAR, i16, i32;
     true => crate::isa::portable::I16_MOD,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD_M1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I16_MOD,
@@ -414,7 +467,7 @@ family! {
     /// lane and no SIMD integer multiply that reaches it. In the quotient there is:
     /// `Z/2^64` needs only the low half of each product, which is what a plain
     /// `wrapping_mul` gives.
-    available_i64_modular, cached_i64_modular, I64_MODULAR, i64, i64;
+    available_i64_modular, all_i64_modular, cached_i64_modular, I64_MODULAR, i64, i64;
     true => crate::isa::portable::I64_MOD,
 }
 
@@ -431,9 +484,11 @@ family! {
     /// them to the ordinary list lengthened every selection, including the calls
     /// that could never use one: measured, a hundred nanoseconds on a shape whose
     /// whole cost is a hundred and twenty.
-    available_i8_narrow, cached_i8_narrow, I8_NARROW, i8, i32;
+    available_i8_narrow, all_i8_narrow, cached_i8_narrow, I8_NARROW, i8, i32;
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_M1_N8,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_I8_I32_N8,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_I8_I32_M1_N8,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_I8_I32_N8,
 }
 
 family! {
@@ -449,22 +504,30 @@ family! {
     /// reduction factored across lanes instead of the output. `CB-06` asserts it
     /// agrees with the reference byte for byte, and the driver chooses between the
     /// two by comparing the shape against the tile, which is a declaration.
-    available_reduce_i8, cached_reduce_i8, REDUCE_I8, i8, i32;
+    available_reduce_i8, all_reduce_i8, cached_reduce_i8, REDUCE_I8, i8, i32;
     true => crate::isa::portable::R1_I8_I32,
     true => crate::isa::portable::R_I8_I32,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32_1,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I8_I32,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_R_I8_I32_1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_LOOKUP_R_I8_I32,
     crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32_1,
     crate::isa::arm::neon_available() => crate::isa::arm::NEON_R_I8_I32,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_LOOKUP_R_I8_I32_1,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_LOOKUP_R_I8_I32,
     crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32_1,
     crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_R_I8_I32,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_LOOKUP_R_I8_I32_1,
+    crate::isa::arm::dotprod_available() => crate::isa::arm::NEON_DOTPROD_LOOKUP_R_I8_I32,
     crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32_1,
     crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_R_I8_I32,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_LOOKUP_R_I8_I32_1,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_LOOKUP_R_I8_I32,
 }
 
 family! {
     /// Every exact `i16` reduce sequence. See [`available_reduce_i8`].
-    available_reduce_i16, cached_reduce_i16, REDUCE_I16, i16, i64;
+    available_reduce_i16, all_reduce_i16, cached_reduce_i16, REDUCE_I16, i16, i64;
     true => crate::isa::portable::R1_I16_I64,
     true => crate::isa::portable::R_I16_I64,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_I64_1,
@@ -473,7 +536,7 @@ family! {
 
 family! {
     /// Every modular `i16` reduce sequence. See [`available_reduce_i8`].
-    available_reduce_i16_modular, cached_reduce_i16_modular, REDUCE_I16_MODULAR, i16, i32;
+    available_reduce_i16_modular, all_reduce_i16_modular, cached_reduce_i16_modular, REDUCE_I16_MODULAR, i16, i32;
     true => crate::isa::portable::R1_I16_MOD,
     true => crate::isa::portable::R_I16_MOD,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I16_MOD_1,
@@ -482,7 +545,7 @@ family! {
 
 family! {
     /// Every exact `i32` reduce sequence. See [`available_reduce_i8`].
-    available_reduce_i32_exact, cached_reduce_i32_exact, REDUCE_I32_EXACT, i32, i64;
+    available_reduce_i32_exact, all_reduce_i32_exact, cached_reduce_i32_exact, REDUCE_I32_EXACT, i32, i64;
     true => crate::isa::portable::R1_I32_I64,
     true => crate::isa::portable::R_I32_I64,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_I64_1,
@@ -491,7 +554,7 @@ family! {
 
 family! {
     /// Every modular `i32` reduce sequence. See [`available_reduce_i8`].
-    available_reduce_i32_modular, cached_reduce_i32_modular, REDUCE_I32_MODULAR, i32, i32;
+    available_reduce_i32_modular, all_reduce_i32_modular, cached_reduce_i32_modular, REDUCE_I32_MODULAR, i32, i32;
     true => crate::isa::portable::R1_I32_MOD,
     true => crate::isa::portable::R_I32_MOD,
     crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_R_I32_MOD_1,
@@ -505,16 +568,106 @@ family! {
     /// on any supported target, so the reference is the whole of what the hardware
     /// offers --- but the reduce *traversal* still buys this family what it buys
     /// every other: a narrow output stops paying for columns that are not there.
-    available_reduce_i64_exact, cached_reduce_i64_exact, REDUCE_I64_EXACT, i64, i128;
+    available_reduce_i64_exact, all_reduce_i64_exact, cached_reduce_i64_exact, REDUCE_I64_EXACT, i64, i128;
     true => crate::isa::portable::R1_I64_I128,
     true => crate::isa::portable::R_I64_I128,
 }
 
 family! {
     /// Every modular `i64` reduce sequence. See [`available_reduce_i64_exact`].
-    available_reduce_i64_modular, cached_reduce_i64_modular, REDUCE_I64_MODULAR, i64, i64;
+    available_reduce_i64_modular, all_reduce_i64_modular, cached_reduce_i64_modular, REDUCE_I64_MODULAR, i64, i64;
     true => crate::isa::portable::R1_I64_MOD,
     true => crate::isa::portable::R_I64_MOD,
+}
+
+family! {
+    /// Every packed tropical `(max, +)` sequence this build can run.
+    ///
+    /// `max_p (a_p ⊗ b_p)` with `⊗` a saturating add and `⊕` a signed max, over
+    /// the packed `i16` lane [`crate::tropical`] derives. The second product of
+    /// the operation census, factored across vector lanes exactly as the first
+    /// one is --- and factored more cheaply, because a `max` has no carry and
+    /// no growth, so the lane the reference uses is the lane every sequence
+    /// uses and there is no widening step anywhere in the family.
+    ///
+    /// Every entry declares the same [`crate::tropical::TROP_I16_MAX_BOUND`],
+    /// the reference included, because here the bound belongs to the
+    /// representation rather than to an instruction. So [`choose`] never picks
+    /// between two alphabets in this family --- it picks between panel widths,
+    /// and past the declared bound it offers nothing at all, which is the
+    /// honest answer when the packing itself has run out.
+    ///
+    /// Deliberately no VNNI entry. VNNI is a *dot product* extension and a
+    /// `(max, +)` reduction issues no dot product, so it contributes no
+    /// operation to this family. The AVX2 declaration remains admissible on an
+    /// AVX-512 host and CB-13 pins that registered sequence to the reference.
+    available_tropical_i16, all_tropical_i16, cached_tropical_i16, TROPICAL_I16, i16, i16;
+    true => crate::isa::portable::TROP_I16,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_TROP_I16_M1,
+    crate::isa::x86::avx2_available() => crate::isa::x86::AVX2_TROP_I16,
+    crate::isa::arm::neon_available() => crate::isa::arm::NEON_TROP_I16,
+    crate::isa::wasm::simd128_available() => crate::isa::wasm::SIMD128_TROP_I16,
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    /// `CG-22`: the model-owned generated capacity has neither overflow risk
+    /// nor unused headroom. The declarations walk ignores host availability,
+    /// so every one-line family entry participates on every test host.
+    #[test]
+    fn declared_host_kernel_families_fit_generated_capacity_cg_22() {
+        macro_rules! maxima {
+            ($family:ident) => {
+                $family()
+                    .map(|spec| (spec.mr * spec.nr, spec.mr + spec.nr))
+                    .reduce(|left, right| (left.0.max(right.0), left.1.max(right.1)))
+                    .expect("every declared kernel family is nonempty")
+            };
+        }
+        let family_maxima = [
+            maxima!(all_i8),
+            maxima!(all_i16),
+            maxima!(all_i32_exact),
+            maxima!(all_i32_modular),
+            maxima!(all_i64_exact),
+            maxima!(all_i16_modular),
+            maxima!(all_i64_modular),
+            maxima!(all_i8_narrow),
+            maxima!(all_reduce_i8),
+            maxima!(all_reduce_i16),
+            maxima!(all_reduce_i16_modular),
+            maxima!(all_reduce_i32_exact),
+            maxima!(all_reduce_i32_modular),
+            maxima!(all_reduce_i64_exact),
+            maxima!(all_reduce_i64_modular),
+            maxima!(all_tropical_i16),
+        ];
+        let declared_cells = family_maxima
+            .into_iter()
+            .map(|(cells, _)| cells)
+            .max()
+            .expect("the kernel registry contains families");
+        let declared_sources = family_maxima
+            .into_iter()
+            .map(|(_, sources)| sources)
+            .max()
+            .expect("the kernel registry contains families");
+        assert!(declared_cells <= MAX_TILE_LANES);
+        assert!(declared_sources <= crate::generated_capacity::MAX_ATLAS_SOURCE_SITES);
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(
+                declared_cells, MAX_TILE_LANES,
+                "the host containing the global maximum must leave no headroom"
+            );
+            assert_eq!(
+                declared_sources,
+                crate::generated_capacity::MAX_ATLAS_SOURCE_SITES,
+                "the host containing the global maximum must leave no source-site headroom"
+            );
+        }
+    }
 }
 
 /// The same lists, with each family's resolved once per process instead of
@@ -564,6 +717,8 @@ pub mod cached {
     pub use super::cached_reduce_i64_modular as available_reduce_i64_modular;
     /// The `i8` reduce list, resolved once per process.
     pub use super::cached_reduce_i8 as available_reduce_i8;
+    /// The packed tropical `(max, +)` list, resolved once per process.
+    pub use super::cached_tropical_i16 as available_tropical_i16;
 
     /// How many availability lists this process has materialized.
     ///
@@ -627,9 +782,25 @@ pub fn choose_for_rows<E, L>(
                 spec.mr <= rows && spec.mr >= b.mr
             }
         } else {
-            // A later entry is a wider backend --- take it, unless the caller
-            // named one and this is already it.
-            !(requested != Backend::Auto && b.backend == requested)
+            // A later entry is a wider backend, but not when its panel would
+            // be padded and the incumbent would fill the declared height.
+            // This comparison has to happen before backend preference: an
+            // eight-row dot-product tile is not a wider factorization of a
+            // four-row product when the four-row NEON tile is available.
+            if requested == Backend::Auto {
+                let spec_fills = spec.mr <= rows;
+                let best_fills = b.mr <= rows;
+                if spec_fills != best_fills {
+                    spec_fills
+                } else {
+                    true
+                }
+            } else {
+                // A named backend remains authoritative once selected; if it
+                // has no admissible entry, the later entries still provide the
+                // same value rather than making selection fail.
+                !(b.backend == requested)
+            }
         };
         if take {
             best = Some(spec);

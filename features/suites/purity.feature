@@ -53,3 +53,15 @@ Feature: Purity
     Given the standing corpus
     When the suite exercises CU-08
     Then the claim holds byte for byte
+
+  @CU-10 @build
+  Scenario: No tropical sequence issues a multiply, read from the emitted instructions
+    Given the standing corpus
+    When the suite exercises CU-10
+    Then the claim holds byte for byte
+
+  @CU-11 @build
+  Scenario: The post-decode and pre-encode float call graph contains only the declared UOR operation census
+    Given every shipped pure-UOR float body, the total q producer, column dictionary, TableBuild, portable gathers, and their emitted call graph
+    When the suite audits the reachable operations for CU-11
+    Then q contraction visits only occupied fractal grades from the highest grade, and no legacy limb placement, scalar support-mask route, hash seed or value multiply, packed shift, mask, XOR, bit scan, float arithmetic, undeclared operation, or reserve route is reachable

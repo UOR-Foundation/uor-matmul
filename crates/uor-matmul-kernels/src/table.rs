@@ -35,7 +35,7 @@
 //! Every buffer is the caller's. These functions take pointers and lengths and
 //! own nothing.
 
-use uor_matmul_core::{Accumulator, Backend, Element, FloatElement};
+use uor_matmul_core::{Accumulator, Backend, Element};
 
 use crate::MAX_TILE_LANES;
 
@@ -258,10 +258,16 @@ pub trait Lane<E: Element>: LaneWord {
     /// licenses for the tile kernels.
     fn capacity(b: u128) -> Option<usize>;
 
-    /// Accumulate one exact product. The only multiply the table issues ---
-    /// and at bound 1 not even this one: [`portable_table_bound1`] fills the
-    /// same slot with adds and subtracts, because there every product is
-    /// `+-a` or `0` (`CB-10`).
+    /// Accumulate one exact product. The arguments are the element-sized panel
+    /// cells declared by the table family: ordinarily the elements themselves;
+    /// for a contextual projection such as `Scaled64`, the paired producer's
+    /// in-place spelling. The latter is valid only as that producer/consumer
+    /// composition, whose placement must equal the element product exactly.
+    ///
+    /// This is the only product contraction the generic build issues --- and
+    /// at bound 1 not even this one: [`portable_table_bound1`] fills the same
+    /// slot with adds and subtracts, because there every product is `+-a` or
+    /// `0` (`CB-10`).
     fn mac(self, a: E, w: E) -> Self;
 
     /// Place a completed run into the exact accumulator.
@@ -532,27 +538,25 @@ impl Lane<i64> for Mod64 {
     }
 }
 
-/// The float symbol lane: an `i64` word over pre-scaled `f32` significands.
+/// The total contextual Atlas lane for symbol-tabulated `f32`.
 ///
-/// The newtype exists for the reason [`Mod32`]'s does: the blanket
-/// `impl<E: Element> Lane<E> for i64` above already speaks for `i64`-as-lane
-/// with *exact full-alphabet* semantics, and for a float that reading is a
-/// stub --- a float has no magnitude for its bound to measure. This lane is a
-/// different contract on the same register width. The driver pre-scales the
-/// codebook and the activation tile to the panels' measured base exponents
-/// (the placement bridge's span walk, the same declaration discipline), so
-/// what `mac` receives are honest `f32` values that are exact integers below
-/// `2^31`; the product of two is an exact integer below `2^62`; and a run of
-/// them is exact for the depth the walk's per-side bounds declare. Placement
-/// is the accumulator's own `add_scaled` at `base_a + base_b`, reached through
-/// [`Lane::place_scaled`] --- the identity the bridge cashes, with the table
-/// doing the reduction: scaled significands are exact integers, tabulation is
-/// regrouping, and the sum is placed once per run (`CD-20`).
+/// Each in-place panel cell retains the source sign and fraction beside a
+/// relative q grade. [`Lane::mac`] contracts the two significands through the
+/// complete signed-octet lookup alphabet. A product that fits the established
+/// common-grade interval remains the incumbent compact coefficient; otherwise
+/// the top-positive model-derived interval carries its unshifted magnitude,
+/// relative grade, and sign. The same interval also carries every Complete
+/// non-finite union and one `SPLIT` marker used to scalar-fracture an unsafe
+/// aggregate codec word. [`Lane::place_scaled`] resolves either spelling once
+/// at `base_a + base_b` (`CD-32`).
 ///
-/// Admission is the driver's, asked once per call and never by this type: a
-/// non-finite code, a span past seven binades, or an `f64` significand is not
-/// this lane's alphabet, and those calls tabulate in no lane at all --- the
-/// dense float factorization answers for them, at the same bytes.
+/// The public transparent word and contextual trait signatures are unchanged.
+/// Their nominal `f32` inputs are q cells produced by the paired tabulation
+/// projection, not standalone IEEE operands; only that producer/consumer
+/// composition has meaning. The locked trait surface cannot express that
+/// distinction in its argument types, so this is deliberately not a claim
+/// that an arbitrary standalone `f32` is a q cell. No additional carrier,
+/// allocation, or copy exists.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(transparent)]
 pub struct Scaled64(pub i64);
@@ -572,69 +576,1344 @@ impl Scaled64 {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum F32QFactor {
+    Finite {
+        magnitude: u32,
+        grade: u32,
+        negative: bool,
+    },
+    Infinite {
+        negative: bool,
+    },
+    NotANumber,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum F32QToken {
+    Compact(i64),
+    Finite {
+        magnitude: u64,
+        grade: u32,
+        negative: bool,
+    },
+    Nonfinite(u8),
+    Split,
+}
+
+#[inline(always)]
+fn atlas_power_of_two_u32(bits: u32) -> u32 {
+    let mut value = 1u32;
+    for _ in 0..bits {
+        value = value.wrapping_add(value);
+    }
+    value
+}
+
+#[inline(always)]
+fn atlas_double_u64(mut value: u64, times: u32) -> u64 {
+    for _ in 0..times {
+        value = value.wrapping_add(value);
+    }
+    value
+}
+
+/// Decode the contextual binary32 cell by its two radix boundaries.
+///
+/// The conversion to `u32` is the symbol boundary. Everything after it is
+/// quotient, remainder, and addition in the Atlas address; no mask, shift, or
+/// floating-point operation participates in the contraction.
+#[inline(always)]
+fn decode_f32_q_factor(value: f32) -> F32QFactor {
+    use crate::generated_capacity::f32_q;
+
+    let raw: u32 = bytemuck::cast::<f32, u32>(value);
+    let sign_place = atlas_power_of_two_u32(u32::BITS - 1);
+    let negative = raw >= sign_place;
+    let unsigned = if negative { raw - sign_place } else { raw };
+    let fraction_place = atlas_power_of_two_u32(f32_q::SIGNIFICAND_BITS - 1);
+    let q = unsigned / fraction_place;
+    let fraction = unsigned % fraction_place;
+    let maximum_relative =
+        u32::try_from(f32_q::MAX_FACTOR_EXP - f32_q::MIN_FACTOR_EXP).unwrap_or(u32::MAX);
+    let special_q = maximum_relative.wrapping_add(2);
+
+    if q == special_q {
+        if fraction == 0 {
+            F32QFactor::Infinite { negative }
+        } else {
+            F32QFactor::NotANumber
+        }
+    } else if q == 0 {
+        F32QFactor::Finite {
+            magnitude: fraction,
+            grade: 0,
+            negative,
+        }
+    } else {
+        F32QFactor::Finite {
+            magnitude: fraction_place.wrapping_add(fraction),
+            grade: q - 1,
+            negative,
+        }
+    }
+}
+
+#[inline(always)]
+fn f32_q_nonfinite_states() -> u32 {
+    use crate::generated_capacity::f32_q;
+    f32_q::STATE_COUNT - f32_q::SIGNED_FINITE_STATES
+}
+
+#[inline(always)]
+fn f32_q_nonfinite_flag_count() -> u32 {
+    let states = f32_q_nonfinite_states();
+    let mut cardinality = 1u32;
+    let mut flags = 0u32;
+    while cardinality - 1 < states {
+        cardinality = cardinality.wrapping_add(cardinality);
+        flags = flags.wrapping_add(1);
+    }
+    flags
+}
+
+#[inline(always)]
+fn f32_q_flag_place(ordinal: u32) -> u8 {
+    let mut place = 1u8;
+    for _ in 0..ordinal {
+        place = place.wrapping_add(place);
+    }
+    place
+}
+
+#[inline(always)]
+fn f32_q_has_flag(flags: u8, ordinal: u32) -> bool {
+    let place = f32_q_flag_place(ordinal);
+    let binary_radix = 1u8.wrapping_add(1);
+    !(flags / place).is_multiple_of(binary_radix)
+}
+
+#[inline(always)]
+fn f32_q_union_flags(left: u8, right: u8) -> u8 {
+    let mut union = 0u8;
+    for ordinal in 0..f32_q_nonfinite_flag_count() {
+        if f32_q_has_flag(left, ordinal) || f32_q_has_flag(right, ordinal) {
+            union = union.wrapping_add(f32_q_flag_place(ordinal));
+        }
+    }
+    union
+}
+
+#[inline(always)]
+fn f32_q_nan_flags() -> u8 {
+    f32_q_flag_place(0)
+}
+
+#[inline(always)]
+fn f32_q_infinity_flags(negative: bool) -> u8 {
+    f32_q_flag_place(if negative { 2 } else { 1 })
+}
+
+#[inline(always)]
+fn f32_q_finite_state(grade: u32, negative: bool) -> u32 {
+    use crate::generated_capacity::f32_q;
+
+    let signs = f32_q::SIGNED_FINITE_STATES / f32_q::RELATIVE_GRADE_COUNT;
+    let mut state = 0u32;
+    for _ in 0..signs {
+        state = state.wrapping_add(grade);
+    }
+    state.wrapping_add(u32::from(negative))
+}
+
+#[inline(always)]
+fn f32_q_tag(state: u32, magnitude: u64) -> Scaled64 {
+    use crate::generated_capacity::f32_q;
+
+    debug_assert_eq!(
+        f32_q::PRODUCT_MAGNITUDE_BITS.wrapping_add(f32_q::STATE_BITS),
+        f32_q::TAG_PAYLOAD_BITS
+    );
+    debug_assert!(magnitude < f32_q::MAGNITUDE_RADIX);
+    let state_place = atlas_double_u64(state.into(), f32_q::PRODUCT_MAGNITUDE_BITS);
+    let raw = f32_q::TAG_BASE
+        .wrapping_add(state_place)
+        .wrapping_add(magnitude);
+    debug_assert!(raw < f32_q::TAG_BASE.wrapping_add(f32_q::TAG_INTERVAL));
+    Scaled64(raw as i64)
+}
+
+#[inline(always)]
+fn f32_q_split() -> Scaled64 {
+    use crate::generated_capacity::f32_q;
+    f32_q_tag(f32_q::SPLIT_STATE, 0)
+}
+
+#[inline(always)]
+fn f32_q_nonfinite(flags: u8) -> Scaled64 {
+    use crate::generated_capacity::f32_q;
+
+    debug_assert!(flags != 0);
+    debug_assert!(u32::from(flags) <= f32_q_nonfinite_states());
+    let state = f32_q::SIGNED_FINITE_STATES
+        .wrapping_add(u32::from(flags))
+        .wrapping_sub(1);
+    f32_q_tag(state, 0)
+}
+
+#[inline(always)]
+fn decode_f32_q_token(word: Scaled64) -> F32QToken {
+    use crate::generated_capacity::f32_q;
+
+    if word.0 < 0 {
+        return F32QToken::Compact(word.0);
+    }
+    let raw = word.0 as u64;
+    if raw < f32_q::TAG_BASE {
+        return F32QToken::Compact(word.0);
+    }
+    let payload = raw - f32_q::TAG_BASE;
+    if payload >= f32_q::TAG_INTERVAL {
+        return F32QToken::Nonfinite(f32_q_nan_flags());
+    }
+    let state = u32::try_from(payload / f32_q::MAGNITUDE_RADIX).unwrap_or(u32::MAX);
+    let magnitude = payload % f32_q::MAGNITUDE_RADIX;
+    if state < f32_q::SIGNED_FINITE_STATES {
+        if magnitude == 0 {
+            return F32QToken::Compact(0);
+        }
+        let signs = f32_q::SIGNED_FINITE_STATES / f32_q::RELATIVE_GRADE_COUNT;
+        F32QToken::Finite {
+            magnitude,
+            grade: state / signs,
+            negative: state % signs != 0,
+        }
+    } else if state < f32_q::STATE_COUNT {
+        let flags = state
+            .wrapping_sub(f32_q::SIGNED_FINITE_STATES)
+            .wrapping_add(1);
+        F32QToken::Nonfinite(u8::try_from(flags).unwrap_or_else(|_| f32_q_nan_flags()))
+    } else if state == f32_q::SPLIT_STATE {
+        F32QToken::Split
+    } else {
+        // The two remaining ten-bit ordinals have no semantic source. Reading
+        // either as NaN keeps the contextual lane total without aliasing it to
+        // a finite coefficient or allowing it into a compact run.
+        F32QToken::Nonfinite(f32_q_nan_flags())
+    }
+}
+
+#[inline(always)]
+fn encode_f32_q_token(token: F32QToken) -> Scaled64 {
+    match token {
+        F32QToken::Compact(value) => Scaled64(value),
+        F32QToken::Finite {
+            magnitude,
+            grade,
+            negative,
+        } => f32_q_tag(f32_q_finite_state(grade, negative), magnitude),
+        F32QToken::Nonfinite(flags) => f32_q_nonfinite(flags),
+        F32QToken::Split => f32_q_split(),
+    }
+}
+
+const F32_Q_COORDINATE_CAPACITY: usize = core::mem::size_of::<f32>();
+const F32_Q_GRADE_CAPACITY: usize = F32_Q_COORDINATE_CAPACITY + F32_Q_COORDINATE_CAPACITY - 1;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct F32QCoordinates {
+    coordinates: [i8; F32_Q_COORDINATE_CAPACITY],
+    extent: usize,
+}
+
+/// Project only as many balanced octets as this significand occupies.
+///
+/// Binary32 contributes at most 24 coefficient bits. Three unsigned octets
+/// hold those bits and the balanced carry can occupy the existing fourth cell,
+/// so the element-sized array is exact rather than a precision ceiling.
+#[inline(always)]
+fn atlas_balanced_u32_octets(magnitude: u32) -> F32QCoordinates {
+    let radix = i64::from(u8::MAX).wrapping_add(1);
+    let mut rest = i64::from(magnitude);
+    let mut coordinates = [0i8; F32_Q_COORDINATE_CAPACITY];
+    let mut extent = 0usize;
+    while rest != 0 {
+        // The model-derived 24-bit significand needs at most three unsigned
+        // octets plus one balanced carry. Indexing keeps that derivation
+        // load-bearing in release builds instead of silently truncating if it
+        // ever drifts.
+        let coordinate = &mut coordinates[extent];
+        let residue = rest % radix;
+        let digit = if residue > i64::from(i8::MAX) {
+            residue - radix
+        } else {
+            residue
+        };
+        *coordinate = digit as i8;
+        rest = (rest - digit) / radix;
+        extent += 1;
+    }
+    F32QCoordinates {
+        coordinates,
+        extent,
+    }
+}
+
+/// Contract the self-similar q words while exposing the actual work boundary.
+///
+/// The two observers make the V&V census nonvacuous: a test counts the lookup
+/// and Horner callbacks that this exact loop issues. Production supplies the
+/// canonical lookup and a zero-sized grade observer; inlining erases the
+/// observation seam rather than adding a counter to the hot path.
+#[inline(always)]
+fn atlas_f32_q_magnitude_product_observed<L, G>(
+    left: u32,
+    right: u32,
+    mut lookup: L,
+    mut grade_observed: G,
+) -> u64
+where
+    L: FnMut(i8, i8) -> i32,
+    G: FnMut(),
+{
+    let left = atlas_balanced_u32_octets(left);
+    let right = atlas_balanced_u32_octets(right);
+    if left.extent == 0 || right.extent == 0 {
+        return 0;
+    }
+
+    let mut grades = [0i64; F32_Q_GRADE_CAPACITY];
+    for (left_grade, &left_coordinate) in left.coordinates[..left.extent].iter().enumerate() {
+        for (right_grade, &right_coordinate) in right.coordinates[..right.extent].iter().enumerate()
+        {
+            let grade = left_grade + right_grade;
+            grades[grade] =
+                grades[grade].wrapping_add(i64::from(lookup(left_coordinate, right_coordinate)));
+        }
+    }
+
+    let grade_extent = left.extent + right.extent - 1;
+    let mut coordinates = grades[..grade_extent].iter().rev();
+    let mut product = *coordinates
+        .next()
+        .expect("two nonempty factors have a nonempty product word");
+    grade_observed();
+    for &coordinate in coordinates {
+        grade_observed();
+        for _ in 0..i8::BITS {
+            product = product.wrapping_add(product);
+        }
+        product = product.wrapping_add(coordinate);
+    }
+    debug_assert!(product >= 0);
+    product as u64
+}
+
+#[inline(always)]
+fn atlas_f32_q_magnitude_product(left: u32, right: u32) -> u64 {
+    atlas_f32_q_magnitude_product_observed(left, right, crate::lookup::i8_product, || {})
+}
+
+#[inline(always)]
+fn f32_q_finite_product(magnitude: u64, grade: u32, negative: bool) -> Scaled64 {
+    use crate::generated_capacity::f32_q;
+
+    debug_assert_eq!(
+        f32_q::COMPACT_CEILING / f32_q::PRODUCT_BOUND,
+        f32_q::ZERO_SPAN_CAPACITY
+    );
+    if magnitude == 0 {
+        return Scaled64(0);
+    }
+    debug_assert!(magnitude <= f32_q::PRODUCT_BOUND);
+    debug_assert!(grade < f32_q::RELATIVE_GRADE_COUNT);
+    let mut compact = magnitude;
+    for _ in 0..grade {
+        if compact > f32_q::COMPACT_CEILING - compact {
+            return encode_f32_q_token(F32QToken::Finite {
+                magnitude,
+                grade,
+                negative,
+            });
+        }
+        compact = compact.wrapping_add(compact);
+    }
+    let compact = compact as i64;
+    if negative {
+        Scaled64(0i64.wrapping_sub(compact))
+    } else {
+        Scaled64(compact)
+    }
+}
+
+#[inline(always)]
+fn f32_q_product(left: F32QFactor, right: F32QFactor) -> Scaled64 {
+    match (left, right) {
+        (F32QFactor::NotANumber, _) | (_, F32QFactor::NotANumber) => {
+            f32_q_nonfinite(f32_q_nan_flags())
+        }
+        (F32QFactor::Infinite { .. }, F32QFactor::Finite { magnitude: 0, .. })
+        | (F32QFactor::Finite { magnitude: 0, .. }, F32QFactor::Infinite { .. }) => {
+            f32_q_nonfinite(f32_q_nan_flags())
+        }
+        (
+            F32QFactor::Infinite {
+                negative: left_negative,
+            },
+            F32QFactor::Infinite {
+                negative: right_negative,
+            }
+            | F32QFactor::Finite {
+                magnitude: 1..,
+                negative: right_negative,
+                ..
+            },
+        )
+        | (
+            F32QFactor::Finite {
+                magnitude: 1..,
+                negative: left_negative,
+                ..
+            },
+            F32QFactor::Infinite {
+                negative: right_negative,
+            },
+        ) => f32_q_nonfinite(f32_q_infinity_flags(left_negative != right_negative)),
+        (
+            F32QFactor::Finite {
+                magnitude: left_magnitude,
+                grade: left_grade,
+                negative: left_negative,
+            },
+            F32QFactor::Finite {
+                magnitude: right_magnitude,
+                grade: right_grade,
+                negative: right_negative,
+            },
+        ) => f32_q_finite_product(
+            atlas_f32_q_magnitude_product(left_magnitude, right_magnitude),
+            left_grade.wrapping_add(right_grade),
+            left_negative != right_negative,
+        ),
+    }
+}
+
+#[inline(always)]
+fn f32_q_add_compact(left: i64, right: i64) -> Scaled64 {
+    use crate::generated_capacity::f32_q;
+
+    if left >= 0 && right >= 0 {
+        let left = left as u64;
+        let right = right as u64;
+        if left > f32_q::COMPACT_CEILING
+            || right > f32_q::COMPACT_CEILING
+            || left > f32_q::COMPACT_CEILING - right
+        {
+            return f32_q_split();
+        }
+        Scaled64(left.wrapping_add(right) as i64)
+    } else if left <= 0 && right <= 0 {
+        let left = left.unsigned_abs();
+        let right = right.unsigned_abs();
+        if left > f32_q::COMPACT_CEILING
+            || right > f32_q::COMPACT_CEILING
+            || left > f32_q::COMPACT_CEILING - right
+        {
+            return f32_q_split();
+        }
+        Scaled64(0i64.wrapping_sub(left.wrapping_add(right) as i64))
+    } else {
+        // Opposite signs subtract magnitudes, so their sum lies between the
+        // operands and cannot cross either compact boundary.
+        Scaled64(left.wrapping_add(right))
+    }
+}
+
+#[inline(always)]
+fn f32_q_add_words(left: Scaled64, right: Scaled64) -> Scaled64 {
+    use F32QToken::{Compact, Finite, Nonfinite, Split};
+
+    // `LaneWord::ZERO` is an identity for every bit pattern the public
+    // transparent word can carry, including an out-of-protocol word. Do this
+    // before semantic decoding so identity cannot normalize or fracture it.
+    if left.0 == 0 {
+        return right;
+    }
+    if right.0 == 0 {
+        return left;
+    }
+    match (decode_f32_q_token(left), decode_f32_q_token(right)) {
+        (Split, _) | (_, Split) => f32_q_split(),
+        (Compact(left), Compact(right)) => f32_q_add_compact(left, right),
+        (Nonfinite(left), Nonfinite(right)) => f32_q_nonfinite(f32_q_union_flags(left, right)),
+        // A semantic tag is a one-product atom. Combining a special with a
+        // finite contribution would discard that finite residue just as
+        // combining two finite grades would discard a grade. The scheduler
+        // isolates specials; an aggregate build asks it to scalar-fracture.
+        (Nonfinite(_), Compact(_))
+        | (Compact(_), Nonfinite(_))
+        | (Nonfinite(_), Finite { .. })
+        | (Finite { .. }, Nonfinite(_))
+        | (Finite { .. }, Compact(_))
+        | (Compact(_), Finite { .. })
+        | (Finite { .. }, Finite { .. }) => f32_q_split(),
+    }
+}
+
 impl LaneWord for Scaled64 {
     const ZERO: Self = Scaled64(0);
 
     #[inline(always)]
     fn add(self, other: Self) -> Self {
-        // Exact within the run the driver derived from the measured spans,
-        // which is the only place the gather runs: the same discipline the
-        // integer lanes state above, with the bound coming from the panels
-        // rather than the alphabet's declaration.
-        Scaled64(self.0.wrapping_add(other.0))
+        f32_q_add_words(self, other)
+    }
+}
+
+/// Recover the one contextual carry of a four-octet coefficient carrier.
+///
+/// Four signed radix-256 coordinates spell exactly `2^32` consecutive values,
+/// but that interval begins slightly below `i32::MIN`. The high positive tail
+/// of the admitted coefficient alphabet consequently has the unique spelling
+/// `carrier + 256^4`. It is recognizable without reifying the coefficient:
+/// the highest coordinate is `-128` and the lower three-coordinate prefix is
+/// negative. The highest nonzero coordinate decides that prefix's sign because
+/// one radix place is wider than every lower place combined.
+#[inline(always)]
+#[cfg(test)]
+fn atlas_octets_with_context(carrier: [i8; 4]) -> [i8; 5] {
+    let mut coordinates = [0i8; 5];
+    coordinates[..4].copy_from_slice(&carrier);
+    if carrier[3] == i8::MIN {
+        for &coordinate in carrier[..3].iter().rev() {
+            if coordinate != 0 {
+                coordinates[4] = if coordinate < 0 { 1 } else { 0 };
+                break;
+            }
+        }
+    }
+    coordinates
+}
+
+/// Evaluate two four-octet common-grade carriers through the Atlas product.
+///
+/// The cells reaching this function have already been projected once, in
+/// place, by the symbol traversal. Each coordinate product is therefore one
+/// canonical signed-`i8` lookup. Horner placement is the same radix recurrence
+/// used by the projection: eight doublings and one add per occupied grade. No
+/// significand decode, runtime value multiply, shift, or second carrier exists
+/// in the table build.
+#[inline]
+#[cfg(test)]
+fn atlas_octet_product(left: [i8; 4], right: [i8; 4]) -> i64 {
+    let left = atlas_octets_with_context(left);
+    let right = atlas_octets_with_context(right);
+    let mut grades = [0i64; 9];
+    for (left_grade, &left_coordinate) in left.iter().enumerate() {
+        for (right_grade, &right_coordinate) in right.iter().enumerate() {
+            let grade = left_grade + right_grade;
+            grades[grade] = grades[grade].wrapping_add(i64::from(crate::lookup::i8_product(
+                left_coordinate,
+                right_coordinate,
+            )));
+        }
+    }
+
+    let mut product = 0i64;
+    for &coordinate in grades.iter().rev() {
+        for _ in 0..i8::BITS {
+            product = product.wrapping_add(product);
+        }
+        product = product.wrapping_add(coordinate);
+    }
+    product
+}
+
+#[cfg(test)]
+// These representation laws intentionally sit beside the private carrier
+// helpers they exhaust; keeping them here makes a later table-sequence item
+// follow the test module without changing the shipped item order.
+#[allow(clippy::items_after_test_module)]
+mod scaled64_tests {
+    use super::{
+        atlas_balanced_u32_octets, atlas_f32_q_magnitude_product,
+        atlas_f32_q_magnitude_product_observed, atlas_octet_product, gray_sign_build_adds,
+        product_build_adds, Lane, LaneWord, Scaled64,
+    };
+    use crate::generated_capacity::f32_q;
+    use core::cell::Cell;
+    use uor_matmul_core::{Accumulator, Element};
+
+    type F32Acc = <f32 as Element>::Acc;
+
+    struct GeneratedCompleteState {
+        nonfinite_states: u32,
+    }
+
+    struct GeneratedWidths {
+        f32_q_carrier: uor_matmul_model::registry::F32QCarrier,
+        complete_state: GeneratedCompleteState,
+    }
+
+    struct GeneratedModel {
+        widths: GeneratedWidths,
+    }
+
+    fn generated_model() -> GeneratedModel {
+        GeneratedModel {
+            widths: GeneratedWidths {
+                f32_q_carrier: uor_matmul_model::registry::F32QCarrier {
+                    significand_bits: f32_q::SIGNIFICAND_BITS,
+                    min_factor_exp: f32_q::MIN_FACTOR_EXP,
+                    max_factor_exp: f32_q::MAX_FACTOR_EXP,
+                    product_magnitude_bits: f32_q::PRODUCT_MAGNITUDE_BITS,
+                    product_bound: f32_q::PRODUCT_BOUND,
+                    relative_grade_count: f32_q::RELATIVE_GRADE_COUNT,
+                    signed_finite_states: f32_q::SIGNED_FINITE_STATES,
+                    state_count: f32_q::STATE_COUNT,
+                    state_bits: f32_q::STATE_BITS,
+                    tag_payload_bits: f32_q::TAG_PAYLOAD_BITS,
+                    tag_interval: f32_q::TAG_INTERVAL,
+                    tag_base: f32_q::TAG_BASE,
+                    compact_ceiling: f32_q::COMPACT_CEILING,
+                    zero_span_capacity: f32_q::ZERO_SPAN_CAPACITY,
+                },
+                complete_state: GeneratedCompleteState {
+                    nonfinite_states: f32_q::STATE_COUNT - f32_q::SIGNED_FINITE_STATES,
+                },
+            },
+        }
+    }
+
+    fn power_of_two(bits: u32) -> u128 {
+        uor_matmul_model::derive::power_of_two(bits).expect("the binary32 field fits u128")
+    }
+
+    /// Test-side spelling of the contextual carrier. The oracle deliberately
+    /// uses field arithmetic, independently of the lookup/add consumer.
+    fn q_cell(negative: bool, q: u32, fraction: u32) -> f32 {
+        let fraction_bits = f32::MANTISSA_DIGITS - 1;
+        let exponent_bits = u32::BITS - f32::MANTISSA_DIGITS;
+        let fraction_radix = u32::try_from(power_of_two(fraction_bits)).unwrap();
+        let exponent_radix = u32::try_from(power_of_two(exponent_bits)).unwrap();
+        assert!(q < exponent_radix);
+        assert!(fraction < fraction_radix);
+        let sign_place = u32::try_from(power_of_two(u32::BITS - 1)).unwrap();
+        let bits = u32::from(negative)
+            .checked_mul(sign_place)
+            .and_then(|sign| sign.checked_add(q.checked_mul(fraction_radix)?))
+            .and_then(|head| head.checked_add(fraction))
+            .expect("the disjoint binary32 fields fit one word");
+        f32::from_bits(bits)
+    }
+
+    fn q_mac(left: f32, right: f32) -> Scaled64 {
+        <Scaled64 as Lane<f32>>::mac(Scaled64(0), left, right)
+    }
+
+    fn place_into(token: Scaled64, acc: F32Acc, exponent: i32) -> F32Acc {
+        <Scaled64 as Lane<f32>>::place_scaled(token, acc, exponent)
+    }
+
+    fn zero_acc() -> F32Acc {
+        <F32Acc as Accumulator>::ZERO
+    }
+
+    /// Independent raw tag spelling. Production must recover this state by
+    /// lookup/add logic; constructing the expected word here does not exercise
+    /// or duplicate that decoder.
+    fn tagged(q: &uor_matmul_model::registry::F32QCarrier, state: u32, magnitude: u64) -> Scaled64 {
+        let radix = power_of_two(q.product_magnitude_bits);
+        assert!(u128::from(magnitude) < radix);
+        let raw = u128::from(q.tag_base)
+            .checked_add(u128::from(state).checked_mul(radix).unwrap())
+            .and_then(|head| head.checked_add(u128::from(magnitude)))
+            .expect("a model-admitted tag fits its interval");
+        assert!(raw < u128::from(q.tag_base) + u128::from(q.tag_interval));
+        Scaled64(i64::try_from(raw).expect("the tag interval is positive i64"))
+    }
+
+    fn complete_for_mask(mask: u8) -> F32Acc {
+        let mut acc = zero_acc();
+        if mask & (1 << 0) != 0 {
+            acc.set_nan();
+        }
+        if mask & (1 << 1) != 0 {
+            acc.set_infinity(false);
+        }
+        if mask & (1 << 2) != 0 {
+            acc.set_infinity(true);
+        }
+        acc
+    }
+
+    fn balanced_octets(value: i32) -> [i8; 4] {
+        let mut rest = i64::from(value);
+        let mut coordinates = [0i8; 4];
+        for coordinate in &mut coordinates {
+            *coordinate = (rest as u8) as i8;
+            rest = (rest - i64::from(*coordinate)) / 256;
+        }
+        assert!(rest == 0 || rest == 1);
+        coordinates
+    }
+
+    /// `CD-20`: the balanced-octet contraction is the signed product for the
+    /// whole lookup alphabet and at every boundary of the admitted coefficient
+    /// width. The oracle is ordinary widened arithmetic in test code, separate
+    /// from the lookup/add body under test.
+    #[test]
+    fn balanced_octets_match_the_independent_wide_product_cd_20() {
+        for left in i8::MIN..=i8::MAX {
+            for right in i8::MIN..=i8::MAX {
+                assert_eq!(
+                    atlas_octet_product([left, 0, 0, 0], [right, 0, 0, 0],),
+                    i64::from(left) * i64::from(right),
+                    "signed-octet pair ({left}, {right})"
+                );
+            }
+        }
+
+        let boundaries = [
+            i64::from(i32::MIN),
+            i64::from(i32::MIN) + 1,
+            -256,
+            -129,
+            -1,
+            0,
+            1,
+            127,
+            255,
+            256,
+            i64::from(i32::MAX) - 1,
+            i64::from(i32::MAX),
+        ];
+        for &left in &boundaries {
+            for &right in &boundaries {
+                let expected = i64::try_from(i128::from(left) * i128::from(right))
+                    .expect("two signed 32-bit coefficients have a signed 64-bit product");
+                assert_eq!(
+                    atlas_octet_product(
+                        balanced_octets(i32::try_from(left).unwrap()),
+                        balanced_octets(i32::try_from(right).unwrap()),
+                    ),
+                    expected,
+                    "coefficient-boundary pair ({left}, {right})"
+                );
+            }
+        }
+    }
+
+    /// `CD-32`: the public lane word's declared zero is an identity before
+    /// contextual interpretation. This includes every semantic token class,
+    /// both compact extremes, and unused raw tag ordinals; identity may not
+    /// normalize or scalar-fracture an opaque word.
+    #[test]
+    fn scaled64_zero_is_raw_identity_for_every_token_class_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        let zero = <Scaled64 as LaneWord>::ZERO;
+        let words = [
+            Scaled64(i64::MIN),
+            Scaled64(-1),
+            zero,
+            Scaled64(1),
+            Scaled64(i64::try_from(q.compact_ceiling).unwrap()),
+            tagged(q, 0, q.product_bound),
+            tagged(q, q.signed_finite_states, 0),
+            tagged(q, q.state_count, 0),
+            Scaled64(i64::MAX),
+        ];
+        for word in words {
+            assert_eq!(
+                <Scaled64 as LaneWord>::add(zero, word),
+                word,
+                "left identity for {word:?}"
+            );
+            assert_eq!(
+                <Scaled64 as LaneWord>::add(word, zero),
+                word,
+                "right identity for {word:?}"
+            );
+        }
+    }
+
+    /// `CD-32`: a special token is singleton execution state, not permission
+    /// to erase a finite contribution in the same table entry. Every mixed
+    /// aggregate therefore requests scalar fracture, while two special states
+    /// retain the exact union required by Complete.
+    #[test]
+    fn mixed_nonfinite_and_finite_words_scalar_fracture_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        let complete = &model.widths.complete_state;
+        let split = tagged(q, q.state_count, 0);
+        let finite = [Scaled64(1), Scaled64(-1), tagged(q, 0, q.product_bound)];
+        for left_mask in 1..=complete.nonfinite_states {
+            let special = tagged(q, q.signed_finite_states + left_mask - 1, 0);
+            for finite in finite {
+                assert_eq!(
+                    <Scaled64 as LaneWord>::add(special, finite),
+                    split,
+                    "special {left_mask:#05b} before {finite:?}"
+                );
+                assert_eq!(
+                    <Scaled64 as LaneWord>::add(finite, special),
+                    split,
+                    "{finite:?} before special {left_mask:#05b}"
+                );
+            }
+            for right_mask in 1..=complete.nonfinite_states {
+                let right = tagged(q, q.signed_finite_states + right_mask - 1, 0);
+                let union = left_mask | right_mask;
+                assert_eq!(
+                    <Scaled64 as LaneWord>::add(special, right),
+                    tagged(q, q.signed_finite_states + union - 1, 0),
+                    "special union {left_mask:#05b} | {right_mask:#05b}"
+                );
+            }
+        }
+    }
+
+    /// `CD-32`: q contraction follows source precision rather than a fixed
+    /// five-octet frame. The low-octet residue alphabet is exhaustive; the
+    /// complete binary32 coefficient boundaries are differential against a
+    /// widened test oracle; and observers count the exact lookup rectangle and
+    /// occupied Horner grades issued by the production recurrence.
+    #[test]
+    fn q_precision_fractal_matches_wide_product_and_exact_work_cd_32() {
+        for left in 0u32..=u32::from(u8::MAX) {
+            for right in 0u32..=u32::from(u8::MAX) {
+                assert_eq!(
+                    atlas_f32_q_magnitude_product(left, right),
+                    u64::from(left) * u64::from(right),
+                    "exhaustive one-octet pair ({left}, {right})"
+                );
+            }
+        }
+
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        let hidden = u32::try_from(power_of_two(q.significand_bits - 1)).unwrap();
+        let maximum = u32::try_from(power_of_two(q.significand_bits)).unwrap() - 1;
+        let boundaries = [
+            0,
+            1,
+            u32::from(i8::MAX as u8),
+            u32::from(u8::MAX),
+            u32::from(u8::MAX) + 1,
+            u32::from(u16::MAX),
+            u32::from(u16::MAX) + 1,
+            hidden - 1,
+            hidden,
+            maximum,
+        ];
+        for &left in &boundaries {
+            for &right in &boundaries {
+                let lookups = Cell::new(0usize);
+                let grades = Cell::new(0usize);
+                let got = atlas_f32_q_magnitude_product_observed(
+                    left,
+                    right,
+                    |a, b| {
+                        lookups.set(lookups.get() + 1);
+                        crate::lookup::i8_product(a, b)
+                    },
+                    || grades.set(grades.get() + 1),
+                );
+                let left_extent = atlas_balanced_u32_octets(left).extent;
+                let right_extent = atlas_balanced_u32_octets(right).extent;
+                let expected_lookups = left_extent * right_extent;
+                let expected_grades = if expected_lookups == 0 {
+                    0
+                } else {
+                    left_extent + right_extent - 1
+                };
+                assert_eq!(got, u64::from(left) * u64::from(right));
+                assert_eq!(
+                    lookups.get(),
+                    expected_lookups,
+                    "lookup pair ({left}, {right})"
+                );
+                assert_eq!(
+                    grades.get(),
+                    expected_grades,
+                    "grade pair ({left}, {right})"
+                );
+            }
+        }
+
+        assert_eq!(atlas_balanced_u32_octets(1).extent, 1);
+        assert_eq!(atlas_balanced_u32_octets(maximum).extent, 4);
+        let one_lookups = Cell::new(0usize);
+        let one_grades = Cell::new(0usize);
+        assert_eq!(
+            atlas_f32_q_magnitude_product_observed(
+                1,
+                1,
+                |a, b| {
+                    one_lookups.set(one_lookups.get() + 1);
+                    crate::lookup::i8_product(a, b)
+                },
+                || one_grades.set(one_grades.get() + 1),
+            ),
+            1
+        );
+        assert_eq!((one_lookups.get(), one_grades.get()), (1, 1));
+
+        let max_lookups = Cell::new(0usize);
+        let max_grades = Cell::new(0usize);
+        assert_eq!(
+            atlas_f32_q_magnitude_product_observed(
+                maximum,
+                maximum,
+                |a, b| {
+                    max_lookups.set(max_lookups.get() + 1);
+                    crate::lookup::i8_product(a, b)
+                },
+                || max_grades.set(max_grades.get() + 1),
+            ),
+            u64::from(maximum) * u64::from(maximum)
+        );
+        assert_eq!((max_lookups.get(), max_grades.get()), (16, 7));
+    }
+
+    /// `CD-32`: every field boundary of the contextual q carrier reaches the
+    /// same complete dyadic as its source code. In particular, q zero keeps
+    /// zero and subnormal coefficients distinct, q one introduces the normal
+    /// hidden coefficient, the last finite q reaches the complete factor
+    /// exponent span, sign is orthogonal, and the all-ones q keeps infinity
+    /// distinct from a NaN payload.
+    #[test]
+    fn q_carrier_round_trips_ieee_boundaries_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        assert_eq!(q.significand_bits, f32::MANTISSA_DIGITS);
+
+        let fraction_bits = q.significand_bits - 1;
+        let fraction_radix = u32::try_from(power_of_two(fraction_bits)).unwrap();
+        let fraction_max = fraction_radix - 1;
+        let exponent_bits = u32::BITS - q.significand_bits;
+        let special_q = u32::try_from(power_of_two(exponent_bits)).unwrap() - 1;
+        let maximum_relative = u32::try_from(q.max_factor_exp - q.min_factor_exp).unwrap();
+        let maximum_finite_q = maximum_relative + 1;
+        assert!(maximum_finite_q < special_q);
+
+        // `1.0` is the normal coefficient `2^(p-1)` at base `-(p-1)`.
+        let unit = q_cell(false, 1, 0);
+        let unit_base = -i32::try_from(fraction_bits).unwrap();
+        let product_base = q.min_factor_exp.checked_add(unit_base).unwrap();
+        let finite = [
+            ("positive zero", false, 0, 0),
+            ("negative zero", true, 0, 0),
+            ("minimum subnormal", false, 0, 1),
+            ("negative minimum subnormal", true, 0, 1),
+            ("maximum subnormal", false, 0, fraction_max),
+            ("minimum normal", false, 1, 0),
+            ("negative minimum normal", true, 1, 0),
+            (
+                "maximum finite grade",
+                false,
+                maximum_finite_q,
+                fraction_max,
+            ),
+            (
+                "negative maximum finite grade",
+                true,
+                maximum_finite_q,
+                fraction_max,
+            ),
+        ];
+        for (label, negative, q_field, fraction) in finite {
+            let relative = if q_field == 0 { 0 } else { q_field - 1 };
+            let coefficient = if q_field == 0 {
+                u128::from(fraction)
+            } else {
+                u128::from(fraction_radix) + u128::from(fraction)
+            };
+            let got = place_into(
+                q_mac(q_cell(negative, q_field, fraction), unit),
+                zero_acc(),
+                product_base,
+            );
+            let mut want = zero_acc();
+            want.add_scaled(
+                coefficient,
+                q.min_factor_exp
+                    .checked_add(i32::try_from(relative).unwrap())
+                    .unwrap(),
+                negative,
+            );
+            assert_eq!(got, want, "{label}");
+        }
+
+        for (label, negative) in [("positive infinity", false), ("negative infinity", true)] {
+            let got = place_into(
+                q_mac(q_cell(negative, special_q, 0), unit),
+                zero_acc(),
+                product_base,
+            );
+            let mut want = zero_acc();
+            want.set_infinity(negative);
+            assert_eq!(got, want, "{label}");
+        }
+        for negative in [false, true] {
+            let got = place_into(
+                q_mac(q_cell(negative, special_q, 1), unit),
+                zero_acc(),
+                product_base,
+            );
+            let mut want = zero_acc();
+            want.set_nan();
+            assert_eq!(got, want, "NaN payload with sign={negative}");
+        }
+    }
+
+    /// `CD-32`: the raw top-positive interval is a lossless semantic round
+    /// trip for every one of the 1,021 model-derived states. The immediately
+    /// following unused state is the aggregate `SPLIT` marker, so compact
+    /// overflow cannot alias a finite grade or a Complete non-finite union.
+    #[test]
+    fn tag_interval_round_trips_every_state_and_split_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        let complete = &model.widths.complete_state;
+        let sign_count = q.signed_finite_states / q.relative_grade_count;
+        assert_eq!(
+            q.signed_finite_states + complete.nonfinite_states,
+            q.state_count
+        );
+        assert_eq!(sign_count * q.relative_grade_count, q.signed_finite_states);
+
+        let product_base = q.min_factor_exp.checked_mul(2).unwrap();
+        for state in 0..q.signed_finite_states {
+            let grade = state / sign_count;
+            let negative = state % sign_count != 0;
+            let token = tagged(q, state, q.product_bound);
+            let got = place_into(token, zero_acc(), product_base);
+            let mut want = zero_acc();
+            want.add_scaled(
+                u128::from(q.product_bound),
+                product_base
+                    .checked_add(i32::try_from(grade).unwrap())
+                    .unwrap(),
+                negative,
+            );
+            assert_eq!(got, want, "finite tag state {state}");
+        }
+        for mask in 1..=complete.nonfinite_states {
+            let state = q.signed_finite_states + mask - 1;
+            let got = place_into(tagged(q, state, 0), zero_acc(), product_base);
+            assert_eq!(
+                got,
+                complete_for_mask(u8::try_from(mask).unwrap()),
+                "non-finite tag state {state}"
+            );
+        }
+
+        let radix = u64::try_from(power_of_two(q.product_magnitude_bits)).unwrap();
+        let last_valid = tagged(q, q.state_count - 1, radix - 1);
+        let split = tagged(q, q.state_count, 0);
+        assert_eq!(split.0, last_valid.0.checked_add(1).unwrap());
+        assert_eq!(tagged(q, 0, 0).0, i64::try_from(q.tag_base).unwrap());
+        assert!(
+            u64::try_from(split.0).unwrap() < q.tag_base.checked_add(q.tag_interval).unwrap(),
+            "the derived ten-bit state field leaves the SPLIT ordinal in the same interval"
+        );
+    }
+
+    /// `CD-32`: all seven nonempty unions of `{NaN,+Inf,-Inf}` have distinct
+    /// tag spellings, and direct union placement agrees with placing the same
+    /// singleton observations one at a time into `Complete`.
+    #[test]
+    fn all_complete_nonfinite_unions_survive_tag_placement_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        let complete = &model.widths.complete_state;
+        let base = q.min_factor_exp.checked_mul(2).unwrap();
+        for mask in 1..=u8::try_from(complete.nonfinite_states).unwrap() {
+            let union_state = q.signed_finite_states + u32::from(mask) - 1;
+            let direct = place_into(tagged(q, union_state, 0), zero_acc(), base);
+            let mut joined = zero_acc();
+            for singleton in [1u8 << 0, 1u8 << 1, 1u8 << 2] {
+                if mask & singleton != 0 {
+                    let state = q.signed_finite_states + u32::from(singleton) - 1;
+                    joined = place_into(tagged(q, state, 0), joined, base);
+                }
+            }
+            let want = complete_for_mask(mask);
+            assert_eq!(direct, want, "direct union mask {mask:#05b}");
+            assert_eq!(joined, want, "joined singleton mask {mask:#05b}");
+
+            let mut residue = zero_acc();
+            residue.add_scaled(u128::from(q.product_bound), base, true);
+            let got = place_into(tagged(q, union_state, 0), residue, base);
+            let mut want = residue;
+            if mask & (1 << 0) != 0 {
+                want.set_nan();
+            }
+            if mask & (1 << 1) != 0 {
+                want.set_infinity(false);
+            }
+            if mask & (1 << 2) != 0 {
+                want.set_infinity(true);
+            }
+            assert_eq!(
+                got, want,
+                "immediate union placement preserves the finite residue for mask {mask:#05b}"
+            );
+        }
+    }
+
+    /// `CD-32`: infinity times either signed zero is NaN before any compact
+    /// coefficient can be formed. Operand signs cannot turn the invalid IEEE
+    /// product into a signed infinity or a finite zero.
+    #[test]
+    fn infinity_times_zero_is_nan_in_q_carrier_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        let exponent_bits = u32::BITS - q.significand_bits;
+        let special_q = u32::try_from(power_of_two(exponent_bits)).unwrap() - 1;
+        for infinity_negative in [false, true] {
+            for zero_negative in [false, true] {
+                let token = q_mac(
+                    q_cell(infinity_negative, special_q, 0),
+                    q_cell(zero_negative, 0, 0),
+                );
+                let got = place_into(token, zero_acc(), q.min_factor_exp.checked_mul(2).unwrap());
+                let mut want = zero_acc();
+                want.set_nan();
+                assert_eq!(
+                    got, want,
+                    "infinity sign={infinity_negative}, zero sign={zero_negative}"
+                );
+            }
+        }
+    }
+
+    /// `CD-32`: the formerly admitted common-grade region remains byte-for-
+    /// byte the incumbent compact coefficient. The carrier extension is paid
+    /// only when a grade cannot inhabit that region; it cannot perturb its hot
+    /// lookup/add composition.
+    #[test]
+    fn former_common_grade_compact_composition_is_unchanged_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        let fraction_bits = q.significand_bits - 1;
+        let fraction_radix = u32::try_from(power_of_two(fraction_bits)).unwrap();
+        let fraction_max = fraction_radix - 1;
+        let incumbent_span = (i32::BITS - 1).checked_sub(q.significand_bits).unwrap();
+        let grades = [0, incumbent_span / 2, incumbent_span];
+
+        for left_grade in grades {
+            for right_grade in grades {
+                for left_fraction in [0, fraction_max] {
+                    for right_fraction in [0, fraction_max] {
+                        for left_negative in [false, true] {
+                            for right_negative in [false, true] {
+                                let left = q_cell(left_negative, left_grade + 1, left_fraction);
+                                let right = q_cell(right_negative, right_grade + 1, right_fraction);
+                                let left_coefficient =
+                                    u128::from(fraction_radix) + u128::from(left_fraction);
+                                let right_coefficient =
+                                    u128::from(fraction_radix) + u128::from(right_fraction);
+                                let grade_scale = power_of_two(left_grade + right_grade);
+                                let magnitude = left_coefficient
+                                    .checked_mul(right_coefficient)
+                                    .and_then(|product| product.checked_mul(grade_scale))
+                                    .unwrap();
+                                assert!(magnitude <= u128::from(q.compact_ceiling));
+                                let magnitude = i64::try_from(magnitude).unwrap();
+                                let expected = if left_negative != right_negative {
+                                    magnitude.checked_neg().unwrap()
+                                } else {
+                                    magnitude
+                                };
+                                assert_eq!(
+                                    q_mac(left, right),
+                                    Scaled64(expected),
+                                    "grades=({left_grade},{right_grade}), fractions=({left_fraction},{right_fraction}), signs=({left_negative},{right_negative})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `CD-32`: exactly the model-derived zero-span capacity remains compact;
+    /// the next product becomes the otherwise-unused `SPLIT` state instead of
+    /// entering the reserved interval with an accidental semantic tag.
+    #[test]
+    fn compact_ceiling_accepts_capacity_and_marks_cap_plus_one_split_cd_32() {
+        let model = generated_model();
+        let q = &model.widths.f32_q_carrier;
+        assert_eq!(
+            <Scaled64 as Lane<f32>>::capacity(u128::from(q.product_bound)),
+            Some(usize::try_from(q.zero_span_capacity).unwrap()),
+            "the contextual Lane declaration consumes an already-product bound exactly once"
+        );
+        assert_eq!(
+            <Scaled64 as Lane<f32>>::capacity(u128::from(q.compact_ceiling) + 1),
+            Some(1)
+        );
+        assert_eq!(<Scaled64 as Lane<f32>>::capacity(0), None);
+        let product = Scaled64(i64::try_from(q.product_bound).unwrap());
+        let mut at_capacity = Scaled64(0);
+        for _ in 0..q.zero_span_capacity {
+            at_capacity = <Scaled64 as LaneWord>::add(at_capacity, product);
+        }
+        let expected = u128::from(q.product_bound)
+            .checked_mul(u128::from(q.zero_span_capacity))
+            .unwrap();
+        assert_eq!(at_capacity.0, i64::try_from(expected).unwrap());
+        assert!(u64::try_from(at_capacity.0).unwrap() <= q.compact_ceiling);
+
+        let cap_plus_one = <Scaled64 as LaneWord>::add(at_capacity, product);
+        assert_eq!(
+            cap_plus_one,
+            tagged(q, q.state_count, 0),
+            "compact overflow must be the SPLIT marker, not a valid semantic tag"
+        );
+    }
+
+    /// `CU-11`: diagnostic charges are total at the address boundary and
+    /// saturate only the bounded `u64` census, never an intermediate `usize`.
+    #[test]
+    fn table_build_charges_are_total_census_queries_cu_11() {
+        assert_eq!(product_build_adds(16, 4, 8), 512);
+        assert_eq!(gray_sign_build_adds(256, 8, 16), 4336);
+        assert_eq!(
+            product_build_adds(usize::MAX, usize::MAX, usize::MAX),
+            u64::MAX
+        );
+        assert_eq!(
+            gray_sign_build_adds(usize::MAX, usize::MAX, usize::MAX),
+            u64::MAX
+        );
+        assert_eq!(gray_sign_build_adds(0, 0, usize::MAX), 0);
+    }
+
+    /// `CU-11`: the production quotient/remainder addresses are byte-for-byte
+    /// the former power-of-two bit projection for every boundary class the
+    /// safe surface admits. The bit spelling lives only in this independent
+    /// test oracle; the shipped q-reachable helpers contain no bit operation.
+    #[test]
+    fn portable_radix_addresses_match_retained_bit_oracle_cu_11() {
+        for rows in [1usize, 2, 4, 8, 16] {
+            let code_space = 16usize;
+            let slab = code_space * rows;
+            for offset in [
+                0,
+                1,
+                rows - 1,
+                rows,
+                slab - 1,
+                slab,
+                slab + rows + 1,
+                u32::MAX as usize,
+                usize::MAX,
+            ] {
+                assert_eq!(
+                    super::table_entry_address(offset, slab, rows),
+                    offset & (slab - rows),
+                    "row-scaled address offset={offset}, slab={slab}, rows={rows}"
+                );
+            }
+            for code in [
+                0,
+                1,
+                code_space - 1,
+                code_space,
+                code_space + 1,
+                u8::MAX as usize,
+                u16::MAX as usize,
+                usize::MAX,
+            ] {
+                assert_eq!(
+                    super::table_code_address(code, code_space, rows),
+                    (code & (code_space - 1)) * rows,
+                    "code address code={code}, space={code_space}, rows={rows}"
+                );
+            }
+            assert_eq!(super::table_row_grade(rows), rows.trailing_zeros());
+        }
     }
 }
 
 impl Lane<f32> for Scaled64 {
     #[inline]
-    fn capacity(b: u128) -> Option<usize> {
-        // Reached by the driver only with the span walk's per-side bound, and
-        // by the sizing queries with the alphabet's `u128::MAX` --- where the
-        // honest data-free answer is one product, which is why the queries
-        // plan against the caches instead (`Tabulated::probe_capacity`).
-        capacity_of(i64::MAX as u128, b)
+    fn capacity(per_step: u128) -> Option<usize> {
+        // Unlike an ordinary element bound, this contextual declaration is
+        // already the exact one-product q coefficient bound. Squaring it here
+        // would charge the product twice and collapse the zero-span capacity.
+        // The data-free query supplies `u128::MAX` and therefore gets the total
+        // one-product answer; the f32 plan itself remains cache-derived.
+        if per_step == 0 {
+            return None;
+        }
+        Some(
+            usize::try_from(
+                u128::from(crate::generated_capacity::f32_q::COMPACT_CEILING) / per_step,
+            )
+            .unwrap_or(usize::MAX)
+            .max(1),
+        )
     }
 
     #[inline(always)]
     fn mac(self, a: f32, w: f32) -> Self {
-        let (pa, pw) = (a.pack(), w.pack());
-        if pa.mantissa == 0 || pw.mantissa == 0 {
-            return self;
-        }
-        // Each operand is a pre-scaled significand: an exact integer below
-        // `2^31`, spelled `mantissa * 2^exp`. The exponents may be negative
-        // --- a significand with fewer than 24 significant bits is stored
-        // normalized, carrying trailing zeros where the value's low bits are
-        // --- so the right shift below drops only zero bits, which is the
-        // integer the product is. The left shift cannot lose a bit either:
-        // admission bounds each panel's span to seven binades, so the sum of
-        // the two exponents is at most fourteen and the product below `2^48`
-        // lands below `2^62`.
-        let product = pa.mantissa * pw.mantissa;
-        let shift = pa.exp.wrapping_add(pw.exp); // R3-ok: an exponent sum, bounded above
-        let placed = if shift >= 0 {
-            product << shift
-        } else {
-            product >> shift.wrapping_neg()
-        };
-        Scaled64(self.0.wrapping_add(placed))
+        // The two four-byte cells are q carriers produced in place by the
+        // paired tabulation projection. Their significands meet only through
+        // the signed-octet Atlas lookup; relative grade and sign are address
+        // coordinates retained in the compact-or-tagged lane word.
+        let product = f32_q_product(decode_f32_q_factor(a), decode_f32_q_factor(w));
+        f32_q_add_words(self, product)
     }
 
     #[inline]
     fn place(self, acc: <f32 as Element>::Acc) -> <f32 as Element>::Acc {
-        // The trait's exponent-free form is placement at `2^0`, and the
-        // driver never reaches it for this lane: the traversal places through
-        // `place_scaled`, and the streaming decline accumulates raw elements
-        // in the family's wide lane. Written out so the contract has no hole.
+        // The trait's exponent-free spelling is precisely placement at grade
+        // zero. The common-grade table walk supplies its measured grade through
+        // `place_scaled`.
         self.place_scaled(acc, 0)
     }
 
     #[inline]
     fn place_scaled(self, mut acc: <f32 as Element>::Acc, exponent: i32) -> <f32 as Element>::Acc {
-        // The run is an exact integer at the declared scale; placing it is
-        // the decode's own primitive, so nothing is rounded on the way in ---
-        // the same sentence `PlaceAt` tells for the bridge's `i128` sum.
-        acc.add_scaled(self.0.unsigned_abs() as u128, exponent, self.0 < 0);
+        match decode_f32_q_token(self) {
+            F32QToken::Compact(value) => {
+                acc.add_scaled(value.unsigned_abs() as u128, exponent, value < 0);
+            }
+            F32QToken::Finite {
+                magnitude,
+                grade,
+                negative,
+            } => {
+                let grade = i32::try_from(grade).unwrap_or(i32::MAX);
+                acc.add_scaled(
+                    u128::from(magnitude),
+                    exponent.saturating_add(grade), // R3-ok: an exponent address, not an accumulation
+                    negative,
+                );
+            }
+            F32QToken::Nonfinite(flags) => {
+                if f32_q_has_flag(flags, 0) {
+                    acc.set_nan();
+                }
+                if f32_q_has_flag(flags, 1) {
+                    acc.set_infinity(false);
+                }
+                if f32_q_has_flag(flags, 2) {
+                    acc.set_infinity(true);
+                }
+            }
+            // A split token is control for the scalar-fracture scheduler and
+            // therefore has no finite Laurent value. Treating an externally
+            // constructed or otherwise misplaced marker as NaN keeps this
+            // contextual trait operation total without aliasing a coefficient.
+            F32QToken::Split => acc.set_nan(),
+        }
         acc
     }
 }
@@ -656,8 +1935,8 @@ pub type TableBuild<E, L> =
 
 /// Reduce one group of output columns over a run of slots.
 ///
-/// `lane[u * rows + i] += sum_{slot < depth} stack[slot * slab + (off[slot *
-/// group + u] & mask) + i]`.
+/// `lane[u * rows + i] += sum_{slot < depth} stack[slot * slab +
+/// radix_entry(off[slot * group + u]) + i]`.
 ///
 /// Read-modify-write on `lane`, so a caller carries one accumulation across as
 /// many calls as the lane's capacity admits and the exact accumulator never
@@ -668,20 +1947,19 @@ pub type TableBuild<E, L> =
 /// The caller multiplies the code's index by `rows` when it writes the stream,
 /// because it is walking that stream anyway. That is the same discipline the
 /// packed panel follows on the dense side --- the layout carries the address, so
-/// the inner loop walks and never indexes --- and it is what leaves this loop
-/// with one `and` and one fused load-add per code and no multiply of any kind.
-/// `CU-06` reads exactly that off the disassembly.
+/// the inner loop walks and never indexes. The portable spelling normalizes the
+/// address by Euclidean remainder; target declarations may spell the same
+/// finite address projection through their native lookup alphabet.
 ///
 /// # Safety
 ///
-/// - `stack` has `depth * slab` readable lanes, and `slab == mask + 1` is a
-///   power of two.
+/// - `stack` has `depth * slab` readable lanes and `slab` is nonzero.
 /// - `off` has `depth * group` readable words.
 /// - `lane` has `group * rows` readable and writable lanes.
-/// - Masking is what discharges the bound: every read is in-slab whatever the
-///   offset holds, with no branch. Correctness of the *value* is
+/// - Euclidean address projection discharges the bound: every read is in-slab
+///   whatever the offset holds. Correctness of the *value* is
 ///   [`uor_matmul_codec::Enumerable`]'s law and `CK-09` asserts it; safety of
-///   the *read* is this mask and holds unconditionally.
+///   the *read* is this projection and holds unconditionally.
 /// - `rows` and `group` are this spec's, and the host has the features its
 ///   backend names.
 pub type TableGather<L> = unsafe fn(
@@ -696,8 +1974,8 @@ pub type TableGather<L> = unsafe fn(
 
 /// The same reduction, reading the coded operand's own memory.
 ///
-/// `lane[u * rows + i] += sum_{slot < depth} stack[slot * slab + ((codes[u *
-/// stride + slot] & mask) << shift) + i]`.
+/// `lane[u * rows + i] += sum_{slot < depth} stack[slot * slab +
+/// radix_code(codes[u * stride + slot]) * rows + i]`.
 ///
 /// # Why there are two of these and not one
 ///
@@ -714,21 +1992,21 @@ pub type TableGather<L> = unsafe fn(
 /// otherwise --- and the two produce the same lane words, which is half of what
 /// `CB-08` asserts.
 ///
-/// `shift` rather than a multiply: the tile heights are powers of two, so the
-/// index scales into an offset by shifting. `CU-06` reads a column loop with no
-/// multiply in it, and this is why it can.
+/// The retained grade argument belongs to the API-locked native function
+/// protocol. The portable spelling derives its code radix directly from
+/// `slab / rows`; no packed field extraction participates in the address.
 ///
 /// # Safety
 ///
-/// - `stack` has `depth * slab` readable lanes, and `slab == (mask + 1) << shift`
-///   is a power of two.
+/// - `stack` has `depth * slab` readable lanes and `slab / rows` is the code
+///   radix.
 /// - `codes` has `(group - 1) * stride + depth` readable words.
 /// - `lane` has `group * rows` readable and writable lanes.
-/// - Masking discharges the bound: every read is in-slab whatever the code
-///   holds, with no branch. That the entry is the *right* one is
+/// - Euclidean code projection discharges the bound: every read is in-slab
+///   whatever the code holds. That the entry is the *right* one is
 ///   `Enumerable::as_index_stream`'s claim, which `CK-09` asserts.
-/// - `rows == 1 << shift` and `group` are this spec's, and the host has the
-///   features its backend names.
+/// - `rows`, its retained radix grade, and `group` are this spec's, and the host
+///   has the features its backend names.
 pub type TableGatherCodes<L> = unsafe fn(
     rows: usize,
     group: usize,
@@ -743,8 +2021,8 @@ pub type TableGatherCodes<L> = unsafe fn(
 
 /// [`TableGatherCodes`] at a byte-wide code stream.
 ///
-/// The same contract, the same masking, the same slab reads: the code is
-/// widened to the index on load, and the two widths are two monomorphic
+/// The same contract, the same Euclidean radix projection, the same slab
+/// reads: the code is widened to the index on load, and the two widths are two monomorphic
 /// sequences the driver dispatches between once per arm, never per code. A
 /// codec whose code space fits a byte stores half the codes the `u16` spelling
 /// does; nothing about the gather's arithmetic moves.
@@ -801,19 +2079,21 @@ pub struct TableSpec<E, L> {
     pub max_bound: u128,
     /// Whether [`Self::build`] issues multiplies.
     ///
-    /// Every build but the bound-1 one does. At bound 1 every product is
-    /// `+-a` or `0`, so the build that declares it is adds and subtracts, and
-    /// the driver's census charges it as such (`CB-10`) rather than as the
-    /// products it computes.
+    /// Product builds normally do. Bound-1 and finite-alphabet lookup builds
+    /// declare `false`: the former issues adds and subtracts, while the latter
+    /// reads a product and adds it. The driver's census charges the operation
+    /// actually issued (`CB-10`) rather than the mathematical product it
+    /// computes.
     pub build_multiplies: bool,
-    /// How many adds [`Self::build`] issues per slot, charged to the census
+    /// The add/contraction charge [`Self::build`] exposes per slot, recorded
     /// when [`Self::build_multiplies`] is false.
     ///
-    /// The census counts what ran, not what a per-codeword build would have
-    /// run: for the independent bound-1 build that is every product issued as
-    /// an add, and for the Gray sign build it is the walk's own count, which
-    /// is the whole point of walking (`2 * block + space - 1` per row against
-    /// `space * block`).
+    /// Transparent fixed bodies count their actual adds: the independent
+    /// bound-one build reports every signed add, the Gray walk reports its own
+    /// recurrence, and compact Atlas carriers report their fixed expansion.
+    /// A generic `Element::mac` body is an opaque algebra boundary and reports
+    /// one contraction presentation per product; a shape-only callback cannot
+    /// truthfully invent its data-dependent internal additions.
     pub build_adds: fn(space: usize, block: usize, rows: usize) -> u64,
     /// Fill one slot.
     pub build: TableBuild<E, L>,
@@ -854,8 +2134,7 @@ impl<E, L> core::fmt::Debug for TableSpec<E, L> {
 ///
 /// Generic over the element and the lane, so there is one reference for every
 /// family rather than one per family --- including the families with no narrow
-/// register at all, where this is not a placeholder but the whole of what the
-/// hardware offers.
+/// register at all, where this is the complete sequence the hardware offers.
 pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -> TableSpec<E, L> {
     // The staged gather holds one column group of lane words in a compile-time
     // array so the run's adds stay in registers. That pays exactly when the
@@ -905,10 +2184,133 @@ pub const fn portable_table<E: Element, L: Lane<E>>(rows: usize, group: usize) -
     }
 }
 
-/// The per-codeword adds build's census charge: every product, issued as an
-/// add or a subtract (`CB-10`).
+/// The full-alphabet i8 table build using the static product lookup.
+///
+/// The gather is the same portable gather as [`portable_table`]; only the
+/// build's product operation is factored into a read from [`I8_PRODUCTS`].
+pub const fn portable_table_i8_lookup(rows: usize, group: usize) -> TableSpec<i8, i32> {
+    let mut spec = portable_table::<i8, i32>(rows, group);
+    spec.build_multiplies = false;
+    spec.build = portable_build_lookup_i8;
+    spec
+}
+
+/// # Safety
+///
+/// [`TableBuild`]'s contract.
+pub(crate) unsafe fn portable_build_lookup_i8(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller guaranteed the three extents.
+    let (book, acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(book, space * block),
+            core::slice::from_raw_parts(acts, block * rows),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    match rows {
+        1 => build_run_lookup_i8::<1>(block, book, acts, out),
+        2 => build_run_lookup_i8::<2>(block, book, acts, out),
+        4 => build_run_lookup_i8::<4>(block, book, acts, out),
+        8 => build_run_lookup_i8::<8>(block, book, acts, out),
+        16 => build_run_lookup_i8::<16>(block, book, acts, out),
+        _ => build_any_lookup_i8(rows, block, book, acts, out),
+    }
+}
+
+/// Build an i8 table from an activation panel with a fixed k-group.
+#[cfg(target_arch = "wasm32")]
+unsafe fn packed_build_lookup_i8<const GROUP: usize>(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: the caller supplied the extents in the TableBuild contract.
+    let (book, acts, out) = unsafe {
+        (
+            core::slice::from_raw_parts(book, space * block),
+            core::slice::from_raw_parts(acts, rows * block),
+            core::slice::from_raw_parts_mut(out, space * rows),
+        )
+    };
+    for (entry, word) in out.chunks_exact_mut(rows).zip(book.chunks_exact(block)) {
+        for (row, cell) in entry.iter_mut().enumerate() {
+            let mut sum = 0i32;
+            for (t, &weight) in word.iter().enumerate() {
+                let activation = acts[crate::spec::packed_slot(t, row, rows, GROUP)];
+                sum = sum.wrapping_add(crate::lookup::i8_product(activation, weight));
+            }
+            *cell = sum;
+        }
+    }
+}
+
+/// Lookup build for a plain k-major activation panel.
+#[cfg(target_arch = "wasm32")]
+pub(crate) unsafe fn packed_build_lookup_i8_group1(
+    rows: usize,
+    space: usize,
+    block: usize,
+    book: *const i8,
+    acts: *const i8,
+    out: *mut i32,
+) {
+    // SAFETY: forwarded from the TableBuild caller.
+    unsafe { packed_build_lookup_i8::<1>(rows, space, block, book, acts, out) }
+}
+
+#[inline(always)]
+fn build_run_lookup_i8<const R: usize>(block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(R).zip(book.chunks_exact(block)) {
+        let mut acc = [0i32; R];
+        for (&w, col) in word.iter().zip(acts.chunks_exact(R)) {
+            for (cell, &a) in acc.iter_mut().zip(&col[..R]) {
+                *cell = cell.wrapping_add(crate::lookup::i8_product(a, w));
+            }
+        }
+        entry.copy_from_slice(&acc);
+    }
+}
+
+fn build_any_lookup_i8(rows: usize, block: usize, book: &[i8], acts: &[i8], out: &mut [i32]) {
+    for (entry, word) in out.chunks_exact_mut(rows).zip(book.chunks_exact(block)) {
+        entry.fill(0);
+        for (&w, col) in word.iter().zip(acts.chunks_exact(rows)) {
+            for (cell, &a) in entry.iter_mut().zip(col) {
+                *cell = cell.wrapping_add(crate::lookup::i8_product(a, w));
+            }
+        }
+    }
+}
+
+const fn census_factor(value: usize) -> u64 {
+    if value as u128 > u64::MAX as u128 {
+        u64::MAX
+    } else {
+        value as u64
+    }
+}
+
+const fn census_product3(a: usize, b: usize, c: usize) -> u64 {
+    census_factor(a)
+        .saturating_mul(census_factor(b)) // R3-ok: a bounded diagnostic counter
+        .saturating_mul(census_factor(c)) // R3-ok: a bounded diagnostic counter
+}
+
+/// The per-codeword build's observable census charge: every product, either
+/// issued transparently as an add/subtract (`CB-10`) or presented once to an
+/// opaque `Element::mac` contraction boundary.
 pub const fn product_build_adds(space: usize, block: usize, rows: usize) -> u64 {
-    (space as u64) * (block as u64) * (rows as u64) // R3-ok: a census count
+    census_product3(space, block, rows) // R3-ok: a bounded diagnostic counter
 }
 
 /// The Gray walk's census charge: `T[0]` and the doubled activations (two
@@ -916,7 +2318,11 @@ pub const fn product_build_adds(space: usize, block: usize, rows: usize) -> u64 
 /// `2 * block + space - 1` adds per row against the independent build's
 /// `space * block`.
 pub const fn gray_sign_build_adds(space: usize, block: usize, rows: usize) -> u64 {
-    (2 * block + space - 1) as u64 * rows as u64 // R3-ok: a census count
+    census_factor(block)
+        .saturating_mul(2) // R3-ok: a bounded diagnostic counter
+        .saturating_add(census_factor(space)) // R3-ok: a bounded diagnostic counter
+        .saturating_sub(1) // R3-ok: a bounded diagnostic counter
+        .saturating_mul(census_factor(rows)) // R3-ok: a bounded diagnostic counter
 }
 
 /// The bound-1 build: the table's only multiply, absent.
@@ -1198,9 +2604,9 @@ fn gray_sign_any(rows: usize, space: usize, block: usize, acts: &[i8], out: &mut
 /// and its book is not the bit decomposition. The driver takes this spec only
 /// where [`uor_matmul_codec::Enumerable::SIGN_BIT_BOOK`] says the book *is*
 /// the bit decomposition; everywhere else the per-codeword adds build runs,
-/// at the same bytes. Whether it stays --- the pre-registered verdict of
-/// `MEASUREMENT-LOG.md`, pending a quiet measurement window: ship only if the
-/// isolated build wins *and* the end-to-end run does not regress.
+/// at the same bytes. The pre-registered measurement verdict was to ship: the
+/// isolated build won at both measured widths and the end-to-end run did not
+/// regress; `MEASUREMENT-LOG.md` records the figures and byte checks.
 pub fn gray_sign_table(rows: usize, group: usize) -> TableSpec<i8, i32> {
     // The incumbent: the spec `Auto` hands a bound-1 alphabet. `block = 1`
     // because only the build's `k_group` divides one, and the bound-1 builds
@@ -1420,20 +2826,20 @@ fn codes_any<L: LaneWord, K: Copy + Into<usize>>(
     rows: usize,
     depth: usize,
     slab: usize,
-    shift: u32,
+    _shift: u32,
     stack: &[L],
     codes: &[K],
     stride: usize,
     lane: &mut [L],
 ) {
-    let mask = (slab >> shift) - 1;
+    let code_space = slab / rows;
     let mut rest = stack;
     for slot in 0..depth {
         let (words, tail) = rest.split_at(slab);
         rest = tail;
         let mut at = slot;
         for cols in lane.chunks_exact_mut(rows) {
-            let entry = &words[(codes[at].into() & mask) << shift..];
+            let entry = &words[table_code_address(codes[at].into(), code_space, rows)..];
             for (cell, &e) in cols.iter_mut().zip(&entry[..rows]) {
                 *cell = cell.add(e);
             }
@@ -1442,12 +2848,40 @@ fn codes_any<L: LaneWord, K: Copy + Into<usize>>(
     }
 }
 
+/// Normalize an arbitrary row-scaled offset into one complete table entry.
+/// The safe gather surface remains total for every offset, while Euclidean
+/// radix projection replaces the former packed mask.
+#[inline(always)]
+fn table_entry_address(offset: usize, slab: usize, rows: usize) -> usize {
+    let within = offset % slab;
+    within - within % rows
+}
+
+/// Project one canonical code into the row-major table alphabet. The product
+/// here is structural address scaling, not an element-value product.
+#[inline(always)]
+fn table_code_address(code: usize, code_space: usize, rows: usize) -> usize {
+    (code % code_space) * rows
+}
+
+/// Radix-two grade of a power-of-two tile height, expressed by quotient
+/// refinement so the public function-pointer protocol does not force bit-field
+/// extraction onto the portable q path.
+#[inline(always)]
+fn table_row_grade(mut rows: usize) -> u32 {
+    let mut grade = 0u32;
+    while rows > 1 {
+        rows /= 2;
+        grade += 1;
+    }
+    grade
+}
+
 /// The reference column step: the whole of what `CU-06` reads.
 ///
 /// Everything is *walked*, and that is the claim. The slot's base advances by an
-/// add, the entry's address is one mask on an offset the caller already scaled,
-/// and the accumulation is a compile-time array --- so the loop is one `and` and
-/// one add per lane word, and no multiply of any kind.
+/// add, the entry's address is a Euclidean projection of an offset the caller
+/// already scaled, and the accumulation is a compile-time array.
 ///
 /// `R` and `G` are both compile-time, and `G` is the reason this is not simply a
 /// slice. With the column group a runtime value the accumulation is a chunked
@@ -1470,19 +2904,6 @@ fn gather_run<const C: usize, const R: usize, const G: usize, L: LaneWord>(
     lane: &mut [L],
 ) {
     let slab = if C == 0 { slab_arg } else { C * R };
-    // Derived here, not passed. `words.len()` is `slab` because `split_at` says
-    // so, and the mask below is at most `slab - R`, so the compiler discharges
-    // both slice bounds instead of checking them.
-    //
-    // `slab - 1` alone would bound the entry's *base* and not the `R` lanes read
-    // from it, and [`TableSpec::gather`] is a safe public method: an offset that
-    // is not a multiple of `R` would start the read inside the last entry and run
-    // past the slab --- a panic here and, in the ISA sequences, a read out of
-    // bounds. `R` is a power of two and `slab` is a multiple of it, so clearing
-    // the sub-row bits is the same single `and` on a different constant, and it
-    // makes every read row-aligned by construction rather than by the caller's
-    // discipline.
-    let mask = (slab - 1) & !(R - 1);
     let mut acc = [[L::ZERO; R]; G];
     for (cols, held) in acc.iter_mut().zip(lane.chunks_exact(R)) {
         cols.copy_from_slice(held);
@@ -1496,9 +2917,7 @@ fn gather_run<const C: usize, const R: usize, const G: usize, L: LaneWord>(
         let (words, tail) = rest.split_at(slab);
         rest = tail;
         for (cols, &at) in acc.iter_mut().zip(run) {
-            // The mask, not a comparison: every offset reads in-slab whatever it
-            // holds, so there is no branch here and none is needed.
-            let entry = &words[at as usize & mask..];
+            let entry = &words[table_entry_address(at as usize, slab, R)..];
             for (cell, &e) in cols.iter_mut().zip(&entry[..R]) {
                 *cell = cell.add(e);
             }
@@ -1522,13 +2941,12 @@ fn gather_any<L: LaneWord>(
     off: &[u32],
     lane: &mut [L],
 ) {
-    let mask = (slab - 1) & !(rows - 1);
     let mut rest = stack;
     for run in off.chunks_exact(group) {
         let (words, tail) = rest.split_at(slab);
         rest = tail;
         for (cols, &at) in lane.chunks_exact_mut(rows).zip(run) {
-            let entry = &words[at as usize & mask..];
+            let entry = &words[table_entry_address(at as usize, slab, rows)..];
             for (cell, &e) in cols.iter_mut().zip(&entry[..rows]) {
                 *cell = cell.add(e);
             }
@@ -1538,29 +2956,27 @@ fn gather_any<L: LaneWord>(
 
 /// The same, over the coded operand's own memory.
 ///
-/// One shift more than [`gather_run`] and one memory round trip fewer: there is
-/// no index stream to write and none to read back.
+/// There is no index stream to write and none to read back.
 ///
-/// `C` binds as it does in [`gather_run`]. The shift is not a second unknown:
-/// [`TableSpec::gather_codes`] derives it as `rows.trailing_zeros()`, so at a
-/// compile-time `R` it is `R`'s and the entry's address is `(code & (C - 1)) *
-/// R` with both factors literal.
+/// `C` binds as it does in [`gather_run`]. The retained grade argument belongs
+/// to the API-locked native protocol; this portable spelling derives the entry
+/// address directly as the canonical code remainder scaled by the structural
+/// row extent.
 #[inline(always)]
 fn codes_run<const C: usize, const R: usize, const G: usize, L: LaneWord, K: Copy + Into<usize>>(
     depth: usize,
     slab_arg: usize,
-    shift_arg: u32,
+    _shift_arg: u32,
     stack: &[L],
     codes: &[K],
     stride: usize,
     lane: &mut [L],
 ) {
-    let (slab, shift) = if C == 0 {
-        (slab_arg, shift_arg)
+    let (slab, code_space) = if C == 0 {
+        (slab_arg, slab_arg / R)
     } else {
-        (C * R, R.trailing_zeros())
+        (C * R, C)
     };
-    let mask = (slab >> shift) - 1;
     let mut acc = [[L::ZERO; R]; G];
     for (cols, held) in acc.iter_mut().zip(lane.chunks_exact(R)) {
         cols.copy_from_slice(held);
@@ -1571,7 +2987,7 @@ fn codes_run<const C: usize, const R: usize, const G: usize, L: LaneWord, K: Cop
         rest = tail;
         let mut at = slot;
         for cols in acc.iter_mut() {
-            let entry = &words[(codes[at].into() & mask) << shift..];
+            let entry = &words[table_code_address(codes[at].into(), code_space, R)..];
             for (cell, &e) in cols.iter_mut().zip(&entry[..R]) {
                 *cell = cell.add(e);
             }
@@ -1593,10 +3009,9 @@ fn codes_run<const C: usize, const R: usize, const G: usize, L: LaneWord, K: Cop
 ///
 /// Instantiated at a *runtime* slab, which is the binding the gate has to read:
 /// with the code count a literal every address is a constant displacement and
-/// the absence of a multiply is trivial, so the claim would pass on the easy
-/// case while the hard one shipped unread. At `C = 0` the slot's base is a
-/// cursor and the entry's is a mask, and that it is still an add is the whole
-/// content of `CU-06`.
+/// the absence of a value multiply is trivial, so the claim would pass on the
+/// easy case while the hard one shipped unread. At `C = 0` the slot's base is a
+/// cursor and the entry is projected into the runtime slab.
 #[inline(never)]
 pub fn gather_reference_i32(slab: usize, stack: &[i32], off: &[u32], lane: &mut [i32]) {
     gather_run::<0, 16, 1, i32>(slab, stack, off, lane);
@@ -1647,19 +3062,18 @@ impl<E, L> TableSpec<E, L> {
     ///
     /// `slab` is the lane words one slot occupies: the slab's code count, which
     /// is a power of two at or above the codec's own code space, times
-    /// [`Self::rows`], which is also one. Every offset is masked into it, so
+    /// [`Self::rows`], which is also one. Every offset is projected into it, so
     /// this checks lengths and nothing per code.
     pub fn gather(&self, depth: usize, slab: u32, stack: &[L], off: &[u32], lane: &mut [L]) {
         assert!(slab.is_power_of_two(), "one slot is 2^j lane words");
-        // The sequences clear the sub-row bits of every offset, which is what
-        // keeps a read of `rows` lanes inside the slab whatever the offset holds.
-        // That argument needs the tile height to be a power of two, so it is
-        // asserted here rather than assumed --- as `gather_codes` already does.
+        // Every sequence projects an offset onto a complete row. The native
+        // declarations use the retained radix grade; the portable declaration
+        // uses quotient/remainder directly.
         assert!(self.rows.is_power_of_two(), "the tile height is 2^j");
         let slab = slab as usize;
         // A slab holds a whole number of entries and an entry is `rows` lane
         // words, so a slab below `rows` holds none --- and every sequence then
-        // reads `rows` words from a base the mask has pinned to zero. Measured at
+        // reads `rows` words from a base the radix projection has pinned to zero. Measured at
         // `slab = 1, rows = 16`: a slice-bounds panic in the reference and a read
         // past the stack in each ISA sequence, from a safe method.
         assert!(self.rows <= slab, "one slot holds at least one entry");
@@ -1670,10 +3084,9 @@ impl<E, L> TableSpec<E, L> {
             self.group * self.rows,
             "the lane is group * rows"
         );
-        // SAFETY: the lengths are what `TableGather` requires, `slab` is a power
-        // of two so `slab - 1` is the mask that makes every read in-slab, and
-        // this spec came from a `*_table` selector, which only ever returns one
-        // whose target features the host has.
+        // SAFETY: the lengths are what `TableGather` requires; the sequence's
+        // finite address projection keeps every read in-slab, and this spec came
+        // from a `*_table` selector whose target features the host has.
         unsafe {
             (self.gather)(
                 self.rows,
@@ -1692,8 +3105,9 @@ impl<E, L> TableSpec<E, L> {
     /// `codes` is the coded operand's own memory, starting at the first code of
     /// the first column of the group, with `stride` codes between columns. The
     /// codec has claimed this stream addresses its enumeration
-    /// ([`uor_matmul_codec::Enumerable::as_index_stream`]); every code is masked
-    /// into the slab, so this checks lengths and nothing per code.
+    /// ([`uor_matmul_codec::Enumerable::as_index_stream`]); every code is
+    /// projected by the slab's Euclidean radix, so this checks lengths and
+    /// nothing per code.
     pub fn gather_codes(
         &self,
         depth: usize,
@@ -1708,7 +3122,7 @@ impl<E, L> TableSpec<E, L> {
         let slab = slab as usize;
         // A slab holds a whole number of entries and an entry is `rows` lane
         // words, so a slab below `rows` holds none --- and every sequence then
-        // reads `rows` words from a base the mask has pinned to zero. Measured at
+        // reads `rows` words from a base the radix projection has pinned to zero. Measured at
         // `slab = 1, rows = 16`: a slice-bounds panic in the reference and a read
         // past the stack in each ISA sequence, from a safe method.
         assert!(self.rows <= slab, "one slot holds at least one entry");
@@ -1723,16 +3137,16 @@ impl<E, L> TableSpec<E, L> {
             self.group * self.rows,
             "the lane is group * rows"
         );
-        // SAFETY: the lengths are what `TableGatherCodes` requires, `slab` is a
-        // power of two so the mask below it makes every read in-slab, and this
-        // spec came from a `*_table` selector.
+        // SAFETY: the lengths are what `TableGatherCodes` requires. The
+        // Euclidean code projection makes every read in-slab, and this spec
+        // came from a `*_table` selector.
         unsafe {
             (self.gather_codes)(
                 self.rows,
                 self.group,
                 depth,
                 slab,
-                self.rows.trailing_zeros(),
+                table_row_grade(self.rows),
                 stack.as_ptr(),
                 codes.as_ptr(),
                 stride,
@@ -1746,7 +3160,7 @@ impl<E, L> TableSpec<E, L> {
     /// The same claim, the same checks, the same lane words: the codec has
     /// claimed this `u8` stream addresses its enumeration
     /// ([`uor_matmul_codec::Enumerable::as_index_stream`]), every code is
-    /// widened and masked into the slab, and nothing is read per code.
+    /// widened and projected into the slab, and nothing is read per code.
     pub fn gather_codes_u8(
         &self,
         depth: usize,
@@ -1778,7 +3192,7 @@ impl<E, L> TableSpec<E, L> {
                 self.group,
                 depth,
                 slab,
-                self.rows.trailing_zeros(),
+                table_row_grade(self.rows),
                 stack.as_ptr(),
                 codes.as_ptr(),
                 stride,
@@ -1812,7 +3226,7 @@ impl<E, L> TableSpec<E, L> {
 #[inline]
 pub fn available_table_i8(rows: usize, group: usize) -> impl Iterator<Item = TableSpec<i8, i32>> {
     collect_table![
-        true => portable_table::<i8, i32>(rows, group),
+        true => portable_table_i8_lookup(rows, group),
         crate::isa::x86::avx2_available() => crate::isa::x86::avx2_table_i8_i32(rows, group),
         crate::isa::x86::avx512_available() => crate::isa::x86::avx512_table_i8_i32(rows, group),
         crate::isa::arm::neon_available() => crate::isa::arm::neon_table_i8_i32(rows, group),
@@ -1864,8 +3278,8 @@ pub fn available_table_i32_modular(
 ///
 /// The build's multiply is the table's only one, and no SIMD integer multiply
 /// reaches an `i64` lane --- the same reason [`crate::available_i64_modular`]
-/// is portable-only. The reference is not a placeholder here but the whole of
-/// what the hardware offers.
+/// is portable-only. The reference is the complete sequence the hardware
+/// offers.
 #[inline]
 pub fn available_table_i64_modular(
     rows: usize,

@@ -288,7 +288,7 @@ pub(crate) fn expand<O: Element>(c: &mut MatViewMut<'_, O>, index: &[usize], m: 
 /// would refuse to collapse a row with a bit-identical repeat of itself, and
 /// `+0.0 == -0.0` would collapse two rows the canonical codebook holds apart.
 /// The arena tier's semantics are the law here (`CK-10`): the bit pattern is
-/// the symbol, so `-0.0` and `+0.0` are distinct symbols with equal decodes
+/// the symbol, so `-0.0` and `+0.0` are distinct symbols with equal dyadic values
 /// and NaN payloads are distinct symbols (`CD-17`). A row that differs from
 /// another only in the sign of a zero must not share that row's sum:
 /// downstream of any later symbolic transform the two are different symbols,
