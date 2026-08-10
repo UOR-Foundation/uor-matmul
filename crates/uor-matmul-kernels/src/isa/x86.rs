@@ -760,7 +760,10 @@ unsafe fn avx512_lookup_i8<const MR: usize, const NR: usize>(
             for j in 0..NR {
                 indices[j] = (a << 8) | (pb[p * NR + j] as u8 as i32);
             }
+            // SAFETY: `indices` contains exactly `NR == 16` contiguous i32 lanes.
             let index = unsafe { _mm512_loadu_si512(indices.as_ptr().cast()) };
+            // SAFETY: each packed i8 pair is a valid index into the 256x256
+            // product table, and the gather scale matches its i32 elements.
             let products = unsafe {
                 _mm512_i32gather_epi32(index, crate::lookup::I8_PRODUCTS.as_ptr().cast(), 4)
             };
@@ -768,6 +771,8 @@ unsafe fn avx512_lookup_i8<const MR: usize, const NR: usize>(
         }
     }
     for (i, value) in tile.iter().enumerate() {
+        // SAFETY: the tile has `MR * NR` lanes and this store writes the
+        // `i`th contiguous block of `NR == 16` lanes within `acc`.
         unsafe { _mm512_storeu_si512(acc.as_mut_ptr().add(i * NR).cast(), *value) };
     }
 }
@@ -1481,12 +1486,18 @@ unsafe fn avx2_lookup_reduce_i8<const MR: usize>(
         for i in 0..MR {
             indices[i] = ((pa[i * kc + p] as u8 as i32) << 8) | b;
         }
+        // SAFETY: `indices` contains eight contiguous i32 lanes for the AVX2
+        // load, even when only the first `MR` lanes are populated.
         let index = unsafe { _mm256_loadu_si256(indices.as_ptr().cast()) };
+        // SAFETY: every index is formed from two i8 bytes and is therefore in
+        // the 256x256 i32 product table.
         let products =
             unsafe { _mm256_i32gather_epi32(crate::lookup::I8_PRODUCTS.as_ptr(), index, 4) };
         sum = _mm256_add_epi32(sum, products);
     }
     let mut result = [0i32; 8];
+    // SAFETY: `result` has eight contiguous i32 lanes, matching the vector
+    // store's width.
     unsafe { _mm256_storeu_si256(result.as_mut_ptr().cast(), sum) };
     acc.copy_from_slice(&result[..MR]);
 }
@@ -1726,16 +1737,22 @@ unsafe fn avx2_lookup_i8<const MR: usize, const NR: usize>(
             for j in 0..NR {
                 indices[j] = (a << 8) | (pb[p * NR + j] as u8 as i32);
             }
-            for v in 0..NR / 8 {
+            for (v, slot) in tile[i].iter_mut().enumerate().take(NR / 8) {
+                // SAFETY: each iteration loads one contiguous group of eight
+                // i32 indices from the `NR`-lane local array.
                 let index = unsafe { _mm256_loadu_si256(indices.as_ptr().add(v * 8).cast()) };
+                // SAFETY: the packed i8 pairs are valid indices into the
+                // 256x256 i32 product table.
                 let products = unsafe {
                     _mm256_i32gather_epi32(crate::lookup::I8_PRODUCTS.as_ptr(), index, 4)
                 };
-                tile[i][v] = _mm256_add_epi32(tile[i][v], products);
+                *slot = _mm256_add_epi32(*slot, products);
             }
         }
     }
     for (i, row) in tile.iter().enumerate() {
+        // SAFETY: each row has `NR` contiguous output lanes, and the stores
+        // cover exactly those lanes without exceeding `acc`.
         unsafe {
             _mm256_storeu_si256(acc.as_mut_ptr().add(i * NR).cast(), row[0]);
             if NR == 16 {
@@ -2522,11 +2539,11 @@ unsafe fn avx2_table_build_lookup<const V: usize>(
                 let weight = *book.add(c * block + t) as u8 as i32;
                 for (v, cell) in entry.iter_mut().enumerate() {
                     let mut indices = [0i32; A2_TABLE_LANES];
-                    for lane in 0..A2_TABLE_LANES {
+                    for (lane, index) in indices.iter_mut().enumerate().take(A2_TABLE_LANES) {
                         let row = v * A2_TABLE_LANES + lane;
                         let activation =
                             *acts.add(crate::spec::packed_slot(t, row, rows, 2)) as u8 as i32;
-                        indices[lane] = (activation << 8) | weight;
+                        *index = (activation << 8) | weight;
                     }
                     let products = _mm256_i32gather_epi32(
                         crate::lookup::I8_PRODUCTS.as_ptr(),
@@ -3259,10 +3276,10 @@ unsafe fn a5_build_lookup8(
             for t in 0..block {
                 let weight = *book.add(c * block + t) as u8 as i32;
                 let mut indices = [0i32; A5_TABLE_LANES];
-                for row in 0..A5_TABLE_LANES {
+                for (row, index) in indices.iter_mut().enumerate().take(A5_TABLE_LANES) {
                     let activation =
                         *acts.add(crate::spec::packed_slot(t, row, rows, 2)) as u8 as i32;
-                    indices[row] = (activation << 8) | weight;
+                    *index = (activation << 8) | weight;
                 }
                 let products = _mm512_i32gather_epi32(
                     _mm512_loadu_si512(indices.as_ptr().cast()),
