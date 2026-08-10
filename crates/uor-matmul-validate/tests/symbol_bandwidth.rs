@@ -226,8 +226,7 @@ fn symbol_coded_gemv_sits_against_the_bus_cg_14() {
                 "{label}: the non-table dense stream must issue a kernel call"
             );
             assert_eq!(
-                census.multiplies,
-                0,
+                census.multiplies, 0,
                 "{label}: opaque dense kernels do not invent a multiply count ({census:?})"
             );
             eprintln!(
