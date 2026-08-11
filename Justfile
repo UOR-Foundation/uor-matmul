@@ -24,7 +24,11 @@ lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
 test:
-    cargo test --workspace
+    # Keep Cargo and the nested target-build commands on the pinned toolchain.
+    # Some hosts put Homebrew Rust ahead of rustup; the conformance tests spawn
+    # Cargo for thumbv7em, whose standard library belongs to the pinned toolchain.
+    PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
+        cargo test --workspace
 
 # A recipe because `kappa` did not compile. `address_into` read
 # `AddressOutcome::label`, a field `uor-addr-1` does not have --- it is
