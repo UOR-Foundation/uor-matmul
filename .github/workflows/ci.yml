@@ -1,11 +1,10 @@
-# The normative acceptance gate.
-#
-# `just vv` is the single gate; the other workflows are the axes it cannot run
-# on one machine --- other architectures, other targets, longer budgets.
+# The required acceptance gate. One pull-request or merge-group event creates
+# one workflow run; the jobs remain parallel so consolidation does not turn
+# runner setup savings into a longer critical path. Miri and fuzz are deep,
+# scheduled validation in their own workflows rather than merge blockers.
 name: ci
 
 on:
-  push: { branches: [main] }
   pull_request:
   # The merge queue runs the required checks on its merge group; without
   # this trigger the group reports nothing and the queue ejects the PR.
@@ -23,11 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: rustfmt, clippy }
+        with:
+          components: rustfmt, clippy
       - run: rustup target add thumbv7em-none-eabihf wasm32-unknown-unknown
       - uses: extractions/setup-just@v2
       - uses: Swatinem/rust-cache@v2
       - run: just vv
+      # `just vv` already runs the BDD half of honesty. Keep the model-level
+      # assertion in the same warmed job instead of provisioning another runner
+      # to repeat the BDD suite.
+      - name: R4, the honesty model gate
+        run: cargo run -q -p xtask -- check-model
 
   checked:
     name: CT-02, checked arithmetic
@@ -63,7 +68,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y llvm
       - name: locate llvm-mca
         run: |
-          MCA=$(command -v llvm-mca || ls /usr/lib/llvm-*/bin/llvm-mca 2>/dev/null | head -1)
+          MCA=$(command -v llvm-mca || find /usr/lib -path '*/bin/llvm-mca' -type f -print -quit 2>/dev/null)
           test -n "$MCA" || { echo "llvm-mca was not installed by the llvm package"; exit 1; }
           echo "LLVM_MCA=$MCA" >> "$GITHUB_ENV"
       # x86-64 is the host, so the required half needs no cross target.
@@ -112,3 +117,148 @@ jobs:
             echo "the manifest changed beyond the NumPy version that wrote it"
             exit 1
           }
+
+  aarch64:
+    name: CB-04, aarch64 NEON and dotprod
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # These are the shipped crates whose architecture-specific code must run.
+      # Host-independent conformance and validation already run under `just vv`.
+      - run: >-
+          cargo test
+          -p uor-matmul-core -p uor-matmul-codec
+          -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul
+      - name: CA-02, the corpus digest on aarch64
+        run: cargo test -p uor-matmul-conformance --test environment
+
+  big-endian:
+    name: CD-06, big-endian
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      # Include `-gemm` here so the selection-half s390x matrix leg this job
+      # replaces does not leave a coverage hole.
+      - run: >-
+          cross test
+          -p uor-matmul-core -p uor-matmul-codec -p uor-matmul-gemm
+          --target s390x-unknown-linux-gnu
+
+  embedded:
+    name: CA-03, no allocator symbol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p uor-matmul --no-default-features --release --target thumbv7em-none-eabihf
+      - run: cargo test -p uor-matmul-conformance --test environment no_allocator
+
+  cortex-m:
+    name: CB-11, Cortex-M parity under qemu-system
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add thumbv6m-none-eabi thumbv7em-none-eabihf
+      - run: sudo apt-get update && sudo apt-get install -y qemu-system-arm
+      - uses: extractions/setup-just@v2
+      - uses: Swatinem/rust-cache@v2
+      - run: just cortex-m-run
+
+  vnni-emulated:
+    # Current hosted x86 runners do not expose AVX-512. Intel SDE's Icelake
+    # model executes the VNNI sequences; this is correctness, never timing.
+    name: CB-02, AVX-512 VNNI parity under Intel SDE Icelake
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Intel SDE (pinned, digest-checked)
+        run: |
+          curl -sSL -o /tmp/sde.tar.xz https://downloadmirror.intel.com/843185/sde-external-9.48.0-2024-11-25-lin.tar.xz
+          echo "3173d2a5369e3385226b488d8b75403951bc14af601435fe707d9f83e0b533e6  /tmp/sde.tar.xz" | sha256sum -c -
+          cd /tmp && tar -xf sde.tar.xz
+      - run: cargo build --release -p uor-matmul-kernels --test parity
+      # A skip is a failure: this job exists specifically to execute VNNI.
+      - run: |
+          BIN=$(find target/release/deps -maxdepth 1 -name 'parity-*' -type f -executable | head -1)
+          echo "running $BIN under SDE (Icelake)"
+          OUT=$(/tmp/sde-external-9.48.0-2024-11-25-lin/sde -icl -- "$BIN" --nocapture 2>&1)
+          echo "$OUT"
+          if echo "$OUT" | grep -q "Avx512Vnni: not available"; then
+            echo "the VNNI sequences did not execute; the leg is vacuous" >&2
+            exit 1
+          fi
+          echo "$OUT" | grep -q "avx512vnni_equals_portable_cb_03 ... ok"
+
+  wasm:
+    name: CB-05, wasm with and without SIMD128
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add wasm32-unknown-unknown wasm32-wasip1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasmtime
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
+      - name: SIMD128 on
+        run: cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
+        env:
+          RUSTFLAGS: -C target-feature=+simd128
+      - name: run the suite under wasmtime, SIMD128 off
+        run: >-
+          cargo test --release --target wasm32-wasip1
+          -p uor-matmul-core -p uor-matmul-codec
+          -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      - name: run the suite under wasmtime, SIMD128 on
+        run: >-
+          cargo test --release --target wasm32-wasip1
+          -p uor-matmul-core -p uor-matmul-codec
+          -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+          RUSTFLAGS: -C target-feature=+simd128
+
+  required:
+    name: required
+    if: always()
+    needs:
+      - vv
+      - checked
+      - deny
+      - census
+      - selection
+      - aarch64
+      - big-endian
+      - embedded
+      - cortex-m
+      - vnni-emulated
+      - wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every acceptance job passed
+        run: |
+          test '${{ needs.vv.result }}' = success
+          test '${{ needs.checked.result }}' = success
+          test '${{ needs.deny.result }}' = success
+          test '${{ needs.census.result }}' = success
+          test '${{ needs.selection.result }}' = success
+          test '${{ needs.aarch64.result }}' = success
+          test '${{ needs['big-endian'].result }}' = success
+          test '${{ needs.embedded.result }}' = success
+          test '${{ needs['cortex-m'].result }}' = success
+          test '${{ needs['vnni-emulated'].result }}' = success
+          test '${{ needs.wasm.result }}' = success

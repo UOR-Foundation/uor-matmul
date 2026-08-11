@@ -70,7 +70,8 @@ purity:
 #
 # Build the shipped crates for targets with no allocator at all.
 no-alloc:
-    cargo build -p uor-matmul --no-default-features --target thumbv7em-none-eabihf
+    PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
+        cargo build -p uor-matmul --no-default-features --target thumbv7em-none-eabihf
     # `.cargo/config.toml` pins `+simd128` for this target, so the plain build
     # below is the SIMD128-*on* one and the second has to say `-simd128` to be a
     # second configuration at all. It used to say `+simd128` again by way of
@@ -79,10 +80,13 @@ no-alloc:
     # Whether the two *agree* is `CB-05`, and that is asserted by running them
     # under `wasmtime` in `cross-run`; what this pair asserts is that neither
     # links an allocator.
-    cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
-    cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown \
+    PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
+        cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown
+    PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
+        cargo build -p uor-matmul --no-default-features --target wasm32-unknown-unknown \
         --config 'target.wasm32-unknown-unknown.rustflags=["-C","target-feature=-simd128"]'
-    cargo check -p uor-matmul --target aarch64-unknown-linux-gnu
+    PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
+        cargo check -p uor-matmul --target aarch64-unknown-linux-gnu
 
 # The crates that carry an ISA sequence or a width that a 32-bit `usize` can
 # change. `uor-matmul-conformance` and `-validate` are absent because their tests
@@ -107,7 +111,7 @@ cross_crates := "-p uor-matmul-core -p uor-matmul-codec -p uor-matmul-kernels -p
 #
 # The linker and runner are set here rather than in `.cargo/config.toml` because
 # `[target.aarch64-unknown-linux-gnu]` there would also apply on a machine where
-# aarch64 is the *host* --- `cross.yml` has one, and a `runner` in the config sent
+# aarch64 is the *host* --- `ci.yml` has one, and a `runner` in the config sent
 # its native test binaries through a `qemu-aarch64` it does not have. Set per
 # invocation, they reach this cross-run and nothing else.
 #
@@ -178,7 +182,7 @@ miri:
 #
 # A recipe because it was only ever run in CI, and three wildcard requirements and
 # an unmaintained advisory sat in `main` unseen: `advisories FAILED, bans FAILED`
-# on every push. Needs `cargo install cargo-deny`, which is why it is not in
+# on every required CI run. Needs `cargo install cargo-deny`, which is why it is not in
 # `just vv`.
 #
 # Advisories, bans, licences and sources, over the dependency graph.
@@ -286,7 +290,8 @@ honesty: bdd
 # R9: every capability begins as a Gherkin scenario, and every scenario has a
 # test whose name ends in its ID.
 bdd:
-    cargo test -p uor-matmul-conformance
+    PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
+        cargo test -p uor-matmul-conformance
 
 # CT-01, CT-03, CK-06, CT-08, CD-25: the fuzz targets. Needs `cargo install
 # cargo-fuzz` and a nightly toolchain, which is why it is not part of `just vv`.

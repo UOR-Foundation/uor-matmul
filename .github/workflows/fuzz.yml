@@ -1,34 +1,20 @@
 # CT-01, CT-03, CK-06, CT-08, CD-25: totality over unstructured input.
 #
-# Short on every push, long on a schedule. The claim is that no representable
-# input fails, so what the fuzzer looks for is a panic --- not a wrong answer,
-# which the differential tests cover.
+# Deep nightly validation. The claim is that no representable input fails, so
+# what the fuzzer looks for is a panic --- not a wrong answer, which the
+# differential tests cover. Pull requests retain deterministic differential
+# tests in `ci`; randomized search does not hold the merge queue open.
 #
 # `tropical` is the one exception, and deliberately: it runs both witness
 # mechanisms on the operands the fuzzer drew and compares their bytes, so a
 # disagreement is a crash. `CD-25` quantifies over every shape, and a corpus is
 # a list of shapes someone thought of.
 #
-# The `push` trigger below was missing, and the header above has claimed it since
-# the file was written. So the only runs this workflow ever had came from its
-# nightly schedule, and its whole history is one `failure`: `error: no such
-# command: fuzz`, because the stable pin in `rust-toolchain.toml` outranked the
-# nightly and `cargo fuzz` resolved against a toolchain that has no `cargo-fuzz`.
-# That is fixed below --- and the fix then sat unexercised, because nothing ran
-# the workflow. A gate that runs once a night is a gate whose fix is verified a
-# day late; one that runs on push is verified by the commit that makes it.
-#
-# The duration expression already anticipated this: `'schedule' && 900 || 60`
-# gives 60 s to every event that is not the nightly, which is only meaningful if
-# events other than the nightly reach it.
+# Manual runs use the short one-minute budget; the nightly search gets fifteen
+# minutes per target.
 name: fuzz
 
 on:
-  push: { branches: [main] }
-  pull_request:
-  # The merge queue runs the required checks on its merge group; without
-  # this trigger the group reports nothing and the queue ejects the PR.
-  merge_group:
   schedule: [{ cron: "0 3 * * *" }]
   workflow_dispatch:
 
