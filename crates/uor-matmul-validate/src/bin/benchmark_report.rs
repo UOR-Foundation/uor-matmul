@@ -32,6 +32,15 @@ struct Row {
     modified: SystemTime,
 }
 
+struct RunContext {
+    host: String,
+    arch: String,
+    os: String,
+    revision: String,
+    workflow: String,
+    run: String,
+}
+
 struct Other<'a> {
     label: &'a str,
     prefix: &'a str,
@@ -134,6 +143,112 @@ fn collect_rows(root: &Path) -> Result<Vec<Row>, String> {
         }
     }
     Ok(rows)
+}
+
+fn context_from_environment() -> RunContext {
+    RunContext {
+        host: env::var("RUNNER_NAME")
+            .or_else(|_| env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "local".to_owned()),
+        arch: env::var("RUNNER_ARCH").unwrap_or_else(|_| env::consts::ARCH.to_owned()),
+        os: env::var("RUNNER_OS").unwrap_or_else(|_| env::consts::OS.to_owned()),
+        revision: env::var("GITHUB_SHA")
+            .or_else(|_| env::var("GIT_COMMIT"))
+            .unwrap_or_else(|_| "unknown".to_owned()),
+        workflow: env::var("GITHUB_WORKFLOW").unwrap_or_else(|_| "local".to_owned()),
+        run: env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "local".to_owned()),
+    }
+}
+
+fn context_string(json: &Value, key: &str) -> Result<String, String> {
+    json.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("missing or non-string report context field {key}"))
+}
+
+fn read_context(path: &Path) -> Result<RunContext, String> {
+    let json: Value = serde_json::from_str(
+        &fs::read_to_string(path)
+            .map_err(|error| format!("read report context {}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("parse report context {}: {error}", path.display()))?;
+    Ok(RunContext {
+        host: context_string(&json, "host")?,
+        arch: context_string(&json, "arch")?,
+        os: context_string(&json, "os")?,
+        revision: context_string(&json, "revision")?,
+        workflow: context_string(&json, "workflow")?,
+        run: context_string(&json, "run")?,
+    })
+}
+
+fn report_context(source: &Path, output: &Path) -> Result<RunContext, String> {
+    let bundled_source = output.join("criterion");
+    let context_path = output.join("context.json");
+    if source == bundled_source && context_path.exists() {
+        read_context(&context_path)
+    } else {
+        Ok(context_from_environment())
+    }
+}
+
+fn write_context(
+    output: &Path,
+    context: &RunContext,
+    measurements: usize,
+    required_comparisons: usize,
+) -> Result<(), String> {
+    let json = serde_json::json!({
+        "schema": 1,
+        "source": "Criterion new/estimates.json",
+        "host": context.host,
+        "arch": context.arch,
+        "os": context.os,
+        "revision": context.revision,
+        "workflow": context.workflow,
+        "run": context.run,
+        "measurements": measurements,
+        "required_comparisons": required_comparisons,
+    });
+    fs::write(
+        output.join("context.json"),
+        serde_json::to_string_pretty(&json)
+            .map_err(|error| format!("serialize report context: {error}"))?,
+    )
+    .map_err(|error| format!("write report context: {error}"))
+}
+
+fn bundle_estimates(source: &Path, output: &Path, rows: &mut [Row]) -> Result<(), String> {
+    let bundled_root = output.join("criterion");
+    if source != bundled_root && bundled_root.exists() {
+        fs::remove_dir_all(&bundled_root)
+            .map_err(|error| format!("clear {}: {error}", bundled_root.display()))?;
+    }
+    for row in rows {
+        let relative = PathBuf::from(&row.relative);
+        let source_path = source.join(&relative);
+        let bundled_path = bundled_root.join(&relative);
+        if source_path != bundled_path {
+            let parent = bundled_path
+                .parent()
+                .ok_or_else(|| format!("no parent for {}", bundled_path.display()))?;
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+            fs::copy(&source_path, &bundled_path).map_err(|error| {
+                format!(
+                    "copy {} to {}: {error}",
+                    source_path.display(),
+                    bundled_path.display()
+                )
+            })?;
+        }
+        row.relative = Path::new("criterion")
+            .join(relative)
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+    }
+    Ok(())
 }
 
 fn retain_current_run(root: &Path, rows: &mut Vec<Row>) -> Result<(), String> {
@@ -848,21 +963,30 @@ fn comparisons() -> Vec<Comparison<'static>> {
 }
 
 fn main() -> Result<(), String> {
-    let root = env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| {
+    let mut args = env::args().skip(1);
+    let source = args.next().map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/criterion")
     });
-    if !root.exists() {
+    let output = args.next().map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/benchmark-report")
+    });
+    if let Some(unexpected) = args.next() {
         return Err(format!(
-            "Criterion directory does not exist: {}",
-            root.display()
+            "unexpected argument {unexpected}; usage: benchmark_report [criterion-directory] [report-directory]"
         ));
     }
-    let mut rows = collect_rows(&root)?;
-    retain_current_run(&root, &mut rows)?;
+    if !source.exists() {
+        return Err(format!(
+            "Criterion directory does not exist: {}",
+            source.display()
+        ));
+    }
+    let mut rows = collect_rows(&source)?;
+    retain_current_run(&source, &mut rows)?;
     if rows.is_empty() {
         return Err(format!(
             "No completed Criterion estimates found under {}",
-            root.display()
+            source.display()
         ));
     }
 
@@ -876,23 +1000,18 @@ fn main() -> Result<(), String> {
         ));
     }
     let required_comparisons = required_comparison_count(&comparisons);
-    let host = env::var("RUNNER_NAME")
-        .or_else(|_| env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "local".to_owned());
-    let arch = env::var("RUNNER_ARCH").unwrap_or_else(|_| env::consts::ARCH.to_owned());
-    let os = env::var("RUNNER_OS").unwrap_or_else(|_| env::consts::OS.to_owned());
-    let revision = env::var("GITHUB_SHA")
-        .or_else(|_| env::var("GIT_COMMIT"))
-        .unwrap_or_else(|_| "unknown".to_owned());
-    let workflow = env::var("GITHUB_WORKFLOW").unwrap_or_else(|_| "local".to_owned());
-    let run = env::var("GITHUB_RUN_ID").unwrap_or_else(|_| "local".to_owned());
+    let context = report_context(&source, &output)?;
+    fs::create_dir_all(&output)
+        .map_err(|error| format!("create report directory {}: {error}", output.display()))?;
+    bundle_estimates(&source, &output, &mut rows)?;
+    write_context(&output, &context, rows.len(), required_comparisons)?;
     let mut markdown = String::new();
     writeln!(
         markdown,
         "# Comparison Benchmark Report\n\nGenerated from Criterion artifacts.\n"
     )
     .unwrap();
-    writeln!(markdown, "## Run context\n\n- Host: `{host}` ({os}/{arch})\n- Workflow: `{workflow}` (run `{run}`)\n- Repository revision: `{revision}`\n").unwrap();
+    writeln!(markdown, "## Run context\n\n- Host: `{}` ({}/{})\n- Workflow: `{}` (run `{}`)\n- Repository revision: `{}`\n", context.host, context.os, context.arch, context.workflow, context.run, context.revision).unwrap();
     writeln!(
         markdown,
         "- Completed Criterion measurements: **{}**",
@@ -991,12 +1110,12 @@ fn main() -> Result<(), String> {
     write!(
         html,
         "{}</code></div><div><small>Platform</small><code>{}/{}</code></div><div><small>Workflow</small><code>{}</code></div><div><small>Run</small><code>{}</code></div><div><small>Revision</small><code>{}</code></div><div><small>Measurements</small><code>{}</code></div></div></main></header><main><nav><a href=\"#comparisons\">Comparisons</a>{}<a href=\"#measurements\">All measurements</a></nav><section id=\"comparisons\"><h2>Direct comparisons</h2><p>Blue marks our primary route. GEMM scaling charts show normalized time per MAC: flat at 1.00× is linear work scaling; rising means the implementation is losing efficiency as the problem grows.</p>{}{}</section><section id=\"measurements\"><h2>All completed measurements</h2><table><thead><tr><th>Group</th><th>Benchmark</th><th>Mean</th><th>95% confidence interval</th><th>Raw estimate</th></tr></thead><tbody>{}</tbody></table></section></main></body></html>",
-        html_escape(&host),
-        html_escape(&os),
-        html_escape(&arch),
-        html_escape(&workflow),
-        html_escape(&run),
-        html_escape(&revision),
+        html_escape(&context.host),
+        html_escape(&context.os),
+        html_escape(&context.arch),
+        html_escape(&context.workflow),
+        html_escape(&context.run),
+        html_escape(&context.revision),
         rows.len(),
         if tropical_highlight.is_empty() {
             "".to_owned()
@@ -1009,16 +1128,16 @@ fn main() -> Result<(), String> {
     )
     .unwrap();
 
-    fs::write(root.join("REPORT.md"), markdown)
+    fs::write(output.join("REPORT.md"), markdown)
         .map_err(|error| format!("write Markdown: {error}"))?;
-    fs::write(root.join("REPORT.html"), &html).map_err(|error| format!("write HTML: {error}"))?;
-    fs::write(root.join("index.html"), html).map_err(|error| format!("write HTML: {error}"))?;
+    fs::write(output.join("REPORT.html"), &html).map_err(|error| format!("write HTML: {error}"))?;
+    fs::write(output.join("index.html"), html).map_err(|error| format!("write HTML: {error}"))?;
     println!(
         "wrote {} measurements, including all {} required comparisons, to {}/REPORT.md and {}/index.html",
         rows.len(),
         required_comparisons,
-        root.display(),
-        root.display()
+        output.display(),
+        output.display()
     );
     Ok(())
 }

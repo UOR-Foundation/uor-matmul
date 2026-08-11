@@ -27,34 +27,29 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+      - name: prepare the durable report bundle
+        if: always()
+        run: |
+          rm -rf target/benchmark-report
+          mkdir -p target/benchmark-report
+          printf 'benchmark job started\n' > target/benchmark-report/benchmark.log
       - uses: dtolnay/rust-toolchain@stable
       - uses: extractions/setup-just@v2
       - uses: Swatinem/rust-cache@v2
-      - name: prepare durable benchmark diagnostics
-        run: mkdir -p target/benchmark-artifacts
-      - name: run same-shape comparison benchmarks and generate the report
+      - name: run same-shape comparison benchmarks
         run: |
           set -o pipefail
-          just bench 2>&1 | tee target/benchmark-artifacts/benchmark.log
+          just bench-data 2>&1 | tee -a target/benchmark-report/benchmark.log
+      - name: generate index.html from the benchmark output
+        run: just bench-report
       - name: publish the Markdown report in the Actions summary
-        run: cat target/criterion/REPORT.md >> "$GITHUB_STEP_SUMMARY"
-      - name: upload the self-contained comparison report
-        uses: actions/upload-artifact@v4
-        with:
-          name: comparison-benchmark-report
-          path: |
-            target/criterion/index.html
-            target/criterion/REPORT.html
-            target/criterion/REPORT.md
-            target/criterion/**/new/estimates.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: upload benchmark diagnostics
+        run: cat target/benchmark-report/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+      - name: upload report, raw inputs, and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: comparison-benchmark-diagnostics
-          path: target/benchmark-artifacts/
+          name: comparison-benchmark-report
+          path: target/benchmark-report/
           if-no-files-found: error
           retention-days: 30
 

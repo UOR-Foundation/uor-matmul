@@ -203,11 +203,19 @@ cross: no-alloc cross-run
 # local estimates cannot fill a hole in the current run. The named baseline is
 # written, not read: a clean machine has no predecessor, and an ordinary
 # comparison run never asks Criterion for missing `base/sample.json` files.
-bench:
+# The result is one portable directory, `target/benchmark-report`: generated
+# Markdown/HTML, run context, and the exact Criterion estimates needed to
+# regenerate either report.
+bench: bench-data
+    just bench-report
+
+# Produce the raw Criterion inputs without rendering them. CI keeps this and
+# `bench-report` as separate steps so the report is visibly derived from the
+# benchmark output it uploads.
+bench-data:
     mkdir -p target/criterion
     touch target/criterion/.comparison-run-start
     UOR_BENCH_SUITE=comparison cargo bench -p uor-matmul-validate --bench scaling -- '^(gemm_i32|gemm_f32|gemm_f64|public_api|lookup_build|modular_strassen|tropical)/' --save-baseline comparison
-    cargo run --release -p uor-matmul-validate --bin benchmark_report
 
 # CG-23's native lookup protocol is deliberately absent from ordinary Criterion
 # runs. It collects and emits 256 paired 50 ms epochs for all seven cases on one
@@ -222,9 +230,12 @@ native-lookup-acceptance:
     @mkdir -p target/measurements
     bash -o pipefail -c 'taskset -c 0 cargo bench -p uor-matmul-validate --bench scaling -- __native_lookup_acceptance_only__ --noplot 2>&1 | tee target/measurements/native-lookup-acceptance-2026-08-08.log'
 
-# Regenerate the comparison report from an existing Criterion directory.
-bench-report:
-    cargo run --release -p uor-matmul-validate --bin benchmark_report
+# Regenerate the comparison report from Criterion output. After downloading a
+# GitHub artifact, run `just bench-report path/to/artifact/criterion
+# path/to/artifact`; its saved context and estimates reproduce the report
+# without rerunning a benchmark.
+bench-report criterion="target/criterion" report="target/benchmark-report":
+    cargo run --release -p uor-matmul-validate --bin benchmark_report -- "{{criterion}}" "{{report}}"
 
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a
 # fitted exponent with a confidence interval, against the same fit for the
