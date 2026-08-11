@@ -425,6 +425,24 @@ meant. `uor_matmul::kernels::available_i8()` says which kernels a build can run.
 
 ## Performance
 
+`just bench` runs the bounded same-shape Criterion comparison suite and writes
+one portable bundle under `target/benchmark-report/`:
+
+- `REPORT.md` for terminals and the GitHub Actions summary;
+- `index.html` and `REPORT.html`, with inline relative-time and scaling graphs;
+- `context.json`, naming the host, revision, workflow, and measurement count;
+- `criterion/**/new/estimates.json`, the raw means and 95% confidence intervals
+  from which the reports were generated.
+
+The raw estimates are sufficient to regenerate the presentation. After
+downloading the GitHub artifact, run
+`just bench-report path/to/artifact/criterion path/to/artifact`; no benchmark is
+rerun, and the saved run context is retained. GitHub uploads this directory as
+the single `comparison-benchmark-report` artifact. Its Action runs
+`just bench-data`, then generates `index.html` from that output with
+`just bench-report`; if either step fails, the same artifact still contains
+`benchmark.log` for the failed run.
+
 `ANALYSIS.md` §"Against the oracles" has the integer sweep --- throughput,
 latency, and fitted exponents from `n = 1` to `n = 1024`, beside every oracle.
 `MEASUREMENT-LOG.md` §"Current pure-Atlas CG-16 and CG-21 measurement record"
