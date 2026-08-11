@@ -1,0 +1,738 @@
+benchmark job started
+mkdir -p target/criterion
+touch target/criterion/.comparison-run-start
+UOR_BENCH_SUITE=comparison cargo bench -p uor-matmul-validate --bench scaling -- '^(gemm_i32|gemm_f32|gemm_f64|public_api|lookup_build|modular_strassen|tropical)/' --save-baseline comparison
+[1m[92m    Updating[0m crates.io index
+[1m[92m   Compiling[0m uor-matmul-core v0.1.0 (/home/runner/work/uor-matmul/uor-matmul/crates/uor-matmul-core)
+[1m[92m   Compiling[0m uor-matmul-model v0.1.0 (/home/runner/work/uor-matmul/uor-matmul/crates/uor-matmul-model)
+[1m[92m   Compiling[0m uor-matmul-codec v0.1.0 (/home/runner/work/uor-matmul/uor-matmul/crates/uor-matmul-codec)
+[1m[92m   Compiling[0m uor-matmul-kernels v0.1.0 (/home/runner/work/uor-matmul/uor-matmul/crates/uor-matmul-kernels)
+[1m[92m   Compiling[0m uor-matmul-gemm v0.1.0 (/home/runner/work/uor-matmul/uor-matmul/crates/uor-matmul-gemm)
+[1m[92m   Compiling[0m uor-matmul v0.1.0 (/home/runner/work/uor-matmul/uor-matmul/crates/uor-matmul)
+[1m[92m   Compiling[0m uor-matmul-validate v0.1.0 (/home/runner/work/uor-matmul/uor-matmul/crates/uor-matmul-validate)
+[1m[92m    Finished[0m `bench` profile [optimized] target(s) in 55.51s
+[1m[92m     Running[0m benches/scaling.rs (target/release/deps/scaling-e61a7d38be5445fc)
+Benchmarking gemm_i32/uor-matmul/16x16x16
+Benchmarking gemm_i32/uor-matmul/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_i32/uor-matmul/16x16x16: Collecting 100 samples in estimated 5.0025 s (3.6M iterations)
+Benchmarking gemm_i32/uor-matmul/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/uor-matmul_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/uor-matmul/16x16x16
+                        time:   [1.3759 µs 1.3769 µs 1.3779 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking gemm_i32/handwritten/16x16x16
+Benchmarking gemm_i32/handwritten/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_i32/handwritten/16x16x16: Collecting 100 samples in estimated 5.0147 s (1.5M iterations)
+Benchmarking gemm_i32/handwritten/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/handwritten_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/handwritten/16x16x16
+                        time:   [3.2462 µs 3.2590 µs 3.2767 µs]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) high mild
+  11 (11.00%) high severe
+Benchmarking gemm_i32/ndarray/16x16x16
+Benchmarking gemm_i32/ndarray/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_i32/ndarray/16x16x16: Collecting 100 samples in estimated 5.0142 s (1.7M iterations)
+Benchmarking gemm_i32/ndarray/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/ndarray_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/ndarray/16x16x16
+                        time:   [2.8741 µs 2.8764 µs 2.8798 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking gemm_i32/nalgebra/16x16x16
+Benchmarking gemm_i32/nalgebra/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_i32/nalgebra/16x16x16: Collecting 100 samples in estimated 5.0022 s (3.3M iterations)
+Benchmarking gemm_i32/nalgebra/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/nalgebra_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/nalgebra/16x16x16
+                        time:   [1.5067 µs 1.5088 µs 1.5122 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  7 (7.00%) high mild
+  3 (3.00%) high severe
+Benchmarking gemm_i32/uor-matmul/128x128x128
+Benchmarking gemm_i32/uor-matmul/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_i32/uor-matmul/128x128x128: Collecting 100 samples in estimated 5.2544 s (35k iterations)
+Benchmarking gemm_i32/uor-matmul/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/uor-matmul_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/uor-matmul/128x128x128
+                        time:   [148.61 µs 148.69 µs 148.77 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high severe
+Benchmarking gemm_i32/handwritten/128x128x128
+Benchmarking gemm_i32/handwritten/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_i32/handwritten/128x128x128: Collecting 100 samples in estimated 5.1843 s (1700 iterations)
+Benchmarking gemm_i32/handwritten/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/handwritten_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/handwritten/128x128x128
+                        time:   [3.0323 ms 3.0361 ms 3.0399 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) low mild
+  4 (4.00%) high mild
+Benchmarking gemm_i32/ndarray/128x128x128
+Benchmarking gemm_i32/ndarray/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_i32/ndarray/128x128x128: Collecting 100 samples in estimated 5.1273 s (1900 iterations)
+Benchmarking gemm_i32/ndarray/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/ndarray_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/ndarray/128x128x128
+                        time:   [2.7912 ms 2.7977 ms 2.8037 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) low severe
+  1 (1.00%) low mild
+  1 (1.00%) high severe
+Benchmarking gemm_i32/nalgebra/128x128x128
+Benchmarking gemm_i32/nalgebra/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_i32/nalgebra/128x128x128: Collecting 100 samples in estimated 7.3939 s (15k iterations)
+Benchmarking gemm_i32/nalgebra/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/nalgebra_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/nalgebra/128x128x128
+                        time:   [487.53 µs 488.14 µs 488.96 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking gemm_i32/uor-matmul/32x256x512
+Benchmarking gemm_i32/uor-matmul/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_i32/uor-matmul/32x256x512: Collecting 100 samples in estimated 5.8144 s (20k iterations)
+Benchmarking gemm_i32/uor-matmul/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/uor-matmul_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/uor-matmul/32x256x512
+                        time:   [287.59 µs 287.91 µs 288.38 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking gemm_i32/handwritten/32x256x512
+Benchmarking gemm_i32/handwritten/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_i32/handwritten/32x256x512: Collecting 100 samples in estimated 5.1609 s (1000 iterations)
+Benchmarking gemm_i32/handwritten/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/handwritten_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/handwritten/32x256x512
+                        time:   [5.1443 ms 5.1477 ms 5.1534 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking gemm_i32/ndarray/32x256x512
+Benchmarking gemm_i32/ndarray/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_i32/ndarray/32x256x512: Collecting 100 samples in estimated 5.3716 s (700 iterations)
+Benchmarking gemm_i32/ndarray/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/ndarray_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/ndarray/32x256x512
+                        time:   [7.6715 ms 7.6736 ms 7.6758 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking gemm_i32/nalgebra/32x256x512
+Benchmarking gemm_i32/nalgebra/32x256x512: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.1s, enable flat sampling, or reduce sample count to 60.
+Benchmarking gemm_i32/nalgebra/32x256x512: Collecting 100 samples in estimated 6.1101 s (5050 iterations)
+Benchmarking gemm_i32/nalgebra/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_i32/nalgebra_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_i32/nalgebra/32x256x512
+                        time:   [1.2093 ms 1.2096 ms 1.2100 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking gemm_f32/uor-matmul/16x16x16
+Benchmarking gemm_f32/uor-matmul/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f32/uor-matmul/16x16x16: Collecting 10 samples in estimated 5.0046 s (16k iterations)
+Benchmarking gemm_f32/uor-matmul/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/uor-matmul_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/uor-matmul/16x16x16
+                        time:   [322.56 µs 324.96 µs 328.29 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking gemm_f32/handwritten/16x16x16
+Benchmarking gemm_f32/handwritten/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f32/handwritten/16x16x16: Collecting 10 samples in estimated 5.0000 s (1.8M iterations)
+Benchmarking gemm_f32/handwritten/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/handwritten_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/handwritten/16x16x16
+                        time:   [2.7186 µs 2.7307 µs 2.7424 µs]
+Benchmarking gemm_f32/matrixmultiply/16x16x16
+Benchmarking gemm_f32/matrixmultiply/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f32/matrixmultiply/16x16x16: Collecting 10 samples in estimated 5.0000 s (10M iterations)
+Benchmarking gemm_f32/matrixmultiply/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/matrixmultiply_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/matrixmultiply/16x16x16
+                        time:   [495.32 ns 499.17 ns 501.74 ns]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking gemm_f32/faer/16x16x16
+Benchmarking gemm_f32/faer/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f32/faer/16x16x16: Collecting 10 samples in estimated 5.0001 s (3.1M iterations)
+Benchmarking gemm_f32/faer/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/faer_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/faer/16x16x16  time:   [1.6095 µs 1.6101 µs 1.6110 µs]
+Benchmarking gemm_f32/uor-matmul/128x128x128
+Benchmarking gemm_f32/uor-matmul/128x128x128: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 8.6s or enable flat sampling.
+Benchmarking gemm_f32/uor-matmul/128x128x128: Collecting 10 samples in estimated 8.5739 s (55 iterations)
+Benchmarking gemm_f32/uor-matmul/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/uor-matmul_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/uor-matmul/128x128x128
+                        time:   [155.47 ms 155.56 ms 155.64 ms]
+Benchmarking gemm_f32/handwritten/128x128x128
+Benchmarking gemm_f32/handwritten/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_f32/handwritten/128x128x128: Collecting 10 samples in estimated 5.1045 s (1705 iterations)
+Benchmarking gemm_f32/handwritten/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/handwritten_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/handwritten/128x128x128
+                        time:   [3.0104 ms 3.0163 ms 3.0217 ms]
+Benchmarking gemm_f32/matrixmultiply/128x128x128
+Benchmarking gemm_f32/matrixmultiply/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_f32/matrixmultiply/128x128x128: Collecting 10 samples in estimated 5.0015 s (81k iterations)
+Benchmarking gemm_f32/matrixmultiply/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/matrixmultiply_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/matrixmultiply/128x128x128
+                        time:   [61.945 µs 62.243 µs 62.894 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking gemm_f32/faer/128x128x128
+Benchmarking gemm_f32/faer/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_f32/faer/128x128x128: Collecting 10 samples in estimated 5.0006 s (40k iterations)
+Benchmarking gemm_f32/faer/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/faer_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/faer/128x128x128
+                        time:   [124.72 µs 125.05 µs 125.56 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking gemm_f32/uor-matmul/32x256x512
+Benchmarking gemm_f32/uor-matmul/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f32/uor-matmul/32x256x512: Collecting 10 samples in estimated 6.2531 s (20 iterations)
+Benchmarking gemm_f32/uor-matmul/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/uor-matmul_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/uor-matmul/32x256x512
+                        time:   [312.49 ms 314.56 ms 316.71 ms]
+Benchmarking gemm_f32/handwritten/32x256x512
+Benchmarking gemm_f32/handwritten/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f32/handwritten/32x256x512: Collecting 10 samples in estimated 5.3450 s (825 iterations)
+Benchmarking gemm_f32/handwritten/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/handwritten_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/handwritten/32x256x512
+                        time:   [6.4773 ms 6.4783 ms 6.4794 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking gemm_f32/matrixmultiply/32x256x512
+Benchmarking gemm_f32/matrixmultiply/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f32/matrixmultiply/32x256x512: Collecting 10 samples in estimated 5.0049 s (31k iterations)
+Benchmarking gemm_f32/matrixmultiply/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/matrixmultiply_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/matrixmultiply/32x256x512
+                        time:   [159.80 µs 159.95 µs 160.03 µs]
+Benchmarking gemm_f32/faer/32x256x512
+Benchmarking gemm_f32/faer/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f32/faer/32x256x512: Collecting 10 samples in estimated 5.0197 s (13k iterations)
+Benchmarking gemm_f32/faer/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f32/faer_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f32/faer/32x256x512
+                        time:   [388.15 µs 388.59 µs 389.10 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
+Benchmarking gemm_f64/uor-matmul/16x16x16
+Benchmarking gemm_f64/uor-matmul/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f64/uor-matmul/16x16x16: Collecting 10 samples in estimated 5.0079 s (15k iterations)
+Benchmarking gemm_f64/uor-matmul/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/uor-matmul_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/uor-matmul/16x16x16
+                        time:   [323.71 µs 323.80 µs 324.06 µs]
+Benchmarking gemm_f64/handwritten/16x16x16
+Benchmarking gemm_f64/handwritten/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f64/handwritten/16x16x16: Collecting 10 samples in estimated 5.0001 s (1.8M iterations)
+Benchmarking gemm_f64/handwritten/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/handwritten_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/handwritten/16x16x16
+                        time:   [2.7276 µs 2.7462 µs 2.7663 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking gemm_f64/matrixmultiply/16x16x16
+Benchmarking gemm_f64/matrixmultiply/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f64/matrixmultiply/16x16x16: Collecting 10 samples in estimated 5.0000 s (7.6M iterations)
+Benchmarking gemm_f64/matrixmultiply/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/matrixmultiply_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/matrixmultiply/16x16x16
+                        time:   [645.97 ns 652.44 ns 661.26 ns]
+Benchmarking gemm_f64/faer/16x16x16
+Benchmarking gemm_f64/faer/16x16x16: Warming up for 3.0000 s
+Benchmarking gemm_f64/faer/16x16x16: Collecting 10 samples in estimated 5.0000 s (3.3M iterations)
+Benchmarking gemm_f64/faer/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/faer_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/faer/16x16x16  time:   [1.5155 µs 1.5169 µs 1.5180 µs]
+Benchmarking gemm_f64/uor-matmul/128x128x128
+Benchmarking gemm_f64/uor-matmul/128x128x128: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 8.0s or enable flat sampling.
+Benchmarking gemm_f64/uor-matmul/128x128x128: Collecting 10 samples in estimated 7.9743 s (55 iterations)
+Benchmarking gemm_f64/uor-matmul/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/uor-matmul_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/uor-matmul/128x128x128
+                        time:   [144.59 ms 144.63 ms 144.70 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking gemm_f64/handwritten/128x128x128
+Benchmarking gemm_f64/handwritten/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_f64/handwritten/128x128x128: Collecting 10 samples in estimated 5.0954 s (1650 iterations)
+Benchmarking gemm_f64/handwritten/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/handwritten_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/handwritten/128x128x128
+                        time:   [3.0869 ms 3.0872 ms 3.0876 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking gemm_f64/matrixmultiply/128x128x128
+Benchmarking gemm_f64/matrixmultiply/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_f64/matrixmultiply/128x128x128: Collecting 10 samples in estimated 5.0023 s (40k iterations)
+Benchmarking gemm_f64/matrixmultiply/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/matrixmultiply_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/matrixmultiply/128x128x128
+                        time:   [125.38 µs 125.44 µs 125.48 µs]
+Benchmarking gemm_f64/faer/128x128x128
+Benchmarking gemm_f64/faer/128x128x128: Warming up for 3.0000 s
+Benchmarking gemm_f64/faer/128x128x128: Collecting 10 samples in estimated 5.0092 s (29k iterations)
+Benchmarking gemm_f64/faer/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/faer_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/faer/128x128x128
+                        time:   [172.84 µs 173.40 µs 174.17 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking gemm_f64/uor-matmul/32x256x512
+Benchmarking gemm_f64/uor-matmul/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f64/uor-matmul/32x256x512: Collecting 10 samples in estimated 5.7918 s (20 iterations)
+Benchmarking gemm_f64/uor-matmul/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/uor-matmul_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/uor-matmul/32x256x512
+                        time:   [289.42 ms 289.53 ms 289.68 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking gemm_f64/handwritten/32x256x512
+Benchmarking gemm_f64/handwritten/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f64/handwritten/32x256x512: Collecting 10 samples in estimated 5.4487 s (440 iterations)
+Benchmarking gemm_f64/handwritten/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/handwritten_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/handwritten/32x256x512
+                        time:   [12.509 ms 12.532 ms 12.571 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking gemm_f64/matrixmultiply/32x256x512
+Benchmarking gemm_f64/matrixmultiply/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f64/matrixmultiply/32x256x512: Collecting 10 samples in estimated 5.0040 s (12k iterations)
+Benchmarking gemm_f64/matrixmultiply/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/matrixmultiply_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/matrixmultiply/32x256x512
+                        time:   [417.23 µs 417.45 µs 417.75 µs]
+Benchmarking gemm_f64/faer/32x256x512
+Benchmarking gemm_f64/faer/32x256x512: Warming up for 3.0000 s
+Benchmarking gemm_f64/faer/32x256x512: Collecting 10 samples in estimated 5.0332 s (7810 iterations)
+Benchmarking gemm_f64/faer/32x256x512: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/gemm_f64/faer_32x256x512/comparison/sample.json": No such file or directory (os error 2)
+gemm_f64/faer/32x256x512
+                        time:   [643.35 µs 643.65 µs 644.13 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+
+Benchmarking public_api/slice::gemm/16x16x16
+Benchmarking public_api/slice::gemm/16x16x16: Warming up for 3.0000 s
+Benchmarking public_api/slice::gemm/16x16x16: Collecting 100 samples in estimated 5.0019 s (2.9M iterations)
+Benchmarking public_api/slice::gemm/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/public_api/slice__gemm_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+public_api/slice::gemm/16x16x16
+                        time:   [1.7535 µs 1.7580 µs 1.7621 µs]
+Found 19 outliers among 100 measurements (19.00%)
+  3 (3.00%) high mild
+  16 (16.00%) high severe
+Benchmarking public_api/gemm_packed/16x16x16
+Benchmarking public_api/gemm_packed/16x16x16: Warming up for 3.0000 s
+Benchmarking public_api/gemm_packed/16x16x16: Collecting 100 samples in estimated 5.0009 s (2.9M iterations)
+Benchmarking public_api/gemm_packed/16x16x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/public_api/gemm_packed_16x16x16/comparison/sample.json": No such file or directory (os error 2)
+public_api/gemm_packed/16x16x16
+                        time:   [1.7672 µs 1.7688 µs 1.7709 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking public_api/slice::gemm/64x64x64
+Benchmarking public_api/slice::gemm/64x64x64: Warming up for 3.0000 s
+Benchmarking public_api/slice::gemm/64x64x64: Collecting 100 samples in estimated 5.0662 s (96k iterations)
+Benchmarking public_api/slice::gemm/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/public_api/slice__gemm_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+public_api/slice::gemm/64x64x64
+                        time:   [52.918 µs 52.953 µs 52.982 µs]
+Found 29 outliers among 100 measurements (29.00%)
+  10 (10.00%) low severe
+  14 (14.00%) low mild
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking public_api/gemm_packed/64x64x64
+Benchmarking public_api/gemm_packed/64x64x64: Warming up for 3.0000 s
+Benchmarking public_api/gemm_packed/64x64x64: Collecting 100 samples in estimated 5.0618 s (96k iterations)
+Benchmarking public_api/gemm_packed/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/public_api/gemm_packed_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+public_api/gemm_packed/64x64x64
+                        time:   [52.712 µs 52.803 µs 52.896 µs]
+Found 23 outliers among 100 measurements (23.00%)
+  17 (17.00%) low severe
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking public_api/slice::gemm/128x128x128
+Benchmarking public_api/slice::gemm/128x128x128: Warming up for 3.0000 s
+Benchmarking public_api/slice::gemm/128x128x128: Collecting 100 samples in estimated 5.1444 s (15k iterations)
+Benchmarking public_api/slice::gemm/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/public_api/slice__gemm_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+public_api/slice::gemm/128x128x128
+                        time:   [340.44 µs 340.75 µs 341.16 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  6 (6.00%) low mild
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking public_api/gemm_packed/128x128x128
+Benchmarking public_api/gemm_packed/128x128x128: Warming up for 3.0000 s
+Benchmarking public_api/gemm_packed/128x128x128: Collecting 100 samples in estimated 5.1428 s (15k iterations)
+Benchmarking public_api/gemm_packed/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/public_api/gemm_packed_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+public_api/gemm_packed/128x128x128
+                        time:   [339.40 µs 339.59 µs 339.88 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking modular_strassen/packed/i8_512cubed
+Benchmarking modular_strassen/packed/i8_512cubed: Warming up for 3.0000 s
+Benchmarking modular_strassen/packed/i8_512cubed: Collecting 10 samples in estimated 5.5879 s (330 iterations)
+Benchmarking modular_strassen/packed/i8_512cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/packed_i8_512cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/packed/i8_512cubed
+                        time:   [16.907 ms 16.924 ms 16.935 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking modular_strassen/level/i8_512cubed
+Benchmarking modular_strassen/level/i8_512cubed: Warming up for 3.0000 s
+Benchmarking modular_strassen/level/i8_512cubed: Collecting 10 samples in estimated 5.5279 s (330 iterations)
+Benchmarking modular_strassen/level/i8_512cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/level_i8_512cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/level/i8_512cubed
+                        time:   [16.742 ms 16.758 ms 16.775 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high mild
+Benchmarking modular_strassen/packed/i32_512cubed
+Benchmarking modular_strassen/packed/i32_512cubed: Warming up for 3.0000 s
+Benchmarking modular_strassen/packed/i32_512cubed: Collecting 10 samples in estimated 5.0636 s (990 iterations)
+Benchmarking modular_strassen/packed/i32_512cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/packed_i32_512cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/packed/i32_512cubed
+                        time:   [5.0997 ms 5.1137 ms 5.1272 ms]
+Benchmarking modular_strassen/level/i32_512cubed
+Benchmarking modular_strassen/level/i32_512cubed: Warming up for 3.0000 s
+Benchmarking modular_strassen/level/i32_512cubed: Collecting 10 samples in estimated 5.1952 s (825 iterations)
+Benchmarking modular_strassen/level/i32_512cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/level_i32_512cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/level/i32_512cubed
+                        time:   [6.2915 ms 6.2985 ms 6.3058 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking modular_strassen/packed/i8_1024cubed
+Benchmarking modular_strassen/packed/i8_1024cubed: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 7.4s or enable flat sampling.
+Benchmarking modular_strassen/packed/i8_1024cubed: Collecting 10 samples in estimated 7.4226 s (55 iterations)
+Benchmarking modular_strassen/packed/i8_1024cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/packed_i8_1024cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/packed/i8_1024cubed
+                        time:   [135.13 ms 135.52 ms 135.77 ms]
+Benchmarking modular_strassen/level/i8_1024cubed
+Benchmarking modular_strassen/level/i8_1024cubed: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 6.7s or enable flat sampling.
+Benchmarking modular_strassen/level/i8_1024cubed: Collecting 10 samples in estimated 6.6806 s (55 iterations)
+Benchmarking modular_strassen/level/i8_1024cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/level_i8_1024cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/level/i8_1024cubed
+                        time:   [122.21 ms 122.90 ms 123.67 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking modular_strassen/packed/i32_1024cubed
+Benchmarking modular_strassen/packed/i32_1024cubed: Warming up for 3.0000 s
+Benchmarking modular_strassen/packed/i32_1024cubed: Collecting 10 samples in estimated 6.8434 s (165 iterations)
+Benchmarking modular_strassen/packed/i32_1024cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/packed_i32_1024cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/packed/i32_1024cubed
+                        time:   [41.339 ms 41.927 ms 42.310 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking modular_strassen/level/i32_1024cubed
+Benchmarking modular_strassen/level/i32_1024cubed: Warming up for 3.0000 s
+Benchmarking modular_strassen/level/i32_1024cubed: Collecting 10 samples in estimated 6.6836 s (165 iterations)
+Benchmarking modular_strassen/level/i32_1024cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/level_i32_1024cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/level/i32_1024cubed
+                        time:   [40.137 ms 40.225 ms 40.358 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking modular_strassen/packed/i8_2048cubed
+Benchmarking modular_strassen/packed/i8_2048cubed: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 11.0s.
+Benchmarking modular_strassen/packed/i8_2048cubed: Collecting 10 samples in estimated 10.961 s (10 iterations)
+Benchmarking modular_strassen/packed/i8_2048cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/packed_i8_2048cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/packed/i8_2048cubed
+                        time:   [1.0951 s 1.0978 s 1.1019 s]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking modular_strassen/level/i8_2048cubed
+Benchmarking modular_strassen/level/i8_2048cubed: Warming up for 3.0000 s
+
+Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 9.5s.
+Benchmarking modular_strassen/level/i8_2048cubed: Collecting 10 samples in estimated 9.5114 s (10 iterations)
+Benchmarking modular_strassen/level/i8_2048cubed: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/modular_strassen/level_i8_2048cubed/comparison/sample.json": No such file or directory (os error 2)
+modular_strassen/level/i8_2048cubed
+                        time:   [950.81 ms 951.89 ms 953.33 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+
+Benchmarking tropical/lane/tropical/64x64x64
+Benchmarking tropical/lane/tropical/64x64x64: Warming up for 3.0000 s
+Benchmarking tropical/lane/tropical/64x64x64: Collecting 100 samples in estimated 6.8720 s (15k iterations)
+Benchmarking tropical/lane/tropical/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_tropical_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/tropical/64x64x64
+                        time:   [454.20 µs 454.65 µs 455.13 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking tropical/lane/ring/64x64x64
+Benchmarking tropical/lane/ring/64x64x64: Warming up for 3.0000 s
+Benchmarking tropical/lane/ring/64x64x64: Collecting 100 samples in estimated 5.2742 s (15k iterations)
+Benchmarking tropical/lane/ring/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_ring_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/ring/64x64x64
+                        time:   [347.87 µs 347.99 µs 348.14 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) high mild
+  7 (7.00%) high severe
+Benchmarking tropical/lane/ring-packed/64x64x64
+Benchmarking tropical/lane/ring-packed/64x64x64: Warming up for 3.0000 s
+Benchmarking tropical/lane/ring-packed/64x64x64: Collecting 100 samples in estimated 5.0488 s (96k iterations)
+Benchmarking tropical/lane/ring-packed/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_ring-packed_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/ring-packed/64x64x64
+                        time:   [52.695 µs 52.865 µs 53.104 µs]
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) high mild
+  9 (9.00%) high severe
+Benchmarking tropical/witness/lexicographic/tie-dense/64x64x64
+Benchmarking tropical/witness/lexicographic/tie-dense/64x64x64: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 5.0s, enable flat sampling, or reduce sample count to 70.
+Benchmarking tropical/witness/lexicographic/tie-dense/64x64x64: Collecting 100 samples in estimated 5.0305 s (5050 iterations)
+Benchmarking tropical/witness/lexicographic/tie-dense/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_lexicographic_tie-dense_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/lexicographic/tie-dense/64x64x64
+                        time:   [997.02 µs 997.63 µs 998.23 µs]
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) low mild
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking tropical/witness/compare-pass/tie-dense/64x64x64
+Benchmarking tropical/witness/compare-pass/tie-dense/64x64x64: Warming up for 3.0000 s
+Benchmarking tropical/witness/compare-pass/tie-dense/64x64x64: Collecting 100 samples in estimated 5.3850 s (10k iterations)
+Benchmarking tropical/witness/compare-pass/tie-dense/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_compare-pass_tie-dense_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/compare-pass/tie-dense/64x64x64
+                        time:   [530.82 µs 531.60 µs 532.54 µs]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high severe
+Benchmarking tropical/witness/lexicographic/max-last/64x64x64
+Benchmarking tropical/witness/lexicographic/max-last/64x64x64: Warming up for 3.0000 s
+Benchmarking tropical/witness/lexicographic/max-last/64x64x64: Collecting 100 samples in estimated 7.4829 s (10k iterations)
+Benchmarking tropical/witness/lexicographic/max-last/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_lexicographic_max-last_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/lexicographic/max-last/64x64x64
+                        time:   [739.55 µs 739.82 µs 740.20 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking tropical/witness/compare-pass/max-last/64x64x64
+Benchmarking tropical/witness/compare-pass/max-last/64x64x64: Warming up for 3.0000 s
+Benchmarking tropical/witness/compare-pass/max-last/64x64x64: Collecting 100 samples in estimated 9.1435 s (10k iterations)
+Benchmarking tropical/witness/compare-pass/max-last/64x64x64: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_compare-pass_max-last_64x64x64/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/compare-pass/max-last/64x64x64
+                        time:   [913.05 µs 913.53 µs 914.02 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking tropical/lane/tropical/128x128x128
+Benchmarking tropical/lane/tropical/128x128x128: Warming up for 3.0000 s
+Benchmarking tropical/lane/tropical/128x128x128: Collecting 100 samples in estimated 5.2410 s (1500 iterations)
+Benchmarking tropical/lane/tropical/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_tropical_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/tropical/128x128x128
+                        time:   [3.4983 ms 3.5140 ms 3.5407 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking tropical/lane/ring/128x128x128
+Benchmarking tropical/lane/ring/128x128x128: Warming up for 3.0000 s
+Benchmarking tropical/lane/ring/128x128x128: Collecting 100 samples in estimated 5.0082 s (1800 iterations)
+Benchmarking tropical/lane/ring/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_ring_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/ring/128x128x128
+                        time:   [2.7819 ms 2.7845 ms 2.7887 ms]
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking tropical/lane/ring-packed/128x128x128
+Benchmarking tropical/lane/ring-packed/128x128x128: Warming up for 3.0000 s
+Benchmarking tropical/lane/ring-packed/128x128x128: Collecting 100 samples in estimated 5.1177 s (15k iterations)
+Benchmarking tropical/lane/ring-packed/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_ring-packed_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/ring-packed/128x128x128
+                        time:   [337.58 µs 337.76 µs 338.01 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking tropical/witness/lexicographic/tie-dense/128x128x128
+Benchmarking tropical/witness/lexicographic/tie-dense/128x128x128: Warming up for 3.0000 s
+Benchmarking tropical/witness/lexicographic/tie-dense/128x128x128: Collecting 100 samples in estimated 5.1476 s (700 iterations)
+Benchmarking tropical/witness/lexicographic/tie-dense/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_lexicographic_tie-dense_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/lexicographic/tie-dense/128x128x128
+                        time:   [7.3562 ms 7.3674 ms 7.3863 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking tropical/witness/compare-pass/tie-dense/128x128x128
+Benchmarking tropical/witness/compare-pass/tie-dense/128x128x128: Warming up for 3.0000 s
+Benchmarking tropical/witness/compare-pass/tie-dense/128x128x128: Collecting 100 samples in estimated 5.0066 s (1400 iterations)
+Benchmarking tropical/witness/compare-pass/tie-dense/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_compare-pass_tie-dense_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/compare-pass/tie-dense/128x128x128
+                        time:   [3.5713 ms 3.5743 ms 3.5775 ms]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking tropical/witness/lexicographic/max-last/128x128x128
+Benchmarking tropical/witness/lexicographic/max-last/128x128x128: Warming up for 3.0000 s
+Benchmarking tropical/witness/lexicographic/max-last/128x128x128: Collecting 100 samples in estimated 5.1297 s (900 iterations)
+Benchmarking tropical/witness/lexicographic/max-last/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_lexicographic_max-last_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/lexicographic/max-last/128x128x128
+                        time:   [5.6979 ms 5.7025 ms 5.7102 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking tropical/witness/compare-pass/max-last/128x128x128
+Benchmarking tropical/witness/compare-pass/max-last/128x128x128: Warming up for 3.0000 s
+Benchmarking tropical/witness/compare-pass/max-last/128x128x128: Collecting 100 samples in estimated 5.6017 s (800 iterations)
+Benchmarking tropical/witness/compare-pass/max-last/128x128x128: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_compare-pass_max-last_128x128x128/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/compare-pass/max-last/128x128x128
+                        time:   [6.9765 ms 6.9853 ms 6.9976 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking tropical/lane/tropical/16x4096x16
+Benchmarking tropical/lane/tropical/16x4096x16: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 8.3s, enable flat sampling, or reduce sample count to 50.
+Benchmarking tropical/lane/tropical/16x4096x16: Collecting 100 samples in estimated 8.3317 s (5050 iterations)
+Benchmarking tropical/lane/tropical/16x4096x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_tropical_16x4096x16/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/tropical/16x4096x16
+                        time:   [1.6405 ms 1.6430 ms 1.6465 ms]
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) high mild
+  10 (10.00%) high severe
+Benchmarking tropical/lane/ring/16x4096x16
+Benchmarking tropical/lane/ring/16x4096x16: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.6s, enable flat sampling, or reduce sample count to 60.
+Benchmarking tropical/lane/ring/16x4096x16: Collecting 100 samples in estimated 6.6204 s (5050 iterations)
+Benchmarking tropical/lane/ring/16x4096x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_ring_16x4096x16/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/ring/16x4096x16
+                        time:   [1.3111 ms 1.3117 ms 1.3125 ms]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking tropical/lane/ring-packed/16x4096x16
+Benchmarking tropical/lane/ring-packed/16x4096x16: Warming up for 3.0000 s
+Benchmarking tropical/lane/ring-packed/16x4096x16: Collecting 100 samples in estimated 5.5779 s (20k iterations)
+Benchmarking tropical/lane/ring-packed/16x4096x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/lane_ring-packed_16x4096x16/comparison/sample.json": No such file or directory (os error 2)
+tropical/lane/ring-packed/16x4096x16
+                        time:   [275.79 µs 275.89 µs 276.00 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  7 (7.00%) high mild
+  2 (2.00%) high severe
+Benchmarking tropical/witness/lexicographic/tie-dense/16x4096x16
+Benchmarking tropical/witness/lexicographic/tie-dense/16x4096x16: Warming up for 3.0000 s
+Benchmarking tropical/witness/lexicographic/tie-dense/16x4096x16: Collecting 100 samples in estimated 5.0004 s (1500 iterations)
+Benchmarking tropical/witness/lexicographic/tie-dense/16x4096x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_lexicographic_tie-dense_16x4096x16/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/lexicographic/tie-dense/16x4096x16
+                        time:   [3.3306 ms 3.3333 ms 3.3379 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking tropical/witness/compare-pass/tie-dense/16x4096x16
+Benchmarking tropical/witness/compare-pass/tie-dense/16x4096x16: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.3s, enable flat sampling, or reduce sample count to 50.
+Benchmarking tropical/witness/compare-pass/tie-dense/16x4096x16: Collecting 100 samples in estimated 7.2974 s (5050 iterations)
+Benchmarking tropical/witness/compare-pass/tie-dense/16x4096x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_compare-pass_tie-dense_16x4096x16/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/compare-pass/tie-dense/16x4096x16
+                        time:   [1.4423 ms 1.4435 ms 1.4450 ms]
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking tropical/witness/lexicographic/max-last/16x4096x16
+Benchmarking tropical/witness/lexicographic/max-last/16x4096x16: Warming up for 3.0000 s
+Benchmarking tropical/witness/lexicographic/max-last/16x4096x16: Collecting 100 samples in estimated 5.1946 s (1900 iterations)
+Benchmarking tropical/witness/lexicographic/max-last/16x4096x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_lexicographic_max-last_16x4096x16/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/lexicographic/max-last/16x4096x16
+                        time:   [2.7263 ms 2.7285 ms 2.7319 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking tropical/witness/compare-pass/max-last/16x4096x16
+Benchmarking tropical/witness/compare-pass/max-last/16x4096x16: Warming up for 3.0000 s
+Benchmarking tropical/witness/compare-pass/max-last/16x4096x16: Collecting 100 samples in estimated 5.2499 s (1600 iterations)
+Benchmarking tropical/witness/compare-pass/max-last/16x4096x16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/tropical/witness_compare-pass_max-last_16x4096x16/comparison/sample.json": No such file or directory (os error 2)
+tropical/witness/compare-pass/max-last/16x4096x16
+                        time:   [3.2804 ms 3.2826 ms 3.2857 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+
+tropical: timed at 3 shapes; gated at 16 corpus cases
+Benchmarking lookup_build/build/portable/space4096-blk16
+Benchmarking lookup_build/build/portable/space4096-blk16: Warming up for 3.0000 s
+Benchmarking lookup_build/build/portable/space4096-blk16: Collecting 10 samples in estimated 5.0534 s (4675 iterations)
+Benchmarking lookup_build/build/portable/space4096-blk16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/lookup_build/build_portable_space4096-blk16/comparison/sample.json": No such file or directory (os error 2)
+lookup_build/build/portable/space4096-blk16
+                        time:   [1.0812 ms 1.0822 ms 1.0833 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking lookup_build/build/cpu-native/space4096-blk16
+Benchmarking lookup_build/build/cpu-native/space4096-blk16: Warming up for 3.0000 s
+Benchmarking lookup_build/build/cpu-native/space4096-blk16: Collecting 10 samples in estimated 5.0527 s (5005 iterations)
+Benchmarking lookup_build/build/cpu-native/space4096-blk16: Analyzing
+Criterion.rs ERROR: error: Failed to access file "/home/runner/work/uor-matmul/uor-matmul/target/criterion/lookup_build/build_cpu-native_space4096-blk16/comparison/sample.json": No such file or directory (os error 2)
+lookup_build/build/cpu-native/space4096-blk16
+                        time:   [1.0082 ms 1.0086 ms 1.0090 ms]
+

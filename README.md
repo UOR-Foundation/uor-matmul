@@ -425,6 +425,15 @@ meant. `uor_matmul::kernels::available_i8()` says which kernels a build can run.
 
 ## Performance
 
+Committed comparison runs live under `benchmark-reports/<github-run-id>/`.
+The relative symlink `benchmark-reports/current` always names the newest run
+that has been committed. GitHub's repository browser does not traverse a
+directory symlink, so the browser links name the current immutable run
+directly: [REPORT.md](benchmark-reports/31519209588/REPORT.md) and the
+self-contained graphed [index.html](benchmark-reports/31519209588/index.html).
+In a checkout, `benchmark-reports/current/` resolves to those same files. Each
+run keeps its raw Criterion estimates beside the rendered report.
+
 `just bench` runs the bounded same-shape Criterion comparison suite and writes
 one portable bundle under `target/benchmark-report/`:
 
@@ -440,8 +449,14 @@ downloading the GitHub artifact, run
 rerun, and the saved run context is retained. GitHub uploads this directory as
 the single `comparison-benchmark-report` artifact. Its Action runs
 `just bench-data`, then generates `index.html` from that output with
-`just bench-report`; if either step fails, the same artifact still contains
-`benchmark.log` for the failed run.
+`just bench-report`, and stages the versioned repository layout with
+`just bench-save "$GITHUB_RUN_ID"`; if either measurement or rendering fails,
+the same artifact still contains `benchmark.log` for the failed run. A separate
+least-privilege job commits successful main-branch reports to the dedicated
+`automation/benchmark-report-current` branch and puts its one-click PR link in
+the run summary. The organization forbids `GITHUB_TOKEN` from creating PRs, so
+opening that link is the only manual step. The job has no branch-protection
+bypass; every saved report reaches `main` through the ordinary reviewed path.
 
 `ANALYSIS.md` §"Against the oracles" has the integer sweep --- throughput,
 latency, and fitted exponents from `n = 1` to `n = 1024`, beside every oracle.

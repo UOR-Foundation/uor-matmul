@@ -489,10 +489,17 @@ fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
     if points.is_empty() {
         return String::new();
     }
-    let left = 180.0;
-    let chart_width = 600.0;
+    // Series names and values live in separate fixed columns. Values once
+    // followed the logarithmic bar endpoint, which made the smallest ratios
+    // collide with long names such as `matrixmultiply`.
+    let series_label_x = 150.0;
+    let value_label_x = 240.0;
+    let plot_left = 260.0;
+    let chart_width = 640.0;
+    let view_width = 920.0;
     let series_count = comparison.others.len() + 1;
-    let row_height = 28.0 + series_count as f64 * 16.0;
+    let series_step = 20.0;
+    let row_height = 32.0 + series_count as f64 * series_step;
     let height = row_height * points.len() as f64;
     // Ratios in this report span several orders of magnitude. A linear axis
     // makes a fast alternative disappear at zero, so center the chart at 1×
@@ -506,11 +513,11 @@ fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
         })
         .fold(1.0_f64, f64::max)
         * 1.1;
-    let x = |ratio: f64| left + (ratio.log2() + log_extent) / (2.0 * log_extent) * chart_width;
+    let x = |ratio: f64| plot_left + (ratio.log2() + log_extent) / (2.0 * log_extent) * chart_width;
     let mut svg = String::new();
     write!(
         svg,
-        "<div class=\"chart-wrap\"><div class=\"chart-title\">Relative time · logarithmic · 1× = {} (ours)</div><div class=\"legend\"><span><i class=\"legend-ours\"></i>{} (ours)</span><span><i class=\"legend-other\"></i>alternative</span></div><svg class=\"chart\" viewBox=\"0 0 820 {:.0}\" role=\"img\" aria-label=\"{} logarithmic relative benchmark chart\">",
+        "<div class=\"chart-wrap\"><div class=\"chart-title\">Relative time · logarithmic · 1× = {} (ours)</div><div class=\"legend\"><span><i class=\"legend-ours\"></i>{} (ours)</span><span><i class=\"legend-other\"></i>alternative</span></div><svg class=\"chart\" viewBox=\"0 0 {view_width:.0} {:.0}\" role=\"img\" aria-label=\"{} logarithmic relative benchmark chart\">",
         html_escape(comparison.primary_label),
         html_escape(comparison.primary_label),
         height,
@@ -520,8 +527,8 @@ fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
     let baseline_x = x(1.0);
     write!(
         svg,
-        "<line x1=\"{baseline_x:.1}\" x2=\"{baseline_x:.1}\" y1=\"0\" y2=\"{height:.1}\" class=\"baseline\"/><text x=\"{left:.1}\" y=\"12\" class=\"baseline-label\">alternative faster ←</text><text x=\"{baseline_x:.1}\" y=\"12\" text-anchor=\"middle\" class=\"baseline-label\">1×</text><text x=\"{:.1}\" y=\"12\" text-anchor=\"end\" class=\"baseline-label\">→ ours faster</text>",
-        left + chart_width
+        "<line x1=\"{baseline_x:.1}\" x2=\"{baseline_x:.1}\" y1=\"0\" y2=\"{height:.1}\" class=\"baseline\"/><text x=\"{plot_left:.1}\" y=\"12\" class=\"baseline-label\">alternative faster ←</text><text x=\"{baseline_x:.1}\" y=\"12\" text-anchor=\"middle\" class=\"baseline-label\">1×</text><text x=\"{:.1}\" y=\"12\" text-anchor=\"end\" class=\"baseline-label\">→ ours faster</text>",
+        plot_left + chart_width
     )
     .unwrap();
     for (index, (primary, others)) in points.iter().enumerate() {
@@ -547,7 +554,7 @@ fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
             )
         }));
         for (series_index, (label, ratio_value, ours)) in series.into_iter().enumerate() {
-            let bar_y = y + 25.0 + series_index as f64 * 16.0;
+            let bar_y = y + 25.0 + series_index as f64 * series_step;
             let ratio_x = x(ratio_value);
             let (bar_x, width) = if ours {
                 (baseline_x - 2.0, 4.0)
@@ -557,20 +564,14 @@ fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
                     (ratio_x - baseline_x).abs().max(2.0),
                 )
             };
-            let (label_x, anchor) = if ratio_value < 1.0 {
-                (ratio_x - 6.0, "end")
-            } else {
-                (ratio_x + 6.0, "start")
-            };
             write!(
                 svg,
-                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" class=\"series-label\">{}</text><rect x=\"{bar_x:.1}\" y=\"{bar_y:.1}\" width=\"{width:.1}\" height=\"10\" rx=\"2\" class=\"{}\"/><text x=\"{label_x:.1}\" y=\"{:.1}\" text-anchor=\"{anchor}\" class=\"bar-label\">{}</text>",
-                left - 8.0,
+                "<text x=\"{series_label_x:.1}\" y=\"{:.1}\" text-anchor=\"end\" class=\"series-label\">{}</text><text x=\"{value_label_x:.1}\" y=\"{:.1}\" text-anchor=\"end\" class=\"bar-label\">{}</text><rect x=\"{bar_x:.1}\" y=\"{bar_y:.1}\" width=\"{width:.1}\" height=\"10\" rx=\"2\" class=\"{}\"/>",
                 bar_y + 9.0,
                 html_escape(label),
-                if ours { "bar-ours" } else { "bar-other" },
                 bar_y + 8.0,
-                format_ratio(ratio_value)
+                format_ratio(ratio_value),
+                if ours { "bar-ours" } else { "bar-other" }
             )
             .unwrap();
         }
@@ -675,9 +676,9 @@ fn scaling_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
     let left = 72.0;
     let right = 205.0;
     let top = 26.0;
-    let bottom = 48.0;
+    let bottom = 70.0;
     let width = 860.0;
-    let height = 300.0;
+    let height = 320.0;
     let plot_width = width - left - right;
     let plot_height = height - top - bottom;
     let x = |work: f64| left + (work.log10() - x_min) / (x_max - x_min) * plot_width;
@@ -727,11 +728,15 @@ fn scaling_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
     }
     for (index, (shape, work, _)) in points.iter().enumerate() {
         let x_pos = x(*work);
+        let label_y = if index % 2 == 0 {
+            height - 36.0
+        } else {
+            height - 16.0
+        };
         write!(
             svg,
-            "<line x1=\"{x_pos:.1}\" x2=\"{x_pos:.1}\" y1=\"{top:.1}\" y2=\"{:.1}\" class=\"scale-grid\"/><text x=\"{x_pos:.1}\" y=\"{:.1}\" text-anchor=\"middle\" class=\"scale-label\">{}</text>",
+            "<line x1=\"{x_pos:.1}\" x2=\"{x_pos:.1}\" y1=\"{top:.1}\" y2=\"{:.1}\" class=\"scale-grid\"/><text x=\"{x_pos:.1}\" y=\"{label_y:.1}\" text-anchor=\"middle\" class=\"scale-label\">{}</text>",
             height - bottom,
-            height - 25.0,
             html_escape(&format!("{} · {}", shape, format_work(*work)))
         )
         .unwrap();
@@ -749,8 +754,8 @@ fn scaling_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
     let linear_y = y(1.0);
     write!(
         svg,
-        "<text x=\"{:.1}\" y=\"{:.1}\" class=\"scale-reference-label\">linear work</text>",
-        width - right - 4.0,
+        "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" class=\"scale-reference-label\">linear work</text>",
+        width - right - 8.0,
         linear_y - 6.0
     )
     .unwrap();
@@ -1103,7 +1108,7 @@ fn main() -> Result<(), String> {
         h1{font-size:2rem;line-height:1.15;font-weight:650;letter-spacing:-.02em;margin:0 0 .45rem}h2{font-size:1.35rem;margin:2.25rem 0 .8rem}h3{font-size:1.15rem;margin:.1rem 0 .45rem}p{color:var(--muted)}header p{margin:.35rem 0 1.25rem}
         .context{display:flex;flex-wrap:wrap;gap:.35rem 1.25rem;color:var(--muted);font-size:.82rem}.context div{display:flex;gap:.35rem}.context small{color:#475467;font-weight:650}.context code{overflow-wrap:anywhere}
         nav{border-bottom:1px solid var(--line);padding:.7rem 0}nav a{color:var(--accent);font-weight:600;margin-right:1.25rem;text-decoration:none}nav a:hover{text-decoration:underline}.highlight{display:flex;flex-wrap:wrap;align-items:baseline;gap:.45rem 1rem;background:#eff4ff;border:1px solid #b2ccff;border-left:3px solid var(--ours);padding:.75rem .9rem;margin:1rem 0 1.25rem}.highlight strong{color:#123b8e}.highlight span{color:#344054}.highlight a{color:var(--accent);font-weight:600;margin-left:auto}
-        .comparison{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--ours);padding:1rem 1.1rem;margin:1rem 0 1.25rem}.comparison p{margin:.2rem 0 .8rem}.comparison table{margin-top:.8rem}.chart-wrap,.scaling-chart-wrap{margin-top:1rem;border-top:1px solid var(--line);padding-top:.8rem;overflow-x:auto}.chart-title{color:var(--ink);font-size:.85rem;font-weight:600;margin-bottom:.35rem}.chart-note{font-size:.8rem;margin:.15rem 0 .45rem}.legend{display:flex;gap:1rem;color:var(--muted);font-size:.8rem;margin-bottom:.35rem}.legend span{display:inline-flex;align-items:center;gap:.35rem}.legend i{display:inline-block;width:.7rem;height:.7rem;border-radius:2px}.legend-ours{background:var(--ours)}.legend-other{background:var(--other)}.chart,.scaling-chart{display:block;min-width:760px;width:100%;height:auto}.baseline{stroke:#98a2b3;stroke-dasharray:3 3}.baseline-label,.shape-label,.series-label,.bar-label,.scale-label{font:12px system-ui,sans-serif;fill:var(--muted)}.shape-label{fill:var(--ink);font-weight:600}.series-label{text-transform:lowercase}.bar-label{font-weight:600}.bar-ours{fill:var(--ours)}.bar-other{fill:var(--other)}.scale-axis{stroke:#667085;stroke-width:1}.scale-grid{stroke:#e4e7ec;stroke-width:1}.scale-reference{stroke:#155eef;stroke-width:1.2;stroke-dasharray:4 3}.scale-reference-label,.scale-axis-label{font:12px system-ui,sans-serif;fill:#155eef;font-weight:600}.scale-ours{fill:none;stroke:var(--ours);stroke-width:2.5}.scale-other{fill:none;stroke:var(--other);stroke-width:2;stroke-dasharray:5 3}.scale-legend-ours{stroke:var(--ours);stroke-width:2.5}.scale-legend-other{stroke:var(--other);stroke-width:2;stroke-dasharray:5 3}
+        .comparison{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--ours);padding:1rem 1.1rem;margin:1rem 0 1.25rem}.comparison p{margin:.2rem 0 .8rem}.comparison table{margin-top:.8rem}.chart-wrap,.scaling-chart-wrap{margin-top:1rem;border-top:1px solid var(--line);padding-top:.8rem;overflow-x:auto}.chart-title{color:var(--ink);font-size:.85rem;font-weight:600;margin-bottom:.35rem}.chart-note{font-size:.8rem;margin:.15rem 0 .45rem}.legend{display:flex;gap:1rem;color:var(--muted);font-size:.8rem;margin-bottom:.35rem}.legend span{display:inline-flex;align-items:center;gap:.35rem}.legend i{display:inline-block;width:.7rem;height:.7rem;border-radius:2px}.legend-ours{background:var(--ours)}.legend-other{background:var(--other)}.chart,.scaling-chart{display:block;width:100%;height:auto}.chart{min-width:900px}.scaling-chart{min-width:760px}.baseline{stroke:#98a2b3;stroke-dasharray:3 3}.baseline-label,.shape-label,.series-label,.bar-label,.scale-label{font:12px system-ui,sans-serif;fill:var(--muted)}.shape-label{fill:var(--ink);font-weight:600}.series-label{text-transform:lowercase}.bar-label{font-weight:600}.bar-ours{fill:var(--ours)}.bar-other{fill:var(--other)}.scale-axis{stroke:#667085;stroke-width:1}.scale-grid{stroke:#e4e7ec;stroke-width:1}.scale-reference{stroke:#155eef;stroke-width:1.2;stroke-dasharray:4 3}.scale-reference-label,.scale-axis-label{font:12px system-ui,sans-serif;fill:#155eef;font-weight:600}.scale-ours{fill:none;stroke:var(--ours);stroke-width:2.5}.scale-other{fill:none;stroke:var(--other);stroke-width:2;stroke-dasharray:5 3}.scale-legend-ours{stroke:var(--ours);stroke-width:2.5}.scale-legend-other{stroke:var(--other);stroke-width:2;stroke-dasharray:5 3}
         table{border-collapse:collapse;width:100%;margin:1rem 0;background:var(--panel);border:1px solid var(--line)}th,td{border-bottom:1px solid var(--line);padding:.6rem .7rem;text-align:left}th{background:#f2f4f7;color:#475467;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em}tr:last-child td{border-bottom:0}tbody tr:nth-child(even){background:#fcfcfd}th:nth-child(n+3),td:nth-child(n+3){text-align:right}th:nth-child(2),td:nth-child(2){background:#eff4ff}code{font-size:.92em;background:#f2f4f7;border-radius:3px;padding:.08rem .3rem}@media(max-width:700px){main{padding-left:.75rem;padding-right:.75rem}td,th{padding:.5rem;font-size:.82rem}table{display:block;overflow-x:auto;white-space:nowrap}.comparison{padding:.8rem}}
         </style></head><body><header><main><h1>Comparison benchmark report</h1><p>Same-shape measurements of this implementation and the alternatives. Blue marks our primary route.</p><div class="context"><div><small>Host</small><code>"##,
     );
@@ -1198,6 +1203,18 @@ mod tests {
         assert!(html.contains("Relative time · logarithmic"));
         assert!(html.contains("alternative faster ←"));
         assert!(html.contains("<svg class=\"scaling-chart\""));
+    }
+
+    #[test]
+    fn relative_chart_keeps_names_values_and_bars_in_separate_columns() {
+        let comparisons = comparisons();
+        let rows = complete_comparison_rows(&comparisons);
+        let html = comparison_chart_html(&comparisons[0], &rows);
+
+        assert!(html.contains("x=\"150.0\" y=\"34.0\" text-anchor=\"end\" class=\"series-label\""));
+        assert!(html.contains("x=\"240.0\" y=\"33.0\" text-anchor=\"end\" class=\"bar-label\""));
+        assert!(html.contains("x=\"150.0\" y=\"54.0\" text-anchor=\"end\" class=\"series-label\""));
+        assert!(html.contains("<rect x=\"578.0\""));
     }
 
     #[test]

@@ -1,0 +1,12 @@
+{
+  "arch": "X64",
+  "host": "GitHub Actions 1000031976",
+  "measurements": 75,
+  "os": "Linux",
+  "required_comparisons": 75,
+  "revision": "035e615649831100a1d52626e9662b8f2a9181b7",
+  "run": "31519209588",
+  "schema": 1,
+  "source": "Criterion new/estimates.json",
+  "workflow": "scaling"
+}

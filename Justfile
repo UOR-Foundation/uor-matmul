@@ -241,6 +241,34 @@ native-lookup-acceptance:
 bench-report criterion="target/criterion" report="target/benchmark-report":
     cargo run --release -p uor-matmul-validate --bin benchmark_report -- "{{criterion}}" "{{report}}"
 
+# Copy one complete GitHub comparison bundle into the repository's immutable
+# run directory and move the relative `current` link to it. The numeric run ID
+# is both the directory key and the provenance recorded in context.json.
+bench-save run source="target/benchmark-report":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{run}}" in
+      ''|*[!0-9]*) echo "run must be a numeric GitHub Actions run ID" >&2; exit 1 ;;
+    esac
+    for required in index.html REPORT.html REPORT.md context.json benchmark.log; do
+      test -f "{{source}}/$required" || {
+        echo "missing report file: {{source}}/$required" >&2
+        exit 1
+      }
+    done
+    test -d "{{source}}/criterion" || {
+      echo "missing raw Criterion estimates: {{source}}/criterion" >&2
+      exit 1
+    }
+    grep -F '"run": "{{run}}"' "{{source}}/context.json" >/dev/null || {
+      echo "context.json does not name run {{run}}" >&2
+      exit 1
+    }
+    mkdir -p "benchmark-reports/{{run}}"
+    cp -R "{{source}}/." "benchmark-reports/{{run}}/"
+    ln -sfn "{{run}}" benchmark-reports/current
+    test "$(readlink benchmark-reports/current)" = "{{run}}"
+
 # CG-*: scaling is a V&V axis, not a benchmark. Every performance claim is a
 # fitted exponent with a confidence interval, against the same fit for the
 # oracle. Every figure it prints is `open`.
