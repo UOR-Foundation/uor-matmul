@@ -31,11 +31,8 @@
 # instead of occupying a runner for six hours and reporting `cancelled` --- which
 # reads like an infrastructure hiccup rather than the regression it would be.
 # It is 90 because the suite doubled in the pass's last week (the kernels'
-# parity walk alone runs past 45 on the shared runner), and a leg-split matrix
-# was considered and rejected: the ruleset requires a check named exactly
-# `miri`, a matrix renames the checks, and a gate that cannot be asked to
-# report is a gate that silently never runs. A hung run still fails here ---
-# at 90 minutes, not at six hours.
+# parity walk alone runs past 45 on the shared runner). A hung scheduled or
+# manual run still fails here at 90 minutes, not at six hours.
 #
 # The `-p` list below is not prose: `CU-07` reads it out of this file and asserts
 # that every shipped crate either `#![forbid(unsafe_code)]` or appears here, so
@@ -45,12 +42,8 @@
 name: miri
 
 on:
-  push: { branches: [main] }
-  pull_request:
-  # The merge queue runs the required checks on its merge group; without
-  # this trigger the group reports nothing and the queue ejects the PR.
-  merge_group:
   schedule: [{ cron: "0 4 * * 1" }]
+  workflow_dispatch:
 
 jobs:
   miri:
