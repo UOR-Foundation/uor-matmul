@@ -18,6 +18,7 @@
 #![allow(missing_docs)]
 
 use criterion::{criterion_group, criterion_main, Criterion};
+use std::env;
 use std::mem::size_of;
 use uor_matmul::driver::modular_level_needs;
 use uor_matmul::prelude::*;
@@ -37,8 +38,18 @@ use uor_matmul_validate::scaling::{self, Labelled, Sweep};
 #[path = "scaling/native_lookup.rs"]
 mod native_lookup;
 
+/// The report suite is a bounded, same-run comparison matrix. The ordinary
+/// harness retains every exploratory measurement; the report suite omits
+/// measurements it neither reports nor needs to answer a comparison question.
+fn comparison_suite() -> bool {
+    env::var_os("UOR_BENCH_SUITE").is_some_and(|value| value == "comparison")
+}
+
 /// Retained pre/post clock for the pure radix-address native lookup refactor.
 fn native_lookup_report(c: &mut Criterion) {
+    if comparison_suite() {
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     native_lookup::bench(c);
     #[cfg(not(target_arch = "x86_64"))]
@@ -48,6 +59,9 @@ fn native_lookup_report(c: &mut Criterion) {
 /// Emit the fitted exponents, then time a few shapes so `cargo bench` has
 /// something to report alongside them.
 fn scaling_report(c: &mut Criterion) {
+    if comparison_suite() {
+        return;
+    }
     let sweep = Sweep::standard();
 
     // `CG-01`: the arithmetic scaling exponent. The oracle columns live in the
@@ -92,10 +106,21 @@ fn scaling_report(c: &mut Criterion) {
 /// which is deliberately the dumbest possible implementation --- one function,
 /// not two, or the baseline and the oracle could drift apart.
 fn vs_oracles(c: &mut Criterion) {
-    const SHAPES: [(usize, usize, usize); 3] = [(16, 16, 16), (128, 128, 128), (64, 512, 1024)];
+    const FULL_SHAPES: [(usize, usize, usize); 3] =
+        [(16, 16, 16), (128, 128, 128), (64, 512, 1024)];
+    const REPORT_SHAPES: [(usize, usize, usize); 3] =
+        [(16, 16, 16), (128, 128, 128), (32, 256, 512)];
+    // The full non-square exact-float row takes roughly a minute per
+    // observation on a development machine. REPORT_SHAPES keeps the same
+    // latency/square/non-square questions with a bounded CI and Actions time.
+    let shapes = if comparison_suite() {
+        &REPORT_SHAPES
+    } else {
+        &FULL_SHAPES
+    };
 
     let mut i32_group = c.benchmark_group("gemm_i32");
-    for &(m, k, n) in &SHAPES {
+    for &(m, k, n) in shapes {
         let shape = format!("{m}x{k}x{n}");
         let a = vec![1i32; m * k];
         let b = vec![1i32; k * n];
@@ -167,7 +192,11 @@ fn vs_oracles(c: &mut Criterion) {
     i32_group.finish();
 
     let mut f32_group = c.benchmark_group("gemm_f32");
-    for &(m, k, n) in &SHAPES {
+    // The largest exact-float calls take seconds, so Criterion's default one
+    // hundred samples turns one comparison row into several minutes. Ten is
+    // Criterion's supported minimum and still gives every row an interval.
+    f32_group.sample_size(10);
+    for &(m, k, n) in shapes {
         let shape = format!("{m}x{k}x{n}");
         let a = vec![1.0f32; m * k];
         let b = vec![1.0f32; k * n];
@@ -203,35 +232,37 @@ fn vs_oracles(c: &mut Criterion) {
             });
         });
 
-        f32_group.bench_function(format!("uor-matmul-full/{shape}"), |bench| {
-            let mut out = vec![0.0f32; m * n];
-            let (pa_len, pb_len) = suggested_float_panels(Shape { m, k, n });
-            let mut pa = vec![PackedCode::default(); pa_len];
-            let mut pb = vec![PackedCode::default(); pb_len];
-            let mut scaled = vec![0i32; suggested_bridge_scaled(Shape { m, k, n })];
-            let mut panels = vec![0i32; suggested_scratch(Shape { m, k, n })];
-            let mut accumulators = vec![0i128; suggested_accumulators(Shape { m, k, n })];
-            bench.iter(|| {
-                uor_matmul::slice::gemm_float_full(
-                    m,
-                    k,
-                    n,
-                    &a,
-                    &b,
-                    &mut out,
-                    &mut pa,
-                    &mut pb,
-                    &mut scaled,
-                    &mut panels,
-                    &mut accumulators,
-                )
-                .expect("the product exists");
-                assert!(
-                    out.iter().all(|&v| v == k as f32),
-                    "the timed call must be correct"
-                );
+        if !comparison_suite() {
+            f32_group.bench_function(format!("uor-matmul-full/{shape}"), |bench| {
+                let mut out = vec![0.0f32; m * n];
+                let (pa_len, pb_len) = suggested_float_panels(Shape { m, k, n });
+                let mut pa = vec![PackedCode::default(); pa_len];
+                let mut pb = vec![PackedCode::default(); pb_len];
+                let mut scaled = vec![0i32; suggested_bridge_scaled(Shape { m, k, n })];
+                let mut panels = vec![0i32; suggested_scratch(Shape { m, k, n })];
+                let mut accumulators = vec![0i128; suggested_accumulators(Shape { m, k, n })];
+                bench.iter(|| {
+                    uor_matmul::slice::gemm_float_full(
+                        m,
+                        k,
+                        n,
+                        &a,
+                        &b,
+                        &mut out,
+                        &mut pa,
+                        &mut pb,
+                        &mut scaled,
+                        &mut panels,
+                        &mut accumulators,
+                    )
+                    .expect("the product exists");
+                    assert!(
+                        out.iter().all(|&v| v == k as f32),
+                        "the timed call must be correct"
+                    );
+                });
             });
-        });
+        }
 
         f32_group.bench_function(format!("handwritten/{shape}"), |bench| {
             let mut out = vec![0.0f32; m * n];
@@ -271,7 +302,8 @@ fn vs_oracles(c: &mut Criterion) {
     f32_group.finish();
 
     let mut f64_group = c.benchmark_group("gemm_f64");
-    for &(m, k, n) in &SHAPES {
+    f64_group.sample_size(10);
+    for &(m, k, n) in shapes {
         let shape = format!("{m}x{k}x{n}");
         let a = vec![1.0f64; m * k];
         let b = vec![1.0f64; k * n];
@@ -424,6 +456,9 @@ fn public_api(c: &mut Criterion) {
 /// the suggested one's does. Byte-equality is asserted inside each timed
 /// closure, as everywhere in this file.
 fn workspace_plans(c: &mut Criterion) {
+    if comparison_suite() {
+        return;
+    }
     const SHAPES: [(usize, usize, usize); 4] = [
         (1, 1_048_576, 1),
         (8, 262_144, 8),
@@ -489,6 +524,9 @@ fn workspace_plans(c: &mut Criterion) {
 /// the table stays per-codeword. Compiled here; the run waits for a quiet
 /// window, so this group has produced no figure yet.
 fn gray_sign(c: &mut Criterion) {
+    if comparison_suite() {
+        return;
+    }
     let mut group = c.benchmark_group("gray_sign");
 
     // (a) The isolated build at the widest tile, `Sign<8>` and `Sign<16>`.
@@ -676,11 +714,20 @@ fn finite_i8_table_build(c: &mut Criterion) {
 /// file, and `MEASUREMENT-LOG.md` records the retained result.
 fn modular_strassen(c: &mut Criterion) {
     let mut group = c.benchmark_group("modular_strassen");
+    // The 4096-cubed rows are deliberately retained, but one hundred samples
+    // would make the report a runner-timeout experiment rather than a useful
+    // comparison. Ten independent samples retain confidence intervals.
+    group.sample_size(10);
     let wrapping = GemmOptions {
         encode: EncodeMode::Wrapping,
         ..Default::default()
     };
-    for &n in &[512usize, 1024, 2048, 4096] {
+    let sizes: &[usize] = if comparison_suite() {
+        &[512, 1024, 2048]
+    } else {
+        &[512, 1024, 2048, 4096]
+    };
+    for &n in sizes {
         let (panels, accs) = modular_level_needs(Shape { m: n, k: n, n });
 
         // The i8 lane: operands in `{-1, 0, 1}` so the fill stays small and
@@ -716,6 +763,13 @@ fn modular_strassen(c: &mut Criterion) {
                     assert_eq!(out, want8, "the timed call must be correct");
                 });
             });
+        }
+
+        // The report's i32 curve stops at 1024: unlike the i8 row, a larger
+        // i32 row answers no report question. The full harness retains both
+        // 2048 and 4096 for the crossover measurement of record.
+        if comparison_suite() && n > 1024 {
+            continue;
         }
 
         // The i32 lane, output wrapped to `i32`.

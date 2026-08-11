@@ -11,9 +11,55 @@ on:
   push: { branches: [main] }
   schedule: [{ cron: "0 5 * * 0" }]
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Work to run
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - comparison
 
 jobs:
+  comparison-benchmarks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: extractions/setup-just@v2
+      - uses: Swatinem/rust-cache@v2
+      - name: prepare durable benchmark diagnostics
+        run: mkdir -p target/benchmark-artifacts
+      - name: run same-shape comparison benchmarks and generate the report
+        run: |
+          set -o pipefail
+          just bench 2>&1 | tee target/benchmark-artifacts/benchmark.log
+      - name: publish the Markdown report in the Actions summary
+        run: cat target/criterion/REPORT.md >> "$GITHUB_STEP_SUMMARY"
+      - name: upload the self-contained comparison report
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-benchmark-report
+          path: |
+            target/criterion/index.html
+            target/criterion/REPORT.html
+            target/criterion/REPORT.md
+            target/criterion/**/new/estimates.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: upload benchmark diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: comparison-benchmark-diagnostics
+          path: target/benchmark-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
   scaling:
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,13 +71,12 @@ jobs:
         run: just bdd
       - name: fitted exponents, ours and every oracle's
         run: just scaling
-      - name: publish comparison benchmark report
-        uses: actions/upload-artifact@v4
-        with:
-          name: comparison-benchmark-report
-          path: target/criterion/
-          if-no-files-found: error
-          retention-days: 30
+      - name: prepare durable x86 measurement artifacts
+        run: |
+          mkdir -p target/measurements
+          printf 'workflow=%s\nrun=%s\nrevision=%s\nplatform=x86_64-linux\n' \
+            "$GITHUB_WORKFLOW" "$GITHUB_RUN_ID" "$GITHUB_SHA" \
+            > target/measurements/run-context-x86.txt
       # CT-06, CG-08: gigabytes of operands and minutes of wall clock, so it is
       # not part of `vv` --- but it is part of CI, or the largest shapes would be
       # measured only when somebody remembered to.
@@ -107,12 +152,17 @@ jobs:
         run: |
           set -o pipefail
           just tropical-sweep 2>&1 | tee target/measurements/tropical-x86.txt
-      - uses: actions/upload-artifact@v4
+      - name: upload x86 measurements
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: measurements-x86
           path: target/measurements/
+          if-no-files-found: error
+          retention-days: 30
 
   measurements-aarch64:
+    if: github.event_name != 'workflow_dispatch' || inputs.suite == 'full'
     # The same sweeps on a native aarch64 runner: the NEON sequences run for
     # real, and the figures are the closest CI gets to the Apple dev machines
     # the phase was measured on. Same discipline: `open`, never a gate.
@@ -122,6 +172,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: extractions/setup-just@v2
       - uses: Swatinem/rust-cache@v2
+      - name: prepare durable aarch64 measurement artifacts
+        run: |
+          mkdir -p target/measurements
+          printf 'workflow=%s\nrun=%s\nrevision=%s\nplatform=aarch64-linux\n' \
+            "$GITHUB_WORKFLOW" "$GITHUB_RUN_ID" "$GITHUB_SHA" \
+            > target/measurements/run-context-aarch64.txt
       - name: CG-12, the sub-cubic recursion against the cubic walk
         run: |
           mkdir -p target/measurements
@@ -149,7 +205,11 @@ jobs:
         run: |
           set -o pipefail
           just tropical-sweep 2>&1 | tee target/measurements/tropical-aarch64.txt
-      - uses: actions/upload-artifact@v4
+      - name: upload aarch64 measurements
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: measurements-aarch64
           path: target/measurements/
+          if-no-files-found: error
+          retention-days: 30

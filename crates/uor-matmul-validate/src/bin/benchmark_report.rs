@@ -4,6 +4,7 @@ use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value;
 use uor_matmul_validate::scaling::{fit, Observation};
@@ -28,6 +29,7 @@ struct Row {
     mean: f64,
     lower: f64,
     upper: f64,
+    modified: SystemTime,
 }
 
 struct Other<'a> {
@@ -123,10 +125,31 @@ fn collect_rows(root: &Path) -> Result<Vec<Row>, String> {
                 mean: json_number(&json, &["mean", "point_estimate"])?,
                 lower: json_number(&json, &["mean", "confidence_interval", "lower_bound"])?,
                 upper: json_number(&json, &["mean", "confidence_interval", "upper_bound"])?,
+                modified: fs::metadata(&estimate_path)
+                    .and_then(|metadata| metadata.modified())
+                    .map_err(|error| {
+                        format!("read timestamp {}: {error}", estimate_path.display())
+                    })?,
             });
         }
     }
     Ok(rows)
+}
+
+fn retain_current_run(root: &Path, rows: &mut Vec<Row>) -> Result<(), String> {
+    let marker = root.join(".comparison-run-start");
+    if !marker.exists() {
+        return Ok(());
+    }
+    let started = fs::metadata(&marker)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|error| format!("read timestamp {}: {error}", marker.display()))?;
+    retain_rows_modified_since(rows, started);
+    Ok(())
+}
+
+fn retain_rows_modified_since(rows: &mut Vec<Row>, started: SystemTime) {
+    rows.retain(|row| row.modified >= started);
 }
 
 fn format_ns(mut value: f64) -> String {
@@ -197,8 +220,47 @@ fn comparison_rows<'a>(
         .collect()
 }
 
+fn required_comparison_count(comparisons: &[Comparison<'_>]) -> usize {
+    comparisons
+        .iter()
+        .map(|comparison| comparison.shapes.len() * (comparison.others.len() + 1))
+        .sum()
+}
+
+fn missing_comparison_rows(comparisons: &[Comparison<'_>], rows: &[Row]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for comparison in comparisons {
+        for shape in comparison.shapes {
+            if row_for(rows, comparison.group, comparison.primary_prefix, shape).is_none() {
+                missing.push(format!(
+                    "{}/{}{}",
+                    comparison.group, comparison.primary_prefix, shape
+                ));
+            }
+            for other in comparison.others {
+                if row_for(rows, comparison.group, other.prefix, shape).is_none() {
+                    missing.push(format!("{}/{}{}", comparison.group, other.prefix, shape));
+                }
+            }
+        }
+    }
+    missing
+}
+
 fn ratio(other: &Row, primary: &Row) -> String {
-    format!("{:.2}×", other.mean / primary.mean)
+    format_ratio(other.mean / primary.mean)
+}
+
+fn format_ratio(value: f64) -> String {
+    if value >= 100.0 {
+        format!("{value:.1}×")
+    } else if value >= 0.01 {
+        format!("{value:.2}×")
+    } else if value >= 0.001 {
+        format!("{value:.3}×")
+    } else {
+        format!("{value:.1e}×")
+    }
 }
 
 fn comparison_markdown(comparison: &Comparison<'_>, rows: &[Row]) -> String {
@@ -317,26 +379,34 @@ fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
     let series_count = comparison.others.len() + 1;
     let row_height = 28.0 + series_count as f64 * 16.0;
     let height = row_height * points.len() as f64;
-    let max_ratio = points
+    // Ratios in this report span several orders of magnitude. A linear axis
+    // makes a fast alternative disappear at zero, so center the chart at 1×
+    // and give equal space to reciprocal factors on a base-2 logarithmic axis.
+    let log_extent = points
         .iter()
-        .flat_map(|(primary, others)| others.iter().map(|other| other.mean / primary.mean))
+        .flat_map(|(primary, others)| {
+            others
+                .iter()
+                .map(|other| (other.mean / primary.mean).log2().abs())
+        })
         .fold(1.0_f64, f64::max)
-        .max(1.0)
         * 1.1;
+    let x = |ratio: f64| left + (ratio.log2() + log_extent) / (2.0 * log_extent) * chart_width;
     let mut svg = String::new();
     write!(
         svg,
-        "<div class=\"chart-wrap\"><div class=\"chart-title\">Relative time · 1× = {} (ours)</div><div class=\"legend\"><span><i class=\"legend-ours\"></i>{} (ours)</span><span><i class=\"legend-other\"></i>alternative</span></div><svg class=\"chart\" viewBox=\"0 0 820 {:.0}\" role=\"img\" aria-label=\"{} relative benchmark chart\">",
+        "<div class=\"chart-wrap\"><div class=\"chart-title\">Relative time · logarithmic · 1× = {} (ours)</div><div class=\"legend\"><span><i class=\"legend-ours\"></i>{} (ours)</span><span><i class=\"legend-other\"></i>alternative</span></div><svg class=\"chart\" viewBox=\"0 0 820 {:.0}\" role=\"img\" aria-label=\"{} logarithmic relative benchmark chart\">",
         html_escape(comparison.primary_label),
         html_escape(comparison.primary_label),
         height,
         html_escape(comparison.title)
     )
     .unwrap();
-    let baseline_x = left + chart_width / max_ratio;
+    let baseline_x = x(1.0);
     write!(
         svg,
-        "<line x1=\"{baseline_x:.1}\" x2=\"{baseline_x:.1}\" y1=\"0\" y2=\"{height:.1}\" class=\"baseline\"/><text x=\"{baseline_x:.1}\" y=\"12\" class=\"baseline-label\">1× ours</text>"
+        "<line x1=\"{baseline_x:.1}\" x2=\"{baseline_x:.1}\" y1=\"0\" y2=\"{height:.1}\" class=\"baseline\"/><text x=\"{left:.1}\" y=\"12\" class=\"baseline-label\">alternative faster ←</text><text x=\"{baseline_x:.1}\" y=\"12\" text-anchor=\"middle\" class=\"baseline-label\">1×</text><text x=\"{:.1}\" y=\"12\" text-anchor=\"end\" class=\"baseline-label\">→ ours faster</text>",
+        left + chart_width
     )
     .unwrap();
     for (index, (primary, others)) in points.iter().enumerate() {
@@ -363,17 +433,29 @@ fn comparison_chart_html(comparison: &Comparison<'_>, rows: &[Row]) -> String {
         }));
         for (series_index, (label, ratio_value, ours)) in series.into_iter().enumerate() {
             let bar_y = y + 25.0 + series_index as f64 * 16.0;
-            let width = chart_width * (ratio_value / max_ratio).min(1.0);
+            let ratio_x = x(ratio_value);
+            let (bar_x, width) = if ours {
+                (baseline_x - 2.0, 4.0)
+            } else {
+                (
+                    ratio_x.min(baseline_x),
+                    (ratio_x - baseline_x).abs().max(2.0),
+                )
+            };
+            let (label_x, anchor) = if ratio_value < 1.0 {
+                (ratio_x - 6.0, "end")
+            } else {
+                (ratio_x + 6.0, "start")
+            };
             write!(
                 svg,
-                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" class=\"series-label\">{}</text><rect x=\"{left:.1}\" y=\"{bar_y:.1}\" width=\"{width:.1}\" height=\"10\" rx=\"2\" class=\"{}\"/><text x=\"{:.1}\" y=\"{:.1}\" class=\"bar-label\">{:.2}×</text>",
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\" class=\"series-label\">{}</text><rect x=\"{bar_x:.1}\" y=\"{bar_y:.1}\" width=\"{width:.1}\" height=\"10\" rx=\"2\" class=\"{}\"/><text x=\"{label_x:.1}\" y=\"{:.1}\" text-anchor=\"{anchor}\" class=\"bar-label\">{}</text>",
                 left - 8.0,
                 bar_y + 9.0,
                 html_escape(label),
                 if ours { "bar-ours" } else { "bar-other" },
-                left + width + 7.0,
                 bar_y + 8.0,
-                ratio_value
+                format_ratio(ratio_value)
             )
             .unwrap();
         }
@@ -616,7 +698,7 @@ fn comparisons() -> Vec<Comparison<'static>> {
         Comparison {
             title: "i32 GEMM",
             group: "gemm_i32",
-            shapes: &["16x16x16", "128x128x128", "64x512x1024"],
+            shapes: &["16x16x16", "128x128x128", "32x256x512"],
             primary_label: "uor-matmul",
             primary_prefix: "uor-matmul/",
             others: &[
@@ -637,7 +719,7 @@ fn comparisons() -> Vec<Comparison<'static>> {
         Comparison {
             title: "f32 GEMM",
             group: "gemm_f32",
-            shapes: &["16x16x16", "128x128x128", "64x512x1024"],
+            shapes: &["16x16x16", "128x128x128", "32x256x512"],
             primary_label: "uor-matmul",
             primary_prefix: "uor-matmul/",
             others: &[
@@ -658,7 +740,7 @@ fn comparisons() -> Vec<Comparison<'static>> {
         Comparison {
             title: "f64 GEMM",
             group: "gemm_f64",
-            shapes: &["16x16x16", "128x128x128", "64x512x1024"],
+            shapes: &["16x16x16", "128x128x128", "32x256x512"],
             primary_label: "uor-matmul",
             primary_prefix: "uor-matmul/",
             others: &[
@@ -775,7 +857,8 @@ fn main() -> Result<(), String> {
             root.display()
         ));
     }
-    let rows = collect_rows(&root)?;
+    let mut rows = collect_rows(&root)?;
+    retain_current_run(&root, &mut rows)?;
     if rows.is_empty() {
         return Err(format!(
             "No completed Criterion estimates found under {}",
@@ -784,6 +867,15 @@ fn main() -> Result<(), String> {
     }
 
     let comparisons = comparisons();
+    let missing = missing_comparison_rows(&comparisons, &rows);
+    if !missing.is_empty() {
+        return Err(format!(
+            "Comparison benchmark report is incomplete; missing {} required estimates:\n- {}",
+            missing.len(),
+            missing.join("\n- ")
+        ));
+    }
+    let required_comparisons = required_comparison_count(&comparisons);
     let host = env::var("RUNNER_NAME")
         .or_else(|_| env::var("HOSTNAME"))
         .unwrap_or_else(|_| "local".to_owned());
@@ -805,6 +897,11 @@ fn main() -> Result<(), String> {
         markdown,
         "- Completed Criterion measurements: **{}**",
         rows.len()
+    )
+    .unwrap();
+    writeln!(
+        markdown,
+        "- Required same-shape comparison measurements: **{required_comparisons} / {required_comparisons}**"
     )
     .unwrap();
     markdown.push_str(
@@ -914,12 +1011,94 @@ fn main() -> Result<(), String> {
 
     fs::write(root.join("REPORT.md"), markdown)
         .map_err(|error| format!("write Markdown: {error}"))?;
-    fs::write(root.join("REPORT.html"), html).map_err(|error| format!("write HTML: {error}"))?;
+    fs::write(root.join("REPORT.html"), &html).map_err(|error| format!("write HTML: {error}"))?;
+    fs::write(root.join("index.html"), html).map_err(|error| format!("write HTML: {error}"))?;
     println!(
-        "wrote {} measurements to {}/REPORT.md and {}/REPORT.html",
+        "wrote {} measurements, including all {} required comparisons, to {}/REPORT.md and {}/index.html",
         rows.len(),
+        required_comparisons,
         root.display(),
         root.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn complete_comparison_rows(comparisons: &[Comparison<'_>]) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for comparison in comparisons {
+            for shape in comparison.shapes {
+                for prefix in std::iter::once(comparison.primary_prefix)
+                    .chain(comparison.others.iter().map(|other| other.prefix))
+                {
+                    let name = format!("{prefix}{shape}");
+                    if rows
+                        .iter()
+                        .any(|row: &Row| row.group == comparison.group && row.name == name)
+                    {
+                        continue;
+                    }
+                    rows.push(Row {
+                        group: comparison.group.to_owned(),
+                        name,
+                        relative: "fixture/new/estimates.json".to_owned(),
+                        mean: 10.0 + rows.len() as f64,
+                        lower: 9.0,
+                        upper: 11.0,
+                        modified: SystemTime::UNIX_EPOCH,
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    #[test]
+    fn every_configured_comparison_is_required_before_a_report_is_published() {
+        let comparisons = comparisons();
+        let mut rows = complete_comparison_rows(&comparisons);
+        assert!(missing_comparison_rows(&comparisons, &rows).is_empty());
+
+        let removed = rows.remove(0);
+        assert_eq!(
+            missing_comparison_rows(&comparisons, &rows),
+            vec![format!("{}/{}", removed.group, removed.name)]
+        );
+    }
+
+    #[test]
+    fn comparison_html_contains_relative_and_scaling_graphs() {
+        let comparisons = comparisons();
+        let rows = complete_comparison_rows(&comparisons);
+        let html = comparison_html(&comparisons[0], &rows);
+        assert!(html.contains("<svg class=\"chart\""));
+        assert!(html.contains("Relative time · logarithmic"));
+        assert!(html.contains("alternative faster ←"));
+        assert!(html.contains("<svg class=\"scaling-chart\""));
+    }
+
+    #[test]
+    fn very_small_ratios_are_not_rounded_to_zero() {
+        assert_eq!(format_ratio(0.000_14), "1.4e-4×");
+        assert_eq!(format_ratio(0.006_2), "0.006×");
+        assert_eq!(format_ratio(1.0), "1.00×");
+    }
+
+    #[test]
+    fn estimates_older_than_the_current_run_marker_are_excluded() {
+        let comparisons = comparisons();
+        let mut rows = complete_comparison_rows(&comparisons);
+        for row in &mut rows {
+            row.modified = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
+        }
+        rows[0].modified = SystemTime::UNIX_EPOCH;
+
+        retain_rows_modified_since(&mut rows, SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+
+        assert_eq!(rows.len(), required_comparison_count(&comparisons) - 1);
+    }
 }

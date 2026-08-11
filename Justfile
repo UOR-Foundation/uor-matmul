@@ -198,11 +198,15 @@ cross: no-alloc cross-run
 # against your own last run is a criterion baseline away ---
 # `--save-baseline before` before the change, `--baseline before` after.
 #
-# "Are we faster?", beside every enabled oracle. Seconds. The completed
-# Criterion measurements are consolidated into target/criterion/REPORT.md and
-# target/criterion/REPORT.html after the run.
+# "Are we faster?", beside every enabled oracle. The bounded report suite runs
+# only measurements consumed by the report and records a start marker, so stale
+# local estimates cannot fill a hole in the current run. The named baseline is
+# written, not read: a clean machine has no predecessor, and an ordinary
+# comparison run never asks Criterion for missing `base/sample.json` files.
 bench:
-    cargo bench -p uor-matmul-validate
+    mkdir -p target/criterion
+    touch target/criterion/.comparison-run-start
+    UOR_BENCH_SUITE=comparison cargo bench -p uor-matmul-validate --bench scaling -- '^(gemm_i32|gemm_f32|gemm_f64|public_api|lookup_build|modular_strassen|tropical)/' --save-baseline comparison
     cargo run --release -p uor-matmul-validate --bin benchmark_report
 
 # CG-23's native lookup protocol is deliberately absent from ordinary Criterion
@@ -231,7 +235,7 @@ bench-report:
 # they are run without it.
 #
 # Fitted scaling exponents against the oracle's, every figure `open`.
-scaling: bench
+scaling:
     cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
 
 # CG-21: both IEEE widths walk the same structural shapes against the retained
