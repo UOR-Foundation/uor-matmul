@@ -41,7 +41,12 @@ jobs:
         run: |
           set -o pipefail
           just bench-data 2>&1 | tee -a target/benchmark-report/benchmark.log
-      - name: generate index.html from the benchmark output
+      - name: install the PDF renderer
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+      - name: generate HTML, Markdown, and PDF from the benchmark output
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
         run: just bench-report
       - name: prepare the versioned repository report
         run: just bench-save "$GITHUB_RUN_ID"

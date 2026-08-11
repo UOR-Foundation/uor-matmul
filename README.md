@@ -430,7 +430,8 @@ The relative symlink `benchmark-reports/current` always names the newest run
 that has been committed. GitHub's repository browser does not traverse a
 directory symlink, so the browser links name the current immutable run
 directly: [REPORT.md](benchmark-reports/31519209588/REPORT.md) and the
-self-contained graphed [index.html](benchmark-reports/31519209588/index.html).
+self-contained graphed [index.html](benchmark-reports/31519209588/index.html),
+plus the printable [REPORT.pdf](benchmark-reports/31519209588/REPORT.pdf).
 In a checkout, `benchmark-reports/current/` resolves to those same files. Each
 run keeps its raw Criterion estimates beside the rendered report.
 
@@ -439,6 +440,7 @@ one portable bundle under `target/benchmark-report/`:
 
 - `REPORT.md` for terminals and the GitHub Actions summary;
 - `index.html` and `REPORT.html`, with inline relative-time and scaling graphs;
+- `REPORT.pdf`, printed from the self-contained HTML in A4 landscape format;
 - `context.json`, naming the host, revision, workflow, and measurement count;
 - `criterion/**/new/estimates.json`, the raw means and 95% confidence intervals
   from which the reports were generated.
@@ -446,9 +448,11 @@ one portable bundle under `target/benchmark-report/`:
 The raw estimates are sufficient to regenerate the presentation. After
 downloading the GitHub artifact, run
 `just bench-report path/to/artifact/criterion path/to/artifact`; no benchmark is
-rerun, and the saved run context is retained. GitHub uploads this directory as
-the single `comparison-benchmark-report` artifact. Its Action runs
-`just bench-data`, then generates `index.html` from that output with
+rerun, and the saved run context is retained. PDF rendering requires Chrome,
+Chromium, Brave, or Edge; `CHROME_BIN` can name another compatible executable.
+GitHub uploads this directory as the single `comparison-benchmark-report`
+artifact. Its Action runs `just bench-data`, then generates all three formats
+from that output with
 `just bench-report`, and stages the versioned repository layout with
 `just bench-save "$GITHUB_RUN_ID"`; if either measurement or rendering fails,
 the same artifact still contains `benchmark.log` for the failed run. A separate
