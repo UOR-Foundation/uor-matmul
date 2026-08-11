@@ -14,6 +14,7 @@ Which axis of `just vv` discharges which class of claim.
 | `just checked` | every accumulator operation checked, no overflow | `CT-02` |
 | `just cross` | the corpus digest off the host | `CA-02` |
 | `just cortex-m-run` | the parity checks run on a Cortex-M target under qemu-system, not merely compiled | `CB-11` |
+| `just bench` | same-shape Criterion comparisons, with a complete Markdown/HTML report and inline logarithmic relative-time and scaling-efficiency graphs; the standard run writes its named baseline and never reads an absent predecessor | `CG-*` |
 | `just scaling` | fitted exponents, reported never asserted | `CG-01` .. `CG-07` |
 | `just census` | the static issue census names a bottleneck per kernel sequence | `CG-11` |
 | `just symbol-bandwidth` | the symbol path's achieved bytes/second against the host's own STREAM number, reported never asserted, with byte-identity asserted inside the timed region | `CG-14` |
