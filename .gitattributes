@@ -1,0 +1,3 @@
+# Versioned benchmark bundles are generated evidence and remain byte-identical
+# to the GitHub Actions artifact, including its terminal whitespace.
+benchmark-reports/** -whitespace

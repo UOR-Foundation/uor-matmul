@@ -7,6 +7,12 @@
 /reports/
 criterion/
 
+# Complete, versioned GitHub benchmark bundles are evidence, not local
+# Criterion working state. Keep their raw inputs and diagnostic log tracked.
+!/benchmark-reports/*/criterion/
+!/benchmark-reports/*/criterion/**
+!/benchmark-reports/*/benchmark.log
+
 # cargo-fuzz working state. The corpus that matters is committed under
 # `fuzz/corpus/`; the rest is machine-local.
 /fuzz/artifacts/

@@ -41,6 +41,8 @@ jobs:
           just bench-data 2>&1 | tee -a target/benchmark-report/benchmark.log
       - name: generate index.html from the benchmark output
         run: just bench-report
+      - name: prepare the versioned repository report
+        run: just bench-save "$GITHUB_RUN_ID"
       - name: publish the Markdown report in the Actions summary
         run: cat target/benchmark-report/REPORT.md >> "$GITHUB_STEP_SUMMARY"
       - name: upload report, raw inputs, and diagnostics
