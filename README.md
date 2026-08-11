@@ -451,9 +451,12 @@ the single `comparison-benchmark-report` artifact. Its Action runs
 `just bench-data`, then generates `index.html` from that output with
 `just bench-report`, and stages the versioned repository layout with
 `just bench-save "$GITHUB_RUN_ID"`; if either measurement or rendering fails,
-the same artifact still contains `benchmark.log` for the failed run. Because
-`main` is protected, committing a newly staged run remains an ordinary reviewed
-repository change rather than an Actions bypass.
+the same artifact still contains `benchmark.log` for the failed run. A separate
+least-privilege job commits successful main-branch reports to the dedicated
+`automation/benchmark-report-current` branch and puts its one-click PR link in
+the run summary. The organization forbids `GITHUB_TOKEN` from creating PRs, so
+opening that link is the only manual step. The job has no branch-protection
+bypass; every saved report reaches `main` through the ordinary reviewed path.
 
 `ANALYSIS.md` §"Against the oracles" has the integer sweep --- throughput,
 latency, and fitted exponents from `n = 1` to `n = 1024`, beside every oracle.

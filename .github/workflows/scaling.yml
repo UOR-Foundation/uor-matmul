@@ -24,6 +24,8 @@ jobs:
   comparison-benchmarks:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: prepare the durable report bundle
@@ -53,6 +55,39 @@ jobs:
           path: target/benchmark-report/
           if-no-files-found: error
           retention-days: 30
+
+  publish-comparison-report:
+    name: publish comparison report
+    needs: comparison-benchmarks
+    if: needs.comparison-benchmarks.result == 'success' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: comparison-benchmark-report
+          path: target/benchmark-report
+      - name: commit the report to the protected review path
+        run: |
+          branch=automation/benchmark-report-current
+          just bench-save "$GITHUB_RUN_ID"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add benchmark-reports
+          if git diff --cached --quiet; then
+            printf 'Run %s is already the current committed report.\n' "$GITHUB_RUN_ID"
+            exit 0
+          fi
+          git commit -m "Record benchmark report $GITHUB_RUN_ID"
+          git push --force origin "HEAD:refs/heads/$branch"
+          compare="https://github.com/$GITHUB_REPOSITORY/compare/main...$branch?expand=1"
+          printf 'Report commit pushed to %s. Open its protected-path PR: %s\n' \
+            "$branch" "$compare" >> "$GITHUB_STEP_SUMMARY"
 
   scaling:
     if: github.event_name != 'workflow_dispatch' || inputs.suite == 'full'

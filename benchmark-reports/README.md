@@ -13,6 +13,9 @@ self-contained graphs in [31519209588/index.html](31519209588/index.html).
 GitHub displays the symlink target but does not traverse nested browser paths
 through it; a normal checkout resolves `current/` directly.
 
-The workflow prepares this layout with `just bench-save "$GITHUB_RUN_ID"`.
-Protected `main` means a new run enters this history through a normal reviewed
-commit; the benchmark runner has no branch-protection bypass.
+The workflow prepares this layout with `just bench-save "$GITHUB_RUN_ID"`, then
+a separate publisher updates `automation/benchmark-report-current` and adds a
+one-click PR link to the run summary. The organization forbids `GITHUB_TOKEN`
+from creating the PR itself. Protected `main` means a new run enters this
+history through a normal reviewed commit; the benchmark runner has no
+branch-protection bypass.
