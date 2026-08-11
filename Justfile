@@ -208,8 +208,8 @@ cross: no-alloc cross-run
 # written, not read: a clean machine has no predecessor, and an ordinary
 # comparison run never asks Criterion for missing `base/sample.json` files.
 # The result is one portable directory, `target/benchmark-report`: generated
-# Markdown/HTML, run context, and the exact Criterion estimates needed to
-# regenerate either report.
+# Markdown/HTML/PDF, run context, and the exact Criterion estimates needed to
+# regenerate every report format.
 bench: bench-data
     just bench-report
 
@@ -234,12 +234,14 @@ native-lookup-acceptance:
     @mkdir -p target/measurements
     bash -o pipefail -c 'taskset -c 0 cargo bench -p uor-matmul-validate --bench scaling -- __native_lookup_acceptance_only__ --noplot 2>&1 | tee target/measurements/native-lookup-acceptance-2026-08-08.log'
 
-# Regenerate the comparison report from Criterion output. After downloading a
+# Regenerate every comparison report format from Criterion output. After downloading a
 # GitHub artifact, run `just bench-report path/to/artifact/criterion
 # path/to/artifact`; its saved context and estimates reproduce the report
-# without rerunning a benchmark.
+# without rerunning a benchmark. A Chrome-compatible browser prints the
+# self-contained HTML, so the PDF cannot drift into a second presentation.
 bench-report criterion="target/criterion" report="target/benchmark-report":
     cargo run --release -p uor-matmul-validate --bin benchmark_report -- "{{criterion}}" "{{report}}"
+    scripts/render-benchmark-pdf.sh "{{report}}"
 
 # Copy one complete GitHub comparison bundle into the repository's immutable
 # run directory and move the relative `current` link to it. The numeric run ID
@@ -250,7 +252,7 @@ bench-save run source="target/benchmark-report":
     case "{{run}}" in
       ''|*[!0-9]*) echo "run must be a numeric GitHub Actions run ID" >&2; exit 1 ;;
     esac
-    for required in index.html REPORT.html REPORT.md context.json benchmark.log; do
+    for required in index.html REPORT.html REPORT.md REPORT.pdf context.json benchmark.log; do
       test -f "{{source}}/$required" || {
         echo "missing report file: {{source}}/$required" >&2
         exit 1
