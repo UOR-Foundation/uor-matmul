@@ -25,11 +25,9 @@ std = []
 [lints]
 workspace = true
 
-# The integration tests need the crate's own runtime feature detection. Without
-# this the test harness links the crate with `std` off, every `available_*`
-# predicate answers from the build's target features, and `CB-02` compares the
-# portable kernel against itself while claiming to cover the host --- which is
-# what it did until `CB-02` was made to assert otherwise.
+# The integration tests enable the crate's `std` feature explicitly in the
+# acceptance and platform recipes. A self dev-dependency used to provide that
+# feature, but Cargo resolves it from crates.io while preparing this package,
+# before the package itself can exist there.
 [dev-dependencies]
-uor-matmul-kernels = { version = "0.1.0", path = ".", features = ["std"] }
-uor-matmul-model = { workspace = true }
+uor-matmul-model = { path = "../uor-matmul-model" }

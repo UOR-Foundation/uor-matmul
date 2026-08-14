@@ -38,6 +38,12 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Cargo permits path dependencies in dev-dependencies because they are omitted
+# from the published manifest. The two model edges below are exactly that case:
+# source-level tests compare against the unpublished workspace model, while the
+# release dry run proves no published crate retains either edge. Normal and
+# build dependencies remain subject to `wildcards = "deny"`.
+allow-wildcard-paths = true
 
 # The crates this workspace must never acquire, written down while the list is
 # provably inert: `cargo deny check bans` passes on the graph as it stands, so

@@ -215,7 +215,9 @@ fn miri_crates(source: &str, marker: &str) -> Vec<String> {
 ///
 /// The `Justfile` recipe is checked against the workflow for the same reason: a
 /// local `just miri` that ran a different set from CI would make one of them a
-/// gate and the other a rehearsal, and the two would drift silently.
+/// gate and the other a rehearsal, and the two would drift silently. The
+/// feature flag is kept outside this comparison because it changes how the
+/// selected crates detect host instructions, not which crates Miri examines.
 #[test]
 fn every_shipped_unsafe_crate_is_under_miri_cu_07() {
     let root = root();

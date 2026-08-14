@@ -76,14 +76,17 @@ fmt-check:
     cargo fmt --all -- --check
 
 lint:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --exclude uor-matmul-kernels --all-targets -- -D warnings
+    cargo clippy -p uor-matmul-kernels --all-targets --features std -- -D warnings
 
 test:
     # Keep Cargo and the nested target-build commands on the pinned toolchain.
     # Some hosts put Homebrew Rust ahead of rustup; the conformance tests spawn
     # Cargo for thumbv7em, whose standard library belongs to the pinned toolchain.
     PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
-        cargo test --workspace
+        cargo test --workspace --exclude uor-matmul-kernels
+    PATH="$(dirname "$(rustup which cargo --toolchain "$(rustup show active-toolchain | sed 's/ .*//')")"):$PATH" \
+        cargo test -p uor-matmul-kernels --features std
 
 # A recipe because `kappa` did not compile. `address_into` read
 # `AddressOutcome::label`, a field `uor-addr-1` does not have --- it is
@@ -112,7 +115,8 @@ features:
 #
 # The whole corpus with every accumulator operation checked.
 checked:
-    cargo test --workspace --profile checked
+    cargo test --workspace --exclude uor-matmul-kernels --profile checked
+    cargo test -p uor-matmul-kernels --features std --profile checked
 
 # R2, R3, R13, and CU-01's disassembly.
 purity:
@@ -174,14 +178,17 @@ cross_crates := "-p uor-matmul-core -p uor-matmul-codec -p uor-matmul-kernels -p
 cross-run:
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu" \
-        cargo test --release --target aarch64-unknown-linux-gnu {{cross_crates}}
+        cargo test --release --target aarch64-unknown-linux-gnu \
+            --features uor-matmul-kernels/std {{cross_crates}}
     # CB-05 is the claim that the two wasm configurations agree, so both are
     # *run*. Neither is implied: with SIMD128 off the selector offers only the
     # portable sequence, and the comparison the parity tests make is a different
     # one --- measured, 525 sequence comparisons against 657.
-    cargo test --release --target wasm32-wasip1 {{cross_crates}}
+    cargo test --release --target wasm32-wasip1 \
+        --features uor-matmul-kernels/std {{cross_crates}}
     RUSTFLAGS="-C target-feature=+simd128" \
-        cargo test --release --target wasm32-wasip1 {{cross_crates}}
+        cargo test --release --target wasm32-wasip1 \
+        --features uor-matmul-kernels/std {{cross_crates}}
 
 # CB-11: the parity checks, run on a Cortex-M target.
 #
@@ -228,7 +235,7 @@ cortex-m-run:
 # Undefined behaviour, in the crate that has the `unsafe`.
 miri:
     MIRIFLAGS=-Zmiri-strict-provenance RUSTUP_TOOLCHAIN=nightly \
-        cargo miri test -p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p uor-matmul-codec
+        cargo miri test -p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p uor-matmul-codec --features uor-matmul-kernels/std
 
 # R11: the oracle crates are dev-dependencies and nothing shipped depends on
 # them. `cargo deny` is what says so about the *graph* rather than about the
@@ -520,5 +527,5 @@ tropical-sweep:
 # The SWAR sequence against the dot incumbent, measured under wasmtime.
 swar-sweep:
     RUSTFLAGS="-C target-feature=+simd128" \
-        cargo test --release --target wasm32-wasip1 -p uor-matmul-kernels --test swar_sweep -- \
+        cargo test --release --target wasm32-wasip1 -p uor-matmul-kernels --features std --test swar_sweep -- \
         --ignored --nocapture
