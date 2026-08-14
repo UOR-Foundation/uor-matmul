@@ -8,8 +8,33 @@ vv: fmt-check model lint test features purity no-alloc bdd
 
 # The lockfile must remain unchanged during packaging, and crates marked
 # `publish = false` are skipped by Cargo.
-# Release all publishable workspace crates after the acceptance gate.
-release: vv
+# Set the exact workspace version, run the acceptance gate, and publish.
+release version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    valid=$(printf '%s\n' "{{version}}" | sed -n 's/^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$/ok/p')
+    test "$valid" = ok || {
+        echo "version must be a numeric SemVer such as 0.2.0" >&2
+        exit 1
+    }
+
+    current=$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' Cargo.toml | head -n 1)
+    test -n "$current" || {
+        echo "could not find a workspace SemVer version in Cargo.toml" >&2
+        exit 1
+    }
+
+    CURRENT="$current" NEXT="{{version}}" perl -0pi -e \
+      's/version = "\Q$ENV{CURRENT}\E"/version = "$ENV{NEXT}"/g' Cargo.toml
+    for manifest in crates/*/Cargo.toml; do
+        CURRENT="$current" NEXT="{{version}}" perl -0pi -e \
+          's/(uor-matmul-[A-Za-z0-9_-]+\s*=\s*\{\s*version\s*=\s*)"\Q$ENV{CURRENT}\E"/$1"$ENV{NEXT}"/g' \
+          "$manifest"
+    done
+    cargo check --workspace
+    echo "set workspace version $current -> {{version}}"
+    just vv
     cargo publish --workspace --locked
 
 # Patch is the default; use `just release-auto minor` or
@@ -34,17 +59,7 @@ release-auto bump="patch":
       *) echo "bump must be major, minor, or patch" >&2; exit 1 ;;
     esac
     next="$major.$minor.$patch"
-
-    CURRENT="$current" NEXT="$next" perl -0pi -e \
-      's/version = "\Q$ENV{CURRENT}\E"/version = "$ENV{NEXT}"/g' Cargo.toml
-    for manifest in crates/*/Cargo.toml; do
-        CURRENT="$current" NEXT="$next" perl -0pi -e \
-          's/(uor-matmul-[A-Za-z0-9_-]+\s*=\s*\{\s*version\s*=\s*)"\Q$ENV{CURRENT}\E"/$1"$ENV{NEXT}"/g' \
-          "$manifest"
-    done
-    cargo check --workspace
-    echo "bumped workspace version $current -> $next"
-    just release
+    just release "$next"
 
 # R1, R2, R8, R10, R11, R13, R15 --- the repository gates, each falsifiable.
 model:
