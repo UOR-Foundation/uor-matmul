@@ -39,4 +39,4 @@ workspace = true
 # runtime detection on, and the driver's own suite could not see it.
 [dev-dependencies]
 uor-matmul-kernels = { workspace = true, features = ["std"] }
-uor-matmul-model = { workspace = true }
+uor-matmul-model = { path = "../uor-matmul-model" }

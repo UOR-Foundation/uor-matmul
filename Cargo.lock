@@ -1840,7 +1840,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "uor-matmul-core",
- "uor-matmul-kernels",
  "uor-matmul-model",
 ]
 

@@ -61,7 +61,7 @@ jobs:
       # right for every other job; this is the one that needs nightly, and it says
       # so here rather than by removing the pin. `Justfile`'s `fuzz` recipe has
       # always spelled the same thing `cargo +nightly`.
-      - run: cargo miri test -p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p uor-matmul-codec
+      - run: cargo miri test -p uor-matmul-kernels -p uor-matmul -p uor-matmul-core -p uor-matmul-codec --features uor-matmul-kernels/std
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
           RUSTUP_TOOLCHAIN: nightly

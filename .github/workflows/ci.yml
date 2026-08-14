@@ -44,7 +44,8 @@ jobs:
       # The whole corpus with every accumulator operation checked. The width is
       # derived so that overflow is unreachable; this witnesses it rather than
       # guarding it.
-      - run: cargo test --workspace --profile checked
+      - run: cargo test --workspace --exclude uor-matmul-kernels --profile checked
+      - run: cargo test -p uor-matmul-kernels --features std --profile checked
 
   deny:
     name: cargo-deny
@@ -187,7 +188,7 @@ jobs:
           curl -sSL -o /tmp/sde.tar.xz https://downloadmirror.intel.com/843185/sde-external-9.48.0-2024-11-25-lin.tar.xz
           echo "3173d2a5369e3385226b488d8b75403951bc14af601435fe707d9f83e0b533e6  /tmp/sde.tar.xz" | sha256sum -c -
           cd /tmp && tar -xf sde.tar.xz
-      - run: cargo build --release -p uor-matmul-kernels --test parity
+      - run: cargo build --release -p uor-matmul-kernels --features std --test parity
       # A skip is a failure: this job exists specifically to execute VNNI.
       - run: |
           BIN=$(find target/release/deps -maxdepth 1 -name 'parity-*' -type f -executable | head -1)
@@ -221,6 +222,7 @@ jobs:
           cargo test --release --target wasm32-wasip1
           -p uor-matmul-core -p uor-matmul-codec
           -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul
+          --features uor-matmul-kernels/std
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       - name: run the suite under wasmtime, SIMD128 on
@@ -228,6 +230,7 @@ jobs:
           cargo test --release --target wasm32-wasip1
           -p uor-matmul-core -p uor-matmul-codec
           -p uor-matmul-kernels -p uor-matmul-gemm -p uor-matmul
+          --features uor-matmul-kernels/std
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
           RUSTFLAGS: -C target-feature=+simd128
