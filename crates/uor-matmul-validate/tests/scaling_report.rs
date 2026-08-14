@@ -19,6 +19,7 @@ use uor_matmul_validate::scaling::{self, Labelled, Observation, Point, Sweep};
 /// nothing about whether the two implementations have the same shape, which is
 /// the only comparison that survives a change of machine.
 #[test]
+#[ignore = "long-running measurement; run through `just scaling`"]
 fn arithmetic_scaling_exponent_cg_01() {
     let sweep = Sweep::standard();
 
@@ -87,6 +88,7 @@ fn arithmetic_scaling_exponent_cg_01() {
 /// complete accumulator happened once per product; it is smaller now that it
 /// happens once per reduction, and what remains is named in `ANALYSIS.md`.
 #[test]
+#[ignore = "long-running measurement; run through `just scaling`"]
 fn float_scaling_exponent_cg_01() {
     let sweep = Sweep::standard();
 

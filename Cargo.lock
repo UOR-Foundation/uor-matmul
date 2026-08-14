@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "uor-matmul-codec",
  "uor-matmul-core",
@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul-codec"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "uor-addr-1",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul-conformance"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "toml",
  "uor-matmul",
@@ -1808,14 +1808,14 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
 ]
 
 [[package]]
 name = "uor-matmul-executor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cortex-m-rt",
  "cortex-m-semihosting",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul-gemm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "uor-matmul-codec",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul-kernels"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "uor-matmul-core",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "toml",
@@ -1854,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "uor-matmul-validate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rustc-demangle",
  "uor-matmul-model",

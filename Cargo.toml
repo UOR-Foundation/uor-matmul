@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 # The AVX-512 VNNI intrinsics stabilized in 1.89, and the kernels crate uses
 # them directly. Declaring anything lower would be a version the workspace
@@ -17,17 +17,17 @@ keywords = ["matmul", "gemm", "quantization", "no-std", "exact"]
 categories = ["mathematics", "no-std", "science"]
 
 [workspace.dependencies]
-uor-matmul-core = { version = "0.1.0", path = "crates/uor-matmul-core", default-features = false }
-uor-matmul-codec = { version = "0.1.0", path = "crates/uor-matmul-codec", default-features = false }
-uor-matmul-kernels = { version = "0.1.0", path = "crates/uor-matmul-kernels", default-features = false }
-uor-matmul-gemm = { version = "0.1.0", path = "crates/uor-matmul-gemm", default-features = false }
-uor-matmul-model = { version = "0.1.0", path = "crates/uor-matmul-model" }
+uor-matmul-core = { version = "0.2.0", path = "crates/uor-matmul-core", default-features = false }
+uor-matmul-codec = { version = "0.2.0", path = "crates/uor-matmul-codec", default-features = false }
+uor-matmul-kernels = { version = "0.2.0", path = "crates/uor-matmul-kernels", default-features = false }
+uor-matmul-gemm = { version = "0.2.0", path = "crates/uor-matmul-gemm", default-features = false }
+uor-matmul-model = { version = "0.2.0", path = "crates/uor-matmul-model" }
 # Declared here for the same reason as the rest: a `path` dependency with no
 # `version` is a wildcard requirement, and `cargo deny` refuses those
 # (`wildcards = "deny"`). These two were referenced by bare path and were the
 # three wildcard errors in CI.
-uor-matmul = { version = "0.1.0", path = "crates/uor-matmul", default-features = false }
-uor-matmul-validate = { version = "0.1.0", path = "crates/uor-matmul-validate" }
+uor-matmul = { version = "0.2.0", path = "crates/uor-matmul", default-features = false }
+uor-matmul-validate = { version = "0.2.0", path = "crates/uor-matmul-validate" }
 bytemuck = { version = "1", default-features = false, features = ["derive"] }
 
 [workspace.lints.rust]

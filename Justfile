@@ -6,6 +6,46 @@ default: vv
 vv: fmt-check model lint test features purity no-alloc bdd
     @echo "vv: the acceptance gate passed"
 
+# The lockfile must remain unchanged during packaging, and crates marked
+# `publish = false` are skipped by Cargo.
+# Release all publishable workspace crates after the acceptance gate.
+release: vv
+    cargo publish --workspace --locked
+
+# Patch is the default; use `just release-auto minor` or
+# `just release-auto major` when the release intentionally changes that SemVer
+# component.
+# Bump the workspace version and publish it after the acceptance gate.
+release-auto bump="patch":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    current=$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' Cargo.toml | head -n 1)
+    test -n "$current" || {
+        echo "could not find a workspace SemVer version in Cargo.toml" >&2
+        exit 1
+    }
+
+    IFS=. read -r major minor patch <<< "$current"
+    case "{{bump}}" in
+      major) major=$((major + 1)); minor=0; patch=0 ;;
+      minor) minor=$((minor + 1)); patch=0 ;;
+      patch) patch=$((patch + 1)) ;;
+      *) echo "bump must be major, minor, or patch" >&2; exit 1 ;;
+    esac
+    next="$major.$minor.$patch"
+
+    CURRENT="$current" NEXT="$next" perl -0pi -e \
+      's/version = "\Q$ENV{CURRENT}\E"/version = "$ENV{NEXT}"/g' Cargo.toml
+    for manifest in crates/*/Cargo.toml; do
+        CURRENT="$current" NEXT="$next" perl -0pi -e \
+          's/(uor-matmul-[A-Za-z0-9_-]+\s*=\s*\{\s*version\s*=\s*)"\Q$ENV{CURRENT}\E"/$1"$ENV{NEXT}"/g' \
+          "$manifest"
+    done
+    cargo check --workspace
+    echo "bumped workspace version $current -> $next"
+    just release
+
 # R1, R2, R8, R10, R11, R13, R15 --- the repository gates, each falsifiable.
 model:
     cargo run -q -p xtask -- validate
@@ -281,7 +321,10 @@ bench-save run source="target/benchmark-report":
 #
 # Fitted scaling exponents against the oracle's, every figure `open`.
 scaling:
-    cargo test --release -p uor-matmul-validate --test scaling_report -- --nocapture
+    # The two CG-01 fits are ignored in the ordinary workspace suite because
+    # debug exact-float timing can take minutes. Include them here, optimized,
+    # alongside the remaining scaling observations.
+    cargo test --release -p uor-matmul-validate --test scaling_report -- --include-ignored --nocapture
 
 # CG-21: both IEEE widths walk the same structural shapes against the retained
 # exact reference, matrixmultiply, and faer, followed by matched integer and
