@@ -185,15 +185,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Intel SDE (pinned, digest-checked)
         run: |
-          curl -sSL -o /tmp/sde.tar.xz https://downloadmirror.intel.com/843185/sde-external-9.48.0-2024-11-25-lin.tar.xz
-          echo "3173d2a5369e3385226b488d8b75403951bc14af601435fe707d9f83e0b533e6  /tmp/sde.tar.xz" | sha256sum -c -
+          curl -fSL --retry 3 -o /tmp/sde.tar.xz https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+          echo "94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  /tmp/sde.tar.xz" | sha256sum -c -
           cd /tmp && tar -xf sde.tar.xz
       - run: cargo build --release -p uor-matmul-kernels --features std --test parity
       # A skip is a failure: this job exists specifically to execute VNNI.
       - run: |
           BIN=$(find target/release/deps -maxdepth 1 -name 'parity-*' -type f -executable | head -1)
           echo "running $BIN under SDE (Icelake)"
-          OUT=$(/tmp/sde-external-9.48.0-2024-11-25-lin/sde -icl -- "$BIN" --nocapture 2>&1)
+          OUT=$(/tmp/sde-external-10.13.1-2026-07-28-lin/sde -icl -- "$BIN" --nocapture 2>&1)
           echo "$OUT"
           if echo "$OUT" | grep -q "Avx512Vnni: not available"; then
             echo "the VNNI sequences did not execute; the leg is vacuous" >&2
