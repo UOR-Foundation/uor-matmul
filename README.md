@@ -1,4 +1,14 @@
+![Illustrative UOR Foundation artwork for the matrix multiplication library](assets/readme-banner-PLACEHOLDER.png)
+
+*Illustrative artwork; project branding has not received Foundation approval.*
+
 # uor-matmul
+
+**A Rust matrix-multiplication library that separates coded operands from exact accumulation, with reproducible correctness expectations across computational strategies.**
+
+[How to use](#the-six-hard-constraints) · [Arithmetic guarantees](#the-library-has-no-envelope) · [Error behavior](#the-error-surface-in-full) · [Repository layout](#repository-layout) · [Performance](#performance) · [Evidence discipline](#claim-discipline) · [Licence](#licence)
+
+[![CI](https://github.com/UOR-Foundation/uor-matmul/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/UOR-Foundation/uor-matmul/actions/workflows/ci.yml)
 
 **Decode the code, accumulate exactly, encode once.**
 
